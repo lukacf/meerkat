@@ -219,8 +219,8 @@ fn workspace_notes_dir(workspace: &Path) -> PathBuf {
 }
 
 /// What every session build shares: the external tools (file and note
-/// tools), where the instruction files and the notes index come from, and
-/// the compaction policy.
+/// tools, and `fork` when helpers are hosted), where the instruction files
+/// and the notes index come from, and the compaction policy.
 pub(crate) struct Template {
     external_tools: Arc<dyn AgentToolDispatcher>,
     notes: Arc<NoteToolDispatcher>,
@@ -253,9 +253,19 @@ impl Template {
         ));
         let gateway = ToolGatewayBuilder::new()
             .add_dispatcher(file_tools as Arc<dyn AgentToolDispatcher>)
-            .add_dispatcher(Arc::clone(&notes) as Arc<dyn AgentToolDispatcher>)
-            .build()
-            .map_err(TuiError::ToolGateway)?;
+            .add_dispatcher(Arc::clone(&notes) as Arc<dyn AgentToolDispatcher>);
+        // `fork` belongs to the sessions' own builds only: helpers (and so
+        // fork children) get their tools from the helper host.
+        #[cfg(feature = "mob")]
+        let gateway = match &runtime.helpers {
+            Some(helpers) => gateway.add_dispatcher(Arc::new(crate::fork::ForkToolDispatcher::new(
+                Arc::clone(helpers),
+                Arc::clone(&runtime.service),
+                Arc::clone(&runtime.approval.engine),
+            )) as Arc<dyn AgentToolDispatcher>),
+            None => gateway,
+        };
+        let gateway = gateway.build().map_err(TuiError::ToolGateway)?;
         let policy = runtime
             .approval
             .engine

@@ -353,6 +353,15 @@ mod owned {
                 .and_then(|model| model.auth_binding.clone())
         }
 
+        /// The model of `session`, when it is open here.
+        #[must_use]
+        pub fn model_of(&self, session: &SessionId) -> Option<String> {
+            self.sessions
+                .read()
+                .get(session)
+                .map(|model| model.model.clone())
+        }
+
         /// The helper `key` is being spawned (or rebuilt) with `tag`: bind
         /// it durably, then list it as running.
         ///
@@ -577,6 +586,22 @@ mod tests {
             registry.owner_for_spawn(&team, None),
             Err(OwnerError::UnknownMob(team))
         );
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn a_helper_that_cannot_be_followed_is_reported_unmeasured() {
+        let (registry, mut rx) = HelperRegistry::new();
+        let tag = HelperTag {
+            owner: SessionId::new(),
+            path: vec!["fork-1".into()],
+            model: "m".into(),
+        };
+        registry.follow_failed(&tag);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HelperUpdate::Unmeasured(label)) if label == "fork-1"
+        ));
     }
 
     #[test]

@@ -359,6 +359,16 @@ impl ApprovalEngine {
             .map(|state| state.transcript.render())
     }
 
+    /// The newest words the human submitted to a session that are still
+    /// recorded (a live prompt or steer, else a seeded one).
+    #[must_use]
+    pub fn latest_user_input(&self, session_id: &SessionId) -> Option<String> {
+        self.sessions
+            .lock()
+            .get(session_id)
+            .and_then(|state| state.transcript.latest_user().map(str::to_string))
+    }
+
     /// Adopt a session this process opened from its authoritative history
     /// (on resume): seed its transcript from typed authorship (the human's
     /// turn inputs and tool calls, never assistant prose, tool output or

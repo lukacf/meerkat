@@ -981,6 +981,7 @@ test_suite(
         "//crates/meerkat-tui:confinement_test",
         "//crates/meerkat-tui:drift_pins_test",
         "//crates/meerkat-tui:file_tools_test",
+        "//crates/meerkat-tui:fork_test",
         "//crates/meerkat-tui:instructions_test",
         "//crates/meerkat-tui:integrator_test",
         "//crates/meerkat-tui:meerkat_tui_unit_test",

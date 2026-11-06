@@ -216,6 +216,15 @@ impl ApprovalTranscript {
         }
     }
 
+    /// The newest recorded user words.
+    #[must_use]
+    pub fn latest_user(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|(entry, _)| match entry {
+            TranscriptEntry::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
     /// Record the user's words without a live key (seeded history, tests).
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.push(TranscriptEntry::User {

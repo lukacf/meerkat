@@ -171,10 +171,11 @@ pub const REVIEWED_BUILTINS: &[&str] = &[
     "conclude_objective",
 ];
 
-/// Tools that hand work to a helper (a mob member, see [`crate::mobs`]).
-/// Delegating does nothing by itself: every call the helper makes passes
-/// the delegating session's gate.
-pub const DELEGATION_TOOLS: &[&str] = &["delegate", "fork_off"];
+/// Tools that hand work to a helper (a mob member, see [`crate::mobs`]; the
+/// TUI's own `fork`, see [`crate::fork`]). Delegating does nothing by
+/// itself: every call the helper makes passes the delegating session's
+/// gate.
+pub const DELEGATION_TOOLS: &[&str] = &["delegate", "fork_off", crate::fork::FORK];
 
 /// What a tool call does, as far as the policy is concerned.
 ///
@@ -315,7 +316,9 @@ impl<'a> Action<'a> {
             (ToolFamily::Native, n) if READ_ONLY_BUILTINS.contains(&n) && !declared_mutating => {
                 ActionKind::ReadOnlyBuiltin
             }
-            (ToolFamily::Native, n) if DELEGATION_TOOLS.contains(&n) => ActionKind::Delegation,
+            (ToolFamily::Native | ToolFamily::Fork, n) if DELEGATION_TOOLS.contains(&n) => {
+                ActionKind::Delegation
+            }
             (ToolFamily::Files, READ_FILE) if !declared_mutating => typed::<PathArgs>(args)
                 .map_or(ActionKind::Other, |a| ActionKind::FileRead { path: a.path }),
             (ToolFamily::Files, GLOB | GREP) if !declared_mutating => typed::<SearchArgs>(args)
@@ -615,6 +618,8 @@ mod tests {
             Some(ToolOrigin::tui(FILE_TOOLS_SOURCE, name))
         } else if NOTE_TOOL_NAMES.contains(&name) {
             Some(ToolOrigin::tui(NOTES_SOURCE, name))
+        } else if name == crate::fork::FORK {
+            Some(ToolOrigin::tui(crate::fork::FORK_SOURCE, name))
         } else if let Some(rest) = name.strip_prefix("mcp__") {
             Some(ToolOrigin::mcp(rest.split("__").next().unwrap_or_default()))
         } else if matches!(name, "unknown_tool" | "agent_spawn") {
@@ -708,6 +713,34 @@ mod tests {
             ),
             Tier::Classifier
         );
+    }
+
+    #[test]
+    fn fork_is_tiered_like_delegate_only_from_the_tuis_own_surface() {
+        use crate::fork::{FORK, FORK_SOURCE};
+
+        let (_dir, root) = project();
+        let task = json!({"task": "rm -rf /", "expected_output": "done"});
+        let delegate = json!({"member_id": "scout", "task": "rm -rf /", "result_label": "r", "max_text_bytes": 10});
+        assert_eq!(parse(FORK, &raw(&task)).kind, ActionKind::Delegation);
+        assert_eq!(
+            tier(&root, &RuleSet::default(), false, FORK, &task),
+            tier(&root, &RuleSet::default(), false, "delegate", &delegate),
+        );
+        assert_eq!(
+            tier(&root, &RuleSet::default(), false, FORK, &task),
+            Tier::AlwaysAllow
+        );
+        // Another surface's `fork` is a foreign tool.
+        let args = raw(&task);
+        let foreign = ToolOrigin::mcp("evil");
+        assert_eq!(
+            Action::parse(FORK, &args, Some(&foreign)).kind,
+            ActionKind::Other
+        );
+        let callback = ToolOrigin::tui("someone-else", FORK);
+        assert_ne!(callback.family(), ToolFamily::Fork);
+        assert_eq!(ToolOrigin::tui(FORK_SOURCE, FORK).family(), ToolFamily::Fork);
     }
 
     #[test]

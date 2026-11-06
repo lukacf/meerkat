@@ -72,7 +72,9 @@ them.
   notice until the new directory exists). File tools never write the gate's
   own `.rkat/` state or `.git/` (sealed paths: denied before the classifier
   and any allow rule), and `fork_off` is denied to sessions and helpers (a
-  fork child would seat outside the approval gate). See
+  fork child would seat outside the approval gate); the session's own `fork`
+  tool runs a helper that starts with the session's conversation, rendered
+  as text, as context, behind the same gate. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_definition_customizer`

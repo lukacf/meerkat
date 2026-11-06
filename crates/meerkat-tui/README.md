@@ -67,7 +67,7 @@ resumed sessions and helpers carry it too. First match wins:
 | Tier | What | Review |
 |---|---|---|
 | 0 | A user **deny** rule matches, or `write_file` / `edit_file` targets a **sealed** path: the gate's own `.rkat/` state (the realm's `config.toml`, rules, MCP servers, sessions) or `.git/`. Neither the classifier nor an allow rule opens a sealed path; a shell command that writes there is still judged by the classifier | denied |
-| 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `note_list`/`note_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
+| 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `note_list`/`note_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`, `fork`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
 | 2 | `write_file` / `edit_file` where every target is inside the project and not protected (`.rkat/`, `.git/` and any `.git` file, `.env*`, …); workspace notes | allowed |
 | 3 | Everything else: other shell commands, MCP tools, web search, comms sends, mutating mob tools, out-of-project paths, protected paths, user-level notes | classifier |
 
@@ -253,11 +253,27 @@ text. Its tool calls pass the **delegating
 session's** gate (same rules, counters and Stop; escalations name the
 helper), so delegating never unlocks an action. The transcript nests helper
 activity under `[label · model]`, the status bar counts running helpers, and
-an interrupt cancels them. `fork_off` is denied to every session and helper
+an interrupt cancels them.
+
+`fork` hands a side quest to a child that starts with the session's own
+conversation as context: the TUI renders the committed conversation (user
+and assistant text, tool calls and results, `/remember` context; long
+values clipped, the oldest entries dropped past 48 KiB) into the child's
+prompt, followed by the task and the expected output. The child is a helper
+in every other respect (the same gate, persona, file tools, nesting under
+`[fork-N · model]`, status bar, `/cost` and interrupt), cannot ask the user,
+and returns its final answer (at most 16 KiB) as the tool result. Only the
+session's own agent has `fork`; helpers and fork children do not, so forks
+do not nest.
+
+The engine's own `fork_off` stays denied to every session and helper
 through the tool access policy: a fork child seats through the engine's
 persisted-fork path, which never consults the TUI's spawn customizer, so it
 would run without the approval gate (and without the persona, the follower
-and the curated environment).
+and the curated environment), and `fork_off` refuses a caller that is not a
+mob member, which the session is not. A durable fork of the session's
+transcript (exact context instead of rendered text) is refused while the
+session's own turn runs, which is when a tool call asks for it.
 
 ## Rules
 

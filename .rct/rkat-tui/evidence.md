@@ -538,3 +538,48 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
   nextest lib (`bootstrap::`, `endpoints::`, `cli::`) + `--test confinement` + `--test models`: 70 passed; confinement
   cases print `SKIPPED:` (AppArmor userns restriction on this host), DNS test included; `--help` exit 0; a real
   `rkat-tui --confinement=workspace` printed the AppArmor explanation and exited 2.
+
+## Fork — the TUI's `fork` tool (2026-11-06)
+
+- Goal: let the agent hand a side quest to a child that starts with its own conversation, behind the gate, while
+  `fork_off` stays denied (`session::UNGATED_SPAWN_TOOLS`: its child seats through the engine's persisted-fork path
+  without the TUI's spawn customizer, and it refuses a caller that is not a mob member).
+- Probe, Route 1 (exact context: `PersistentSessionService::fork_durable_session` of the caller's session into a plain
+  child): **dead**. A tool call runs inside the caller's turn; without a target the fork runs under
+  `DurableForkSourceAdmission::Quiescent`, whose `quiescent_fork_mutation_guard` answers `SessionError::Busy` as soon as
+  the source has an active runtime admission (at the committed prefix count too). The admission that forks a running
+  caller, `CallerTurn`, exists only on a `DurableSessionForkTarget`, which carries a required `MobMemberBinding`: the
+  child's metadata gets that binding and comms name (verified before commit) and its resume builds it as a member, so a
+  plain child is not reachable through public API; `fork_durable_session_at_turn_boundary` waits for the turn to end
+  (a deadlock from inside it). Not pursued further: the activated-instructions question
+  (`ForkInstructionRefused`). Pinned by `tests/fork.rs::the_engine_refuses_a_durable_fork_of_a_running_session`
+  (parent turn hanging in its model call; `fork_durable_session(id, None | Some(committed), None, None)` → `Busy`).
+- Route 2 taken (text context): `fork::ForkToolDispatcher` (a TUI callback tool, provenance `rkat-tui.fork`, in the
+  main session's gateway only; helpers get their tools from the helper host, so fork children cannot fork). It reads
+  the caller's committed conversation with `load_committed_session_tolerating_tail` (the strict
+  `load_authoritative_session` fails mid-turn with a transcript revision conflict against the running turn's tail), adds
+  the running turn's request (not committed yet) from the approval engine's record of the user's newest words
+  (`ApprovalEngine::latest_user_input`; `ToolDispatchContext::current_turn` is `None` for text turns), renders it
+  (`fork::context`: user/assistant text, tool calls with truncated args, results clipped to 1 KiB, `/remember` system
+  context, compaction summaries; the caller's system prompt left out; 48 KiB, newest kept; content cannot close the
+  `<parent_conversation>` tag) and runs the child as a helper of the caller in its implicit mob through
+  `DelegationExecutionService` (the path `delegate` takes) with member identity `fork-N`, the TUI's tool access policy
+  and an override of the implicit `delegate` profile with builtins and shell on (that profile enables comms only; a
+  `delegate` helper gets its parent's tools through `InheritParent`, which the host cannot resolve). Result: the
+  child's bounded text (16 KiB) or an error result. (`MobMcpState::mob_spawn_helper` was tried first: from inside the
+  caller's tool call the child never reached its first model call in the rig; not investigated further.)
+- Everything else is the helper machinery: customizer gate for the parent as owner, `HELPER_PERSONA` + fork framing in
+  the prompt (one task, report back, do not ask the user), file tools, curated shell env, follower (`[fork-1 · model]`,
+  status bar, `/cost`), `Helpers::cancel_for` on interrupt.
+- Policy: `ToolFamily::Fork` (provenance `rkat-tui.fork` only) and `fork` in `DELEGATION_TOOLS` → tier 1 like `delegate`;
+  a `fork` from any other surface stays foreign.
+- `mobs/follow.rs` follow failure: already emitted `HelperUpdate::Unmeasured` through `HelperRegistry::follow_failed`;
+  unit test added (`a_helper_that_cannot_be_followed_is_reported_unmeasured`).
+- Tests: `tests/fork.rs` — `a_fork_starts_with_the_parents_conversation_and_returns_its_answer`,
+  `a_forks_calls_pass_the_parents_gate` (child `shell` denied by the classifier, counted on the parent, notice
+  `[fork-1] shell`, `fork` itself never classified), `an_interrupt_leaves_no_running_fork`,
+  `fork_off_stays_denied_and_a_fork_cannot_fork` (parent offers `fork`, not `fork_off`; child has `read_file`/`shell`,
+  neither `fork` nor `fork_off`), the probe above; unit `fork_is_tiered_like_delegate_only_from_the_tuis_own_surface`,
+  `fork::context` tests, the catalog family test.
+- Upstream ask: a host hook to shape fork seats (the spawn customizer for persisted-fork children). It only matters once
+  the main session is a durable mob member, which would make `fork_off` (exact context) usable behind the gate.

@@ -50,8 +50,8 @@ macro_rules! internal_modules {
 }
 
 internal_modules!(
-    approval, bootstrap, cli, delivery, endpoints, error, http, memory, mobs, models, overlay,
-    paths, pricing, runner, session, tools, ui,
+    approval, bootstrap, cli, delivery, endpoints, error, fork, http, memory, mobs, models,
+    overlay, paths, pricing, runner, session, tools, ui,
 );
 
 /// The headless runner the integration tests drive (see

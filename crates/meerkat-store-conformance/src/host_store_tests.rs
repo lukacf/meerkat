@@ -90,6 +90,9 @@ enum Breaks {
     /// Moves each scope from its current version, whatever the batch says:
     /// two batches for one version both land.
     VersionChain,
+    /// Answers a takeover with the newest token granted before it: a grant
+    /// no higher than an earlier one.
+    TokenOrder,
 }
 
 struct Canary {
@@ -113,8 +116,15 @@ impl Canary {
 #[async_trait]
 impl HostStore for Canary {
     async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        let before = self.newest.load(Ordering::SeqCst);
         let grant = self.inner.acquire_fence(mode).await?;
         self.newest.fetch_max(grant.token.get(), Ordering::SeqCst);
+        if self.breaks == Breaks::TokenOrder && mode == AcquireMode::Takeover && before > 0 {
+            return Ok(FenceGrant {
+                token: FenceToken::new(before),
+                ..grant
+            });
+        }
         Ok(grant)
     }
 
@@ -189,6 +199,7 @@ impl HostStore for Canary {
                     CommitBatch::try_new(batch.commit_id().clone(), batch.fence(), updates)?;
                 self.inner.commit(&rebatched).await
             }
+            Breaks::TokenOrder => self.inner.commit(batch).await,
         }
     }
 }
@@ -238,6 +249,17 @@ async fn store_landing_two_batches_for_one_version_fails_the_host_store_chapter(
         .expect_err("a store that lands two batches for one version must fail");
     assert_eq!(failure.chapter(), "host_store");
     assert_eq!(failure.step(), "same_version_twice");
+}
+
+#[tokio::test]
+async fn store_answering_a_takeover_with_an_earlier_token_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::TokenOrder))
+        .await
+        .expect_err(
+            "a store whose takeover answers no higher token than an earlier grant must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "token_order");
 }
 
 fn scope(name: &str) -> ScopeRef {

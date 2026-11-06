@@ -1954,10 +1954,7 @@ async fn r114_an_interrupted_rotation_is_core_s_to_finish_and_no_compile_drives_
     let runtime = runtime_over(None, &core);
     let specs = vec![spec(&alice)];
     roster_pass(&runtime, &specs, None).await;
-    runtime
-        .record_rotation_intent(&alice, "reset", Some(1))
-        .await
-        .expect("the rotation is recorded");
+    seed_rotation_record(&runtime, &alice, "reset", Some(1)).await;
     let rotations_before = core.rotation_calls.load(Ordering::SeqCst);
 
     let outcomes = roster_pass(&runtime, &specs, None).await;
@@ -1973,11 +1970,7 @@ async fn r114_an_interrupted_rotation_is_core_s_to_finish_and_no_compile_drives_
     assert_eq!(core.generation_of(&alice), Some(1));
     assert_eq!(core.session_of(&alice), Some(old_session));
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "Meta's record of the rotation stays written"
     );
 }
@@ -3340,14 +3333,9 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
             .expect("registered live");
     }
     // An earlier reset of bob left its record.
-    runtime
-        .record_rotation_intent(&bob, "reset", Some(0))
+    seed_rotation_record(&runtime, &bob, "reset", Some(0)).await;
+    let earlier = rotation_records(&runtime)
         .await
-        .expect("record bob's earlier rotation");
-    let earlier = runtime
-        .pending_rotation_intents()
-        .await
-        .expect("the records read")
         .remove(&bob)
         .expect("bob's earlier record");
 
@@ -3362,10 +3350,7 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         );
     }
 
-    let records = runtime
-        .pending_rotation_intents()
-        .await
-        .expect("the records read");
+    let records = rotation_records(&runtime).await;
     assert!(
         !records.contains_key(&alice),
         "the refused reset left no record: {records:?}"
@@ -3391,6 +3376,336 @@ async fn a_reset_core_refuses_before_it_starts_leaves_no_rotation_to_carry_out()
         Some(0),
         "alice keeps her generation"
     );
+}
+
+/// The rotation records the runtime's record store holds now, by identity:
+/// the mirror a rollback to 0.9.10 reads, read here as that rollback reads
+/// it (the runtime never reads it).
+async fn rotation_records(
+    runtime: &IdentityRuntime,
+) -> BTreeMap<AgentIdentity, crate::runtime::IdentityRotationIntent> {
+    let (store, mob_id) = runtime.identity_record_store();
+    store
+        .load_identity_rotation_intents(&mob_id)
+        .await
+        .expect("the records read")
+        .into_iter()
+        .map(|record| (identity(&record.identity), record))
+        .collect()
+}
+
+/// Write `who`'s rotation record into the runtime's record store, as an
+/// earlier call (or an earlier Meta) left it.
+async fn seed_rotation_record(
+    runtime: &IdentityRuntime,
+    who: &AgentIdentity,
+    verb: &str,
+    from_generation: Option<u64>,
+) {
+    let (store, mob_id) = runtime.identity_record_store();
+    store
+        .set_identity_rotation_intent(&crate::runtime::IdentityRotationIntent {
+            mob_id,
+            identity: who.as_str().to_string(),
+            verb: verb.to_string(),
+            from_generation,
+            recorded_at_ms: 1,
+        })
+        .await
+        .expect("the record is written");
+}
+
+/// A record store whose rotation records do not read; everything else is an
+/// in-memory store's.
+#[derive(Default)]
+struct RotationReadsFail {
+    inner: crate::runtime::InMemoryMetadataStore,
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::PersistentMetadataStore for RotationReadsFail {
+    async fn get_subscription_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<u64>, crate::runtime::MetadataStoreError> {
+        self.inner.get_subscription_cursor(mob_id).await
+    }
+
+    async fn set_subscription_cursor(
+        &self,
+        mob_id: &str,
+        cursor: u64,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_subscription_cursor(mob_id, cursor).await
+    }
+
+    async fn identity_tool_record(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<Option<crate::runtime::IdentityToolRecord>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.identity_tool_record(mob_id, identity).await
+    }
+
+    async fn set_identity_tool_record(
+        &self,
+        record: &crate::runtime::IdentityToolRecord,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_identity_tool_record(record).await
+    }
+
+    async fn load_identity_rotation_intents(
+        &self,
+        _mob_id: &str,
+    ) -> Result<Vec<crate::runtime::IdentityRotationIntent>, crate::runtime::MetadataStoreError>
+    {
+        Err(crate::runtime::MetadataStoreError::Io(
+            "the rotation records do not read".to_string(),
+        ))
+    }
+
+    async fn set_identity_rotation_intent(
+        &self,
+        intent: &crate::runtime::IdentityRotationIntent,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_identity_rotation_intent(intent).await
+    }
+
+    async fn clear_identity_rotation_intent(
+        &self,
+        mob_id: &str,
+        identity: &str,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner
+            .clear_identity_rotation_intent(mob_id, identity)
+            .await
+    }
+
+    async fn lifecycle_projection_cursor(
+        &self,
+        mob_id: &str,
+    ) -> Result<Option<crate::runtime::LifecycleProjectionCursor>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_projection_cursor(mob_id).await
+    }
+
+    async fn set_lifecycle_projection_cursor(
+        &self,
+        cursor: &crate::runtime::LifecycleProjectionCursor,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_lifecycle_projection_cursor(cursor).await
+    }
+
+    async fn lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        key: &crate::runtime::LifecycleIntentKey,
+    ) -> Result<Option<crate::runtime::LifecycleEffectIntent>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_effect_intent(mob_id, key).await
+    }
+
+    async fn set_lifecycle_effect_intent(
+        &self,
+        intent: &crate::runtime::LifecycleEffectIntent,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.set_lifecycle_effect_intent(intent).await
+    }
+
+    async fn clear_lifecycle_effect_intent(
+        &self,
+        mob_id: &str,
+        key: &crate::runtime::LifecycleIntentKey,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.clear_lifecycle_effect_intent(mob_id, key).await
+    }
+
+    async fn lifecycle_effect_intents(
+        &self,
+        mob_id: &str,
+    ) -> Result<Vec<crate::runtime::LifecycleEffectIntent>, crate::runtime::MetadataStoreError>
+    {
+        self.inner.lifecycle_effect_intents(mob_id).await
+    }
+
+    async fn record_lifecycle_effect_failure(
+        &self,
+        failure: &crate::runtime::LifecycleEffectFailure,
+    ) -> Result<(), crate::runtime::MetadataStoreError> {
+        self.inner.record_lifecycle_effect_failure(failure).await
+    }
+
+    async fn lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<crate::runtime::LifecycleEffectFailure>, crate::runtime::MetadataStoreError>
+    {
+        self.inner
+            .lifecycle_effect_failures(mob_id, skip, limit)
+            .await
+    }
+
+    async fn prune_lifecycle_effect_failures(
+        &self,
+        mob_id: &str,
+        keep: usize,
+    ) -> Result<usize, crate::runtime::MetadataStoreError> {
+        self.inner
+            .prune_lifecycle_effect_failures(mob_id, keep)
+            .await
+    }
+}
+
+/// A reset over a record store whose rotation records do not read starts
+/// and finishes its rotation: the records are a mirror written for a
+/// rollback to 0.9.10, which the verb writes after Core's answer and never
+/// reads. The mirror then holds what 0.9.10 leaves at rest after a
+/// rotation: no record.
+///
+/// RED before the verbs stopped reading the records: the reset was refused,
+/// retryable, because they could not be read.
+#[tokio::test]
+async fn rotation_survives_an_unreadable_meta_record_store() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    let records = Arc::new(RotationReadsFail::default());
+    runtime.set_identity_records(records.clone(), "unreadable".to_string());
+    let session = SessionId::new();
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+
+    let fresh = runtime
+        .reset(&alice)
+        .await
+        .expect("the reset starts and finishes its rotation");
+
+    assert_ne!(
+        fresh.session_id(),
+        Some(&session),
+        "the reset gives alice a fresh session"
+    );
+    assert_eq!(
+        lock(&core.rotations).clone(),
+        vec![alice.clone()],
+        "Core rotated alice once"
+    );
+    assert!(
+        records
+            .inner
+            .load_identity_rotation_intents("unreadable")
+            .await
+            .expect("the inner records read")
+            .is_empty(),
+        "the mirror holds no record after the rotation"
+    );
+}
+
+/// The rotation mirror after a rotation holds no record for the identity,
+/// an earlier call's included: 0.9.10 writes its record over the earlier one
+/// and removes it once Core answers, so that is what a rollback finds.
+#[tokio::test]
+async fn the_rotation_mirror_after_a_rotation_holds_no_record() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    // An earlier reset of alice left its record.
+    seed_rotation_record(&runtime, &alice, "reset", Some(0)).await;
+
+    runtime
+        .reset(&alice)
+        .await
+        .expect("the reset rotates alice");
+
+    assert!(
+        rotation_records(&runtime).await.is_empty(),
+        "the rotation left no record, and took the earlier one with it"
+    );
+}
+
+/// The rotation mirror after a delete whose rotation may have started names
+/// that rotation as 0.9.10 leaves it at rest (its verb and the generation it
+/// rotates from), so a rollback drives it to its end.
+#[tokio::test]
+async fn the_rotation_mirror_after_a_delete_that_may_have_started_names_it() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    *lock(&core.rotation_failure) = Some(BridgeError::Mob(
+        "the retirement ran past its bound".to_string(),
+    ));
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+
+    let failed = runtime.delete_identity(&alice).await;
+    let Err(IdentityRuntimeError::Internal(detail)) = &failed else {
+        panic!("the delete answers that its rotation may have started: {failed:?}");
+    };
+    assert!(detail.contains("may have started"), "{detail}");
+    let kept = rotation_records(&runtime).await.remove(&alice);
+    assert_eq!(
+        kept.as_ref()
+            .map(|record| (record.verb.as_str(), record.from_generation)),
+        Some(("delete_identity", Some(0))),
+        "{kept:?}"
+    );
+}
+
+/// Source guard: the identity runtime never reads its rotation records.
+/// They are a mirror written for a rollback to 0.9.10, whose roster pass
+/// drives the rotation a record names to its end (O3, until 0.9.12): a verb
+/// writes its record after Core's answer and reads none, and nothing else
+/// reads them online.
+///
+/// RED before the verbs stopped reading the records: the reset and delete
+/// verbs read them to put an earlier call's record back after a refusal.
+#[test]
+fn the_identity_runtime_never_reads_its_rotation_records() {
+    let sources = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/records.rs",
+            include_str!("records.rs"),
+        ),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        (
+            "identity_first/runtime/lifecycle_projection.rs",
+            include_str!("lifecycle_projection.rs"),
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            include_str!("build_preparation.rs"),
+        ),
+        (
+            "identity_first/orchestrator.rs",
+            include_str!("../orchestrator.rs"),
+        ),
+    ];
+    for (file, source) in sources {
+        let production = production_code(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production code was read"
+        );
+        for reader in ["load_identity_rotation_intents", "pending_rotation_intents"] {
+            assert!(
+                !production.contains(reader),
+                "{file} names `{reader}`: the rotation records are a rollback's mirror, \
+                 written and never read"
+            );
+        }
+    }
 }
 
 /// A roster pass that moves a seated identity to another profile keeps it a
@@ -3908,12 +4223,15 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_no_compile_rotates_i
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the record of a rotation that may have started stays"
+    );
+    let kept = rotation_records(&runtime).await.remove(&alice);
+    assert_eq!(
+        kept.as_ref()
+            .map(|record| (record.verb.as_str(), record.from_generation)),
+        Some(("reset", Some(0))),
+        "the record names the rotation as 0.9.10 leaves it at rest: {kept:?}"
     );
     let asked = core.rotation_calls.load(Ordering::SeqCst);
 
@@ -3926,11 +4244,7 @@ async fn a_reset_that_may_have_started_keeps_its_record_and_no_compile_rotates_i
     );
     assert!(lock(&core.rotations).is_empty(), "nothing was rotated");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the record stays written"
     );
 }
@@ -3957,11 +4271,7 @@ async fn a_reset_whose_spec_cannot_be_lowered_leaves_no_rotation_to_carry_out() 
         "{refused:?}"
     );
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the record of a rotation that never started is taken back"
     );
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
@@ -4071,11 +4381,7 @@ async fn a_reset_refused_for_the_member_route_leaves_no_rotation_to_carry_out() 
     }
 
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the refused rotation left no record"
     );
     let host_pending =
@@ -6523,11 +6829,7 @@ async fn a_delete_core_refuses_while_a_host_rotation_ends_keeps_nothing() {
         "{refused:?}"
     );
     assert!(
-        !runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        !rotation_records(&runtime).await.contains_key(&alice),
         "the refused delete keeps no rotation record"
     );
     runtime.settle_lifecycle_projection().await;
@@ -6856,11 +7158,7 @@ async fn a_host_fresh_life_a_refused_delete_raced_owes_no_delete() {
         "the refused delete recorded nothing it owes"
     );
     assert!(
-        !runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        !rotation_records(&runtime).await.contains_key(&alice),
         "the refused delete recorded no rotation"
     );
     let fresh = core
@@ -7052,11 +7350,7 @@ async fn a_reset_whose_journal_head_does_not_read_asks_core_nothing() {
         "Core was asked nothing"
     );
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .is_empty(),
+        rotation_records(&runtime).await.is_empty(),
         "the refused reset left no record"
     );
 }
@@ -7084,11 +7378,7 @@ async fn a_refusal_whose_records_are_kept_says_the_rotation_may_have_started() {
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the reset's rotation record stays written"
     );
 }
@@ -7486,11 +7776,7 @@ async fn a_reset_whose_incarnation_a_host_retired_first_keeps_what_it_recorded()
     };
     assert!(detail.contains("may have started"), "{detail}");
     assert!(
-        runtime
-            .pending_rotation_intents()
-            .await
-            .expect("the records read")
-            .contains_key(&alice),
+        rotation_records(&runtime).await.contains_key(&alice),
         "the reset's rotation record stays written"
     );
 }

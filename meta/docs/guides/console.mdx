@@ -410,6 +410,12 @@ a caller can read them but not decide them. A request pinned to an approver id
 is decided by a person who holds that id through the access configuration's
 `approvers` bindings.
 
+The same holds for memory quarantine reviews and WorkGraph goal confirmations:
+the console offers them only to a signed-in person. A WorkGraph claim is owned
+by the caller who makes it, so the WorkGraph panel offers Claim only to a
+caller with a token and Release only on the caller's own claims. Release
+someone else's claim from the host's RPC gateway, or let its lease end.
+
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
 That option does not configure unrelated HTTP or library entrypoints.

@@ -4433,30 +4433,51 @@ pub(crate) const CONSOLE_UNAUTHENTICATED_KIND: &str = "unauthenticated";
 /// JSON-RPC code of a console change refused for its caller.
 pub(crate) const CONSOLE_CALLER_REFUSED_CODE: i64 = -32056;
 
-/// JSON-RPC code of a console approval decision refused because the caller
-/// is not a verified, current person: an open Console's caller without a
-/// token, a service token, a token that names no human, a shared-account
-/// token, or a person whose login ended before the decision was applied.
+/// JSON-RPC code of a console operation refused because its caller is not
+/// the one it needs. An approval decision (`approver_unauthenticated`)
+/// needs a verified, current person and refuses an open Console's caller
+/// without a token, a service token, a token that names no human, a
+/// shared-account token, or a person whose login ended before the
+/// decision was applied. A WorkGraph claim
+/// (`person_authentication_required`) needs a caller that can own it and
+/// refuses an open Console's caller without a token.
 pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_CODE: i64 = -32057;
 
 /// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`], shared by every
-/// console approval decision.
+/// console approval decision: a gating decision, a memory quarantine
+/// review and a WorkGraph goal confirmation.
 pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_KIND: &str = "approver_unauthenticated";
+
+/// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`] for a console
+/// operation that needs a caller who can own its result (a WorkGraph
+/// claim), made by an open Console's caller without a token.
+pub(crate) const CONSOLE_PERSON_AUTHENTICATION_REQUIRED_KIND: &str =
+    "person_authentication_required";
 
 /// The refusal of a console approval decision whose caller is not a
 /// verified, current person. Nothing was decided.
+pub(crate) fn approver_unauthenticated_error() -> JsonRpcError {
+    JsonRpcError {
+        code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
+        message: "console approvals are decided only by a signed-in person; nothing was decided"
+            .to_string(),
+        data: Some(json!({ "kind": CONSOLE_APPROVER_UNAUTHENTICATED_KIND })),
+    }
+}
+
 fn approver_unauthenticated_rpc_error(response_id: Value) -> Value {
-    response_value(
-        response_id,
-        None,
-        Some(JsonRpcError {
-            code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
-            message:
-                "console approvals are decided only by a signed-in person; nothing was decided"
-                    .to_string(),
-            data: Some(json!({ "kind": CONSOLE_APPROVER_UNAUTHENTICATED_KIND })),
-        }),
-    )
+    response_value(response_id, None, Some(approver_unauthenticated_error()))
+}
+
+/// The refusal of a console operation that needs a caller who can own its
+/// result, made by an open Console's caller without a token. Nothing was
+/// changed.
+pub(crate) fn person_authentication_required_error() -> JsonRpcError {
+    JsonRpcError {
+        code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
+        message: "this console operation needs a signed-in caller; nothing was changed".to_string(),
+        data: Some(json!({ "kind": CONSOLE_PERSON_AUTHENTICATION_REQUIRED_KIND })),
+    }
 }
 
 /// The request field naming the caller a console change was made for: the
@@ -6523,30 +6544,16 @@ fn memory_quarantine_decide_requirements(
     requirements
 }
 
-/// The reviewer recorded on a quarantine decision: the authenticated console
-/// principal only, never a name the caller asserts. This is attribution, not
-/// authorization: grants were already enforced for whoever called, an
-/// anonymous caller included, whenever access control is on. Only a host
-/// that runs without app auth reaches here with no principal, and the
-/// decision then records that none was known.
-fn memory_quarantine_reviewer(
-    authenticated_principal: Option<&str>,
-) -> crate::memory::review::QuarantineReviewer {
-    crate::memory::review::QuarantineReviewer::Operator {
-        principal: authenticated_principal
-            .map(str::trim)
-            .filter(|principal| !principal.is_empty())
-            .map(str::to_string),
-    }
-}
-
 /// The operator half of quarantine review (§10.1 "until steward/operator
 /// review"): one decision over a quarantined record in the identity's scope.
 /// Access was enforced up front; the store binds the decision to that scope
-/// and to the reviewed content, and refuses anything it cannot decide.
+/// and to the reviewed content, and refuses anything it cannot decide. The
+/// reviewer is the signed-in person the connection names, never a name the
+/// caller asserts: any other caller decides nothing
+/// (`approver_unauthenticated`).
 async fn handle_memory_quarantine_decide(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    authenticated_principal: Option<&str>,
+    decider: Option<ConsoleApprovalDecider>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -6559,8 +6566,15 @@ async fn handle_memory_quarantine_decide(
             return invalid_params(response_id, format!("Invalid params: {}", err.message()));
         }
     };
+    // Right before the decision is handed to the store: a person, still
+    // current.
+    let Some(decider) = decider.filter(ConsoleApprovalDecider::still_current) else {
+        return approver_unauthenticated_rpc_error(response_id);
+    };
     let realm = request.realm.clone();
-    let reviewer = memory_quarantine_reviewer(authenticated_principal);
+    let reviewer = crate::memory::review::QuarantineReviewer::Operator {
+        principal: Some(decider.principal.clone()),
+    };
     let outcome = store
         .review_quarantined(crate::memory::review::QuarantineReviewRequest {
             scope: crate::memory::records::MemoryScope::Identity {
@@ -10379,9 +10393,16 @@ fn console_aggregator_unavailable(response_id: Value) -> Value {
 /// connection's token names, as the access principal the Console resolved
 /// it to. Every other caller decides nothing (`approver_unauthenticated`),
 /// and no request field names an approver.
-struct ConsoleApprovalDecider {
+pub(crate) struct ConsoleApprovalDecider {
     human: crate::runtime::AuthenticatedConsoleHuman,
     principal: String,
+}
+
+impl std::fmt::Debug for ConsoleApprovalDecider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsoleApprovalDecider")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ConsoleApprovalDecider {
@@ -10401,10 +10422,15 @@ impl ConsoleApprovalDecider {
         })
     }
 
+    /// The access principal the person decides as.
+    pub(crate) fn principal(&self) -> &str {
+        &self.principal
+    }
+
     /// The person is still current, right before the decision is applied:
     /// its retained token still verifies (its session fence included) as
     /// the same access principal.
-    fn still_current(&self) -> bool {
+    pub(crate) fn still_current(&self) -> bool {
         self.human
             .current()
             .is_ok_and(|principal| principal == self.principal)
@@ -11343,7 +11369,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/quarantine/decide" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_quarantine_decide(
                 memory_panel,
-                authenticated_principal,
+                ConsoleApprovalDecider::of(governance, authenticated_principal),
                 &request.params,
                 response_id,
             )
@@ -15004,18 +15030,21 @@ async fn handle_console_runtime_rpc_with_visibility(
         method if crate::rpc::workgraph_methods::is_workgraph_method(method) => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // The read-only gate and the workgraph.view/manage ABAC checks
             // already ran above; the surface carries the authenticated
-            // console principal, which goal/confirm promotes into the
-            // trusted confirmation seam and break_glass_reassign records as
-            // the audited operator. The admission always comes from the
-            // runtime (never a parameter): whatever constructed the service,
-            // the unified stdin surface acquires the runtime's admission, so
-            // the console must acquire that same one.
+            // console principal, which owns the caller's claims and which
+            // break_glass_reassign records as the audited operator, and the
+            // signed-in person, the only caller goal/confirm accepts. The
+            // admission always comes from the runtime (never a parameter):
+            // whatever constructed the service, the unified stdin surface
+            // acquires the runtime's admission, so the console must acquire
+            // that same one.
             let admission = runtime.workgraph_admission();
+            let person = ConsoleApprovalDecider::of(governance, authenticated_principal);
             match crate::rpc::workgraph_methods::handle_workgraph_method(
                 workgraph,
                 &admission,
                 crate::rpc::workgraph_methods::WorkgraphSurface::Console {
                     authenticated_principal,
+                    person: person.as_ref(),
                 },
                 method,
                 &request.params,
@@ -20023,25 +20052,6 @@ comms = true
         assert!(super::is_console_mutating_rpc_method(
             "meta/memory/quarantine/decide"
         ));
-    }
-
-    #[test]
-    fn memory_quarantine_reviewer_is_only_the_authenticated_principal() {
-        use crate::memory::review::QuarantineReviewer;
-        assert_eq!(
-            super::memory_quarantine_reviewer(Some(" alice@example.test ")),
-            QuarantineReviewer::Operator {
-                principal: Some("alice@example.test".to_string())
-            }
-        );
-        assert_eq!(
-            super::memory_quarantine_reviewer(Some("  ")),
-            QuarantineReviewer::Operator { principal: None }
-        );
-        assert_eq!(
-            super::memory_quarantine_reviewer(None),
-            QuarantineReviewer::Operator { principal: None }
-        );
     }
 
     #[test]

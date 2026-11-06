@@ -533,7 +533,16 @@
           "data": {
             "kind": "approver_unauthenticated"
           },
-          "applicability": "Console approval decisions (meta/gating/decide): the caller is not a verified, current person (no token on an open console, a service token, a token that names no human, a shared-account token), or the person's login ended or its sessions were revoked before the decision was applied. Nothing was decided."
+          "applicability": "Console approval decisions (meta/gating/decide, meta/memory/quarantine/decide and meta/workgraph/goal/confirm): the caller is not a verified, current person (no token on an open console, a service token, a token that names no human, a shared-account token), or the person's login ended or its sessions were revoked before the decision was applied. Nothing was decided."
+        },
+        "person_authentication_required": {
+          "status": 200,
+          "code": -32057,
+          "message": "string",
+          "data": {
+            "kind": "person_authentication_required"
+          },
+          "applicability": "A console WorkGraph claim or release (meta/workgraph/claim, meta/workgraph/release) made on an open console without a token: a claim is owned by its caller, and such a caller owns nothing. Nothing was changed."
         }
       },
       "policy_error_inventory": "policy_error_refs supplement each endpoint or method's local errors array. Endpoint references are conditional on the dispatched method, not all requests.",
@@ -1890,7 +1899,8 @@
         "meta/memory/quarantine/decide": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/approver_unauthenticated"
           ],
           "request": {
             "required_fields": [
@@ -1928,6 +1938,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32043,
                 -32602,
                 -32603,
@@ -2045,15 +2056,16 @@
         "meta/workgraph/claim": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/person_authentication_required"
           ],
           "request": {
             "required_fields": [
               "id",
-              "expected_revision",
-              "owner"
+              "expected_revision"
             ],
             "optional_fields": [
+              "owner",
               "lease_seconds",
               "namespace"
             ]
@@ -2066,6 +2078,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32030,
                 -32041,
                 -32042,
@@ -2079,7 +2092,8 @@
         "meta/workgraph/release": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/person_authentication_required"
           ],
           "request": {
             "required_fields": [
@@ -2098,6 +2112,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32030,
                 -32041,
                 -32042,
@@ -2144,7 +2159,8 @@
         "meta/workgraph/goal/confirm": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/approver_unauthenticated"
           ],
           "request": {
             "required_fields": [
@@ -2165,6 +2181,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32030,
                 -32041,
                 -32042,

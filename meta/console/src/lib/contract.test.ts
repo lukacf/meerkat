@@ -261,6 +261,32 @@ test("console contract decides approvals as the signed-in person only", () => {
   assert.equal(whoami?.success?.actor_kind_values?.includes("person"), true);
 });
 
+test("console contract documents the person-only quarantine review, goal confirmation and claim refusals", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as {
+    surfaces: {
+      rpc: {
+        methods: Record<string, { policy_error_refs?: string[]; errors?: Array<{ codes?: number[] }> }>;
+        policy_errors: Record<string, { code?: number; data?: { kind?: string } }>;
+      };
+    };
+  };
+  const method = (name: string) => schema.surfaces.rpc.methods[name];
+  for (const [name, refusal] of [
+    ["meta/memory/quarantine/decide", "approver_unauthenticated"],
+    ["meta/workgraph/goal/confirm", "approver_unauthenticated"],
+    ["meta/workgraph/claim", "person_authentication_required"],
+    ["meta/workgraph/release", "person_authentication_required"],
+  ]) {
+    assert.equal(method(name)?.policy_error_refs?.includes(`#/surfaces/rpc/policy_errors/${refusal}`), true, name);
+    assert.equal((method(name)?.errors || []).some((entry) => entry.codes?.includes(-32057)), true, name);
+  }
+  const refusal = schema.surfaces.rpc.policy_errors.person_authentication_required;
+  assert.equal(refusal?.code, -32057);
+  assert.equal(refusal?.data?.kind, "person_authentication_required");
+});
+
 test("console contract route and method names stay synchronized with Rust http console source", () => {
   const schema = JSON.parse(
     readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),

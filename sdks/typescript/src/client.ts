@@ -533,6 +533,7 @@ import type {
   TurnOptions,
   TurnToolOverlay,
   ToolCallDedupeKey,
+  ToolCallRequester,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -1077,6 +1078,7 @@ export class MeerkatClient {
       handler: (
         args: Record<string, unknown>,
         dedupeKey?: ToolCallDedupeKey,
+        requester?: ToolCallRequester,
       ) => Promise<string | ContentBlock[]>;
     }
   >();
@@ -1109,6 +1111,11 @@ export class MeerkatClient {
    * {@link ToolCallDedupeKey}, present when an agent-loop round dispatched
    * the call. A resumed run that dispatches the same call again passes the
    * same key.
+   *
+   * Its optional third argument is the {@link ToolCallRequester} of the run
+   * the call serves, when the run has one. The runtime sets it from the run's
+   * admitted inputs, never from the arguments, so a tool that acts in one
+   * person's name can refuse every other requester.
    */
   registerTool(
     name: string,
@@ -1117,6 +1124,7 @@ export class MeerkatClient {
     handler: (
       args: Record<string, unknown>,
       dedupeKey?: ToolCallDedupeKey,
+      requester?: ToolCallRequester,
     ) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
@@ -5209,6 +5217,16 @@ export class MeerkatClient {
       return undefined;
     }
     return { run_id, round, call_id, call_digest };
+  }
+
+  /**
+   * The `requester` of a `tool/execute` request: the original requester of
+   * the run the call serves. An absent or malformed value is `undefined`, no
+   * requester, which a person-scoped tool refuses.
+   */
+  static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
+    void raw;
+    return undefined;
   }
 
   /**

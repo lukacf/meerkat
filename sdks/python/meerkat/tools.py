@@ -94,6 +94,50 @@ def _accepts_dedupe_key(handler: Callable[..., Any]) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class RequesterPrincipal:
+    """The principal a callback call's requester names, as the runtime sends
+    it.
+
+    ``kind`` is the principal's category (``"human"`` for a person) and ``id``
+    its id within ``trust_domain_id``: the qualified trust domain (for a
+    person signed in through an identity provider, ``"oidc-issuer:"`` and the
+    issuer), or ``None`` for an unqualified principal.
+    """
+
+    kind: str
+    id: str
+    trust_domain_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolCallRequester:
+    """The original requester of the run a callback tool call serves.
+
+    The runtime sets it from the run's admitted inputs; tool arguments never
+    do. ``carried`` is true when the run's work reached its agent through
+    another actor (a peer hop or an approval). A tool that acts in a person's
+    name serves only a direct requester (:attr:`direct_principal`).
+    """
+
+    principal: RequesterPrincipal
+    carried: bool = False
+
+    @property
+    def direct_principal(self) -> RequesterPrincipal | None:
+        """The principal, only when the requester is direct."""
+        return None if self.carried else self.principal
+
+    @classmethod
+    def from_wire(cls, value: Any) -> ToolCallRequester | None:
+        """Parse a wire ``requester`` object.
+
+        An absent or malformed value is ``None``: no requester, which a
+        person-scoped tool refuses.
+        """
+        return None
+
+
 @dataclass
 class ToolRegistration:
     """A registered callback tool."""

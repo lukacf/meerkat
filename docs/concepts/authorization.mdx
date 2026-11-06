@@ -165,6 +165,36 @@ it cannot turn a denied request into a more privileged request of its own.
 Schedules retain their commissioning mandate. Console visibility and a signed-in
 provider account are not substitutes for those checks.
 
+Between agents in one process, Core carries the original requester itself. A
+comms delivery that governed work sends in process carries that work's origin:
+its requester, the sending agent, and every work it names. Core's peer binder
+(`OriginalRequesterPeerBinder`, which a host composition installs) binds the
+receiving work under that requester, with the sending agent as its ingress
+actor and every work of the sending work as a contributor. It takes only the
+receiving agent's own facts from the host (`PeerServiceBasis`): its basis for
+serving peers, its destination and its controller. Every operation of the
+receiving work is narrowed by the requester's current grant, at every hop, so
+the receiving agent's own access never widens what the requester may do. Core
+refuses any binder's binding of such a delivery that drops the requester, the
+sending agent or a work of the sending work. A delivery over a network carries
+no origin, and Core's binder refuses it (`origin_unverifiable`), as it refuses
+a sending work whose basis narrows nothing (`sender_basis_unbounded`).
+
+An ungoverned input can name its original requester too: an opaque, qualified
+principal that the host supplies from the caller it authenticated
+(`StartTurnRuntimeSemantics::with_requester`, `InputHeader.requester`), never
+one taken from a request body, a tool argument or model output. Core never
+interprets it. It is stored with the admitted input and returned on the input's
+receipt (`InputState::requester`) and on the turn's transcript rows
+(`TranscriptMessageIdentity.requester`), and a tool sees the run's requester in
+its dispatch context (`ToolDispatchContext::requester`). A governed input's
+requester is its work association's, and an input that names a different one
+besides is refused. The requester is direct when the person asked the agent
+itself, and carried when the work reached the agent through a peer hop or an
+approval; `ToolDispatchContext::direct_requester` answers only for a direct
+one, which is the only one a host should act for in that person's name. Inputs
+of different requesters, or of a requester and none, never share a run.
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot
@@ -265,14 +295,18 @@ owner then executes the held request at most once.
   never runs after it.
 - **One executor.** `DecisionExecutorLoop` executes the approved decisions of
   a store, through one registered executor per decision kind. It holds the
-  store's executor claim while it runs (for the SQLite file, an OS lock on
-  `approval_decisions.executor.lock` beside it, released when its process
-  ends), so a second executor of the store, in this process or another, is
-  refused at start, and a candidate launch starts none. It keeps the three
-  obligations the machine cannot see: one executor per decision; after a
-  commit, the only settlement is recording it; and after a restart or a
-  dropped pass it settles first, from the owner's own record of the
-  operation, which reports every commit that can still land.
+  executor claim of each kind it executes while it runs (for the SQLite file,
+  an OS lock on `approval_decisions.executor.<kind>.lock` beside it, and a
+  shared one on `approval_decisions.executor.lock`, released when its process
+  ends). Another executor of a kind, in this process or another, executes
+  none of its decisions while the claim lives: each pass lists the kind as
+  unclaimed and asks for it again, so it takes over once the first executor
+  ends. Executors of different kinds of one store run side by side, and a
+  candidate launch starts none. It keeps the three obligations the machine
+  cannot see: one executor per decision; after a commit, the only settlement
+  is recording it; and after a restart or a dropped pass it settles first,
+  from the owner's own record of the operation, which reports every commit
+  that can still land.
 - **One notice.** An ended decision whose requester can be told owes it one
   notice, settled by its delivery receipt. A delivery whose receipt was not
   recorded is made again, so the owner delivers idempotently.
@@ -282,8 +316,23 @@ Decisions live in their own file beside the approval records,
 nothing is read at start, and a read touches one decision or one index page. A
 candidate launch reads decisions and writes none. Durable decisions share no
 record, file or machine with the in-run consent above, and `approval/list` never
-shows them. Core adds no wire method for them: a host builds its decision
-surfaces on the Rust owner, `meerkat_runtime::decision::DurableDecisionService`,
+shows them. The RPC server reads, presents and withdraws them with the
+[`decision/*` methods](/api/rpc#durable-decisions); a runtime whose persistence
+keeps none answers them capability unavailable (`-32020`). No request body
+names who decides one: a host's trusted adapter decides through
+`MethodRouter::dispatch_with_decision_event`, with the
+`AuthenticatedDecisionEvent` it built from the event it authenticated. The
+operator of an `rkat-rpc` stdio connection (Unix builds with local
+authorization) decides with `decision/decide` on that connection, which builds
+the event itself: the operator, device trusted in the connection's own scope.
+When its client lists, the connection presents each listed decision held for
+an approver id `[governance.decisions] operator_approver_ids` names, writing a
+`decision/notice` before it records the presentation, and only a decision it
+presented, whose approver id is still listed, is eligible
+([the operator of a stdio connection](/api/rpc#the-operator-of-a-stdio-connection)).
+Elsewhere `decision/decide` is method not found. A host
+builds its other decision surfaces on the Rust owner,
+`meerkat_runtime::decision::DurableDecisionService`,
 and executes them with `meerkat_runtime::decision::DecisionExecutorLoop`.
 
 Read the [integration and migration guide](/guides/authorization-integration)

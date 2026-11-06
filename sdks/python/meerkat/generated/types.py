@@ -1214,6 +1214,168 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
 
+# Who a presenter showed a rendering to. Closed.
+class DecisionAudienceApprover(TypedDict, total=False):
+    approver_id: Required[str]
+    kind: Required[Literal['approver']]
+
+class DecisionAudienceReviewer(TypedDict, total=False):
+    kind: Required[Literal['reviewer']]
+    reviewer: Required[str]
+
+DecisionAudienceRequest = DecisionAudienceApprover | DecisionAudienceReviewer
+
+# Where a decision stands.
+WireDecisionPhase = Literal['open', 'approved', 'rejected', 'expired', 'withdrawn', 'executed', 'execution_refused', 'unknown']
+
+# Who decides an open decision now.
+WireDecisionStage = Literal['human', 'review', 'unknown']
+
+# Where the requester notice of a decision stands.
+WireDecisionNoticeState = Literal['not_required', 'not_due', 'owed', 'delivered', 'failed', 'unknown']
+
+# What a decision notice reports.
+WireDecisionNoticeEvent = Literal['presented', 'unknown']
+
+# Who decided a decision.
+WireDecisionTier = Literal['human', 'review', 'unknown']
+
+# How the human who decided was authenticated on the decision event.
+WireDecisionAssurance = Literal['person_authenticated', 'service_credential', 'device_trusted', 'unknown']
+
+# A reviewer's verdict.
+WireDecisionReviewVerdict = Literal['allow', 'deny', 'escalate', 'unknown']
+
+# Who a recorded presentation was shown to.
+class WirePresentationAudienceApprover(TypedDict, total=False):
+    approver_id: Required[str]
+    kind: Required[Literal['approver']]
+
+class WirePresentationAudienceReviewer(TypedDict, total=False):
+    kind: Required[Literal['reviewer']]
+    reviewer: Required[str]
+
+class WirePresentationAudienceUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown
+
+# The durable evidence a decision was decided with. An authentication
+# scope is never projected.
+class WireDecisionEvidenceHuman(TypedDict, total=False):
+    approve: Required[bool]
+    approver_id: Required[str]
+    assurance: Required[WireDecisionAssurance]
+    decider: Required[str]
+    event_ref: Required[str]
+    ingress: Required[str]
+    kind: Required[Literal['human']]
+    observed_at_ms: NotRequired[Optional[int]]
+    presentation: NotRequired[Optional[dict[str, Any]]]
+    presented_digest: Required[str]
+    reason: NotRequired[Optional[str]]
+
+class WireDecisionEvidenceReview(TypedDict, total=False):
+    feedback: NotRequired[Optional[str]]
+    kind: Required[Literal['review']]
+    origin_session: Required[str]
+    presented_digest: Required[str]
+    reviewer: Required[str]
+    verdict: Required[WireDecisionReviewVerdict]
+    verdict_call_ref: Required[str]
+
+class WireDecisionEvidenceUnknown(TypedDict, total=False):
+    kind: Required[Literal['unknown']]
+
+WireDecisionEvidence = WireDecisionEvidenceHuman | WireDecisionEvidenceReview | WireDecisionEvidenceUnknown
+
+# Why a decision refused a call. Closed: a refusal bears authority, so a
+# client never reads one it does not know as another.
+class WireDecisionRefusalInvalidWindow(TypedDict, total=False):
+    kind: Required[Literal['invalid_window']]
+
+class WireDecisionRefusalSelfReview(TypedDict, total=False):
+    kind: Required[Literal['self_review']]
+
+class WireDecisionRefusalHoldConflict(TypedDict, total=False):
+    kind: Required[Literal['hold_conflict']]
+
+class WireDecisionRefusalNotOpen(TypedDict, total=False):
+    kind: Required[Literal['not_open']]
+
+class WireDecisionRefusalExpired(TypedDict, total=False):
+    kind: Required[Literal['expired']]
+
+class WireDecisionRefusalSubjectChanged(TypedDict, total=False):
+    kind: Required[Literal['subject_changed']]
+
+class WireDecisionRefusalPresentationIncomplete(TypedDict, total=False):
+    kind: Required[Literal['presentation_incomplete']]
+
+class WireDecisionRefusalWrongAudience(TypedDict, total=False):
+    kind: Required[Literal['wrong_audience']]
+
+class WireDecisionRefusalReviewStage(TypedDict, total=False):
+    kind: Required[Literal['review_stage']]
+
+class WireDecisionRefusalHumanStage(TypedDict, total=False):
+    kind: Required[Literal['human_stage']]
+
+class WireDecisionRefusalEvidenceRequired(TypedDict, total=False):
+    kind: Required[Literal['evidence_required']]
+
+class WireDecisionRefusalNotEligible(TypedDict, total=False):
+    kind: Required[Literal['not_eligible']]
+
+class WireDecisionRefusalSelfApproval(TypedDict, total=False):
+    kind: Required[Literal['self_approval']]
+
+class WireDecisionRefusalWrongReviewer(TypedDict, total=False):
+    kind: Required[Literal['wrong_reviewer']]
+
+class WireDecisionRefusalNotRequester(TypedDict, total=False):
+    kind: Required[Literal['not_requester']]
+
+class WireDecisionRefusalNotApproved(TypedDict, total=False):
+    kind: Required[Literal['not_approved']]
+
+class WireDecisionRefusalBindingMismatch(TypedDict, total=False):
+    kind: Required[Literal['binding_mismatch']]
+
+class WireDecisionRefusalNotAuthorized(TypedDict, total=False):
+    kind: Required[Literal['not_authorized']]
+
+class WireDecisionRefusalSettlementOwed(TypedDict, total=False):
+    kind: Required[Literal['settlement_owed']]
+
+class WireDecisionRefusalNotOwed(TypedDict, total=False):
+    kind: Required[Literal['not_owed']]
+
+class WireDecisionRefusalDecidedBeforePresentation(TypedDict, total=False):
+    kind: Required[Literal['decided_before_presentation']]
+
+WireDecisionRefusal = WireDecisionRefusalInvalidWindow | WireDecisionRefusalSelfReview | WireDecisionRefusalHoldConflict | WireDecisionRefusalNotOpen | WireDecisionRefusalExpired | WireDecisionRefusalSubjectChanged | WireDecisionRefusalPresentationIncomplete | WireDecisionRefusalWrongAudience | WireDecisionRefusalReviewStage | WireDecisionRefusalHumanStage | WireDecisionRefusalEvidenceRequired | WireDecisionRefusalNotEligible | WireDecisionRefusalSelfApproval | WireDecisionRefusalWrongReviewer | WireDecisionRefusalNotRequester | WireDecisionRefusalNotApproved | WireDecisionRefusalBindingMismatch | WireDecisionRefusalNotAuthorized | WireDecisionRefusalSettlementOwed | WireDecisionRefusalNotOwed | WireDecisionRefusalDecidedBeforePresentation
+
+# The typed `data` of a `decision/*` error. Closed, like the refusals it
+# carries.
+class WireDecisionErrorDataDecisionRefused(TypedDict, total=False):
+    decision_refusal: Required[WireDecisionRefusal]
+    kind: Required[Literal['decision_refused']]
+
+class WireDecisionErrorDataDecisionNotFound(TypedDict, total=False):
+    kind: Required[Literal['decision_not_found']]
+
+class WireDecisionErrorDataDecisionUnreadable(TypedDict, total=False):
+    kind: Required[Literal['decision_unreadable']]
+
+class WireDecisionErrorDataCandidateLaunch(TypedDict, total=False):
+    kind: Required[Literal['candidate_launch']]
+
+class WireDecisionErrorDataNoDecisionStore(TypedDict, total=False):
+    kind: Required[Literal['no_decision_store']]
+
+WireDecisionErrorData = WireDecisionErrorDataDecisionRefused | WireDecisionErrorDataDecisionNotFound | WireDecisionErrorDataDecisionUnreadable | WireDecisionErrorDataCandidateLaunch | WireDecisionErrorDataNoDecisionStore
+
 @dataclass
 class ActivateInstructionParams:
     """Request payload for `session/activate_instruction`."""
@@ -2082,6 +2244,187 @@ the next page while more rows may follow."""
     rows: list[WireToolGrantAuditRow]
     next_sequence: Optional[int] = None
     unreadable: Optional[list[WireUnreadableToolGrantAuditRow]] = None
+
+
+@dataclass
+class WireCanonicalPart:
+    """One canonical part of a rendering: consecutive byte ranges on character
+boundaries of at most the presenter's part size, each with its own
+digest."""
+    count: int
+    index: int
+    part_digest: str
+
+
+@dataclass
+class WirePresentationRecord:
+    """One recorded presentation of a decision's rendering."""
+    at_ms: int
+    audience: WirePresentationAudience
+    channel_ref: str
+    message_ref: str
+    parts_shown: list[WireCanonicalPart]
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class WireDecisionOutcome:
+    """A decided decision's outcome: who decided, and the evidence."""
+    evidence: WireDecisionEvidence
+    tier: WireDecisionTier
+
+
+@dataclass
+class WireDecision:
+    """One durable decision, as its row stands at the read."""
+    approver_id: str
+    created_at_ms: int
+    deadline_at_ms: int
+    decision_id: str
+    kind: str
+    notice: WireDecisionNoticeState
+    operation_id: str
+    permit_issued: bool
+    phase: WireDecisionPhase
+    renderer: str
+    request_digest: str
+    requester: str
+    revision: int
+    stage: WireDecisionStage
+    subject_digest: str
+    subject_key: str
+    decided_at_ms: Optional[int] = None
+    ended_at_ms: Optional[int] = None
+    execution_refusal: Optional[str] = None
+    first_presented_to_approver_at_ms: Optional[int] = None
+    outcome: Optional[WireDecisionOutcome] = None
+    presentations: Optional[list[WirePresentationRecord]] = None
+    request: Optional[Any] = None
+    reviewer: Optional[str] = None
+
+
+@dataclass
+class WireUnreadableDecision:
+    """A stored decision row the server cannot read (written by a newer
+version, or torn). Nothing executes it."""
+    decision_id: str
+    detail: str
+
+
+@dataclass
+class DecisionPresentationRequest:
+    """What a host presenter showed. Closed."""
+    at_ms: int
+    audience: DecisionAudienceRequest
+    channel_ref: str
+    message_ref: str
+    parts_shown: list[WireCanonicalPart]
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionListParams:
+    """`decision/list` parameters: every field set must match. The page holds
+at most `limit` decisions (100 when absent, at most 500), in decision id
+order after `after`."""
+    after: Optional[str] = None
+    approver_id: Optional[str] = None
+    kind: Optional[str] = None
+    limit: Optional[int] = None
+    phase: Optional[WireDecisionPhase] = None
+    requester: Optional[str] = None
+
+
+@dataclass
+class DecisionListResult:
+    """`decision/list` result. Each decision is read at the server's clock: one
+past its deadline reads as expired."""
+    decisions: list[WireDecision]
+    next_after: Optional[str] = None
+    unreadable: Optional[list[WireUnreadableDecision]] = None
+
+
+@dataclass
+class DecisionGetParams:
+    """`decision/get` parameters."""
+    decision_id: str
+    include_request: Optional[bool] = None
+
+
+@dataclass
+class DecisionResult:
+    """The result of `decision/get`, `decision/present`, `decision/withdraw`
+and `decision/decide`: the decision as it stands after the call."""
+    decision: WireDecision
+
+
+@dataclass
+class DecisionRenderingParams:
+    """`decision/rendering` parameters. `max_part_bytes` splits the rendering
+into canonical parts of at most that many bytes; absent, it is one part."""
+    decision_id: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionRenderingResult:
+    """`decision/rendering` result: the one canonical rendering of the held
+request and its canonical parts for the asked part size."""
+    decision_id: str
+    parts: list[WireCanonicalPart]
+    renderer: str
+    rendering: str
+    subject_digest: str
+    max_part_bytes: Optional[int] = None
+
+
+@dataclass
+class DecisionPresentParams:
+    """`decision/present` parameters: record what a host presenter showed. It
+counts only when it shows every canonical part of the held rendering to
+the party that decides now."""
+    decision_id: str
+    presentation: DecisionPresentationRequest
+
+
+@dataclass
+class DecisionWithdrawParams:
+    """`decision/withdraw` parameters: the connection withdraws as the host."""
+    decision_id: str
+
+
+@dataclass
+class WireDecisionNoticePresentation:
+    """The rendering a `presented` notice showed: the decision's whole
+rendering, its renderer and digest, and its canonical parts (one part:
+the whole rendering)."""
+    parts: list[WireCanonicalPart]
+    renderer: str
+    rendering: str
+    subject_digest: str
+
+
+@dataclass
+class WireDecisionNotice:
+    """`decision/notice` parameters: what an `rkat-rpc` stdio connection showed
+its operator about one durable decision. When its client lists
+(`decision/list`), the connection presents each open decision of the
+returned page that is addressed to an approver id its operator acts for
+and that it has not presented yet: it writes a `presented` notice
+carrying the whole rendering, then records that presentation (to the
+approver, with this notice's id as its message reference) before it
+answers the list. A notice grants nothing: the operator decides with
+`decision/decide` on the same connection."""
+    approver_id: str
+    decision_id: str
+    event: WireDecisionNoticeEvent
+    kind: str
+    notice_id: str
+    phase: WireDecisionPhase
+    requester: str
+    presentation: Optional[WireDecisionNoticePresentation] = None
 
 
 # Private host/gateway execution declaration for a callback tool.

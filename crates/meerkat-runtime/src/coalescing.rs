@@ -126,6 +126,7 @@ mod tests {
             idempotency_key: None,
             supersession_key: key.map(SupersessionKey::new),
             correlation_id: None,
+            requester: None,
         }
     }
 

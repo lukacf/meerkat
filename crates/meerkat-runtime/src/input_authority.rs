@@ -18,12 +18,19 @@ use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
 use crate::traits::RuntimeDriverError;
 
+mod governed_origin;
+mod original_requester;
 mod peer_ingress;
+pub use governed_origin::GovernedPeerOrigin;
+pub use original_requester::{
+    DEFAULT_PEER_CUSTODY_RETENTION, OriginalRequesterPeerBinder, PeerServiceBasis,
+    PeerServiceFuture, PeerServiceGrant, PeerServiceRefusal, PeerServiceRequest,
+};
 pub(crate) use peer_ingress::delivery_input_id;
 pub use peer_ingress::{
-    PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest, PeerIngressBinder,
-    PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin, PeerIngressOrigin,
-    PeerIngressSupervisorOrigin,
+    PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest,
+    PeerIngressBinder, PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin,
+    PeerIngressOrigin, PeerIngressSupervisorOrigin,
 };
 
 /// The native replay lookup's verdict for one admission of a governed input:
@@ -848,11 +855,55 @@ pub(crate) fn generated_binding(
             .ok_or_else(unavailable)?;
         return association_binding(canonical.association());
     }
-    input
-        .header()
-        .authority_association
-        .as_ref()
-        .map_or(Ok((None, None)), association_binding)
+    match input.header().authority_association.as_ref() {
+        Some(association) => association_binding(association),
+        // An ungoverned input has no binding. Its batch key is its
+        // requester's, when its host supplied one, so that inputs of
+        // different requesters never share a run.
+        None => Ok((
+            None,
+            input
+                .header()
+                .requester
+                .as_ref()
+                .map(requester_batch_key)
+                .transpose()?,
+        )),
+    }
+}
+
+/// The batch key of an ungoverned input whose host supplied `requester`:
+/// `requester:` and the hex SHA-256 of the requester's canonical bytes. A
+/// governed batch key is pure hex, so the two never collide. Identity only:
+/// the key grants nothing and no requester is parsed back out of it.
+pub(crate) fn requester_batch_key(
+    requester: &meerkat_core::PrincipalRef,
+) -> Result<String, RuntimeDriverError> {
+    let bytes = serde_json::to_vec(requester).map_err(|_| unavailable())?;
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat.input-requester-batch.v1\0");
+    digest.update(&bytes);
+    Ok(format!("requester:{}", hex(&digest.finalize())))
+}
+
+/// An input names at most one requester: its host-supplied requester must be
+/// a qualified principal, and a governed input (or a retained resume) whose
+/// header also names one must name its association's own requester.
+pub(crate) fn verify_single_requester(input: &Input) -> Result<(), RuntimeDriverError> {
+    let Some(requester) = input.header().requester.as_ref() else {
+        return Ok(());
+    };
+    if requester.validate_qualified().is_err() {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input's requester must be a qualified principal".into(),
+        });
+    }
+    match input.requester() {
+        Some(own) if own == requester => Ok(()),
+        _ => Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input carries two different requesters".into(),
+        }),
+    }
 }
 
 pub(crate) fn association_binding(
@@ -985,11 +1036,47 @@ pub(crate) fn verify_retained_replay(
         .find(|item| item.input_id() == &state.input_id);
     match (own, input.header().authority_association.as_ref()) {
         (Some(retained), Some(_)) => retained.verify_replay(input),
-        (None, None) if state.authority_contributors.is_empty() => Ok(()),
+        // An ungoverned retry replays only for the requester the row was
+        // admitted for (absence included): another requester's retry under
+        // the same key is a conflict, never that requester's receipt.
+        (None, None)
+            if state.authority_contributors.is_empty()
+                && state.requester.as_ref() == input.header().requester.as_ref() =>
+        {
+            Ok(())
+        }
         _ => Err(RuntimeDriverError::InputIdempotencyConflict {
             existing_id: state.input_id.clone(),
         }),
     }
+}
+
+/// Bind one original to its final input: set the association and the
+/// original event's raw idempotency key, then bind the trusted ingress
+/// observation and the actual selected controller to exactly that input (the
+/// one body of `bind_scoped_original`, also Core's own peer binder's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bind_original_input(
+    mut input: Input,
+    association: InputAuthorityAssociation,
+    event_key: IdempotencyKey,
+    requester: meerkat_core::PrincipalRef,
+    ingress_actor: meerkat_core::PrincipalRef,
+    realm: meerkat_core::connection::RealmId,
+    authentication: meerkat_authorization_contracts::evidence::HistoricalEvidenceRef,
+    controller: meerkat_core::ControllerModelClient,
+) -> Result<Input, RuntimeDriverError> {
+    input.header_mut().authority_association = Some(association);
+    input.header_mut().idempotency_key = Some(event_key);
+    let ingress = NativeIngressContext::from_trusted_ingress(
+        &input,
+        requester,
+        ingress_actor,
+        realm,
+        authentication,
+    )?
+    .with_controller_client(&input, controller)?;
+    input.with_ingress_context(ingress)
 }
 
 /// What a bound original's association must name as its original work.
@@ -1003,6 +1090,18 @@ pub enum BoundOriginalPin<'a> {
     /// [`PeerIngressBindRequest::delivery_work`]): the original's work only,
     /// since its authority principal is the host's.
     DeliveryWork(&'a EvidenceId),
+    /// Core's work id for one delivery that carries a governed origin (an
+    /// in-process delivery from governed work,
+    /// [`PeerIngressCommsOrigin::governed_origin`]), as `DeliveryWork`. The
+    /// binding also keeps the origin's requester, names the sending agent
+    /// as its ingress actor, and names every work of the sending work as a
+    /// contributor ([`GovernedPeerOrigin::sender_work`]), so the receiving
+    /// work keeps the original requester and is narrowed by the requester's
+    /// own ceiling.
+    GovernedDelivery {
+        work: &'a EvidenceId,
+        origin: &'a GovernedPeerOrigin,
+    },
 }
 
 /// Check a trusted host's binding of an input Core handed it: Core's exact
@@ -1061,6 +1160,29 @@ pub fn check_bound_original(
         BoundOriginalPin::DeliveryWork(work) => {
             if claims.original_work.work != *work {
                 return Err("the binding names another delivery's work than Core's".into());
+            }
+        }
+        BoundOriginalPin::GovernedDelivery { work, origin } => {
+            if claims.original_work.work != *work {
+                return Err("the binding names another delivery's work than Core's".into());
+            }
+            if claims.requester != *origin.requester() {
+                return Err("the binding names another requester than the sending work's".into());
+            }
+            if claims.ingress_actor != *origin.sender_executor() {
+                return Err(
+                    "the binding names another ingress actor than the sending agent".into(),
+                );
+            }
+            if origin
+                .sender_work()
+                .iter()
+                .any(|sent| !claims.contributing_work.contains(sent))
+            {
+                return Err(
+                    "the binding does not name every work of the sending work as a contributor"
+                        .into(),
+                );
             }
         }
     }
@@ -1941,6 +2063,41 @@ pub(crate) mod tests {
             prompt.injected_context.push("new hidden context".into());
         }
         assert!(verify_retained_replay(&decoded.state, &altered).is_err());
+    }
+
+    /// One requester concept: a governed input's requester is its work
+    /// association's. An input that also carries a host-supplied requester
+    /// must name the same principal. Another principal is refused before
+    /// admission and nothing is admitted; the same one is admitted, and its
+    /// receipt names the association's requester.
+    #[tokio::test]
+    async fn an_input_carrying_two_different_requesters_is_refused() {
+        let mut driver = driver(true);
+        let carrying = |host_requester: &str| {
+            let mut input = driver.input("caller-a");
+            input.header_mut().ingress_context = None;
+            input.header_mut().requester = Some(principal(host_requester));
+            attach_ingress(input, "caller-a", "host-supplied-requester")
+        };
+        let conflicting = carrying("caller-b");
+        let agreeing = carrying("caller-a");
+        let conflicting_id = conflicting.id().clone();
+        assert!(
+            driver.accept_input(conflicting).await.is_err(),
+            "an input whose host-supplied requester differs from its association's is refused"
+        );
+        assert!(
+            driver.input_state(&conflicting_id).is_none(),
+            "the refused input is not admitted"
+        );
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(agreeing)
+            .await
+            .expect("an agreeing requester is admitted")
+        else {
+            panic!("agreeing admission");
+        };
+        assert_eq!(state.requester(), Some(&principal("caller-a")));
     }
 
     /// The driver resolves its native replay lookup before the host

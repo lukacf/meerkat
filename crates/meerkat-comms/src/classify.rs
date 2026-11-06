@@ -62,6 +62,9 @@ pub(crate) struct PreparedIngressItem {
     /// How the transport established the sender: set by the inbox path that
     /// admits the item, `Unverified` unless that path proves otherwise.
     pub(crate) sender_authentication: meerkat_core::PeerIngressSenderAuthentication,
+    /// The governed work the item was sent under: set only by the
+    /// in-process path, from what its sender carried; `None` otherwise.
+    pub(crate) governed_send_origin: Option<meerkat_core::GovernedSendOrigin>,
 }
 
 fn content_shape_for_text_and_blocks(
@@ -486,6 +489,7 @@ impl IngressClassificationContext {
                     request_id,
                     sender_authentication:
                         meerkat_core::PeerIngressSenderAuthentication::Unverified,
+                    governed_send_origin: None,
                     item: InboxItem::External { envelope },
                 })
             }
@@ -537,6 +541,7 @@ impl IngressClassificationContext {
                     request_id: None,
                     sender_authentication:
                         meerkat_core::PeerIngressSenderAuthentication::Unverified,
+                    governed_send_origin: None,
                     item: InboxItem::PlainEvent {
                         body,
                         source,

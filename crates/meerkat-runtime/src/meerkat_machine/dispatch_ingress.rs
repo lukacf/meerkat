@@ -903,6 +903,39 @@ impl MeerkatMachine {
                     LiveBoundaryInputDisposition::QueuedFallback,
                 ));
             };
+            // Inputs of different requesters never share a run, and the
+            // machine decides which may join this one: an input of another
+            // requester than the run's batch (or with a requester while the
+            // run has none, or the reverse) takes the queued fallback and
+            // waits for a run of its own. It never becomes a class head
+            // below, so it holds back no later steer of the run's requester.
+            if !driver
+                .driver_ingress()
+                .live_boundary_joins_run_batch(input_id, &run_id)
+            {
+                drop(driver);
+                held_mutation_gate = self
+                    .normalize_live_boundary_queued_fallback(
+                        session_id,
+                        witness,
+                        completions,
+                        publication_handle.clone(),
+                        held_mutation_gate,
+                        input_id,
+                        fallback_wake,
+                    )
+                    .await?;
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input_id,
+                    run_id = %run_id,
+                    "live-boundary candidate of another requester waits for a run of its own"
+                );
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::QueuedFallback,
+                ));
+            }
             // Arbitrate only an actual active-run boundary. Before a run has
             // acquired queue authority, multiple Steer inputs intentionally
             // remain eligible for one generated same-boundary batch.

@@ -1,0 +1,303 @@
+//! An input carries its original requester (an opaque principal its host
+//! supplies), and inputs with different requesters never share a run.
+//!
+//! These rows drive the durable steer rows' scripted runner through the
+//! runtime ingress, the generated machine and the runtime loop: queued and
+//! steered inputs of two people, and requester-less ones.
+use super::*;
+use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+
+/// A person the host authenticated: the opaque, qualified requester Core
+/// carries and never interprets.
+fn person(subject: &str) -> PrincipalRef {
+    PrincipalRef::in_domain(
+        PrincipalKind::Human,
+        subject,
+        TrustDomainId::new("oidc-issuer:https://issuer.example").expect("trust domain"),
+    )
+    .expect("qualified requester")
+}
+
+fn with_requester(mut input: Input, requester: PrincipalRef) -> Input {
+    input.header_mut().requester = Some(requester);
+    input
+}
+
+/// A durable steer prompt (a typed text prompt in the Steer lane) from
+/// `requester`.
+fn steer_from(text: &str, requester: PrincipalRef) -> Input {
+    with_requester(text_prompt_steer(text), requester)
+}
+
+/// Start a turn for `requester`'s queued prompt and wait until the runner is
+/// inside it.
+async fn start_busy_turn_for(rig: &DurableSteerRig, requester: PrincipalRef) -> InputId {
+    let prompt = with_requester(
+        Input::Prompt(crate::input::PromptInput::new(
+            "a person's prompt keeps the runtime busy",
+            None,
+        )),
+        requester,
+    );
+    let input_id = prompt.id().clone();
+    let (outcome, _completion) = rig
+        .adapter
+        .accept_input_with_completion(&rig.session_id, prompt)
+        .await
+        .expect("the person's prompt is accepted");
+    assert!(outcome.is_accepted());
+    tokio::time::timeout(Duration::from_secs(5), rig.script.apply_started.notified())
+        .await
+        .expect("the person's run starts");
+    input_id
+}
+
+type BoundaryWorkOutcomes = mpsc::UnboundedReceiver<(Option<InputId>, Result<(), String>)>;
+
+/// Report every accepted input's asynchronous boundary work as it settles.
+fn observe_boundary_work(rig: &DurableSteerRig) -> BoundaryWorkOutcomes {
+    let (outcomes_tx, outcomes) = mpsc::unbounded_channel();
+    *rig.adapter
+        .test_accepted_boundary_work_outcomes
+        .lock()
+        .unwrap() = Some(outcomes_tx);
+    outcomes
+}
+
+/// Wait until `input_id` either registered a live-boundary delivery in the
+/// running turn or settled its boundary work without one.
+async fn wait_for_boundary_decision(
+    rig: &DurableSteerRig,
+    outcomes: &mut BoundaryWorkOutcomes,
+    settled: &mut Vec<(Option<InputId>, Result<(), String>)>,
+    input_id: &InputId,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while let Ok(outcome) = outcomes.try_recv() {
+                settled.push(outcome);
+            }
+            if rig.state.has_waiting_delivery_for_test()
+                || rig.state.has_registered_request_only_delivery_for_test()
+                || settled
+                    .iter()
+                    .any(|(settled_id, _)| settled_id.as_ref() == Some(input_id))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the boundary work of {input_id} decides"));
+}
+
+/// Two people's steers queue while a requester-less run is busy. When it
+/// ends, each person's steer runs in a run of its own: the runtime loop never
+/// batches two requesters into one run.
+#[tokio::test]
+async fn different_requesters_never_share_a_run() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let busy = rig.start_busy_turn().await;
+    // The model is streaming: no boundary opens before the run ends.
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let from_a = steer_from("from a", person("a"));
+    let from_b = steer_from("from b", person("b"));
+    let (a, b) = (from_a.id().clone(), from_b.id().clone());
+    rig.admit(from_a).await;
+    rig.admit(from_b).await;
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(
+        rig.script.primitives()[1],
+        vec![a.clone()],
+        "the follow-up run serves one requester: the second person's steer is not batched into it"
+    );
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(3).await;
+    assert_eq!(rig.script.primitives()[2], vec![b.clone()]);
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&busy, &a, &b] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    let run_of = |stored: crate::input_state::StoredInputState| stored.seed.last_run_id;
+    assert_ne!(
+        run_of(rig.stored(&a).await.expect("a")),
+        run_of(rig.stored(&b).await.expect("b")),
+        "the two requesters' inputs were consumed by two runs"
+    );
+}
+
+/// A steer from another person never joins a person's running turn, at any
+/// boundary: it waits for a run of its own. The person's own steer still
+/// joins their turn.
+#[tokio::test]
+async fn a_steer_from_another_requester_waits_for_its_own_run() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let mut settled = Vec::new();
+    let busy = start_busy_turn_for(&rig, person("a")).await;
+
+    let from_b = steer_from("from b", person("b"));
+    let b = from_b.id().clone();
+    rig.admit(from_b).await;
+    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &b).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert!(
+        rig.script.applied_durable().is_empty(),
+        "another person's steer never joins the running turn"
+    );
+    assert_eq!(rig.phase(&b).await, Some(InputLifecycleState::Queued));
+
+    // The person's own steer joins their running turn.
+    let from_a = steer_from("from a", person("a"));
+    let a = from_a.id().clone();
+    rig.admit(from_a).await;
+    rig.wait_for_waiting_delivery().await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    rig.wait_for_applied_durable(1).await;
+    assert_eq!(rig.script.applied_durable(), vec![a.clone()]);
+
+    // The person's turn answers; the other person's steer runs alone.
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(rig.script.primitives()[1], vec![b.clone()]);
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&busy, &a, &b] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        rig.script.apply_calls.load(Ordering::SeqCst),
+        2,
+        "two runs: the person's (with their late steer) and the other person's"
+    );
+}
+
+/// Absence is a requester value too: an input without a requester (here a
+/// background completion steered as request-only context) never joins a
+/// person's running turn. It runs in a turn of its own after that run ends.
+#[tokio::test]
+async fn a_requester_less_steer_never_joins_a_person_s_run() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let mut settled = Vec::new();
+    let busy = start_busy_turn_for(&rig, person("a")).await;
+
+    let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
+    continuation.turn_append = Some(notice_append(
+        "background result",
+        ConversationAppendRole::SystemNotice,
+    ));
+    let continuation = Input::Continuation(continuation);
+    let continuation_id = continuation.id().clone();
+    rig.admit(continuation).await;
+    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &continuation_id).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert!(
+        rig.script.request_only_taken.lock().unwrap().is_empty(),
+        "requester-less context is never injected into a person's running turn"
+    );
+    assert_eq!(
+        rig.phase(&continuation_id).await,
+        Some(InputLifecycleState::Queued)
+    );
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    assert_eq!(rig.script.primitives()[1], vec![continuation_id.clone()]);
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&busy, &continuation_id] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+}
+
+/// The receipt names the requester its host supplied: at admission, after a
+/// restart over the same durable store, and after the input completed and its
+/// payload retired.
+#[tokio::test]
+async fn host_requester_survives_restart() {
+    let dir = tempfile::tempdir().expect("store dir");
+    let store: Arc<dyn crate::store::RuntimeStore> = Arc::new(
+        crate::store::sqlite::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite"))
+            .expect("sqlite runtime store"),
+    );
+    let first = DurableSteerRig::persistent(Arc::clone(&store)).await;
+    let session_id = first.session_id.clone();
+    let runtime_id = MeerkatMachine::logical_runtime_id(&session_id);
+    // A requester-less run keeps the runtime busy, so the person's prompt
+    // stays queued across the restart.
+    let busy = first.start_busy_turn().await;
+    let prompt = with_requester(
+        Input::Prompt(crate::input::PromptInput::new("queued for a", None)),
+        person("a"),
+    );
+    let queued = prompt.id().clone();
+    first.admit(prompt).await;
+    let admitted = first.stored(&queued).await.expect("admitted row");
+    assert_eq!(
+        admitted.state.requester(),
+        Some(&person("a")),
+        "the admission receipt names the requester"
+    );
+
+    // The process stops with the run in flight; the store keeps both rows.
+    std::mem::forget(first);
+    let restarted = DurableSteerRig::with_adapter_for_session(
+        Arc::new(
+            MeerkatMachine::persistent_without_blobs(Arc::clone(&store))
+                .expect("persistent machine"),
+        ),
+        session_id,
+    )
+    .await;
+    let reloaded = store
+        .load_input_state(&runtime_id, &queued)
+        .await
+        .expect("load row")
+        .expect("row persisted");
+    assert_eq!(
+        reloaded.state.requester(),
+        Some(&person("a")),
+        "the receipt names the requester after a restart"
+    );
+
+    // Run both to completion: the payload retires, the requester stays.
+    for expected_calls in 1..=3 {
+        if restarted.phase(&queued).await == Some(InputLifecycleState::Consumed)
+            && restarted.phase(&busy).await == Some(InputLifecycleState::Consumed)
+        {
+            break;
+        }
+        restarted.wait_for_apply_calls(expected_calls).await;
+        restarted.script.step(RunnerStep::Finish);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    restarted
+        .wait_for_phase(&queued, InputLifecycleState::Consumed)
+        .await;
+    let consumed = store
+        .load_input_state(&runtime_id, &queued)
+        .await
+        .expect("load consumed row")
+        .expect("consumed row persisted");
+    assert!(
+        consumed.state.persisted_input.is_none(),
+        "the completed input's payload retired"
+    );
+    assert_eq!(
+        consumed.state.requester(),
+        Some(&person("a")),
+        "the receipt names the requester after the payload retired"
+    );
+}

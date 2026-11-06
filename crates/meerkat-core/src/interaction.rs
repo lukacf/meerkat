@@ -484,6 +484,41 @@ impl PeerIngressSenderAuthentication {
     }
 }
 
+/// The governed work a peer send was made under, carried with an
+/// in-process delivery to its receiver.
+///
+/// The native runtime mints it from the admitted associations of the run it
+/// stages, attaches it to that run's work authorization, and reads it back
+/// at the receiver (`meerkat_runtime::input_authority::GovernedPeerOrigin`).
+/// Everything between holds it opaque: a comms tool takes it only from its
+/// dispatch context, never from its arguments, and the comms layer carries it
+/// unchanged through the in-process lane only. It is never serialized, so a
+/// delivery over a network carries none. It is no permission: the
+/// receiver's host binds and admits the delivery under its own owners.
+#[derive(Clone)]
+pub struct GovernedSendOrigin(Arc<dyn std::any::Any + Send + Sync>);
+
+impl GovernedSendOrigin {
+    /// Wrap the native runtime's own facts. Only the native runtime mints
+    /// one; a receiver reads back only the runtime's own type.
+    #[doc(hidden)]
+    pub fn __from_runtime_facts(facts: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        Self(facts)
+    }
+
+    /// The native runtime's facts, for the runtime to read back.
+    #[doc(hidden)]
+    pub fn __runtime_facts(&self) -> &Arc<dyn std::any::Any + Send + Sync> {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for GovernedSendOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GovernedSendOrigin([process-local])")
+    }
+}
+
 /// Typed peer convention admitted at the peer-ingress seam.
 ///
 /// This is the core-side ingress convention, not a rendered prompt. Runtime
@@ -1225,6 +1260,7 @@ pub struct PeerIngressQueueClaim {
     delivery_contract: PeerIngressDeliveryContract,
     candidate: Option<PeerInputCandidate>,
     sender_authentication: PeerIngressSenderAuthentication,
+    governed_send_origin: Option<GovernedSendOrigin>,
     lease: Option<Arc<dyn PeerIngressClaimLease>>,
 }
 
@@ -1257,6 +1293,7 @@ impl PeerIngressQueueClaim {
             delivery_contract,
             candidate,
             sender_authentication: PeerIngressSenderAuthentication::Unverified,
+            governed_send_origin: None,
             lease: Some(lease),
         }
     }
@@ -1277,6 +1314,21 @@ impl PeerIngressQueueClaim {
     /// evidence reads `Unverified`.
     pub fn sender_authentication(&self) -> PeerIngressSenderAuthentication {
         self.sender_authentication
+    }
+
+    /// The same claim with the governed origin the comms queue received
+    /// with its item from an in-process sender.
+    #[doc(hidden)]
+    pub fn with_governed_send_origin(mut self, origin: Option<GovernedSendOrigin>) -> Self {
+        self.governed_send_origin = origin;
+        self
+    }
+
+    /// The governed work the item was sent under, when an in-process sender
+    /// carried one with it (see [`GovernedSendOrigin`]). A claim built
+    /// without it has none.
+    pub fn governed_send_origin(&self) -> Option<&GovernedSendOrigin> {
+        self.governed_send_origin.as_ref()
     }
 
     pub fn claim_id(&self) -> PeerIngressClaimId {

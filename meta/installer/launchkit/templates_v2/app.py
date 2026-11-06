@@ -23,9 +23,11 @@ import tomllib
 from connectors import ConnectorTools, load_environment
 from mcp_connections import MCPPool, configuration_value
 from application_configuration import application_fields, configuration_issue, validate_application_fields, validate_configuration_values
-from console_configuration import console_authentication, console_credential_issue, validate_console_configuration_values
+from console_configuration import (console_authentication, console_authentication_choice,
+    console_credential_issue, validate_console_configuration_values)
 from console_auth import (ConsoleFront, ConsoleConnectLogin, FrontendManagementRequest,
-    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_configuration)
+    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_configuration,
+    load_console_accounts)
 from native_definition_continuity import (continuity_query, registry_role_continuity,
     verify_continuity_runtime)
 
@@ -653,7 +655,7 @@ class Application:
             fields = application_fields(self.context.root)
             authenticated_console = console_configuration(self.context.root, fields)
             if getattr(self.integration, "on_console_input", None) and not authenticated_console:
-                raise ValueError("on_console_input requires local-password Console authentication metadata and private setup fields.")
+                raise ValueError("on_console_input requires local-password or local-accounts Console authentication metadata and private setup fields.")
             review_factory = getattr(self.integration, "controller_review_factory", None)
             if review_factory is not None and not _synchronous_callable(review_factory):
                 raise ValueError("Application controller_review_factory must be synchronous.")
@@ -664,7 +666,7 @@ class Application:
                 support = "Console login" if login_factory is not None else "Controller review" if review_factory is not None else "Frontend management"
                 if not authenticated_console:
                     hook_name = "console_login_factory" if login_factory is not None else "controller_review_factory" if review_factory is not None else "frontend_management"
-                    raise ValueError(f"{hook_name} requires local-password Console authentication metadata and private setup fields.")
+                    raise ValueError(f"{hook_name} requires local-password or local-accounts Console authentication metadata and private setup fields.")
                 if "deployment.json" not in loaded_sources or json.loads(loaded_sources["deployment.json"]) != self.context.deployment:
                     raise ValueError(f"{support} requires the exact loaded application deployment source.")
                 setup_sources = {name: loaded_sources[name] for name in
@@ -1614,10 +1616,14 @@ async def run(spec, args, *, application_startup=None):
         raise ValueError("Hosted MCP requires the configured authenticated Console.")
     hosted_console = ({} if hosted_origin is None else
         {"public_origin": hosted_origin, "hosted_mcp_targets": hosted_targets})
+    # Named accounts (`local-accounts`) are kept on this computer by setup.py
+    # and read once here: the native console's allowlist is fixed at start.
+    named_accounts = ({"accounts": load_console_accounts(ROOT, os.environ.get("CONSOLE_USER_ID"))}
+        if authenticated_console and console_authentication_choice(ROOT, fields) == "local-accounts" else {})
     console_front = (ConsoleFront(ROOT, port, os.environ.get("CONSOLE_USER_ID"),
         os.environ.get("CONSOLE_LOGIN_PASSWORD"), application.on_console_input,
         runtime_namespace="meta" if meta else "mobkit",
-        **hosted_console) if authenticated_console else None)
+        **named_accounts, **hosted_console) if authenticated_console else None)
     application.context.console_url = f"{hosted_origin or f'http://127.0.0.1:{port}'}/console"
     configured_tools = {}
     loop = asyncio.get_running_loop()

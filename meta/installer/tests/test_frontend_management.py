@@ -152,7 +152,8 @@ async def test_changed_or_unapproved_proposal_never_reaches_submit_owner(tmp_pat
         if alteration == "expiry": body["approval"]["expires_at"] = 0
         if alteration == "proof": body["approval"]["proof"] = "0" * 64
         if alteration == "source": host["source_digest"] = "3" * 64
-        if alteration == "principal": front.principal = "different-configured-user"
+        # The proof binds the account of the login that prepared it.
+        if alteration == "principal": front._logins[client.cookies[front.cookie]].principal = "different-configured-user"
         response = await client.post(PATH + "/submit", json=body, headers={"Origin": front.origin})
         assert response.status_code == 403
         assert [request.operation for request in owner.calls] == ["prepare"]

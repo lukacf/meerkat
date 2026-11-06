@@ -6,6 +6,7 @@ Native timeline frames do not attest the authenticated human principal.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -21,14 +22,17 @@ import re
 import secrets
 import socket
 import stat
+import tempfile
 import time
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlsplit
 
 try:
-    from .console_configuration import console_configuration, validate_console_credentials
+    from .console_configuration import (console_account_issue, console_configuration,
+        console_password_issue, validate_console_credentials)
 except ImportError:
-    from console_configuration import console_configuration, validate_console_credentials
+    from console_configuration import (console_account_issue, console_configuration,
+        console_password_issue, validate_console_credentials)
 
 ISSUER = "http://127.0.0.1/mobkit-gateway"
 AUDIENCE = "persistent-gateway"
@@ -70,6 +74,14 @@ TOOLKIT_SETUP_POST_LIMITS = MappingProxyType({
 TOOLKIT_LANDING_CSP = re.compile(
     r"default-src 'none'; script-src 'sha256-[A-Za-z0-9+/]{43}='; connect-src 'self'; "
     r"frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+# Named accounts (`local-accounts`): one private file on the deployment
+# computer, a salted scrypt hash per account and never a password.
+ACCOUNTS_FILE = "console-accounts.json"
+ACCOUNTS_FORMAT = "console-accounts-v1"
+MAX_ACCOUNTS = 100
+MAX_ACCOUNTS_BYTES = 256 * 1024
+_SCRYPT = MappingProxyType({"n": 2**14, "r": 8, "p": 1})
+_PASSWORD_HASH = re.compile(r"scrypt:16384:8:1:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})")
 
 
 def _console_assets(value):
@@ -225,7 +237,7 @@ def _frontend_object(pairs):
     return result
 
 
-def _private_key(root, *, create=False):
+def _private_state_directory(root, *, create=False):
     directory = Path(root) / ".mobkit"
     if create:
         directory.mkdir(mode=0o700, exist_ok=True)
@@ -234,6 +246,11 @@ def _private_key(root, *, create=False):
     info = directory.stat()
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise ValueError("The Console state directory must be owned privately by this user.")
+    return directory
+
+
+def _private_key(root, *, create=False):
+    directory = _private_state_directory(root, create=create)
     path = directory / "console-signing.key"
     if create:
         try:
@@ -255,6 +272,134 @@ def _private_key(root, *, create=False):
     if not re.fullmatch(r"[a-f0-9]{64}", key):
         raise ValueError("The Console signing key is invalid.")
     return key
+
+
+def _base64(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _stored_password(stored):
+    match = _PASSWORD_HASH.fullmatch(stored) if isinstance(stored, str) else None
+    if match is None:
+        raise ValueError("A named account's password hash is invalid.")
+    salt, digest = (base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)) for part in match.groups())
+    if len(salt) != 16 or len(digest) != 32:
+        raise ValueError("A named account's password hash is invalid.")
+    return salt, digest
+
+
+def hash_console_password(password):
+    """A named account's stored password: a salted scrypt hash, never the text."""
+    issue = console_password_issue(password)
+    if issue is not None:
+        raise ValueError(issue)
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, **_SCRYPT)
+    return "scrypt:{n}:{r}:{p}:".format(**_SCRYPT) + _base64(salt) + ":" + _base64(digest)
+
+
+def verify_console_password(stored, password):
+    """Whether a password opens the account this stored hash belongs to."""
+    salt, expected = _stored_password(stored)
+    try:
+        offered, valid = password.encode("utf-8"), True
+    except (AttributeError, UnicodeError):
+        # Refuse with the same work as a wrong password.
+        offered, valid = b"", False
+    digest = hashlib.scrypt(offered, salt=salt, dklen=32, **_SCRYPT)
+    return hmac.compare_digest(digest, expected) and valid
+
+
+def _console_accounts(value, installation_account):
+    """Validated named accounts: name to stored password hash, in order."""
+    if not isinstance(value, Mapping) or len(value) > MAX_ACCOUNTS:
+        raise ValueError(f"Named Console accounts are at most {MAX_ACCOUNTS} names with password hashes.")
+    accounts = {}
+    for name, stored in value.items():
+        issue = console_account_issue(name, installation_account)
+        if issue is not None:
+            raise ValueError(issue)
+        _stored_password(stored)
+        accounts[name] = stored
+    return accounts
+
+
+def _read_accounts_file(root):
+    """Exact bytes of the private named-account file, or None while absent."""
+    directory = Path(root) / ".mobkit"
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    path = _private_state_directory(root) / ACCOUNTS_FILE
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as channel:
+        info = os.fstat(channel.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > MAX_ACCOUNTS_BYTES):
+            raise ValueError("The named Console accounts must be a private owned ordinary file.")
+        content = channel.read(MAX_ACCOUNTS_BYTES + 1)
+    if len(content) > MAX_ACCOUNTS_BYTES:
+        raise ValueError("The named Console accounts file exceeds its limit.")
+    return content
+
+
+def _parse_accounts(content, installation_account):
+    try:
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=_frontend_object)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError("The named Console accounts file is not valid JSON.") from None
+    if (not isinstance(value, dict) or set(value) != {"format", "accounts"}
+            or value["format"] != ACCOUNTS_FORMAT or not isinstance(value["accounts"], list)):
+        raise ValueError("The named Console accounts file has an unknown format.")
+    rows = {}
+    for row in value["accounts"]:
+        if (not isinstance(row, dict) or set(row) != {"name", "password"}
+                or not isinstance(row["name"], str) or row["name"] in rows):
+            raise ValueError("The named Console accounts file lists an invalid or repeated account.")
+        rows[row["name"]] = row["password"]
+    return _console_accounts(rows, installation_account)
+
+
+def load_console_accounts(root, installation_account):
+    """Named accounts kept on the deployment computer: name to password hash."""
+    content = _read_accounts_file(root)
+    return {} if content is None else _parse_accounts(content, installation_account)
+
+
+def console_accounts_for_change(root, installation_account):
+    """The named accounts, and the exact bytes a later save must still find."""
+    content = _read_accounts_file(root)
+    return ({} if content is None else _parse_accounts(content, installation_account)), content
+
+
+def save_console_accounts(root, accounts, original, installation_account):
+    """Replace the named accounts, unless someone changed them meanwhile."""
+    checked = _console_accounts(accounts, installation_account)
+    directory = _private_state_directory(root, create=True)
+    changed = ("The named Console accounts changed during setup. Run setup again; "
+               "the newer accounts were kept.")
+    if _read_accounts_file(root) != original:
+        raise ValueError(changed)
+    content = (json.dumps({"format": ACCOUNTS_FORMAT, "accounts": [
+        {"name": name, "password": stored} for name, stored in checked.items()]}, indent=2) + "\n").encode()
+    descriptor, temporary = tempfile.mkstemp(prefix=".console-accounts.", suffix=".pending", dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        if _read_accounts_file(root) != original:
+            raise ValueError(changed)
+        os.replace(temporary, directory / ACCOUNTS_FILE)
+        handle = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _token(key, principal, *, scope="native-console", login_scope_id=None):
@@ -324,6 +469,10 @@ class _ConsoleSubscription:
 class _ConsoleLogin:
     session: str
     expires: float
+    # The account this login signed in to, and whether that account is one
+    # person's (a named account) rather than an account people share.
+    principal: str = ""
+    person: bool = False
     subscriptions: set = field(default_factory=set)
     expiry_task: asyncio.Task | None = None
     retirement_task: asyncio.Task | None = None
@@ -364,13 +513,20 @@ class ConsoleFront:
     def __init__(self, root, port, principal, password, on_input=None, *, transport=None, connect_factory=None,
                  console_assets=None, document_transform=None, controller_review_factory=None,
                  console_login_factory=None, runtime_namespace="mobkit", public_origin=None,
-                 hosted_mcp_targets=()):
+                 hosted_mcp_targets=(), accounts=None):
         if type(runtime_namespace) is not str or runtime_namespace not in ("mobkit", "meta"):
             raise ValueError("The application must select the mobkit or meta Console runtime namespace.")
         # The trusted application selects one SDK before serving. Browser RPC
         # methods never select or widen the admitted-input delivery hook.
         self._console_send_method = runtime_namespace + "/console/send"
+        self._runtime_namespace = runtime_namespace
         validate_console_credentials(principal, password)
+        # None: the installation's own account is the only one, and everyone
+        # with its password shares it. A mapping: further named accounts
+        # (name to stored password hash), and every account is one person's.
+        if accounts is not None and runtime_namespace != "meta":
+            raise ValueError("Named Console accounts need the Meta Console runtime, whose tokens can name a person.")
+        self.accounts = None if accounts is None else MappingProxyType(_console_accounts(accounts, principal))
         self.console_assets = _console_assets(console_assets)
         if document_transform is not None and not callable(document_transform):
             raise ValueError("The Console document transform must be application-owned and callable.")
@@ -394,6 +550,10 @@ class ConsoleFront:
         self._mcp_routes = {}
         self.key = _private_key(root, create=True)
         self.password_digest = hashlib.sha256(password.encode()).digest()
+        # An unknown account name costs one scrypt too, so the answer time does
+        # not tell a named account from a name nobody has.
+        self._decoy_password = (None if self.accounts is None
+                                else hash_console_password(secrets.token_urlsafe(24)))
         self.cookie = "mobkit_console_" + hashlib.sha256((str(self.root.resolve()) + str(port)).encode()).hexdigest()[:16]
         if self._secure_cookie:
             self.cookie = "__Host-" + self.cookie
@@ -421,8 +581,15 @@ class ConsoleFront:
 
     @property
     def native_auth(self):
-        return {"provider": "jwt", "shared_secret": self.key, "issuer": ISSUER,
+        auth = {"provider": "jwt", "shared_secret": self.key, "issuer": ISSUER,
                 "audience": AUDIENCE, "email_allowlist": [self.principal]}
+        if self.accounts is not None:
+            # Each named account is one person's, so the console names a
+            # person per token. Without it the one account is shared and the
+            # console treats its tokens as a shared account's.
+            auth["email_allowlist"] += list(self.accounts)
+            auth["accounts"] = "personal"
+        return auth
 
     def application(self, native_url):
         import httpx
@@ -574,7 +741,7 @@ class ConsoleFront:
     def _console_login_binding_current(self, login):
         owner = login.console_login
         try:
-            return (owner is not None and owner.issuer == ISSUER and owner.subject == self.principal
+            return (owner is not None and owner.issuer == ISSUER and owner.subject == login.principal
                     and owner.login_scope_id == login.login_scope_id
                     and type(owner.expires_at_ms) is int and owner.expires_at_ms == int(login.expires * 1000)
                     and owner.is_current() is True)
@@ -584,12 +751,12 @@ class ConsoleFront:
     def _login_context(self, login):
         """Retain one object for private adapters that admit by login identity."""
         if login.context is None:
-            principal, origin = self.principal, self.origin
-            scope, expiry = login.login_scope_id, login.expires
+            principal, origin = login.principal, self.origin
+            installation, scope, expiry = self.principal, login.login_scope_id, login.expires
             login.context = ConsoleConnectLogin(principal, scope, int(expiry * 1000), origin,
-                lambda: (self._login_current(login) and self.principal == principal
-                         and self.origin == origin and login.login_scope_id == scope
-                         and login.expires == expiry))
+                lambda: (self._login_current(login) and login.principal == principal
+                         and self.principal == installation and self.origin == origin
+                         and login.login_scope_id == scope and login.expires == expiry))
         return login.context
 
     def _reserve_console_login(self, login):
@@ -766,11 +933,32 @@ class ConsoleFront:
             return Response("Try again shortly.", status_code=429)
         nonce = secrets.token_urlsafe(32)
         self.login_tokens[nonce] = now + 300
-        response = HTMLResponse(_login_form(nonce, error), status_code=status_code)
+        response = HTMLResponse(_login_form(nonce, error, named=self.accounts is not None),
+                                status_code=status_code)
         response.set_cookie(self.cookie + "_login", nonce, httponly=True, samesite="strict", max_age=300,
                             secure=self._secure_cookie, path="/")
         response.headers.update({"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"})
         return response
+
+    def _login_account(self, form):
+        """The account a sign-in opens. With one shared account, that account."""
+        if self.accounts is None:
+            return self.principal
+        # Names hold no whitespace; an empty name is the installation's own.
+        return form.get("account", "").strip() or self.principal
+
+    def _login_refusal(self):
+        if self.accounts is None:
+            return "That password didn't open this Console. Try the Console password you chose during installation."
+        return ("That account and password didn't open this Console. Leave the account empty for this "
+                "installation's own account.")
+
+    async def _password_opens(self, account, password):
+        if account == self.principal:
+            return hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self.password_digest)
+        stored = None if self.accounts is None else self.accounts.get(account)
+        opened = await asyncio.to_thread(verify_console_password, stored or self._decoy_password, password)
+        return opened and stored is not None
 
     async def handle(self, request):
         from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -843,14 +1031,18 @@ class ConsoleFront:
             self.failures = [at for at in self.failures if at > now - 60]
             if len(self.failures) >= 10:
                 return Response("Too many login attempts. Try again in one minute.", status_code=429)
-            if not hmac.compare_digest(hashlib.sha256(form.get("password", "").encode()).digest(), self.password_digest):
+            account = self._login_account(form)
+            if not await self._password_opens(account, form.get("password", "")):
                 self.failures.append(now)
-                return self._login_response(now, error="That password didn't open this Console. Try the Console password you chose during installation.", status_code=401)
+                return self._login_response(now, error=self._login_refusal(), status_code=401)
+            if self._closing:
+                return Response("The Console is stopping.", status_code=503)
             if len(self.sessions) >= 100:
                 return Response("Too many active sessions. Restart the application to clear them.", status_code=429)
             session = secrets.token_urlsafe(32)
             self.sessions[session] = now + SESSION_SECONDS
-            login = _ConsoleLogin(session, self.sessions[session])
+            login = _ConsoleLogin(session, self.sessions[session], principal=account,
+                                  person=self.accounts is not None)
             self._logins[session] = login
             self._reserve_console_login(login)
             self._queue_controller_review(login)
@@ -1016,7 +1208,10 @@ class ConsoleFront:
             return Response("The Console is stopping.", status_code=503)
         if is_human and not self._disclosure_current(request, login):
             return JSONResponse({"error": "Console login required."}, status_code=401)
-        headers = {} if toolkit_callback_landing else {"Authorization": "Bearer " + _token(self.key, self.principal,
+        # A browser login acts as its own account; a host health probe as the
+        # installation's own account, with no login association.
+        headers = {} if toolkit_callback_landing else {"Authorization": "Bearer " + _token(self.key,
+                   login.principal if is_human else self.principal,
                    login_scope_id=login.login_scope_id if is_human else None)}
         if toolkit_post_limit is not None:
             headers["Origin"] = self.origin
@@ -1124,7 +1319,7 @@ class ConsoleFront:
                 envelope = json.loads(payload)
                 accepted = envelope.get("result") if path != "/console/send" else envelope
                 if isinstance(accepted, dict) and not envelope.get("error"):
-                    await self._deliver(submission, accepted)
+                    await self._deliver(submission, accepted, login.principal)
             except Exception:
                 # Native may already have admitted the turn. Retrying its same
                 # idempotency key lets the application retry its own delivery.
@@ -1597,6 +1792,8 @@ class ConsoleFront:
                 result.update(status="unknown", change_id=change_id)
             return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
 
+        # Every command names the login's own account; a proof binds it too.
+        principal = self.principal if login is None else login.principal
         path = request.url.path
         if path == FRONTEND_PATH:
             operation, method = "inventory", "GET"
@@ -1649,12 +1846,12 @@ class ConsoleFront:
                             or approval["approved"] is not True or type(approval["expires_at"]) is not int
                             or not time.time() < approval["expires_at"] <= time.time() + FRONTEND_APPROVAL_SECONDS
                             or not isinstance(approval["proof"], str)
-                            or not hmac.compare_digest(approval["proof"], self._frontend_proof(host, payload["proposal"], approval["expires_at"]))):
+                            or not hmac.compare_digest(approval["proof"], self._frontend_proof(host, payload["proposal"], approval["expires_at"], principal))):
                         return error(403, "Explicit approval of this exact current proposal is required.")
                     approved = True
                     payload = {"proposal": payload["proposal"],
-                               "approval": {"principal": self.principal, "expires_at": approval["expires_at"]}}
-            command = FrontendManagementRequest(operation, self.principal, copy.deepcopy(host), copy.deepcopy(payload), approved)
+                               "approval": {"principal": principal, "expires_at": approval["expires_at"]}}
+            command = FrontendManagementRequest(operation, principal, copy.deepcopy(host), copy.deepcopy(payload), approved)
         except (ValueError, TypeError, UnicodeError, RecursionError, KeyError):
             return error(400, "Invalid frontend command. Use nonsecret configuration and the exact proposal.")
 
@@ -1705,7 +1902,7 @@ class ConsoleFront:
                 self._frontend_proposal(proposal)
                 expires_at = int(time.time()) + FRONTEND_APPROVAL_SECONDS
                 envelope.update(proposal=proposal, approval={"expires_at": expires_at,
-                    "proof": self._frontend_proof(host, proposal, expires_at)})
+                    "proof": self._frontend_proof(host, proposal, expires_at, principal)})
             else:
                 envelope["observation"] = result
                 if (operation == "submit" and submission_outcome is not None
@@ -1730,8 +1927,9 @@ class ConsoleFront:
         _frontend_json(proposal)
         self._frontend_no_private_literals(proposal)
 
-    def _frontend_proof(self, host, proposal, expires_at):
-        binding = {"scope": "forge-frontend-proposal-v1", "host": host, "principal": self.principal,
+    def _frontend_proof(self, host, proposal, expires_at, principal=None):
+        binding = {"scope": "forge-frontend-proposal-v1", "host": host,
+                   "principal": self.principal if principal is None else principal,
                    "proposal": proposal, "expires_at": expires_at}
         return hmac.new(self.key.encode(), _frontend_json(binding), hashlib.sha256).hexdigest()
 
@@ -1770,13 +1968,13 @@ class ConsoleFront:
             raise ValueError("Console RPC must be an object.")
         return value.get("params") if value.get("method") == self._console_send_method else None
 
-    async def _deliver(self, submission, accepted):
+    async def _deliver(self, submission, accepted, principal):
         fields = ("identity", "interaction_id", "session_id", "input_frame_id", "cursor")
         if (not isinstance(submission, dict) or "content" not in submission
                 or any(not isinstance(accepted.get(key), str) or not accepted[key] for key in fields)
                 or accepted["identity"] != submission.get("identity")):
             raise ValueError("Native admission evidence is incomplete.")
-        event = ConsoleInput(channel="host-authenticated-console", principal=self.principal,
+        event = ConsoleInput(channel="host-authenticated-console", principal=principal,
             identity=accepted["identity"], content=submission["content"], interaction_id=accepted["interaction_id"],
             session_id=accepted["session_id"], input_frame_id=accepted["input_frame_id"], cursor=accepted["cursor"],
             conversation_id=accepted.get("conversation_id"), handling_mode=submission.get("handling_mode"))
@@ -1791,10 +1989,23 @@ class ConsoleFront:
             self.delivered.add(event.interaction_id)
 
 
-def _login_form(nonce, error=None):
+def _login_form(nonce, error=None, *, named=False):
     notice = f'<p id="login-error" role="alert">{html.escape(error)}</p>' if error else ""
     description = ' aria-describedby="login-error"' if error else ""
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MobKit Console login</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}input,button{{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:12px 0}}button{{background:#242522;color:white;border:0;border-radius:6px}}#login-error{{padding:12px;background:#fbece5;color:#783d2e;border:1px solid #dab19d;border-radius:6px}}</style></head><body><main><h1>Open your Console</h1><p>Enter the private Console password you chose during installation. Your configured user identity is applied automatically. Your provider API key is separate.</p>{notice}<form method="post" action="/login"><input type="hidden" name="nonce" value="{html.escape(nonce)}"><label for="password">Console password</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus{description}><button>Open Console</button></form></main></body></html>'''
+    if named:
+        guidance = ("Sign in with your account name and password. Leave the account empty to use this "
+                    "installation's own account and the Console password chosen during installation. "
+                    "Your provider API key is separate.")
+        account = (f'<label for="account">Account</label><input id="account" name="account" '
+                   f'autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="200" '
+                   f'autofocus{description}>')
+        password = f'<label for="password">Password</label><input id="password" type="password" name="password" autocomplete="current-password" required{description}>'
+    else:
+        guidance = ("Enter the private Console password you chose during installation. Your configured user "
+                    "identity is applied automatically. Your provider API key is separate.")
+        account = ""
+        password = f'<label for="password">Console password</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus{description}>'
+    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MobKit Console login</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}input,button{{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:12px 0}}button{{background:#242522;color:white;border:0;border-radius:6px}}#login-error{{padding:12px;background:#fbece5;color:#783d2e;border:1px solid #dab19d;border-radius:6px}}</style></head><body><main><h1>Open your Console</h1><p>{guidance}</p>{notice}<form method="post" action="/login"><input type="hidden" name="nonce" value="{html.escape(nonce)}">{account}{password}<button>Open Console</button></form></main></body></html>'''
 
 
 from contextlib import contextmanager

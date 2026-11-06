@@ -29,6 +29,7 @@ use meerkat_core::{
 use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream, PreparedLlmRequest,
 };
+use meerkat_runtime::SessionServiceRuntimeExt;
 use meerkat_runtime::completion::CompletionOutcome;
 use meerkat_runtime::input::{Input, PromptInput};
 use meerkat_runtime::meerkat_machine::MeerkatMachine;

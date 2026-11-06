@@ -277,6 +277,7 @@ comms tools available to agents during their turns (`send_message`,
 | **Hooks** | -- | Configured hook engines and command hooks |
 | **Compaction** | Automatic session context compaction at configured/model-aware thresholds | No additional manual compaction API in `@rkat/web` |
 | **Scheduling** | -- | Durable schedule driver and stores |
+| **Operator instructions** | -- | Session and mob operator-instruction verbs: browser sessions keep no durable session document, so every write would be refused `durability_unavailable` (use a host process runtime through the Python or TypeScript SDK) |
 | **Other** | Helper/fork delegation inside browser mobs | MCP client and cross-process runtime recovery |
 
 Excluded requests fail with `CAPABILITY_UNAVAILABLE`. The error's `data`

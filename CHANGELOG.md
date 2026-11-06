@@ -35,6 +35,98 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-core`: `InstructionWriteError` gains the variant
+  `PreparedAuthorizationRequired`, and `InstructionSetErrorCode` gains
+  `PreparedAuthorizationRequired` (wire `prepared_authorization_required`),
+  each appended last. Both enums are exhaustive, so a match over either
+  needs the new arm. `SessionInstructionError::code` and
+  `OperatorInstructionError::code` answer the new code for it.
+
+- `meerkat-session`, `meerkat-mob` (behaviour; the semver gate cannot see
+  it): on a governed runtime (a runtime machine with a native work
+  authorization host) an operator-instruction write is refused and nothing
+  is written. `SessionServiceInstructionExt::set_session_instruction` on
+  `PersistentSessionService` answers
+  `SessionInstructionError::Refused(InstructionWriteError::PreparedAuthorizationRequired)`
+  where it recorded the write before, and `MobHandle::set_operator_instruction`
+  and `revoke_operator_instruction` answer
+  `OperatorInstructionError::Refused(InstructionWriteError::PreparedAuthorizationRequired)`
+  before anything is journaled. A governed runtime admits an
+  operator-instruction write only with prepared authorization, which this
+  release does not mint, so a retry is refused the same way. Plain System
+  context appends were already refused on a governed runtime.
+
+### Added
+
+- `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`, `meerkat-mob`:
+  operator instructions on JSON-RPC. `session/set_instruction`,
+  `session/revoke_instruction` and `session/instruction_status` write and
+  read a session's own operator instructions; `mob/set_instruction`,
+  `mob/revoke_instruction` and `mob/instruction_status` write and read a
+  mob's, for the members a target selects (`{"kind": "mob"}`, a profile or
+  one member). A write answers once it is durable; the status reads report
+  per slot what is recorded, the entry in effect and why a change is still
+  pending, and per member its residency and delivery, and never wake a
+  member. A refusal answers `INVALID_PARAMS` (a malformed instruction
+  history `INTERNAL_ERROR`) with its closed code in
+  `error.data.instruction_set_code` (`InstructionSetErrorData`). The wire
+  types are `MobSetInstructionParams`, `MobRevokeInstructionParams`,
+  `MobInstructionWriteResult`, `MobInstructionStatusParams`,
+  `MobInstructionStatusResult`, `SetSessionInstructionParams`,
+  `RevokeSessionInstructionParams`, `SessionInstructionWriteResult`,
+  `SessionInstructionStatusParams` and `SessionInstructionStatusResult`.
+  Dispositions, refusal codes, effects, entry kinds and state kinds are
+  closed; the advisory values (pending reason, block reason, residency,
+  lowering) are tolerant: a value a reader does not know reads as
+  `Unknown` with the value as it was sent. Rust: `MobMcpState::mob_set_instruction`,
+  `mob_revoke_instruction` and `mob_instruction_status`;
+  `SessionRuntime::set_session_instruction` and
+  `read_session_instructions`; `to_wire` on `OperatorInstructionTarget`,
+  `OperatorInstructionReceipt` and `OperatorInstructionStatusPage`.
+
+- Python and TypeScript SDKs: `set_session_instruction`,
+  `revoke_session_instruction`, `session_instruction_status`,
+  `set_mob_instruction`, `revoke_mob_instruction` and
+  `mob_instruction_status` (TypeScript `setSessionInstruction` and so on),
+  and `set_instruction`, `revoke_instruction` and `instruction_status` on
+  `Session` and `Mob`. The status reads keep an advisory value the SDK does
+  not know as `{"unknown": <the value>}` and fail closed on an unknown closed
+  value. `meerkat.errors.instruction_set_code(error)` and
+  `instructionSetCode(error)` read a refusal's closed code.
+
+- `meerkat-core`: `AgentEvent::OperatorInstructionsApplied` (wire
+  `operator_instructions_applied`), appended last. A session publishes it
+  for each operator-instruction entry it applies: a delta once the run whose
+  start appended it starts, a snapshot once the compaction that folded it
+  commits. It carries the session, the entry sequence, the kind, the
+  applying run, the active set after the entry and a delta's changes. An
+  observation only: the status read is the authority. The Python,
+  TypeScript and Web SDKs know the event type and keep its payload whole.
+
+### Changed
+
+- Docs: instruction activations (`session/activate_instruction`) are
+  deprecated in favour of operator instructions (`session/set_instruction`).
+  The method keeps working.
+
+### Known limitations
+
+- `meerkat-rpc`, `meerkat-rest`, `meerkat-mcp-server`, Web SDK: operator
+  instructions have no REST route, no MCP tool and no Web SDK method. A
+  browser session keeps no durable session document, so every write would
+  be refused `durability_unavailable`.
+
+- `meerkat-session`, `meerkat-mob`: a governed runtime refuses every
+  operator-instruction write (`prepared_authorization_required`) until a
+  release mints prepared authorization for them. Records a mob journaled
+  before its runtime was composed governed are still delivered to its
+  members.
+
+- `meerkat-mob`: a placed member (one on another host) is reported blocked
+  (`member_host_unsupported`); operator instructions do not reach it.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

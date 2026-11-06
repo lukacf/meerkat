@@ -560,8 +560,11 @@ on its current session (`ReleaseOutcome::Stale` otherwise).
 member out of `auto_wire_orchestrator` and `role_wiring` (not for a placed
 member).
 
-Operator instructions (since 0.9.9, Rust only; writes need `AdminHost` and
-are never an agent tool): `set_operator_instruction` writes a slot's body at
+Operator instructions (since 0.9.9 in Rust, since 0.9.11 on JSON-RPC as
+`mob/set_instruction`, `mob/revoke_instruction` and `mob/instruction_status`,
+and in the Python and TypeScript SDKs as `Mob.set_instruction` /
+`setInstruction` and siblings; writes need `AdminHost` and are never an agent
+tool): `set_operator_instruction` writes a slot's body at
 a revision for every member, one profile's members or one member (a predicate
 over the roster, so a member added later receives it);
 `revoke_operator_instruction` revokes it at a higher revision; and
@@ -571,7 +574,8 @@ each member's whole snapshot in its session, through the session while it is
 live and store-only while it is dormant, never waking a member (at most
 `MobBuilder::with_member_instruction_delivery_concurrency` dormant deliveries
 at a time, 16 by default), and a member born on a new session carries the
-snapshot from its first build. A placed member is reported blocked. A mob
+snapshot from its first build. A placed member is reported blocked. A
+governed runtime refuses every write `prepared_authorization_required`. A mob
 that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
 refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
 

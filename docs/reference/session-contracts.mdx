@@ -177,12 +177,18 @@ capability never changes, rejects, or rewrites the durable Session itself.
 ### Operator instructions
 
 Since 0.9.9 a host gives a session standing System-plane instructions by
-slot (a namespace and a key), revision and body; this is a Rust API with no
-wire method. `SessionServiceInstructionExt::set_session_instruction` records a
+slot (a namespace and a key), revision and body. Since 0.9.11 they are on
+JSON-RPC (`session/set_instruction`, `session/revoke_instruction` and
+`session/instruction_status`; see
+[RPC operator instructions](/api/rpc#operator-instructions)) and in the Python
+and TypeScript SDKs; in Rust,
+`SessionServiceInstructionExt::set_session_instruction` records a
 session-owned write (activate a body, or revoke, at a higher revision; an
 exact retry answers as a duplicate), and `read_session_instructions` reads
 the recorded target, the entries in effect and how the session's model lowers
-them (`lowering`). The persistent service records a live session's write
+them (`lowering`). They replace instruction activations
+(`session/activate_instruction`), deprecated since 0.9.11. The persistent
+service records a live session's write
 through a task it owns and a dormant session's store-only, without waking it;
 the ephemeral service refuses `durability_unavailable`. A write changes only
 the recorded target. The pending changes apply at the session's next fresh
@@ -195,14 +201,22 @@ wire carries only one leading System row keeps them pending
 (`lowering_unavailable`). A compaction folds every entry row into one
 snapshot of the instructions in effect after the leading System prefix, and
 no summary request, host curator window or compactor input carries an
-instruction body. A stale or conflicting revision, a slot that instruction
+instruction body. Each applied entry is published as an
+`operator_instructions_applied` event: a delta once the run whose start
+appended it starts, a snapshot once its compaction commits. The event is an
+observation; the status read is the authority. A stale or conflicting revision, a slot that instruction
 activations manage, more than 64 slots, a body over 256 KiB and more than
 1 MiB of Active bodies are refused typed (`InstructionSetErrorCode`), and so
 is a model change onto a target that cannot carry the entry rows the session
-wrote where they stand. A mob member's session belongs to its mob, which
-writes through `MobHandle::set_operator_instruction`: the session's own
+wrote where they stand. On a governed runtime (a runtime with a native work
+authorization host) every operator-instruction write, session-owned or a
+mob's, is refused `prepared_authorization_required` and nothing is written:
+such a write needs prepared authorization, which this release does not mint,
+so a retry is refused the same way. A mob member's session belongs to its mob, which
+writes through `MobHandle::set_operator_instruction` (`mob/set_instruction`):
+the session's own
 host's writes are refused `owned_by_mob` (see
-[Operator instructions](/guides/mobs#operator-instructions-rust-hosts)). A
+[Operator instructions](/guides/mobs#operator-instructions)). A
 session that holds operator-instruction facts is written at session envelope
 5, which releases before 0.9.9 refuse (see
 [Upgrading](/guides/upgrading#downgrading-to-0-9-8)).

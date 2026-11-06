@@ -94,7 +94,13 @@ them.
   default). An interrupt abandons the messages still queued for the
   running turn before it stops the run, so none of them runs as a
   follow-up turn after the interrupt, and every one comes back to the
-  editor with the turn reported as interrupted, not failed. See
+  editor with the turn reported as interrupted, not failed. Esc while a
+  turn runs pulls back the steers the runtime still holds queued without
+  stopping the run (only when nothing is left to pull back does it
+  interrupt), and the first Ctrl-C after a mouse selection only clears the
+  selection. The terminal is asked for keyboard disambiguation only, not
+  event types: kitty 0.32 sent a Backspace release as a second press byte,
+  which deleted two characters per keystroke. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

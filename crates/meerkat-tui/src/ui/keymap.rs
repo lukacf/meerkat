@@ -47,7 +47,7 @@ pub enum Action {
     CtrlC,
     /// Ctrl-D: quit when the input is empty, otherwise delete forward.
     CtrlD,
-    /// Esc: interrupt a running turn.
+    /// Esc: recall pending messages, else interrupt a running turn.
     Escape,
     /// Toggle collapse of the last reasoning block (Ctrl-O).
     ToggleReasoning,

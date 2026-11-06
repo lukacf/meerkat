@@ -37,16 +37,21 @@ transcript reads *queued*, then *delivering*, and becomes your message once
 the runtime reports it written. A steer the runtime did not deliver (an
 interrupt, a failed turn) comes back to the editor.
 
-*Esc limitation:* a steered message belongs to the runtime as soon as it is
-admitted, so it cannot be pulled back. Esc recalls only messages the UI still
-holds (typed right as a turn ended); with nothing to recall, Esc interrupts
-the turn. Ctrl-C interrupts too: steers still waiting for a boundary are
-abandoned first, then the current run is stopped (steers that joined it are
-abandoned, not re-run, and a call in flight is cancelled and answered as
-*outcome unknown*), outstanding inputs are cancelled and running helpers are
-cancelled. Every steered message the interrupt abandoned comes back to the
-editor. Typing alone never interrupts: a message sent while a tool runs
-waits for that tool's result and joins the turn after it.
+*Esc while a turn runs* pulls messages back without stopping the run: the
+messages the UI still holds and every steer the runtime still holds queued
+(not yet joined to the run) are abandoned and come back to the editor, oldest
+first, before your draft; the turn runs on (a tool in flight finishes and its
+result reaches the model). A steer that already joined the run cannot be
+pulled back: Esc then says your messages already reached the agent, and Esc
+again interrupts. With nothing pending, Esc interrupts the turn. Ctrl-C
+interrupts too (the first Ctrl-C after a mouse selection only clears it):
+steers still waiting for a boundary are abandoned first, then the current run
+is stopped (steers that joined it are abandoned, not re-run, and a call in
+flight is cancelled and answered as *outcome unknown*), outstanding inputs
+are cancelled and running helpers are cancelled. Every steered message the
+interrupt abandoned comes back to the editor. Typing alone never interrupts:
+a message sent while a tool runs waits for that tool's result and joins the
+turn after it.
 
 **How a turn ends.** A turn ends when the runtime reports every input it
 admitted terminal, and the UI says how in typed terms: completed, failed

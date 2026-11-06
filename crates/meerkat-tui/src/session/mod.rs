@@ -88,6 +88,8 @@ const SYSTEM_CONTEXT_SOURCE: &str = "rkat-tui";
 
 /// Reason recorded with every interrupt and cancellation the TUI requests.
 const INTERRUPT_REASON: &str = "rkat-tui: interrupted by the user";
+/// The cancel reason of [`SessionHandle::recall_queued`].
+const RECALL_REASON: &str = "rkat-tui: recalled by the user";
 
 /// How many passes [`SessionHandle::interrupt`] makes at most.
 const INTERRUPT_PASSES: u32 = 3;
@@ -623,6 +625,36 @@ impl SessionHandle {
         report
     }
 
+    /// Recall: abandon each of `outstanding` (in the given order) that the
+    /// runtime still holds queued, without touching the running run. An
+    /// input that already joined a run (applied at a boundary, or staged
+    /// into a run) is left alone and not reported. Reports the inputs the
+    /// runtime abandoned, in the order of `outstanding`, and the cancels
+    /// that failed.
+    pub async fn recall_queued(&self, outstanding: &[InputId]) -> Recalled {
+        let mut report = Recalled::default();
+        for input_id in outstanding {
+            if !self.is_queued(input_id).await {
+                continue;
+            }
+            match self
+                .machine
+                .cancel_input_if_present(&self.id, input_id, RECALL_REASON)
+                .await
+            {
+                Ok(true) => report.recalled.push(input_id.clone()),
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(%input_id, error = %err, "recall failed");
+                    report
+                        .errors
+                        .push(format!("recalling input {input_id}: {err}"));
+                }
+            }
+        }
+        report
+    }
+
     /// Whether the runtime holds `input_id` queued (admitted, not yet
     /// staged into a run).
     async fn is_queued(&self, input_id: &InputId) -> bool {
@@ -746,6 +778,15 @@ impl Interrupted {
             }
         }
     }
+}
+
+/// What [`SessionHandle::recall_queued`] did.
+#[derive(Debug, Default)]
+pub struct Recalled {
+    /// The inputs the runtime abandoned, in the order they were given.
+    pub recalled: Vec<InputId>,
+    /// The cancels that failed.
+    pub errors: Vec<String>,
 }
 
 /// The identity `session`'s metadata records.

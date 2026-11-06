@@ -357,6 +357,9 @@ struct Turn {
     stop_pending: bool,
     /// Inputs the runtime reports the interrupt cancelled.
     cancelled: HashSet<InputId>,
+    /// Steers a recall abandoned (already back in the editor): their
+    /// terminal contributes nothing to the turn.
+    recalled: HashSet<InputId>,
     /// Steered messages the runtime ended without delivering.
     undelivered: Vec<PendingId>,
     /// Runs that published `RunStarted` and no terminal event yet, by run
@@ -770,6 +773,7 @@ impl Runner {
             // The UI keeps the text of `InterruptAndSend` and starts the next
             // turn itself once `TurnFinished` arrives.
             Effect::Interrupt | Effect::InterruptAndSend(_) => self.interrupt(),
+            Effect::RecallQueued => self.recall_queued().await,
             Effect::Quit => {}
             Effect::SaveUnsent(held) => self.held_unsent.extend(held),
             Effect::NewSession => self.new_session().await,
@@ -909,6 +913,55 @@ impl Runner {
         });
     }
 
+    /// [`Effect::RecallQueued`]: abandon the turn's steers the runtime still
+    /// holds queued, leaving the run alone, and answer with
+    /// [`Msg::Recalled`]. A recalled steer leaves the classifier transcript
+    /// and its terminal contributes nothing to the turn. Awaited in the
+    /// loop, so the recalled steers' completions find them marked.
+    async fn recall_queued(&mut self) {
+        let steers: Vec<InputId> = self
+            .turn
+            .inputs
+            .iter()
+            .filter(|input| {
+                !input.done
+                    && matches!(
+                        input.kind,
+                        InputKind::Steer {
+                            delivered: false,
+                            ..
+                        }
+                    )
+            })
+            .map(|input| input.input_id.clone())
+            .collect();
+        let report = if steers.is_empty() {
+            crate::session::Recalled::default()
+        } else {
+            self.session.recall_queued(&steers).await
+        };
+        let mut recalled = Vec::with_capacity(report.recalled.len());
+        for input_id in report.recalled {
+            if let Some(input) = self
+                .turn
+                .inputs
+                .iter()
+                .find(|input| input.input_id == input_id)
+            {
+                self.session.forget_input(&input.key);
+                if let InputKind::Steer { id, .. } = input.kind {
+                    recalled.push(id);
+                }
+            }
+            self.turn.recalled.insert(input_id);
+        }
+        tracing::debug!(?recalled, errors = ?report.errors, "recalled queued steers");
+        self.send(Msg::Recalled {
+            recalled,
+            errors: report.errors,
+        });
+    }
+
     /// The interrupt's report arrived: record what it cancelled and end
     /// the turn when every input is terminal.
     async fn on_stopped(&mut self, stopped: Stopped) {
@@ -1012,6 +1065,12 @@ impl Runner {
             return;
         };
         input.done = true;
+        if self.turn.recalled.contains(&done.input_id) {
+            // Back in the editor already: no result, nothing undelivered.
+            input.end = None;
+            self.maybe_finish().await;
+            return;
+        }
         let mut msgs = Vec::new();
         let mut undelivered = None;
         let end = match (&mut input.kind, done.outcome) {

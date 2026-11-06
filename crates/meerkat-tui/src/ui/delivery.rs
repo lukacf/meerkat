@@ -8,11 +8,12 @@
 //! block in place). The state machine itself lives in [`super::App`]; this
 //! module only owns the queue.
 //!
-//! Only messages the UI still holds ([`PendingState::Deferred`]) can be
-//! recalled into the editor. Once the runtime has admitted a message it is
-//! durable: the runtime offers no cancellation that is guaranteed to leave the
-//! running turn alone, so the way to get admitted messages back is to
-//! interrupt the turn, which returns every undelivered one to the editor.
+//! Messages the UI still holds ([`PendingState::Deferred`]) are recalled into
+//! the editor by the UI alone. Admitted messages come back through the runner
+//! ([`super::Effect::RecallQueued`], answered by [`super::Msg::Recalled`]):
+//! it abandons the ones the runtime still holds queued, leaving the running
+//! turn alone; one that already joined the run stays, and only an interrupt
+//! ends it.
 //!
 //! [`Block::Queued`]: super::transcript::Block::Queued
 
@@ -44,8 +45,9 @@ impl PendingState {
         }
     }
 
-    /// Whether the user can pull the message back into the editor (Esc / ↑):
-    /// only messages the runtime does not hold yet.
+    /// Whether the UI alone can pull the message back into the editor (Esc /
+    /// ↑): only messages the runtime does not hold yet (admitted ones need a
+    /// recall through the runner).
     #[must_use]
     pub fn recallable(self) -> bool {
         matches!(self, Self::Deferred)

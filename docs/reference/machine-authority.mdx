@@ -55,12 +55,13 @@ The canonical registry is `canonical_machine_schemas()` in
 | `TemporaryCouncilLifecycleMachine` | `meerkat-mob::machines::temporary_council_lifecycle` | One temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed versus coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict. Record-scoped (one machine state per council) and clock-free. |
 | `ToolGrantLifecycleMachine` | `meerkat-runtime::tool_grant::dsl` | One scoped tool grant: issuance, expiry at a supplied clock, revocation, use admission. Record-scoped (one machine state per grant) and clock-free (every input carries the host's time observation); expired and revoked grants are terminal. |
 | `MobStoreRestoreLifecycleMachine` | `meerkat-mob::machines::mob_store_restore_lifecycle` | One quarantined persisted mob store: its class (store unavailable, store unreadable, resume refused), which re-attempts of its restore it admits (an explicit one for any class, an on-demand one only for a store that could not serve now), the single re-attempt in flight, and whether a re-attempt released the store (managed, held or settled) or left it quarantined under the class it met. Record-scoped (one machine state per quarantined store), volatile (held in memory by the mob-set state; every restore pass derives it again) and clock-free (it never re-attempts on its own). |
+| `HostStoreWriterFenceMachine` | `meerkat-runtime::store::spi::writer_fence` | The writer fence of one host store realm: the writer's phase (live, stopped, re-acquiring, proving a grant with a fresh listing, resuming, waiting out a holder that may be its own late grant, or lost), the token it commits with, the grant it got and has not installed, the acquires it gave up on since its last grant, the holder it waits out, and why it stopped or lost the realm. Realm-scoped (one machine state per open realm), volatile (a reopen starts a fresh one at the open's grant) and clock-free (the realm reports the self-fence window and the end of a waited-out lease as inputs). |
 
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. The other
 canonical machines protect narrower domain facts: auth, approval and durable
 decisions, schedules and occurrences, detached jobs and runtime delivery,
 session document and turn admission, WorkGraph lifecycle, attention, and
-execution, and scoped tool grants. WorkGraph is an
+execution, scoped tool grants, and the writer fence of a host store realm. WorkGraph is an
 optional subsystem authority for durable agent commitments, dependency-aware
 claim state, and goal attention bindings. `WorkExecutionLifecycleMachine` owns
 the cross-system obligation for one execution attempt without absorbing either

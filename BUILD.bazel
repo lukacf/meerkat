@@ -746,6 +746,7 @@ test_suite(
         "//crates/meerkat-machine-schema:generation_guard_call_sites_test",
         "//crates/meerkat-machine-schema:gpt_live_authority_contract_test",
         "//crates/meerkat-machine-schema:grant_tlc_model_test",
+        "//crates/meerkat-machine-schema:host_store_writer_fence_machine_test",
         "//crates/meerkat-machine-schema:identity_roundtrip_test",
         "//crates/meerkat-machine-schema:input_field_domains_test",
         "//crates/meerkat-machine-schema:live_context_readiness_guard_contract_test",

@@ -89,6 +89,7 @@ mod session;
 pub(crate) mod test_host;
 #[cfg(test)]
 mod tests;
+pub mod writer_fence;
 
 use std::time::Duration;
 

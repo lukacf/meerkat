@@ -1155,6 +1155,12 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::durable_decision_schema_metadata()
             .attach_to(crate::decision::dsl::DurableDecisionMachineState::schema())
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host_store_writer_fence_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::host_store_writer_fence_schema_metadata()
+            .attach_to(crate::store::spi::writer_fence::HostStoreWriterFenceMachineState::schema())
+    }
 }
 pub use instruction_activation_admission::{
     InstructionActivationRuntimeRefusal, instruction_activation_admission_for_session_error,

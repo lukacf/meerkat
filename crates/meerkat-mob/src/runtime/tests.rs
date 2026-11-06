@@ -96812,7 +96812,7 @@ fn kickoff_notices_are_sent_as_typed_lifecycle_notices_not_requests() {
 
 #[tokio::test]
 async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (handle, service) = create_test_mob(sample_definition()).await;
     let member = AgentIdentity::from("worker-kickoff-quiesce-retire");
     handle
         .spawn_with_options(
@@ -96829,6 +96829,15 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
     // exact shape the old shell cannot quiesce (its cancel path probes the
     // shell-side `autonomous_initial_turns` map instead of discharging the
     // machine obligation).
+    //
+    // The actor then starts the kickoff this live member owes
+    // (`start_owed_kickoffs`): it marks it starting, admits the kickoff input
+    // and waits on its run. Hold that run at the provider so the kickoff is
+    // still in flight when retire is admitted. A run that completes first
+    // resolves the kickoff Started, and retire then has nothing to cancel.
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
     handle
         .project_machine_input(
@@ -96839,6 +96848,13 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff pending");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the owed kickoff run reaches the provider")
+    .expect("start-turn watch");
     handle
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
@@ -101565,7 +101581,7 @@ fn placement_fixture_uses_local_mob_authority_types() {
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
         ],
-        "shared unit fixtures must not import the separately compiled self-dev-dependency",
+        "shared unit fixtures must use this crate's own types, not a separately compiled copy",
     );
 }
 /// A turn-driven placed spawn with an initial message settles its activation

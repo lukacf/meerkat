@@ -71,6 +71,7 @@ import {
   coreWorkspaceArgs,
   loadProducts,
   productPackageArgs,
+  testFeatureArgs,
   workspaceMembersByProduct,
 } from "./ci-products.mjs";
 import { readMetadata, readSelectionFeatures, root, workspacePackages } from "./rust-test-selector.mjs";
@@ -420,38 +421,61 @@ function sameSet(a, b) {
 
 // The lane selections of the workspace: Core's (`--workspace` and an
 // `--exclude` for every other product's package) and each other product's
-// (`-p` each of its packages), with the features each selection compiles its
-// members with (`cargo tree`'s roots for exactly that selection).
+// (`-p` each of its packages). A test row passes the selection's test
+// features too (`testArgs`, `testFlags`: every selected member's test
+// features, ci-products.mjs testFeatureArgs), and `features` holds what each
+// member is compiled with in that test build (`cargo tree`'s roots for
+// exactly those arguments, dev-dependencies included). `args` and `flags`
+// are the bare selection, for a build that compiles no test target.
 export function laneSelections(metadata, { products = loadProducts(), selectionFeatures = readSelectionFeatures } = {}) {
   const byProduct = workspaceMembersByProduct(metadata, products);
   const productOf = new Map();
   for (const [product, names] of byProduct) for (const name of names) productOf.set(name, product);
+  const byName = new Map(workspacePackages(metadata).map((pkg) => [pkg.name, pkg]));
   const selections = new Map();
   for (const [product, names] of byProduct) {
     if (names.length === 0) continue;
     const args = product === CORE ? coreWorkspaceArgs(byProduct) : productPackageArgs(byProduct, product);
-    const resolved = selectionFeatures(args);
+    const testArgs = [...args, ...testFeatureArgs(names.map((name) => byName.get(name)))];
+    const resolved = selectionFeatures(testArgs);
     const features = new Map(names.map((name) => [name, new Set(resolved.get(name) ?? [])]));
-    selections.set(product, { product, args, flags: args.join(" "), packages: [...names], features });
+    selections.set(product, {
+      product,
+      args,
+      flags: args.join(" "),
+      testArgs,
+      testFlags: testArgs.join(" "),
+      packages: [...names],
+      features,
+    });
   }
   if (!selections.has(CORE)) throw new Error("the workspace has no Core member");
   return { byProduct, productOf, selections };
 }
 
+// The test features a lane selection passes (`package/feature` names), from
+// its test arguments.
+function selectionTestFeatures(selection) {
+  const extra = selection.testArgs.slice(selection.args.length);
+  return extra.length === 2 && extra[0] === "--features" ? extra[1].split(",") : [];
+}
+
 // Reads a row's package flags the way Cargo does. `--workspace` must come
-// with an `--exclude` for exactly every other product's package (Core's
-// selection, the hook's own resolution); `-p NAME`, `--features LIST` and
-// `--no-default-features` as for a multi-package invocation (a feature must
-// name its package unless exactly one package is selected), where `-p` for
-// exactly one product's packages, with no feature flag, is that product's
-// selection.
+// with an `--exclude` for exactly every other product's package and then
+// exactly Core's test features (Core's test selection, the hook's own
+// resolution); `-p NAME`, `--features LIST` and `--no-default-features` as
+// for a multi-package invocation (a feature must name its package unless
+// exactly one package is selected), where exactly one product's test
+// selection (`-p` each of its packages and their test features) is that
+// product's selection.
 function parsePackageFlags(flags, byName, selections) {
   const tokens = flags.split(/\s+/).filter(Boolean);
   if (tokens[0] === "--workspace") {
     const excluded = new Set();
-    for (let index = 1; index < tokens.length; index += 2) {
+    let index = 1;
+    for (; index < tokens.length && tokens[index] !== "--features"; index += 2) {
       if (tokens[index] !== "--exclude" || !tokens[index + 1]) {
-        throw new Error(`a whole-workspace row takes only --exclude NAME pairs after --workspace: ${JSON.stringify(flags)}`);
+        throw new Error(`a whole-workspace row takes only --exclude NAME pairs and Core's test features after --workspace: ${JSON.stringify(flags)}`);
       }
       excluded.add(tokens[index + 1]);
     }
@@ -463,6 +487,13 @@ function parsePackageFlags(flags, byName, selections) {
       );
     }
     const core = selections.selections.get(CORE);
+    const coreTestFeatures = core.testArgs.slice(core.args.length);
+    if (JSON.stringify(tokens.slice(index)) !== JSON.stringify(coreTestFeatures)) {
+      throw new Error(
+        `a whole-workspace row must pass exactly Core's test features (${coreTestFeatures.join(" ") || "none"}) ` +
+          `after its --exclude pairs: ${JSON.stringify(flags)}`,
+      );
+    }
     return { packages: [...core.packages], enabled: new Map(core.features), selection: CORE };
   }
   const packages = [];
@@ -485,10 +516,15 @@ function parsePackageFlags(flags, byName, selections) {
   for (const name of packages) {
     if (!byName.has(name)) throw new Error(`row selects unknown package ${name}`);
   }
-  if (packages.length > 0 && requested.length === 0 && defaults) {
+  if (packages.length > 0 && defaults) {
     const owner = selections.productOf.get(packages[0]);
     const selection = selections.selections.get(owner);
-    if (owner !== CORE && selection && sameSet(new Set(packages), new Set(selection.packages))) {
+    if (
+      owner !== CORE &&
+      selection &&
+      sameSet(new Set(packages), new Set(selection.packages)) &&
+      sameSet(new Set(requested), new Set(selectionTestFeatures(selection)))
+    ) {
       return { packages: [...packages].sort(), enabled: new Map(selection.features), selection: owner };
     }
   }

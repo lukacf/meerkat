@@ -18,11 +18,15 @@ scripts/release-rust-crates.sh lists.
         - `cargo test -p C --features <declared>` passes, where <declared> is
           the crate's [package.metadata.meerkat.standalone-tests] features;
         - test-name parity: per test target, the standalone test names equal
-          the workspace's names for the same package and features, minus the
-          workspace-only tests ci/standalone-workspace-only.toml declares.
+          the workspace's names for the same package and features (plus
+          `workspace-tests` when the crate declares it, as every workspace
+          test build of the crate passes), minus the workspace-only tests
+          ci/standalone-workspace-only.toml declares.
       --stack mirror (default) sets RUST_MIN_STACK to the workspace's
       .cargo/config.toml value; --stack default leaves Rust's own default, to
-      record which targets need the larger stack.
+      record which targets need the larger stack. --out must not lie under a
+      directory with a Cargo configuration (the repository's included): the
+      standalone builds run inside it, and a downloader has none.
 
   published_crates_standalone.py guard [--crate NAME ...]
 
@@ -36,9 +40,13 @@ scripts/release-rust-crates.sh lists.
         - code under a cfg that needs `workspace-tests` is not scanned: the
           package leaves that feature off, so the code never builds there;
         - the declared test features exist and leave `workspace-tests` off,
-          a crate declaring `workspace-tests` has the path-only self
-          dev-dependency that enables it and its Bazel unit-test target
-          turns it on, and the packaged README.md prints the test command.
+          and the packaged README.md prints the test command;
+        - the crate's test features (the declared ones, and `workspace-tests`
+          when it declares that feature) are on its Bazel unit-test target,
+          its lib.rs carries the test-feature canary over exactly them, and
+          no path-only self dev-dependency turns them on (the workspace's
+          test commands pass them; the edge would make the crate's lib test
+          wait for its own library).
       A flagged line that is not a test escape is listed under the crate's
       `guard_allow` with its reason.
 
@@ -178,9 +186,9 @@ def test_command(manifest: dict) -> str | None:
 
 def published_test_contract_failures(crate: str, manifest: dict, package_root: pathlib.Path, packaged: set[str]) -> list[str]:
     """The published test contract: the declared feature set exists and never
-    turns on `workspace-tests`; a crate that declares `workspace-tests` has the
-    path-only self dev-dependency that enables it; and README.md, which the
-    package carries, prints the exact test command."""
+    turns on `workspace-tests`, which only the workspace's own test builds
+    pass; and README.md, which the package carries, prints the exact test
+    command."""
     failures = []
     features = (manifest.get("features") or {})
     for feature in standalone_features(manifest):
@@ -188,13 +196,6 @@ def published_test_contract_failures(crate: str, manifest: dict, package_root: p
             failures.append(f"{crate}: standalone-tests features must not include {WORKSPACE_TESTS}")
         elif feature not in features:
             failures.append(f"{crate}: standalone-tests feature {feature} is not declared in [features]")
-    if WORKSPACE_TESTS in features:
-        self_dep = (manifest.get("dev-dependencies") or {}).get(crate)
-        if not (isinstance(self_dep, dict) and self_dep.get("path") == "." and "version" not in self_dep
-                and WORKSPACE_TESTS in (self_dep.get("features") or [])):
-            failures.append(
-                f"{crate}: declares {WORKSPACE_TESTS} but no path-only self dev-dependency enables it"
-            )
     command = test_command(manifest)
     if command is not None:
         readme = package_root / "README.md"
@@ -219,23 +220,139 @@ def bazel_unit_test_features(build_text: str, target: str) -> list[str] | None:
     return re.findall(r'"([^"]+)"', features.group(1)) if features else []
 
 
+def test_features(manifest: dict) -> list[str]:
+    """The features every workspace test build of the crate passes: its
+    declared standalone-test features, then `workspace-tests` when it declares
+    that feature (scripts/ci-products.mjs testFeaturesOf)."""
+    declared = list(dict.fromkeys(standalone_features(manifest)))
+    if WORKSPACE_TESTS in (manifest.get("features") or {}):
+        declared.append(WORKSPACE_TESTS)
+    return declared
+
+
 def bazel_workspace_tests_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
-    """A crate that declares `workspace-tests` gets it on its Bazel unit-test
-    target (scripts/generate-bazel-rust-builds.mjs follows the self
-    dev-dependency), or the Bazel lanes silently drop its workspace-only tests."""
-    if WORKSPACE_TESTS not in (manifest.get("features") or {}):
+    """A crate's Bazel unit-test target turns on every test feature of the
+    crate (scripts/generate-bazel-rust-builds.mjs adds them to its feature
+    union), or the Bazel lanes silently drop the tests they gate."""
+    wanted = test_features(manifest)
+    if not wanted:
         return []
     target = f"{crate.replace('-', '_')}_unit_test"
     try:
         build_text = (package_root / "BUILD.bazel").read_text()
     except OSError as err:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but its BUILD.bazel cannot be read: {err}"]
+        return [f"{crate}: has test features but its BUILD.bazel cannot be read: {err}"]
     features = bazel_unit_test_features(build_text, target)
     if features is None:
-        return [f"{crate}: declares {WORKSPACE_TESTS} but BUILD.bazel has no {target}"]
-    if WORKSPACE_TESTS not in features:
-        return [f"{crate}: BUILD.bazel {target} does not enable {WORKSPACE_TESTS}; run make buildbuddy-generate"]
+        return [f"{crate}: has test features but BUILD.bazel has no {target}"]
+    missing = [feature for feature in wanted if feature not in features]
+    if missing:
+        return [f"{crate}: BUILD.bazel {target} does not enable {', '.join(missing)}; run make buildbuddy-generate"]
     return []
+
+
+CANARY_ENV = "MEERKAT_WORKSPACE_TEST_FEATURES"
+# The canary in any whitespace layout (rustfmt splits a long cfg over lines):
+# `#[cfg(...)]` (no `]` inside) on a module whose generic function asserts on
+# the variable in an inline const, and a `#[used]` static that instantiates
+# that function. A generic function's inline const is evaluated only where
+# the function is instantiated, which only code generation does: a test
+# binary trips the canary, `cargo check`, clippy and an editor's check run do
+# not. A plain `const _` assert would trip all of them.
+CANARY = re.compile(
+    r'#\[cfg\((?P<cfg>[^\]]*)\)\]\s*'
+    r'mod test_features_canary \{\s*'
+    r'fn require<T>\(\) \{\s*'
+    r'const \{\s*'
+    r'let _ = size_of::<T>\(\);\s*'
+    r'assert!\(\s*'
+    r'option_env!\("' + CANARY_ENV + r'"\)\.is_none\(\),\s*'
+    r'"(?P<message>(?:[^"\\]|\\.)*)"\s*,?\s*'
+    r'\);\s*'
+    r'\}\s*'
+    r'\}\s*'
+    r'#\[used\]\s*'
+    r'static REQUIRE: fn\(\) = require::<\(\)>;\s*'
+    r'\}',
+    re.S,
+)
+
+
+def rust_string_value(literal: str) -> str:
+    """A Rust string literal's text as the compiler reads it, for the escapes
+    a canary message uses: a backslash at the end of a line drops the line
+    break and the next line's leading whitespace, and `\\"` and `\\\\` stand
+    for the character."""
+    text = re.sub(r"\\\n\s*", "", literal)
+    return re.sub(r'\\(["\\])', r"\1", text)
+
+
+def canary_features(cfg: str) -> list[str] | None:
+    """The features a canary's cfg, `all(test, not(PREDICATE))`, requires,
+    where PREDICATE is `feature = "x"` or `all(feature = "x", ...)`; None for
+    any other cfg. Whitespace is ignored."""
+    compact = re.sub(r"\s+", "", cfg)
+    whole = re.fullmatch(r'all\(test,not\((?P<predicate>.*)\)\)', compact)
+    if not whole:
+        return None
+    predicate = whole.group("predicate")
+    one = re.fullmatch(r'feature="([^"]+)"', predicate)
+    if one:
+        return [one.group(1)]
+    many = re.fullmatch(r'all\((feature="[^"]+"(?:,feature="[^"]+")+),?\)', predicate)
+    if many:
+        return re.findall(r'feature="([^"]+)"', many.group(1))
+    return None
+
+
+def canary_failures(crate: str, manifest: dict, package_root: pathlib.Path) -> list[str]:
+    """A crate with test features carries exactly one test-feature canary in
+    its lib.rs, over exactly those features, whose message names the command
+    to run (`cargo test -p <crate> --features <them>`): in the repository
+    (.cargo/config.toml [env] sets the variable) a test build without them
+    fails to compile instead of compiling the tests they gate out. A crate
+    without test features carries none."""
+    wanted = test_features(manifest)
+    try:
+        text = (package_root / "src" / "lib.rs").read_text()
+    except OSError as err:
+        return [f"{crate}: has test features but its src/lib.rs cannot be read: {err}"] if wanted else []
+    found = list(CANARY.finditer(text))
+    reads = text.count(f'option_env!("{CANARY_ENV}")')
+    if not wanted:
+        return [f"{crate}: has no test features but its lib.rs carries a test-feature canary"] if reads else []
+    if len(found) != 1 or reads != 1:
+        return [
+            f"{crate}: lib.rs must carry exactly one test-feature canary (a cfg(all(test, not(...))) "
+            f"test_features_canary module asserting on {CANARY_ENV} in a generic function's inline const, "
+            "and the #[used] static that instantiates it)"
+        ]
+    features = canary_features(found[0].group("cfg"))
+    if features is None or sorted(features) != sorted(wanted):
+        return [f"{crate}: the lib.rs canary requires {features}, not the crate's test features {wanted}"]
+    command = f"cargo test -p {crate} --features {','.join(wanted)}"
+    if f"`{command}`" not in rust_string_value(found[0].group("message")):
+        return [f"{crate}: the lib.rs canary message must name `{command}`"]
+    return []
+
+
+def self_dev_dependency_failures(crate: str, manifest: dict) -> list[str]:
+    """No crate dev-depends on itself: the workspace's test commands pass its
+    test features, and a self edge would make its lib test wait for its own
+    library (and swallow `--features <crate>/<feature>` in non-test builds)."""
+    tables = [manifest.get("dev-dependencies") or {}]
+    for target in (manifest.get("target") or {}).values():
+        tables.append((target or {}).get("dev-dependencies") or {})
+    failures = []
+    for table in tables:
+        for key, spec in table.items():
+            name = spec.get("package", key) if isinstance(spec, dict) else key
+            if name == crate or (isinstance(spec, dict) and spec.get("path") == "."):
+                failures.append(
+                    f"{crate}: dev-depends on itself ({key}); the workspace's test commands pass its test features "
+                    "(scripts/core-workspace-args.mjs --tests)"
+                )
+    return failures
 
 
 def toolchain(root: pathlib.Path) -> str | None:
@@ -578,6 +695,8 @@ def guard(root: pathlib.Path, crates: list[str]) -> int:
             failures.append(f"{crate}: guard_allow {path} {kind} matches nothing (stale entry)")
         failures.extend(published_test_contract_failures(crate, cargo_manifest, package_root, packaged))
         failures.extend(bazel_workspace_tests_failures(crate, cargo_manifest, package_root))
+        failures.extend(canary_failures(crate, cargo_manifest, package_root))
+        failures.extend(self_dev_dependency_failures(crate, cargo_manifest))
         print(f"  {crate:<36}{'FAIL' if any(f.startswith(crate + ':') for f in failures) else 'OK'}")
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
@@ -724,11 +843,34 @@ def package_and_unpack(root: pathlib.Path, crates: list[str], all_crates: list[s
     return unpacked
 
 
+def cargo_config_above(path: pathlib.Path) -> pathlib.Path | None:
+    """The first Cargo configuration file Cargo would read for a build run in
+    `path` from the directories above it (`.cargo/config.toml` or
+    `.cargo/config` of `path` or an ancestor), or None. The user's own
+    $CARGO_HOME configuration is not one: a downloader has that too."""
+    home = pathlib.Path(os.environ.get("CARGO_HOME") or pathlib.Path.home() / ".cargo").resolve()
+    own = {home / "config.toml", home / "config"}
+    for directory in [path, *path.parents]:
+        for name in ("config.toml", "config"):
+            candidate = directory / ".cargo" / name
+            if candidate.is_file() and candidate.resolve() not in own:
+                return candidate
+    return None
+
+
 def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str, allow_dirty: bool) -> int:
     manifest = load_manifest(root)
     all_crates = release_crates(root)
     dirs = crate_dirs(root)
     rust_toolchain = toolchain(root)
+    # The standalone builds run in out/ws: a Cargo configuration above it (the
+    # repository's [env], for one) would reach them, and a downloader has none.
+    config = cargo_config_above(out.resolve())
+    if config is not None:
+        raise UsageError(
+            f"--out {out} lies under {config.parent.parent}, whose Cargo configuration ({config}) the standalone "
+            "builds would read; choose a directory outside the repository"
+        )
     out.mkdir(parents=True, exist_ok=False)
     logs = out / "logs"
     logs.mkdir()
@@ -761,7 +903,13 @@ def census(root: pathlib.Path, crates: list[str], out: pathlib.Path, stack: str,
 
         rc_s, standalone_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
                                        ws, standalone_env, logs / f"{crate}.list-standalone.log")
-        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *feature_args, "--", "--list", "--format", "terse"],
+        # The workspace runs the crate's tests with `workspace-tests` too when
+        # it declares that feature: every workspace test build passes it (no
+        # dev-dependency does), and the parity below takes the tests it gates
+        # out again (ci/standalone-workspace-only.toml).
+        workspace_features = [*features, *([WORKSPACE_TESTS] if WORKSPACE_TESTS in (packaged.get("features") or {}) else [])]
+        workspace_feature_args = ["--features", ",".join(workspace_features)] if workspace_features else []
+        rc_w, workspace_listing = run([cargo(), "test", "-p", crate, *workspace_feature_args, "--", "--list", "--format", "terse"],
                                       root, workspace_env, logs / f"{crate}.list-workspace.log")
         if rc_s != 0 or rc_w != 0:
             row["problems"].append(f"listing failed (standalone rc {rc_s}, workspace rc {rc_w})")

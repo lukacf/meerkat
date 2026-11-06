@@ -514,12 +514,14 @@ impl MobActor {
         self.begin_running_member_wake(&identity, cause, attempt);
 
         // The seat's build inputs ride the member's first build, as a
-        // spawn's do; a member whose session a build created has none.
+        // spawn's do, and a same-session successor's declared build rides
+        // each build of its incarnation; any other member whose session a
+        // build created has none.
         let (entry, seat_build, resume_from_role) = {
             let roster = self.roster.read().await;
             (
                 roster.get(&identity).cloned(),
-                roster.seat_build(&identity),
+                roster.next_build(&identity),
                 roster.resume_from_role(&identity).cloned(),
             )
         };

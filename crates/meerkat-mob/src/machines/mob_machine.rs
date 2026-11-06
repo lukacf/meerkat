@@ -13757,18 +13757,60 @@ mod tests {
             .expect("the probe emits its verdict")
     }
 
+    /// The shell's raw observations of one legacy adoption
+    /// (`AdoptLegacyIdentityEntry`): the spawn row's durable-identity marker
+    /// and own-identity label, whether the roster lists the identity, and
+    /// whether a host's intent row names it.
+    #[derive(Debug, Clone, Copy)]
+    struct Observed {
+        marker: bool,
+        label: bool,
+        listed: bool,
+        intent_row: bool,
+    }
+
+    impl Observed {
+        /// A listed member whose spawn row carries both legacy marks.
+        const LISTED_LEGACY: Self = Self {
+            marker: true,
+            label: true,
+            listed: true,
+            intent_row: false,
+        };
+        /// A listed member whose spawn row carries neither mark: a worker.
+        const LISTED_WORKER: Self = Self {
+            marker: false,
+            label: false,
+            listed: true,
+            intent_row: false,
+        };
+
+        /// All sixteen observations.
+        fn all() -> impl Iterator<Item = Self> {
+            (0u8..16).map(|bits| Self {
+                marker: bits & 1 != 0,
+                label: bits & 2 != 0,
+                listed: bits & 4 != 0,
+                intent_row: bits & 8 != 0,
+            })
+        }
+    }
+
     fn adopt_legacy(
         authority: &mut MobMachineAuthority,
         identity: &AgentIdentity,
         generation: Generation,
-        legacy_roster_member: bool,
+        observed: Observed,
     ) -> LegacyIdentityEntryAdoptionKind {
         let transition = MobMachineMutator::apply(
             authority,
             MobMachineInput::AdoptLegacyIdentityEntry {
                 agent_identity: identity.clone(),
                 generation,
-                legacy_roster_member,
+                durable_identity_marker: observed.marker,
+                own_identity_label: observed.label,
+                listed: observed.listed,
+                intent_row: observed.intent_row,
             },
         )
         .expect("the adoption answers");
@@ -14004,7 +14046,12 @@ mod tests {
         let legacy = seat_live_member_with_endpoint(&mut authority, "legacy-member", 59);
         let worker = seat_live_member_with_endpoint(&mut authority, "named-worker", 60);
         assert_eq!(
-            adopt_legacy(&mut authority, &legacy.identity, Generation(0), true),
+            adopt_legacy(
+                &mut authority,
+                &legacy.identity,
+                Generation(0),
+                Observed::LISTED_LEGACY
+            ),
             LegacyIdentityEntryAdoptionKind::Adopted
         );
         assert_eq!(
@@ -14015,15 +14062,30 @@ mod tests {
             Some(&IdentityEntryOrigin::Declared)
         );
         assert_eq!(
-            adopt_legacy(&mut authority, &legacy.identity, Generation(0), true),
+            adopt_legacy(
+                &mut authority,
+                &legacy.identity,
+                Generation(0),
+                Observed::LISTED_LEGACY
+            ),
             LegacyIdentityEntryAdoptionKind::AlreadyAnEntry
         );
         assert_eq!(
-            adopt_legacy(&mut authority, &worker.identity, Generation(0), false),
+            adopt_legacy(
+                &mut authority,
+                &worker.identity,
+                Generation(0),
+                Observed::LISTED_WORKER
+            ),
             LegacyIdentityEntryAdoptionKind::NameHeldByWorker
         );
         assert_eq!(
-            adopt_legacy(&mut authority, &worker.identity, Generation(3), true),
+            adopt_legacy(
+                &mut authority,
+                &worker.identity,
+                Generation(3),
+                Observed::LISTED_LEGACY
+            ),
             LegacyIdentityEntryAdoptionKind::StaleObservation
         );
         assert_eq!(
@@ -14031,7 +14093,7 @@ mod tests {
                 &mut authority,
                 &AgentIdentity::from("never-seated"),
                 Generation(0),
-                true
+                Observed::LISTED_LEGACY
             ),
             LegacyIdentityEntryAdoptionKind::NotSeated
         );
@@ -14048,9 +14110,172 @@ mod tests {
         );
         MobMachineMutator::apply(&mut authority, MobMachineInput::Stop).expect("stop");
         assert_eq!(
-            adopt_legacy(&mut authority, &worker.identity, Generation(0), true),
+            adopt_legacy(
+                &mut authority,
+                &worker.identity,
+                Generation(0),
+                Observed::LISTED_LEGACY
+            ),
             LegacyIdentityEntryAdoptionKind::MobNotRunning
         );
+    }
+
+    /// The member shapes the legacy adoption tells apart.
+    #[derive(Debug, Clone, Copy)]
+    enum AdoptionShape {
+        /// Local, bound to a session, not retiring.
+        Local,
+        /// Seated by replay with no session binding yet.
+        BoundToNoSession,
+        /// Placed on a member host.
+        Placed,
+        /// Local, its retirement started.
+        Retiring,
+    }
+
+    /// An authority holding one member of `shape` under `name`.
+    fn adoption_member(shape: AdoptionShape, name: &str) -> (MobMachineAuthority, AgentIdentity) {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from(name);
+        let runtime_id = AgentRuntimeId(format!("{name}:0"));
+        match shape {
+            AdoptionShape::Local => {
+                seat_live_member_with_endpoint(&mut authority, name, 62);
+            }
+            AdoptionShape::BoundToNoSession => {
+                authority
+                    .apply_signal(MobMachineSignal::RecoverRosterMember {
+                        agent_identity: identity.clone(),
+                        agent_runtime_id: runtime_id,
+                        fence_token: FenceToken(1),
+                        generation: Generation(0),
+                        profile_name: "worker".to_string(),
+                        runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                        external_addressable: false,
+                    })
+                    .expect("replay seats the member before its binding");
+            }
+            AdoptionShape::Placed => {
+                let host_id = HostId(format!("{name}-host"));
+                let owner_session_id = SessionId(format!("{name}-owner"));
+                authority
+                    .apply_signal(MobMachineSignal::RecoverOwnerBridgeSession {
+                        bridge_session_id: owner_session_id.clone(),
+                        destroy_on_owner_archive: false,
+                        implicit_delegation_mob: false,
+                    })
+                    .expect("recover the placed member's owner");
+                authority
+                    .apply_signal(MobMachineSignal::RecoverHostBinding {
+                        host_id: host_id.clone(),
+                        pubkey: PeerSigningKey([8; 32]),
+                        endpoint: PeerAddress(format!("tcp://{name}-host.test:4100")),
+                        epoch: 1,
+                        binding_generation: 1,
+                        protocol_min: 4,
+                        protocol_max: 4,
+                        engine_version: format!("{name}-engine"),
+                        durable_sessions: true,
+                        autonomous_members: true,
+                        hard_cancel_member: true,
+                        tracked_input_cancel: true,
+                        memory_store: true,
+                        mcp: true,
+                        resolvable_providers: std::collections::BTreeSet::from([
+                            "anthropic".to_string()
+                        ]),
+                        approval_forwarding: false,
+                        live_endpoint: None,
+                    })
+                    .expect("recover the placed member's host");
+                authority
+                    .apply_signal(MobMachineSignal::RecoverCommittedPlacedSpawn {
+                        spawn_id: PlacedSpawnId(format!("{name}-spawn")),
+                        agent_identity: identity.clone(),
+                        agent_runtime_id: runtime_id,
+                        generation: Generation(0),
+                        fence_token: FenceToken(1),
+                        host_id,
+                        host_binding_generation: 1,
+                        member_session_id: SessionId(format!("{name}-session")),
+                        member_peer_endpoint: MemberPeerEndpoint::new(
+                            PeerName(format!("mob/worker/{name}")),
+                            PeerId(format!("{name}-peer")),
+                            PeerAddress(format!("tcp://{name}.test:4200")),
+                            PeerSigningKey([3; 32]),
+                        ),
+                        profile_name: "worker".to_string(),
+                        runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                        external_addressable: true,
+                        provision_operation_id: format!("{name}-operation"),
+                        operation_owner_session_id: owner_session_id,
+                    })
+                    .expect("recover the placed member");
+            }
+            AdoptionShape::Retiring => {
+                let member = seat_live_member_with_endpoint(&mut authority, name, 63);
+                authority
+                    .apply_signal(MobMachineSignal::RetireMember {
+                        agent_identity: member.identity.clone(),
+                        agent_runtime_id: member.runtime_id.clone(),
+                        fence_token: member.fence_token,
+                        session_id: Some(member.session_id.clone()),
+                    })
+                    .expect("the member's retirement starts");
+            }
+        }
+        (authority, identity)
+    }
+
+    /// The legacy adoption answers every one of the sixteen observations of
+    /// every member shape by one rule. A listed member is a legacy member
+    /// with either mark: adopted when it is local, bound to a session and
+    /// not retiring, not adoptable otherwise, and a worker holds the name
+    /// when it carries neither mark. An unlisted member is a legacy member
+    /// only with both marks and no host's intent row: adopted when it is
+    /// local and bound to a session (so the seal unlists and retires it),
+    /// retired without its adoption when it is placed or bound to no
+    /// session, and not adoptable while it retires; any other unlisted
+    /// member is left as it is. Only an adoption records an entry.
+    #[test]
+    fn the_legacy_adoption_answers_every_observation_by_one_rule() {
+        use AdoptionShape::{BoundToNoSession, Local, Placed, Retiring};
+        use LegacyIdentityEntryAdoptionKind::{
+            Adopted, NameHeldByWorker, NotAdoptable, RetireUnadopted,
+        };
+        for shape in [Local, BoundToNoSession, Placed, Retiring] {
+            for observed in Observed::all() {
+                let (mut authority, identity) = adoption_member(shape, "adoption-rule");
+                let expected = if observed.listed {
+                    match shape {
+                        Local if observed.marker || observed.label => Adopted,
+                        Local => NameHeldByWorker,
+                        BoundToNoSession | Placed | Retiring => NotAdoptable,
+                    }
+                } else if observed.marker && observed.label && !observed.intent_row {
+                    match shape {
+                        Local => Adopted,
+                        BoundToNoSession | Placed => RetireUnadopted,
+                        Retiring => NotAdoptable,
+                    }
+                } else {
+                    NameHeldByWorker
+                };
+                assert_eq!(
+                    adopt_legacy(&mut authority, &identity, Generation(0), observed),
+                    expected,
+                    "{shape:?} {observed:?}"
+                );
+                assert_eq!(
+                    authority
+                        .state()
+                        .identity_entry_origins
+                        .contains_key(&identity),
+                    expected == Adopted,
+                    "{shape:?} {observed:?}"
+                );
+            }
+        }
     }
 
     /// The replay of an entry's row records the entry on the identity's
@@ -16849,7 +17074,10 @@ mod tests {
                 MobMachineInput::AdoptLegacyIdentityEntry {
                     agent_identity: identity.clone(),
                     generation: Generation(0),
-                    legacy_roster_member: true,
+                    durable_identity_marker: true,
+                    own_identity_label: true,
+                    listed: true,
+                    intent_row: false,
                 },
             )
             .expect("the adoption answers");
@@ -16877,7 +17105,10 @@ mod tests {
             MobMachineInput::AdoptLegacyIdentityEntry {
                 agent_identity: created.identity.clone(),
                 generation: Generation(0),
-                legacy_roster_member: true,
+                durable_identity_marker: true,
+                own_identity_label: true,
+                listed: true,
+                intent_row: false,
             },
         )
         .expect("the adoption answers");

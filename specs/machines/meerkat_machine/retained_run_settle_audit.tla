@@ -23,7 +23,9 @@
 \* of a new one (and their held twins), the resume of the kept run, its
 \* settlement as cancelled or as a refused resume, a stop of the kept run,
 \* the abandonment of either input, the hold and release of every reason
-\* explored, and the start of an unregister. Properties:
+\* explored, the start of an unregister, a retire, the exit of the runtime
+\* executor and a destroy. A side path marks the run before the runtime
+\* initializes and settles there. Properties:
 \*
 \*   AuditSettleChangesOnlyTheStop (action property): a settle step changes
 \*     no phase, run, mark, hold, input or registration fact: at most the
@@ -31,32 +33,38 @@
 \*   AuditAcceptedSettlesTheRetainedRun (action property): an accepted
 \*     settle happens only with no run current and a run marked, and records
 \*     the stop of exactly that run.
+\*   AuditSettleNotAcceptedWhileDraining (action property): no settle is
+\*     accepted while the registration drains for its unregister.
 \*   AuditRefusedSettleRecordsNothing (action property): a busy or
 \*     not-retained settle records no stop.
 \*   AuditSettledRunNeverResumes (action property): no step resumes a run
 \*     whose settle was accepted.
 \*   AuditSettledRunEndsCancelled (action property): a run whose settle was
 \*     accepted is never settled as a refused resume.
+\*   AuditRunningHasACurrentRun (invariant): the runtime is Running only
+\*     with a run current, so the busy arm for a Running registration with
+\*     no run current (SettleRetainedRunBusyNotServingRunning) and its
+\*     not-retained twin are total-arm completions no state reaches.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous. The runner's
-\* --mutants mode also checks that five seeded model defects are refused (an
-\* accept of a run other than the marked one, an accept that records no
-\* stop, a busy settle that records the stop, a resume that ignores the
-\* stop, and a settlement of a stopped run as a refused resume).
+\* --mutants mode also checks that eight seeded model defects are refused (an
+\* accept of a run other than the marked one, an accept with no run marked,
+\* an accept with a run current, an accept while the registration drains, an
+\* accept that records no stop, a busy settle that records the stop, a resume
+\* that ignores the stop, and a settlement of a stopped run as a refused
+\* resume).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* retained_run_settle_audit.sh. Run a deeper bound by hand with:
 \*   specs/machines/meerkat_machine/retained_run_settle_audit.sh 14
 \*
 \* Scope limits: the runtime loop's settlement of a stopped marked run
-\* before its hold check, the waiters the host's verb waits on, and the
+\* before its hold check, the waiters the host's verb waits on, the facts it
+\* reads under the session's gate before it answers Settled, and the
 \* never-woken dormant member are shell, covered by the meerkat-runtime rows
 \* in tests/recovery_contract.rs (a_host_settle_*) and the meerkat-mob rows in
-\* tests/cold_restart_mob_resume.rs. The Initializing, Retired and Stopped
-\* arms of the settle are not driven here (no step of this audit reaches
-\* those phases with a run marked); their guards are pinned by the arm
-\* exclusivity test of meerkat-machine-schema.
+\* tests/cold_restart_mob_resume.rs.
 EXTENDS model
 
 CONSTANT AuditMaxSteps
@@ -69,11 +77,14 @@ VARIABLES
     audit_busy_current,       \* a settle was busy with a run current
     audit_busy_stale,         \* a settle was busy with a stale observation
     audit_busy_draining,      \* a settle was busy while draining
-    audit_retry_not_retained  \* a settle found nothing retained after an accept
+    audit_retry_not_retained, \* a settle found nothing retained after an accept
+    audit_not_serving,        \* phases a settle was busy in, not serving the run
+    audit_destroyed_inert     \* a settle met a destroyed runtime
 
 auditVars == <<audit_accepted, audit_accepts, audit_accepted_held,
                audit_settled_held, audit_busy_current, audit_busy_stale,
-               audit_busy_draining, audit_retry_not_retained>>
+               audit_busy_draining, audit_retry_not_retained,
+               audit_not_serving, audit_destroyed_inert>>
 
 AuditSession == "sessionid_1"
 AuditQueued == "input_1"
@@ -194,7 +205,8 @@ ReleaseFor(r) ==
 
 \* The attachment, the start of the kept run or of a new one (refused while
 \* held), the resume of the kept run, a stop of the kept run, the
-\* abandonment of an input, and the start of an unregister.
+\* abandonment of an input, the start of an unregister, a retire, the exit of
+\* the runtime executor, and a destroy.
 AuditRunStep ==
     \/ EnsureSessionWithExecutorIdle(AuditSession)
     \/ \E r \in AuditRuns :
@@ -210,6 +222,20 @@ AuditRunStep ==
         \/ AbandonInputAttached(i, "Cancelled", Attempts(i))
     \/ BeginUnregisterSessionIdle(AuditSession, None, None, None, None, "Stop", 0)
     \/ BeginUnregisterSessionAttached(AuditSession, None, None, None, None, "Stop", 0)
+    \/ RetireRequestedFromIdle(AuditSession)
+    \/ RetireRequestedFromIdleUnbound(AuditSession)
+    \/ RuntimeExecutorExitedFromIdle
+    \/ RuntimeExecutorExitedFromAttached
+    \/ Destroy(AuditSession)
+
+\* A settle the registration cannot serve now, recorded with its phase.
+AuditBusyNotServing(o) ==
+    /\ SettleBusyNotServing(o)
+    /\ audit_not_serving' = audit_not_serving \cup {phase}
+    /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
+                   audit_settled_held, audit_busy_current, audit_busy_stale,
+                   audit_busy_draining, audit_retry_not_retained,
+                   audit_destroyed_inert>>
 
 AuditBody ==
     \/ \E o \in Observations :
@@ -218,44 +244,59 @@ AuditBody ==
         /\ audit_accepts' = audit_accepts + 1
         /\ audit_accepted_held' = (audit_accepted_held \/ HostHeld)
         /\ UNCHANGED <<audit_settled_held, audit_busy_current, audit_busy_stale,
-                       audit_busy_draining, audit_retry_not_retained>>
+                       audit_busy_draining, audit_retry_not_retained,
+                       audit_not_serving, audit_destroyed_inert>>
     \/ \E o \in Observations :
         /\ SettleBusyCurrent(o)
         /\ audit_busy_current' = TRUE
         /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
                        audit_settled_held, audit_busy_stale, audit_busy_draining,
-                       audit_retry_not_retained>>
+                       audit_retry_not_retained, audit_not_serving,
+                       audit_destroyed_inert>>
     \/ \E o \in Observations :
         /\ SettleBusyStale(o)
         /\ audit_busy_stale' = TRUE
         /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
                        audit_settled_held, audit_busy_current, audit_busy_draining,
-                       audit_retry_not_retained>>
+                       audit_retry_not_retained, audit_not_serving,
+                       audit_destroyed_inert>>
     \/ \E o \in Observations :
         /\ SettleBusyDraining(o)
         /\ audit_busy_draining' = TRUE
         /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
                        audit_settled_held, audit_busy_current, audit_busy_stale,
-                       audit_retry_not_retained>>
+                       audit_retry_not_retained, audit_not_serving,
+                       audit_destroyed_inert>>
     \/ \E o \in Observations :
         /\ SettleNotRetained(o)
         /\ audit_retry_not_retained' = (audit_retry_not_retained \/ audit_accepted # {})
+        /\ audit_destroyed_inert' = (audit_destroyed_inert \/ phase = "Destroyed")
         /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
                        audit_settled_held, audit_busy_current, audit_busy_stale,
-                       audit_busy_draining>>
-    \/ \E o \in Observations : SettleBusyNotServing(o) /\ KeepHistory
+                       audit_busy_draining, audit_not_serving>>
+    \/ \E o \in Observations : AuditBusyNotServing(o)
     \/ \E reason \in {"Cancelled", "ResumeRefused"} :
         /\ LoopSettle(reason)
         /\ audit_settled_held' =
               (audit_settled_held \/ (AuditRunKept \in audit_accepted /\ HostHeld))
         /\ UNCHANGED <<audit_accepted, audit_accepts, audit_accepted_held,
                        audit_busy_current, audit_busy_stale, audit_busy_draining,
-                       audit_retry_not_retained>>
+                       audit_retry_not_retained, audit_not_serving,
+                       audit_destroyed_inert>>
     \/ (\E r \in AuditReasons : HoldFor(r) \/ ReleaseFor(r)) /\ KeepHistory
     \/ AuditRunStep /\ KeepHistory
 
+\* Side path: the run is marked before the runtime initializes, and a settle
+\* meets the initializing runtime.
+AuditInitializingSide ==
+    /\ phase = "Initializing"
+    /\ \/ MarkRunResumableInitializing(AuditRunKept) /\ KeepHistory
+       \/ \E o \in Observations : AuditBusyNotServing(o)
+       \/ \E o \in Observations : SettleNotRetained(o) /\ KeepHistory
+
 AuditNext ==
     \/ AuditPrefix
+    \/ AuditInitializingSide
     \/ (model_step_count >= AuditPrefixLength /\ AuditBody)
 
 AuditInit ==
@@ -268,6 +309,8 @@ AuditInit ==
     /\ audit_busy_stale = FALSE
     /\ audit_busy_draining = FALSE
     /\ audit_retry_not_retained = FALSE
+    /\ audit_not_serving = {}
+    /\ audit_destroyed_inert = FALSE
 
 AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
 
@@ -287,6 +330,10 @@ AuditAcceptedSettlesTheRetainedRun ==
             /\ resumable_run_id # None
             /\ run_stop_requested' = resumable_run_id]_<<vars, auditVars>>
 
+AuditSettleNotAcceptedWhileDraining ==
+    [][\A o \in Observations :
+         SettleAccepted(o) => registration_phase # "Draining"]_<<vars, auditVars>>
+
 AuditRefusedSettleRecordsNothing ==
     [][\A o \in Observations :
          SettleRefused(o) => UNCHANGED run_stop_requested]_<<vars, auditVars>>
@@ -298,6 +345,10 @@ AuditSettledRunEndsCancelled ==
     [][\A r \in audit_accepted :
          ~(SettleResumableRunIdle(r, "ResumeRefused")
            \/ SettleResumableRunAttached(r, "ResumeRefused"))]_<<vars, auditVars>>
+
+\* Running always has a run current: no state reaches the settle arms of a
+\* Running registration with no run current.
+AuditRunningHasACurrentRun == phase = "Running" => current_run_id # None
 
 \* Reachability goals, each checked as an expected violation of its negation.
 \* The host's settle is accepted while its own hold holds the session.
@@ -318,6 +369,14 @@ AuditWitnessBusyStaleObservation == audit_busy_stale
 AuditWitnessBusyWhileDraining == audit_busy_draining
 \* A retry after the run was settled finds nothing retained.
 AuditWitnessRetryNotRetained == audit_retry_not_retained
+\* A settle meets a runtime still initializing, with the run marked: busy.
+AuditWitnessBusyNotServingInitializing == "Initializing" \in audit_not_serving
+\* A settle meets a retired runtime that still marks the run: busy.
+AuditWitnessBusyNotServingRetired == "Retired" \in audit_not_serving
+\* A settle meets a runtime whose executor exited, the run marked: busy.
+AuditWitnessBusyNotServingStopped == "Stopped" \in audit_not_serving
+\* A settle meets a destroyed runtime: nothing retained, nothing changed.
+AuditWitnessInertDestroyed == audit_destroyed_inert
 
 NotAuditWitnessAcceptedUnderHostHold == ~AuditWitnessAcceptedUnderHostHold
 NotAuditWitnessSettledUnderHostHold == ~AuditWitnessSettledUnderHostHold
@@ -326,4 +385,8 @@ NotAuditWitnessBusyWithRunCurrent == ~AuditWitnessBusyWithRunCurrent
 NotAuditWitnessBusyStaleObservation == ~AuditWitnessBusyStaleObservation
 NotAuditWitnessBusyWhileDraining == ~AuditWitnessBusyWhileDraining
 NotAuditWitnessRetryNotRetained == ~AuditWitnessRetryNotRetained
+NotAuditWitnessBusyNotServingInitializing == ~AuditWitnessBusyNotServingInitializing
+NotAuditWitnessBusyNotServingRetired == ~AuditWitnessBusyNotServingRetired
+NotAuditWitnessBusyNotServingStopped == ~AuditWitnessBusyNotServingStopped
+NotAuditWitnessInertDestroyed == ~AuditWitnessInertDestroyed
 ====

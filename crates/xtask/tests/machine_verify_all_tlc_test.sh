@@ -328,17 +328,21 @@ fi
 # another run, the attachment, the start and resume of the kept run or the
 # start of a new one, the runtime's settlement of the kept run as cancelled or
 # as a refused resume, a stop of it, the abandonment of an input, the holds
-# and releases, and the start of an unregister, under every generated
-# invariant plus five action properties (a settle changes nothing but the
-# stop it records; an accepted settle records the stop of exactly the marked
-# run, only with no run current; a refused settle records nothing; a run whose
-# settle was accepted never resumes, and is never settled as a refused
-# resume). It requires seven witnesses reached and refuses five seeded
-# defects (--mutants): an accept of a run other than the marked one, an
-# accept that records no stop, a busy settle that records the stop, a resume
-# that ignores the stop, and a settlement of a stopped run as a refused
-# resume. 10 steps reach every witness and mutant. It runs in shard
-# audits-r, the lightest; not yet measured on a hosted runner.
+# and releases, the start of an unregister, a retire, an executor exit and a
+# destroy (and a run marked before the runtime initializes), under every
+# generated invariant plus six action properties (a settle changes nothing
+# but the stop it records; an accepted settle records the stop of exactly the
+# marked run, only with no run current; no settle is accepted while the
+# registration drains; a refused settle records nothing; a run whose settle
+# was accepted never resumes, and is never settled as a refused resume) and
+# one invariant (Running always has a run current). It requires eleven
+# witnesses reached and refuses eight seeded defects (--mutants): an accept
+# of a run other than the marked one, an accept with no run marked, an accept
+# with a run current, an accept while the registration drains, an accept that
+# records no stop, a busy settle that records the stop, a resume that ignores
+# the stop, and a settlement of a stopped run as a refused resume. 10 steps
+# reach every witness and mutant. It runs in shard audits-r, the lightest;
+# not yet measured on a hosted runner.
 retained_run_settle_audit="${workspace_root}/specs/machines/meerkat_machine/retained_run_settle_audit.sh"
 if [[ ! -x "${retained_run_settle_audit}" ]]; then
   echo "error: retained-run settle audit runner is missing from workspace runfiles: ${retained_run_settle_audit}" >&2

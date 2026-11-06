@@ -7,20 +7,21 @@
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then gives the audit two
-# inputs, two runs and one session, adds its five action properties and its
-# step bound, and checks them over the whole bounded space. It then reruns the
-# same space once per reachability witness, with that witness's negation as an
-# extra invariant, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds five defects into a
-# copy of the generated model (an accept of a run other than the marked one,
-# an accept that records no stop, a busy settle that records the stop, a
-# resume that ignores the stop, and a settlement of a stopped run as a
-# refused resume) and requires TLC to refuse each with the property it
-# breaks. A mutant run uses one worker, so the violation TLC reports is the
-# shallowest one. An anchor this script expects but cannot find fails the
-# run. Each TLC run is held to the canonical lane's per-run cap
-# (`TLC_RUN_CAP_SECS`, default 900 s, see tlc_run_cap.sh); a run that hits it
-# fails closed as TLC INCOMPLETE (exit 3).
+# inputs, two runs and one session, adds its six action properties, its
+# invariant and its step bound, and checks them over the whole bounded space.
+# It then reruns the same space once per reachability witness, with that
+# witness's negation as an extra invariant, and requires TLC to report exactly
+# that violation, so the properties are not vacuous. With --mutants it then
+# seeds eight defects into a copy of the generated model (an accept of a run
+# other than the marked one, an accept with no run marked, an accept with a
+# run current, an accept while the registration drains, an accept that
+# records no stop, a busy settle that records the stop, a resume that ignores
+# the stop, and a settlement of a stopped run as a refused resume) and
+# requires TLC to refuse each with the property it breaks. A mutant run uses
+# one worker, so the violation TLC reports is the shallowest one. An anchor
+# this script expects but cannot find fails the run. Each TLC run is held to
+# the canonical lane's per-run cap (`TLC_RUN_CAP_SECS`, default 900 s, see
+# tlc_run_cap.sh); a run that hits it fails closed as TLC INCOMPLETE (exit 3).
 set -euo pipefail
 
 usage="usage: retained_run_settle_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -69,10 +70,12 @@ write_cfg() {
   replace_exact_line "INVARIANTS" "PROPERTIES
   AuditSettleChangesOnlyTheStop
   AuditAcceptedSettlesTheRetainedRun
+  AuditSettleNotAcceptedWhileDraining
   AuditRefusedSettleRecordsNothing
   AuditSettledRunNeverResumes
   AuditSettledRunEndsCancelled
-INVARIANTS${extra}" "${cfg}"
+INVARIANTS
+  AuditRunningHasACurrentRun${extra}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
 }
@@ -117,7 +120,8 @@ if [[ "${safety_status}" != "0" ]] \
 fi
 
 for witness in AcceptedUnderHostHold SettledUnderHostHold RepeatAccepted BusyWithRunCurrent \
-  BusyStaleObservation BusyWhileDraining RetryNotRetained; do
+  BusyStaleObservation BusyWhileDraining RetryNotRetained BusyNotServingInitializing \
+  BusyNotServingRetired BusyNotServingStopped InertDestroyed; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -200,6 +204,47 @@ ACCEPTED = ["SettleRetainedRunAcceptedIdle", "SettleRetainedRunAcceptedAttached"
 edit_arms(
     ACCEPTED,
     lambda line: line == "    /\\ (resumable_run_id = run_id)",
+    lambda line: "    /\\ TRUE",
+)
+PY
+
+  # The settle is accepted with no run marked (10 steps: after the kept run
+  # was settled, a settle that observed no run).
+  mutate accept_with_no_run_retained "property AuditAcceptedSettlesTheRetainedRun is violated" "$@" <<'PY'
+edit_arms(
+    ACCEPTED,
+    lambda line: line == "    /\\ (resumable_run_id # None)",
+    lambda line: "    /\\ TRUE",
+)
+PY
+
+  # The settle is accepted while a run is current (9 steps: the kept run
+  # started with nothing held and has not resumed yet): the Idle arm also
+  # answers a Running registration, with no current-run guard.
+  mutate accept_with_a_current_run "property AuditAcceptedSettlesTheRetainedRun is violated" "$@" <<'PY'
+edit_arms(
+    ["SettleRetainedRunAcceptedIdle"],
+    lambda line: line == "    /\\ phase = \"Idle\"",
+    lambda line: "    /\\ phase \\in {\"Idle\", \"Running\"}",
+)
+edit_arms(
+    ["SettleRetainedRunAcceptedIdle"],
+    lambda line: line == "    /\\ phase' = \"Idle\"",
+    lambda line: "    /\\ phase' = phase",
+)
+edit_arms(
+    ["SettleRetainedRunAcceptedIdle"],
+    lambda line: line == "    /\\ (current_run_id = None)",
+    lambda line: "    /\\ TRUE",
+)
+PY
+
+  # The settle is accepted while the registration drains for its unregister
+  # (9 steps), whose next registration would find the run open again.
+  mutate accept_while_draining "property AuditSettleNotAcceptedWhileDraining is violated" "$@" <<'PY'
+edit_arms(
+    ACCEPTED,
+    lambda line: line == "    /\\ (registration_phase # \"Draining\")",
     lambda line: "    /\\ TRUE",
 )
 PY

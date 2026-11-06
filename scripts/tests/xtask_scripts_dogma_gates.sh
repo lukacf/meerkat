@@ -296,7 +296,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # and with --mutants each seeded defect's property violated.
 # run_start_hold_audit.sh requires each of its nine reachability witnesses
 # (seven in its main run, two in its reasons run) to be reported violated.
-# retained_run_settle_audit.sh requires its seven witnesses violated, and
+# retained_run_settle_audit.sh requires its eleven witnesses violated, and
 # with --mutants each seeded defect's action property violated.
 # requeue_across_stop_audit.sh requires each of its fifteen reachability
 # witnesses to be reported violated.
@@ -439,7 +439,12 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessBusyStaleObservation is violated."' \
   'echo "Error: Invariant NotAuditWitnessBusyWhileDraining is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetryNotRetained is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingInitializing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessInertDestroyed is violated."' \
   'echo "Error: Action property AuditAcceptedSettlesTheRetainedRun is violated."' \
+  'echo "Error: Action property AuditSettleNotAcceptedWhileDraining is violated."' \
   'echo "Error: Action property AuditRefusedSettleRecordsNothing is violated."' \
   'echo "Error: Action property AuditSettledRunNeverResumes is violated."' \
   'echo "Error: Action property AuditSettledRunEndsCancelled is violated."' \

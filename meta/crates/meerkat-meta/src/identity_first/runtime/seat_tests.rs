@@ -147,6 +147,18 @@ struct SeatCore {
     seat_gate: StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     /// Core refuses each wake with this verdict.
     wake_refusal: StdMutex<Option<meerkat_mob::MemberWakeRefusal>>,
+    /// Core's build preparation retries: the identities whose build
+    /// preparation their host asked to retry. Core refuses each one's wakes
+    /// (a delivery's included) `BuildPreparationRetry` until the host
+    /// retries the preparation
+    /// ([`SessionBridge::resolve_member_build_preparation`]).
+    build_preparation_retry: StdMutex<BTreeSet<AgentIdentity>>,
+    /// The host's build preparer refuses these identities' builds,
+    /// retryably: a wake Core makes of one records its retry and is refused
+    /// for it.
+    preparation_refuses: StdMutex<BTreeSet<AgentIdentity>>,
+    /// Every build preparation retry the host asked Core for, by member id.
+    resolves: StdMutex<Vec<String>>,
     /// Core answers each wake with this typed resume refusal on this
     /// session, as the bridge reads Core's Broken verdict on a member it
     /// holds.
@@ -298,6 +310,21 @@ impl SeatCore {
     fn dematerialize(&self, runtime_id: &AgentRuntimeId) {
         lock(&self.materialized).remove(runtime_id);
     }
+
+    /// Whether Core refuses a wake of `identity` for its build preparation
+    /// retry: Core keeps one, or the host's preparer refuses the wake's
+    /// preparation, which records one.
+    fn refuses_for_build_preparation(&self, identity: &AgentIdentity) -> bool {
+        let mut retries = lock(&self.build_preparation_retry);
+        if retries.contains(identity) {
+            return true;
+        }
+        if lock(&self.preparation_refuses).contains(identity) {
+            retries.insert(identity.clone());
+            return true;
+        }
+        false
+    }
 }
 
 #[async_trait::async_trait]
@@ -433,6 +460,23 @@ impl SessionBridge for SeatCore {
                 detail: format!("Core refused the wake: {}", refusal.as_str()),
             });
         }
+        // Core keeps the member's build preparation retry: the wake is
+        // refused for it, and the host's preparer is not asked. Without one,
+        // a preparer that refuses again makes Core record the retry. A
+        // member Core holds materialized is not woken.
+        let materialized = self
+            .core
+            .live_member(identity)?
+            .is_some_and(|live| lock(&self.materialized).contains(&live.agent_runtime_id));
+        if !materialized && self.refuses_for_build_preparation(identity) {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(identity),
+                refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+                detail: "Core holds the member's wakes for the build preparation its host \
+                         asked to retry"
+                    .to_string(),
+            });
+        }
         if let Some((kind, session_id)) = lock(&self.wake_rejection).clone() {
             return Err(BridgeError::ResumeRejected {
                 kind,
@@ -445,6 +489,16 @@ impl SessionBridge for SeatCore {
             self.materialize(&live.agent_runtime_id);
         }
         Ok(live)
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id_asked: &meerkat_mob::AgentIdentity,
+    ) -> Result<(), BridgeError> {
+        lock(&self.resolves).push(member_id_asked.to_string());
+        lock(&self.build_preparation_retry)
+            .retain(|identity| member_id(identity) != *member_id_asked);
+        Ok(())
     }
 
     async fn member_binding_history(
@@ -729,6 +783,35 @@ impl SessionBridge for SeatCore {
             return Err(BridgeError::Mob(format!(
                 "{runtime_id}: Core refuses the wake while the host preparation is pending"
             )));
+        }
+        // Core's dispatch wakes a member that is not materialized, and
+        // refuses that wake for a build preparation retry it keeps.
+        let woken = (!lock(&self.materialized).contains(runtime_id))
+            .then(|| {
+                let candidates: Vec<AgentIdentity> = {
+                    let retries = lock(&self.build_preparation_retry);
+                    let refuses = lock(&self.preparation_refuses);
+                    retries.iter().chain(refuses.iter()).cloned().collect()
+                };
+                candidates.into_iter().find(|identity| {
+                    self.core
+                        .live_member(identity)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|live| &live.agent_runtime_id == runtime_id)
+                })
+            })
+            .flatten();
+        if let Some(identity) = woken
+            && self.refuses_for_build_preparation(&identity)
+        {
+            return Err(BridgeError::MemberWakeRefused {
+                identity: member_id(&identity),
+                refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+                detail: "Core holds the member's wakes for the build preparation its host \
+                         asked to retry"
+                    .to_string(),
+            });
         }
         let session = self
             .core
@@ -4065,6 +4148,130 @@ async fn ready_bootstrap_entry(runtime: &IdentityRuntime, identity: &AgentIdenti
         snapshot.complete = true;
         snapshot.refresh_aggregates();
     });
+}
+
+/// A door's wake Core refuses for the build preparation the member's host
+/// asked to retry (`BuildPreparationRetry`) retries that preparation
+/// (`resolve_member_build_preparation`) and wakes the member again, once:
+/// the member is materialized on the retry.
+///
+/// RED before the door answered Core's typed refusal: the materialization
+/// was refused retryable, and Core was asked for no retry.
+#[tokio::test]
+async fn a_door_wake_refused_for_a_build_preparation_retry_retries_it_once() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.build_preparation_retry).insert(alice.clone());
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let woken = runtime.materialize(&alice).await;
+
+    assert!(
+        woken.is_ok(),
+        "the retried wake materializes alice: {woken:?}"
+    );
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst) - wakes,
+        2,
+        "the refused wake and its one retry"
+    );
+}
+
+/// A send whose delivery Core refuses for the build preparation the
+/// member's host asked to retry retries that preparation and delivers once:
+/// the door's one retry covers a delivery's wake as it covers its own.
+///
+/// RED before the door answered Core's typed refusal: the send was refused
+/// retryable, and nothing was delivered.
+#[tokio::test]
+async fn a_send_refused_for_a_build_preparation_retry_is_delivered_after_one_retry() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore {
+        admits_deliveries: true,
+        ..SeatCore::default()
+    });
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.build_preparation_retry).insert(alice.clone());
+
+    let sent = runtime.send(&alice, &text("hello")).await;
+
+    assert!(sent.is_ok(), "the retried delivery goes through: {sent:?}");
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(lock(&core.delivered).len(), 1, "delivered once");
+}
+
+/// A healthy door wake asks Core for nothing extra: no build preparation
+/// retry, one wake.
+#[tokio::test]
+async fn a_healthy_door_wake_retries_no_build_preparation() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let woken = runtime.materialize(&alice).await;
+
+    assert!(woken.is_ok(), "{woken:?}");
+    assert!(lock(&core.resolves).is_empty(), "no retry was asked");
+    assert_eq!(core.wakes.load(Ordering::SeqCst) - wakes, 1);
+}
+
+/// A door's retried wake that Core refuses again for the build preparation
+/// (the host's preparer refused the retry too) surfaces typed and
+/// retryable: the door retries once, never in a loop.
+///
+/// RED before the door answered Core's typed refusal: the first refusal
+/// surfaced, and Core was asked for no retry.
+#[tokio::test]
+async fn a_second_build_preparation_retry_refusal_surfaces_typed() {
+    let alice = identity("personal:alice");
+    let core = Arc::new(SeatCore::default());
+    let runtime = runtime_over(None, &core);
+    register_live(&runtime, &core.core, spec(&alice), 0, SessionId::new())
+        .await
+        .expect("registered live");
+    lock(&core.preparation_refuses).insert(alice.clone());
+    lock(&core.build_preparation_retry).insert(alice.clone());
+    let wakes = core.wakes.load(Ordering::SeqCst);
+
+    let refused = runtime.materialize(&alice).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(IdentityRuntimeError::IdentityWakeRetryable { .. })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        *lock(&core.resolves),
+        vec![member_id(&alice).to_string()],
+        "the door retried the build preparation once"
+    );
+    assert_eq!(
+        core.wakes.load(Ordering::SeqCst) - wakes,
+        2,
+        "the refused wake and its one retry, never more"
+    );
 }
 
 /// An explicit materialization or warm that Core refuses with a refusal

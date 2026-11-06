@@ -98,11 +98,15 @@ impl AgentCustomizer for CountingCustomizer {
 }
 
 /// Core holding members live, and recording each run-start hold release
-/// the identity runtime asks for.
+/// the identity runtime asks for. It holds the `ToolsNotPublished` run
+/// starts of the members a row stages (Core stages that hold when its
+/// preparer answers `HoldUntilReleased`), until a release.
 #[derive(Default)]
 struct HoldingCore {
     core: CoreTestMembers,
     released: Mutex<Vec<String>>,
+    /// The members whose run starts Core holds for unpublished tools.
+    held: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl HoldingCore {
@@ -111,6 +115,15 @@ impl HoldingCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Core stages `member`'s `ToolsNotPublished` hold, as its build does
+    /// after the preparer answered `HoldUntilReleased`.
+    fn stage_hold(&self, member: &meerkat_mob::AgentIdentity) {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(member.to_string());
     }
 }
 
@@ -182,11 +195,27 @@ impl SessionBridge for HoldingCore {
         &self,
         member_id: &meerkat_mob::AgentIdentity,
     ) -> Result<(), BridgeError> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(member_id.as_str());
         self.released
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(member_id.to_string());
         Ok(())
+    }
+
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<meerkat_mob::AgentIdentity>, BridgeError> {
+        Ok(self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|member| meerkat_mob::AgentIdentity::from(member.as_str()))
+            .collect())
     }
 
     async fn apply_declared_roster(
@@ -618,6 +647,143 @@ async fn a_build_core_reports_unprepared_is_recorded_for_its_registered_identity
     assert!(
         runtime.last_built_tools(&unregistered).await?.is_none(),
         "the build of a member no registered identity names is not recorded"
+    );
+    Ok(())
+}
+
+/// A build preparation the host asked to retry and a host preparation Core
+/// keeps for another cause (a first-boot row, a held role move) are told
+/// apart by Core, and Meta answers each from Core's cause: a wake Core
+/// refused `BuildPreparationRetry` reports the reason the host's customizer
+/// failed with, typed, and a wake Core refused `HostPreparationPending`
+/// reports Core's refusal, never a customizer failure the identity's last
+/// preparation recorded.
+///
+/// RED before Meta read Core's cause: Meta typed `HostPreparationPending`
+/// from its own record of refused preparations, so the first-boot wake
+/// reported the customizer's failure, and the retry's refusal reported
+/// nothing of it.
+#[tokio::test]
+async fn a_retryable_build_preparation_and_a_first_boot_request_are_told_apart_by_core()
+-> TestResult {
+    let alice = identity("personal:alice");
+    let bob = identity("personal:bob");
+    let core = Arc::new(HoldingCore::default());
+    let customizer = Arc::new(CountingCustomizer {
+        refuse: Some(|| CustomizerError::BuildFailed("the host is down".to_string())),
+        ..CountingCustomizer::default()
+    });
+    let (runtime, _registry) = runtime_with(&core, Some(customizer)).await?;
+    let preparer = IdentityBuildPreparer::new(true);
+    preparer.bind(&runtime, None).await;
+    for identity in [&alice, &bob] {
+        runtime
+            .register(spec(identity))
+            .await
+            .expect("the identity registers");
+    }
+    runtime.compose_member_builds().await;
+    // Both identities' last preparations failed.
+    for identity in [&alice, &bob] {
+        let prepared = preparer
+            .prepare_identity_member(
+                &member_of(identity),
+                identity.clone(),
+                Some(Arc::clone(&runtime)),
+                management(MemberIdentityManagement::CommandDriven),
+            )
+            .await;
+        assert!(
+            matches!(
+                prepared,
+                Err(MemberBuildPreparationRefusal::Retryable { .. })
+            ),
+            "{identity}: {prepared:?}"
+        );
+    }
+    let refused = |identity: &AgentIdentity, refusal: meerkat_mob::MemberWakeRefusal| {
+        runtime.wake_error(
+            identity,
+            None,
+            BridgeError::MemberWakeRefused {
+                identity: member_of(identity),
+                refusal,
+                detail: format!("Core refused the wake: {}", refusal.as_str()),
+            },
+        )
+    };
+
+    // Core keeps alice's build preparation for its retry.
+    match refused(
+        &alice,
+        meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+    ) {
+        IdentityRuntimeError::IdentityWakeRetryable { detail, .. } => {
+            assert!(detail.contains("the host is down"), "{detail}");
+        }
+        other => return Err(format!("alice reports her customizer's failure: {other:?}").into()),
+    }
+    // Core keeps bob's host preparation for his first-boot row.
+    match refused(&bob, meerkat_mob::MemberWakeRefusal::HostPreparationPending) {
+        IdentityRuntimeError::IdentityWakeRetryable { detail, .. } => {
+            assert!(
+                !detail.contains("the host is down"),
+                "bob's first-boot preparation is no customizer failure: {detail}"
+            );
+            assert!(detail.contains("host_preparation_pending"), "{detail}");
+        }
+        other => return Err(format!("bob reports Core's refusal: {other:?}").into()),
+    }
+    Ok(())
+}
+
+/// The composition publishes and releases the members Core holds for
+/// unpublished customizer tools, as Core reads them
+/// (`members_holding_run_starts`): a member this identity runtime never
+/// held itself (Core held its build before the runtime existed) is
+/// published once and released, and a later composition releases nothing.
+///
+/// RED before Meta read Core's held members: the composition published only
+/// the members its own record named, so this member stayed held.
+#[tokio::test]
+async fn the_composition_releases_the_members_core_holds_for_unpublished_tools() -> TestResult {
+    let alice = identity("personal:alice");
+    let core = Arc::new(HoldingCore::default());
+    bind_live(
+        &core.core,
+        &alice,
+        &meerkat_mob::ProfileName::from("personal"),
+        1,
+        Some(SessionId::new()),
+    )?;
+    core.stage_hold(&member_of(&alice));
+    let customizer = Arc::new(CountingCustomizer::default());
+    let (runtime, registry) = runtime_with(&core, Some(Arc::clone(&customizer))).await?;
+    let preparer = IdentityBuildPreparer::new(true);
+    preparer.bind(&runtime, None).await;
+    runtime
+        .register(spec(&alice))
+        .await
+        .expect("the identity registers");
+    assert_eq!(
+        runtime
+            .customizer_tools_pending_for(&alice)
+            .map(|pending| pending.reason),
+        Some(PUBLISHED_ONCE_COMPOSED.to_string()),
+        "the status reads Core's hold"
+    );
+
+    runtime.compose_member_builds().await;
+    assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
+    assert_eq!(registry.ensure(&alice).generation(), 1, "published once");
+    assert_eq!(core.released(), vec![member_of(&alice).to_string()]);
+    assert!(runtime.customizer_tools_pending_for(&alice).is_none());
+
+    runtime.compose_member_builds().await;
+    assert_eq!(
+        core.released().len(),
+        1,
+        "a later composition releases nothing"
     );
     Ok(())
 }

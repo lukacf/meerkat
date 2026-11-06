@@ -18,6 +18,7 @@ import stat
 import sys
 import time
 from types import SimpleNamespace
+import uuid
 
 import httpx
 import jwt
@@ -740,3 +741,120 @@ async def test_consent_read_and_decide_are_forwarded(tmp_path, route, payload, l
             assert len(native.requests) == before
     finally:
         await console.close()
+
+
+# Forge's Build default: named accounts for new builds, and the one console
+# update transition that moves an existing installation on its next update.
+SHARED = b'{"authentication":"local-password"}\n'
+NAMED = b'{"authentication":"local-accounts"}\n'
+UPDATE_FIELDS = (json.dumps({"fields": [
+    {"key": "CONSOLE_USER_ID", "label": "Console user", "secret": False, "required": True},
+    {"key": "CONSOLE_LOGIN_PASSWORD", "label": "Console password", "secret": True, "required": True,
+     "min_length": 12, "max_length": 4096}]}, separators=(",", ":")) + "\n").encode()
+UPDATE_ACCESS = ('enabled = true\nadmins = ["' + OPERATOR + '"]\nrules = []\n\n[groups]\n').encode()
+
+
+def console_update(before, after, *, fields=UPDATE_FIELDS, access=UPDATE_ACCESS, mode=0o644):
+    from launchkit import deployment_updates as updates
+    previous = {"application/configuration.json": (UPDATE_FIELDS, 0o644), "config/access.toml": (UPDATE_ACCESS, 0o644)}
+    candidate = {"application/configuration.json": (fields, 0o644), "config/access.toml": (access, 0o644)}
+    if before is not None:
+        previous["application/console.json"] = (before, 0o644)
+    if after is not None:
+        candidate["application/console.json"] = (after, mode)
+    return updates.compatibility(previous, candidate, {})
+
+
+def test_update_moves_one_shared_console_account_to_named_accounts():
+    changes, blockers = console_update(SHARED, NAMED)
+    assert changes == [{"path": "application/console.json", "change": "changed"}]
+    assert blockers == []
+    # The same two documents written with other whitespace are the same choice.
+    assert console_update(b'{\n  "authentication": "local-password"\n}\n', b'{"authentication": "local-accounts"}')[1] == []
+
+
+@pytest.mark.parametrize("variant", ["fields", "operator", "back", "other", "added", "removed", "mode",
+                                     "extra", "duplicate", "oversized"])
+def test_update_refuses_every_other_console_authentication_change(variant):
+    before, after, options = SHARED, NAMED, {}
+    if variant == "fields":
+        options["fields"] = UPDATE_FIELDS.replace(b'"Console user"', b'"Console account"')
+    elif variant == "operator":
+        options["access"] = UPDATE_ACCESS.replace(OPERATOR.encode(), b"another-operator")
+    elif variant == "back":
+        before, after = NAMED, SHARED
+    elif variant == "other":
+        after = b'{"authentication":"oidc"}\n'
+    elif variant == "added":
+        before = None
+    elif variant == "removed":
+        after = None
+    elif variant == "mode":
+        options["mode"] = 0o755
+    elif variant == "extra":
+        after = b'{"authentication":"local-accounts","accounts":["' + ALICE.encode() + b'"]}\n'
+    elif variant == "duplicate":
+        after = b'{"authentication":"local-password","authentication":"local-accounts"}\n'
+    else:
+        after = NAMED + b" " * 4096
+    _, blockers = console_update(before, after, **options)
+    assert any("application/console.json" in blocker for blocker in blockers)
+
+
+async def console_installation(tmp_path):
+    """One installed package with the single shared account, then its next build."""
+    from launchkit.deployment import materialize, read_receipt, update_receipt
+    from test_deployment import Guide, Implementation, Service, submit
+    guide = Guide()
+    implementation = Implementation(guide)
+    implementation.digest = "c" * 64
+    implementation.application_configuration = json.loads(UPDATE_FIELDS)
+    implementation.extra_files = {"application/console.json": SHARED.decode(),
+                                  "config/access.toml": UPDATE_ACCESS.decode()}
+    service = Service(tmp_path / "private-server", guide, implementation)
+    destination = tmp_path / "application"
+    await submit(service, destination, settings={"OPENAI_API_KEY": "private-api-key-value",
+        "CONSOLE_USER_ID": OPERATOR, "CONSOLE_LOGIN_PASSWORD": OPERATOR_PASSWORD})
+    directory = service._directory(guide.identity)
+    materialize(directory)
+    await service.shutdown()
+    update_receipt(directory, status="stopped")
+    previous = read_receipt(directory)
+    implementation.identity = str(uuid.uuid4())
+    implementation.digest = "d" * 64
+    implementation.extra_files = {"application/console.json": NAMED.decode(),
+                                  "config/access.toml": UPDATE_ACCESS.decode()}
+    return service, directory, destination, previous
+
+
+async def test_an_installed_shared_account_moves_to_named_accounts_on_its_next_update(tmp_path):
+    from launchkit import deployment_updates as updates
+    service, directory, destination, previous = await console_installation(tmp_path)
+    private = (destination / ".env").read_bytes()
+    receipt = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    update = receipt["update"]
+    assert update["status"] == "staged" and update["blockers"] == [], update["blockers"]
+    assert {"path": "application/console.json", "change": "changed"} in update["changes"]
+    updates.activate(directory, update["update_id"])
+    assert (destination / "application/console.json").read_bytes() == NAMED
+    assert (destination / "config/access.toml").read_bytes() == UPDATE_ACCESS
+    assert (destination / ".env").read_bytes() == private
+
+
+async def test_an_update_that_also_changes_the_operator_stays_blocked(tmp_path):
+    service, directory, destination, previous = await console_installation(tmp_path)
+    service.implementation.extra_files["config/access.toml"] = UPDATE_ACCESS.decode().replace(OPERATOR, "another-operator")
+    receipt = await service.stage_update(service.guide.identity, previous["deployment_id"],
+        service.guide.state["version"], service.implementation.identity)
+    update = receipt["update"]
+    assert update["status"] == "blocked"
+    assert any("application/console.json" in blocker for blocker in update["blockers"])
+    assert (destination / "application/console.json").read_bytes() == SHARED
+
+
+def test_legacy_ordinary_source_keeps_one_shared_account():
+    # Its continuation re-derives these bytes and refuses different ones, so
+    # the legacy ordinary route keeps the single shared account.
+    from launchkit.ordinary_application_source import _console_source
+    assert json.loads(_console_source("guide")["application/console.json"]) == {"authentication": "local-password"}

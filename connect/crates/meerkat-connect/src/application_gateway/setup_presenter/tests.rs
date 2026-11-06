@@ -483,8 +483,12 @@ async fn account_failure_resumes_the_same_enrollment_and_later_review() {
             std::io::Error::other("private-provider-canary"),
         );
         assert!(
-            super::super::finish_account_presentation(&mut presenters, enrollment, Err(failure))
-                .unwrap()
+            super::super::finish_account_presentation(
+                Some(&mut presenters),
+                enrollment,
+                Err(failure)
+            )
+            .unwrap()
         );
         owner.check_session(&session).unwrap();
         let later = owner.review_access(request(session.clone()));
@@ -710,7 +714,8 @@ async fn software_request_unavailable_keeps_a_later_real_review() {
             "Controlled request-local transport loss".into(),
         )));
         assert!(
-            super::super::finish_software_presentation(&mut presenters, enrollment, local).unwrap()
+            super::super::finish_software_presentation(Some(&mut presenters), enrollment, local)
+                .unwrap()
         );
         let later = owner.review_access(request(session.clone()));
         tokio::pin!(later);
@@ -762,7 +767,7 @@ async fn software_owner_stop_and_typed_cleanup_failure_do_not_resume_enrollment(
             Ok(ApprovalPromptOutcome::Stopped)
         };
         let result =
-            super::super::finish_software_presentation(&mut presenters, enrollment, outcome);
+            super::super::finish_software_presentation(Some(&mut presenters), enrollment, outcome);
         if cleanup_failed {
             assert!(matches!(result, Err(ConnectError::Cleanup { .. })));
         } else {

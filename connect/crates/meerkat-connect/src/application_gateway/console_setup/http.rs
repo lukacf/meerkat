@@ -159,16 +159,13 @@ fn selected(
         .binding
         .current_login(&viewer)
         .map_err(|_| StatusCode::FORBIDDEN)?;
+    // The caller answers only the prompt of its own login.
     let active = panel
         .0
         .active
-        .lock()
+        .of(&login)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .clone()
         .ok_or(StatusCode::CONFLICT)?;
-    if !active.login.same_owner(&login) {
-        return Err(StatusCode::FORBIDDEN.into());
-    }
     let action = Action {
         viewer: panel
             .0
@@ -202,10 +199,9 @@ fn still_selected(
     if !panel
         .0
         .active
-        .lock()
+        .of(&action.login)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, active))
+        .is_some_and(|current| Arc::ptr_eq(&current, active))
     {
         return Err(StatusCode::CONFLICT.into());
     }
@@ -293,21 +289,19 @@ async fn data_page(
 }
 // One read owns its selected presentation across the native await. Retirement
 // removes that presentation; replacement cannot retarget the completed read.
+// `current` reads the reader's login's presentation now, after the await.
 pub(super) async fn read_status_with_review<T, P>(
     selected: Option<Arc<T>>,
-    active: &Mutex<Option<Arc<T>>>,
+    current: impl FnOnce() -> Result<Option<Arc<T>>, ()>,
     read: impl std::future::Future<Output = Result<P, StatusCode>>,
 ) -> Result<(P, Option<Arc<T>>), StatusCode> {
     let page = read.await?;
     let selected = match selected {
-        Some(selected) => {
-            let current = active.lock().map_err(|_| StatusCode::CONFLICT)?;
-            match current.as_ref() {
-                None => None,
-                Some(current) if Arc::ptr_eq(current, &selected) => Some(selected),
-                Some(_) => return Err(StatusCode::CONFLICT),
-            }
-        }
+        Some(selected) => match current().map_err(|()| StatusCode::CONFLICT)? {
+            None => None,
+            Some(current) if Arc::ptr_eq(&current, &selected) => Some(selected),
+            Some(_) => return Err(StatusCode::CONFLICT),
+        },
         None => None,
     };
     Ok((page, selected))
@@ -347,14 +341,14 @@ async fn data_from(
             }
         },
     };
-    let active = match panel.0.active.lock() {
-        Ok(slot) => slot.clone(),
+    // Only the reader's own login's presentation is shown to it.
+    let active = match panel.0.active.of(&login) {
+        Ok(active) => active,
         Err(_) => {
             status_read_refused("http.data.active_lock", "poisoned");
             return failure(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
-    let active = active.filter(|active| active.login.same_owner(&login));
     if let Some(active) = &active
         && (active
             .task
@@ -404,10 +398,13 @@ async fn data_from(
         }
         Ok(page)
     };
-    let (page, active) = match read_status_with_review(active, &panel.0.active, read).await {
-        Ok(value) => value,
-        Err(status) => return failure(status),
-    };
+    let (page, active) =
+        match read_status_with_review(active, || panel.0.active.of(&login).map_err(|_| ()), read)
+            .await
+        {
+            Ok(value) => value,
+            Err(status) => return failure(status),
+        };
     let projection = page.projection();
     let review = if let Some(active) = active {
         let start = match active.start.lock() {

@@ -138,7 +138,7 @@ async fn status_read_across_retirement_omits_review_and_replacement_still_refuse
         let replacement = Arc::new("review-51");
         let active = Mutex::new(Some(selected.clone()));
         let (complete, page) = oneshot::channel();
-        let read = http::read_status_with_review(Some(selected.clone()), &active, async {
+        let read = http::read_status_with_review(Some(selected.clone()), slot(&active), async {
             page.await.unwrap()
         });
         tokio::pin!(read);
@@ -196,8 +196,9 @@ async fn status_read_across_retirement_omits_review_and_replacement_still_refuse
         let selected = Arc::new("review-51");
         let active = Mutex::new(Some(selected.clone()));
         let (complete, page) = oneshot::channel();
-        let read =
-            http::read_status_with_review(Some(selected), &active, async { page.await.unwrap() });
+        let read = http::read_status_with_review(Some(selected), slot(&active), async {
+            page.await.unwrap()
+        });
         tokio::pin!(read);
         assert!(read.as_mut().now_or_never().is_none());
         active
@@ -216,11 +217,18 @@ async fn status_read_across_retirement_omits_review_and_replacement_still_refuse
     assert!(poisoned.is_err());
     assert!(
         matches!(
-            http::read_status_with_review(Some(selected), &active, async { Ok(()) }).await,
+            http::read_status_with_review(Some(selected), slot(&active), async { Ok(()) }).await,
             Err(StatusCode::CONFLICT)
         ),
         "poison must not become a retired presentation"
     );
+}
+
+// The read's view of one login's presentation slot, after its await.
+fn slot<'a>(
+    active: &'a Mutex<Option<Arc<&'static str>>>,
+) -> impl FnOnce() -> Result<Option<Arc<&'static str>>, ()> + 'a {
+    move || active.lock().map(|held| held.clone()).map_err(|_| ())
 }
 
 #[test]

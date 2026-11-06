@@ -382,7 +382,7 @@ async fn present_setup_prompt(
                 .await
         }
         .await;
-        return finish_account_presentation(setup, enrollment, result);
+        return finish_account_presentation(Some(setup), enrollment, result);
     }
     if let SetupEvent::Public(request) = event {
         let result = async {
@@ -405,7 +405,7 @@ async fn present_setup_prompt(
                 .await
         }
         .await;
-        return finish_account_presentation(setup, enrollment, result);
+        return finish_account_presentation(Some(setup), enrollment, result);
     }
     if let SetupEvent::Account(request) = event {
         let result = async {
@@ -448,7 +448,7 @@ async fn present_setup_prompt(
             }
         }
         .await;
-        return finish_account_presentation(setup, enrollment, result);
+        return finish_account_presentation(Some(setup), enrollment, result);
     }
     let SetupEvent::Approval(prompt) = event else {
         unreachable!("service requests handled above")
@@ -469,17 +469,21 @@ async fn present_setup_prompt(
         )
         .await
     };
-    finish_software_presentation(setup, enrollment, result)
+    finish_software_presentation(Some(setup), enrollment, result)
 }
 
+/// `setup` is the presenters a finished enrollment returns to; `None` once
+/// the presenter loop takes no new request, and the enrollment then retires.
 pub(super) fn finish_software_presentation(
-    setup: &mut SetupPresenters,
+    setup: Option<&mut SetupPresenters>,
     enrollment: Enrollment,
     result: Result<ApprovalPromptOutcome, ConnectError>,
 ) -> Result<bool, ConnectError> {
     match result {
         Ok(ApprovalPromptOutcome::Continue) => {
-            setup.resume(enrollment);
+            if let Some(setup) = setup {
+                setup.resume(enrollment);
+            }
             Ok(true)
         }
         Ok(ApprovalPromptOutcome::Refused(error)) => {
@@ -491,7 +495,9 @@ pub(super) fn finish_software_presentation(
                 _ => "Setup request unavailable.",
             };
             eprintln!("{message}");
-            setup.resume(enrollment);
+            if let Some(setup) = setup {
+                setup.resume(enrollment);
+            }
             Ok(true)
         }
         Ok(ApprovalPromptOutcome::Stopped) => Ok(false),
@@ -499,8 +505,9 @@ pub(super) fn finish_software_presentation(
     }
 }
 
+/// `setup` as for [`finish_software_presentation`].
 pub(super) fn finish_account_presentation(
-    setup: &mut SetupPresenters,
+    setup: Option<&mut SetupPresenters>,
     enrollment: Enrollment,
     result: Result<bool, ConnectError>,
 ) -> Result<bool, ConnectError> {
@@ -509,11 +516,15 @@ pub(super) fn finish_account_presentation(
             // The exact request has already joined and its response channel
             // yields native unavailable feedback. Keep other eligible work.
             crate::installed_service_review::account_request::report_failure(&error);
-            setup.resume(enrollment);
+            if let Some(setup) = setup {
+                setup.resume(enrollment);
+            }
             Ok(true)
         }
         Ok(true) => {
-            setup.resume(enrollment);
+            if let Some(setup) = setup {
+                setup.resume(enrollment);
+            }
             Ok(true)
         }
         result => result,

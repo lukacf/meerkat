@@ -611,7 +611,7 @@ fn schedule(mode: Schedule) -> Pin<Box<dyn Future<Output = ()>>> {
         let (first_result, ()) = tokio::join!(presenting, observe);
         assert!(first_result.is_err(), "the actual request failed; the gateway decides its local scope");
         assert!(crate::application_gateway::finish_account_presentation(
-            &mut presenters, enrollment, first_result).unwrap());
+            Some(&mut presenters), enrollment, first_result).unwrap());
         assert!(approvals.check_session(session.id()).is_ok());
         assert_eq!(approvals.store_path(), approval_path);
         assert!(installed.selection(connector_operations()).unwrap().check_current().is_ok());
@@ -632,7 +632,7 @@ fn schedule(mode: Schedule) -> Pin<Box<dyn Future<Output = ()>>> {
         let (second_result, second_approval) = tokio::join!(presenting, deny);
         assert!(matches!(second_result, Ok(true)));
         assert!(crate::application_gateway::finish_account_presentation(
-            &mut presenters, enrollment, second_result).unwrap());
+            Some(&mut presenters), enrollment, second_result).unwrap());
         assert!(matches!(completion.wait().await.unwrap(), CompletionOutcome::Completed(_)),
             "the original input completes without cancellation or another admission");
         assert_eq!(model.issued.load(Ordering::SeqCst), 4);

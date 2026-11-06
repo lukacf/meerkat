@@ -94,7 +94,8 @@ struct Panel {
     selection: ConsoleSetupSelection,
     binding: ConsoleSetupBinding,
     viewer: OnceLock<ConsoleViewerResolver>,
-    active: Mutex<Option<Arc<Active>>>,
+    // One open presentation per login: the login that started its request.
+    active: Presentations<Active>,
     next: AtomicU64,
     pages: Mutex<Vec<StatusOffer<Arc<ConsoleStatusPage>>>>,
 }
@@ -151,7 +152,6 @@ struct Active {
     software: bool,
     credential_review: bool,
     task: InstalledServiceTask,
-    login: ConsoleLoginHandle,
     start: Mutex<Option<oneshot::Sender<StartDisposition>>>,
     prompt: Mutex<Option<Exchange>>,
     callback: Mutex<Option<CallbackDelivery>>,
@@ -373,7 +373,7 @@ impl ConsoleSetup {
             selection,
             binding,
             viewer: OnceLock::new(),
-            active: Mutex::new(None),
+            active: Presentations::default(),
             next: AtomicU64::new(1),
             pages: Mutex::new(Vec::new()),
         })))
@@ -385,11 +385,15 @@ impl ConsoleSetup {
     /// A read may release obsolete local presentation custody after definite
     /// canonical terminal evidence. It never initiates native account work or
     /// writes a cancellation. Unknown/transient observations leave custody held.
+    /// Every login's open presentation is checked, as when one was open.
     async fn reclaim_terminal(&self) -> Result<bool, ConnectError> {
-        let active = self.0.active.lock().map_err(|_| unavailable())?.clone();
-        let Some(active) = active else {
-            return Ok(false);
-        };
+        let mut reclaimed = false;
+        for active in self.0.active.all()? {
+            reclaimed |= self.reclaim_obsolete(active).await?;
+        }
+        Ok(reclaimed)
+    }
+    async fn reclaim_obsolete(&self, active: Arc<Active>) -> Result<bool, ConnectError> {
         if active.start.lock().map_err(|_| unavailable())?.is_none() {
             return Ok(false);
         }
@@ -408,10 +412,7 @@ impl ConsoleSetup {
         if let Some(pending) = pending {
             let _ = pending.send(StartDisposition::Obsolete);
         }
-        let mut slot = self.0.active.lock().map_err(|_| unavailable())?;
-        if slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &active)) {
-            slot.take();
-        }
+        self.0.active.release(&active)?;
         Ok(true)
     }
     /// Presents the existing checked-install approval. The prompt's canonical
@@ -448,19 +449,16 @@ impl ConsoleSetup {
             software: true,
             credential_review: false,
             task,
-            login: login.clone(),
             start: Mutex::new(Some(pending)),
             prompt: Mutex::new(None),
             callback: Mutex::new(None),
             credentials: Mutex::new(None),
             action: Mutex::new(None),
         });
-        {
-            let mut slot = self.0.active.lock().map_err(|_| unavailable())?;
-            if slot.is_some() {
-                return Ok(ApprovalPromptOutcome::Refused(unavailable()));
-            }
-            *slot = Some(active.clone());
+        match self.0.active.claim(&login, active.clone()) {
+            Ok(()) => {}
+            Err(NotHeld::Taken) => return Ok(ApprovalPromptOutcome::Refused(unavailable())),
+            Err(NotHeld::Unavailable) => return Err(unavailable()),
         }
         let result = async {
             let record = prompt.record();
@@ -539,13 +537,8 @@ impl ConsoleSetup {
         }.await;
         // Release only this presentation. Shared custody failure is visible
         // and cannot be converted into a request-local success or retry.
-        match self.0.active.lock() {
-            Ok(mut slot) => {
-                if slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &active)) {
-                    slot.take();
-                }
-                result
-            }
+        match self.0.active.release(&active) {
+            Ok(()) => result,
             Err(_) => match result {
                 Ok(ApprovalPromptOutcome::Refused(primary)) | Err(primary) => {
                     Err(ConnectError::Cleanup {
@@ -642,20 +635,16 @@ impl ConsoleSetup {
             software: false,
             credential_review: credentials.is_some(),
             task,
-            login: login.clone(),
             start: Mutex::new(Some(start)),
             prompt: Mutex::new(None),
             callback: Mutex::new(None),
             credentials: Mutex::new(credentials),
             action: Mutex::new(None),
         });
-        {
-            let mut slot = self.0.active.lock().map_err(|_| unavailable())?;
-            if slot.is_some() {
-                return Err(unavailable());
-            }
-            *slot = Some(active.clone());
-        }
+        self.0
+            .active
+            .claim(&login, active.clone())
+            .map_err(|_| unavailable())?;
         // The sole presenter retains this request. An explicit authenticated
         // POST enters it; GET only projects the already retained request.
         let result = async {
@@ -730,28 +719,56 @@ impl ConsoleSetup {
         }.await;
         // Always retire transport, and release only this actual owner's slot.
         // present_console itself joins entered native account work on close.
-        if let Ok(mut slot) = self.0.active.lock()
-            && slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &active))
-        {
-            slot.take();
-        }
+        let _ = self.0.active.release(&active);
         result
     }
 }
 
-pub async fn serve_console_setup(
-    reviews: super::LocalSetupReviews,
+/// What one presentation returned, by the kind of request it presented.
+enum Presented {
+    /// An account, credential or public service request.
+    Request(Result<bool, ConnectError>),
+    /// A software approval.
+    Software(Result<ApprovalPromptOutcome, ConnectError>),
+}
+
+type Presentation = BoxFuture<
+    'static,
+    (
+        Option<ConsoleLoginHandle>,
+        super::setup_presenter::Enrollment,
+        Presented,
+    ),
+>;
+
+/// The login a setup request belongs to: the Console login of the task that
+/// started it. `None` for a request no Console login started, which the
+/// panel refuses at once.
+fn request_login(event: &super::setup_presenter::SetupEvent) -> Option<ConsoleLoginHandle> {
+    use super::setup_presenter::SetupEvent;
+    match event {
+        SetupEvent::Approval(prompt) => prompt.console_task(),
+        SetupEvent::Account(request) => request.console_task(),
+        SetupEvent::Public(request) => request.console_task(),
+        SetupEvent::Credentials(request) => request.console_task(),
+    }
+    .and_then(|task| task.console_login())
+    .cloned()
+}
+
+/// Present one setup request on its enrollment's panel, keeping the
+/// enrollment with the result.
+fn present_one(
+    login: Option<ConsoleLoginHandle>,
+    mut enrollment: super::setup_presenter::Enrollment,
+    event: super::setup_presenter::SetupEvent,
     closed: PrivateHostClosed,
-) -> Result<(), ConnectError> {
-    let mut presenters = super::setup_presenter::SetupPresenters::new(reviews);
-    loop {
-        let next = tokio::select! { biased; _ = closed.wait_closed() => return Ok(()), next = presenters.next() => next };
-        let Some((mut enrollment, event)) = next else {
-            return Ok(());
-        };
-        let result = match event {
-            super::setup_presenter::SetupEvent::Account(request) => {
-                let result = async {
+) -> Presentation {
+    use super::setup_presenter::SetupEvent;
+    Box::pin(async move {
+        let presented = match event {
+            SetupEvent::Account(request) => Presented::Request(
+                async {
                     let panel = enrollment.console().ok_or_else(unavailable)?;
                     panel
                         .present(
@@ -762,14 +779,10 @@ pub async fn serve_console_setup(
                         )
                         .await
                 }
-                .await;
-                // Request failure must not retire this enrollment or another
-                // helper. Host closure still wins at the next loop boundary.
-                super::finish_account_presentation(&mut presenters, enrollment, result)?;
-                continue;
-            }
-            super::setup_presenter::SetupEvent::Credentials(request) => {
-                let result = async {
+                .await,
+            ),
+            SetupEvent::Credentials(request) => Presented::Request(
+                async {
                     let panel = enrollment.console().ok_or_else(unavailable)?;
                     panel
                         .present_credentials(
@@ -780,12 +793,10 @@ pub async fn serve_console_setup(
                         )
                         .await
                 }
-                .await;
-                super::finish_account_presentation(&mut presenters, enrollment, result)?;
-                continue;
-            }
-            super::setup_presenter::SetupEvent::Public(request) => {
-                let result = async {
+                .await,
+            ),
+            SetupEvent::Public(request) => Presented::Request(
+                async {
                     let panel = enrollment.console().ok_or_else(unavailable)?;
                     panel
                         .present_public(
@@ -796,17 +807,116 @@ pub async fn serve_console_setup(
                         )
                         .await
                 }
-                .await;
-                super::finish_account_presentation(&mut presenters, enrollment, result)?;
-                continue;
-            }
-            super::setup_presenter::SetupEvent::Approval(prompt) => match enrollment.console() {
+                .await,
+            ),
+            SetupEvent::Approval(prompt) => Presented::Software(match enrollment.console() {
                 Some(panel) => panel.present_software(*prompt, &closed).await,
                 None => Ok(ApprovalPromptOutcome::Refused(unavailable())),
-            },
+            }),
         };
-        if !super::finish_software_presentation(&mut presenters, enrollment, result)? {
-            return Ok(());
+        (login, enrollment, presented)
+    })
+}
+
+/// Present the Console's setup requests: every login's at once, and one
+/// login's one at a time, in the order they arrived. Host closure, a
+/// presentation that reports the host stopped and a shared custody failure
+/// each end the intake: waiting requests retire with their enrollments, and
+/// every running presentation is joined (each observes the closure itself),
+/// never dropped.
+pub async fn serve_console_setup(
+    reviews: super::LocalSetupReviews,
+    closed: PrivateHostClosed,
+) -> Result<(), ConnectError> {
+    use futures_util::StreamExt as _;
+    enum Step {
+        Closed,
+        Next(
+            Option<(
+                super::setup_presenter::Enrollment,
+                super::setup_presenter::SetupEvent,
+            )>,
+        ),
+        Finished(
+            Option<(
+                Option<ConsoleLoginHandle>,
+                super::setup_presenter::Enrollment,
+                Presented,
+            )>,
+        ),
+    }
+    let mut presenters = Some(super::setup_presenter::SetupPresenters::new(reviews));
+    let mut turns = LoginTurns::default();
+    let mut running = futures_util::stream::FuturesUnordered::<Presentation>::new();
+    // No enrollment is waiting for its next request now: those presenting
+    // return to the presenters when they finish.
+    let mut idle = false;
+    let mut outcome = Ok(());
+    loop {
+        if presenters.is_none() && running.is_empty() {
+            return outcome;
+        }
+        let step = tokio::select! { biased;
+            _ = closed.wait_closed(), if presenters.is_some() => Step::Closed,
+            finished = running.next(), if !running.is_empty() => Step::Finished(finished),
+            next = async {
+                match presenters.as_mut() {
+                    Some(presenters) => presenters.next().await,
+                    None => std::future::pending().await,
+                }
+            }, if presenters.is_some() && !idle => Step::Next(next),
+        };
+        match step {
+            Step::Closed => {
+                presenters = None;
+                turns.clear();
+            }
+            Step::Next(None) if running.is_empty() => {
+                presenters = None;
+                turns.clear();
+            }
+            Step::Next(None) => idle = true,
+            Step::Next(Some((enrollment, event))) => {
+                let login = request_login(&event);
+                if let Some((enrollment, event)) = turns.offer(login.clone(), (enrollment, event)) {
+                    running.push(present_one(login, enrollment, event, closed.clone()));
+                }
+            }
+            Step::Finished(None) => {}
+            Step::Finished(Some((login, enrollment, presented))) => {
+                idle = false;
+                let next = turns.finished(login.as_ref());
+                // Request failure must not retire this enrollment or another
+                // helper. Host closure still ends the intake.
+                let finished = match presented {
+                    Presented::Request(result) => {
+                        super::finish_account_presentation(presenters.as_mut(), enrollment, result)
+                            .map(|_| true)
+                    }
+                    Presented::Software(result) => {
+                        super::finish_software_presentation(presenters.as_mut(), enrollment, result)
+                    }
+                };
+                match finished {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        presenters = None;
+                        turns.clear();
+                    }
+                    Err(error) => {
+                        if outcome.is_ok() {
+                            outcome = Err(error);
+                        }
+                        presenters = None;
+                        turns.clear();
+                    }
+                }
+                if presenters.is_some()
+                    && let Some((login, (enrollment, event))) = next
+                {
+                    running.push(present_one(login, enrollment, event, closed.clone()));
+                }
+            }
         }
     }
 }
@@ -816,10 +926,20 @@ fn unavailable() -> ConnectError {
 
 /// The presentations a panel holds, each with the exact login owner that
 /// started the request it shows. Presentation custody only: holding one is
-/// never a grant or a decision. A presentation is held while the panel
-/// holds no other.
+/// never a grant or a decision. A login holds one presentation at a time,
+/// and logins hold theirs at once: one person's open prompt never holds back
+/// another login's.
 pub(crate) struct Presentations<T> {
     held: Mutex<Vec<(ConsoleLoginHandle, Arc<T>)>>,
+}
+
+/// Why a presentation was not held.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotHeld {
+    /// The login holds another presentation.
+    Taken,
+    /// The panel's presentation custody is unavailable.
+    Unavailable,
 }
 
 impl<T> Default for Presentations<T> {
@@ -831,15 +951,11 @@ impl<T> Default for Presentations<T> {
 }
 
 impl<T> Presentations<T> {
-    /// Hold `value` for `login`; refused while the panel holds one.
-    pub(crate) fn claim(
-        &self,
-        login: &ConsoleLoginHandle,
-        value: Arc<T>,
-    ) -> Result<(), ConnectError> {
-        let mut held = self.held.lock().map_err(|_| unavailable())?;
-        if !held.is_empty() {
-            return Err(unavailable());
+    /// Hold `value` for `login`; refused while `login` holds another.
+    pub(crate) fn claim(&self, login: &ConsoleLoginHandle, value: Arc<T>) -> Result<(), NotHeld> {
+        let mut held = self.held.lock().map_err(|_| NotHeld::Unavailable)?;
+        if held.iter().any(|(owner, _)| owner.same_owner(login)) {
+            return Err(NotHeld::Taken);
         }
         held.push((login.clone(), value));
         Ok(())
@@ -878,7 +994,10 @@ impl<T> Presentations<T> {
 }
 
 /// The Console presenter loop's turns over requests and the login each one
-/// belongs to: one presentation at a time, whatever its login.
+/// belongs to: one presentation per login at a time, and every login's at
+/// once. A request whose login has one running waits for that login's turn,
+/// in the order it arrived. A request without a login is refused at once, so
+/// it never waits.
 pub(crate) struct LoginTurns<T> {
     running: Vec<Option<ConsoleLoginHandle>>,
     waiting: std::collections::VecDeque<(Option<ConsoleLoginHandle>, T)>,
@@ -897,7 +1016,12 @@ impl<T> LoginTurns<T> {
     /// A request of `login` arrived: it starts now (returned) or waits for
     /// its turn.
     pub(crate) fn offer(&mut self, login: Option<ConsoleLoginHandle>, request: T) -> Option<T> {
-        if !self.running.is_empty() {
+        let busy = login.as_ref().is_some_and(|login| {
+            self.running
+                .iter()
+                .any(|running| same_login(running.as_ref(), Some(login)))
+        });
+        if busy {
             self.waiting.push_back((login, request));
             return None;
         }
@@ -918,10 +1042,13 @@ impl<T> LoginTurns<T> {
         {
             self.running.remove(index);
         }
-        if !self.running.is_empty() {
-            return None;
-        }
-        let (login, request) = self.waiting.pop_front()?;
+        // Only this login's turn came: a request waits only for its own login.
+        let login = login?;
+        let index = self
+            .waiting
+            .iter()
+            .position(|(waiting, _)| same_login(waiting.as_ref(), Some(login)))?;
+        let (login, request) = self.waiting.remove(index)?;
         self.running.push(login.clone());
         Some((login, request))
     }

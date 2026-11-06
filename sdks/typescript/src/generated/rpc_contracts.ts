@@ -34,6 +34,14 @@ import type {
   ConfigWriteResult,
   CreateProfileParams,
   CreateScheduleRequest,
+  DecisionGetParams,
+  DecisionListParams,
+  DecisionListResult,
+  DecisionPresentParams,
+  DecisionRenderingParams,
+  DecisionRenderingResult,
+  DecisionResult,
+  DecisionWithdrawParams,
   DeferredCreateResult,
   DeviceCompleteParams,
   DeviceStartParams,
@@ -571,6 +579,26 @@ export interface RpcMethodContracts {
   "tool_grants/audit": {
     params: ToolGrantAuditParams;
     result: (ToolGrantAuditResult) & Record<string, unknown>;
+  };
+  "decision/list": {
+    params: DecisionListParams;
+    result: (DecisionListResult) & Record<string, unknown>;
+  };
+  "decision/get": {
+    params: DecisionGetParams;
+    result: (DecisionResult) & Record<string, unknown>;
+  };
+  "decision/rendering": {
+    params: DecisionRenderingParams;
+    result: (DecisionRenderingResult) & Record<string, unknown>;
+  };
+  "decision/present": {
+    params: DecisionPresentParams;
+    result: (DecisionResult) & Record<string, unknown>;
+  };
+  "decision/withdraw": {
+    params: DecisionWithdrawParams;
+    result: (DecisionResult) & Record<string, unknown>;
   };
   "blob/get": {
     params: BlobGetParams;

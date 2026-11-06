@@ -9653,6 +9653,23 @@
         ],
         "type": "object"
       },
+      "DecisionGovernanceConfig": {
+        "additionalProperties": false,
+        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when its client lists them, and it decides only a\ndecision the connection presented, while the decision's approver id is\nstill listed here.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
+        "properties": {
+          "operator_approver_ids": {
+            "default": [
+              "operator"
+            ],
+            "description": "The approver ids the operator acts for. Absent, it is `[\"operator\"]`;\nan explicitly empty list presents nothing and decides nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
         "properties": {
@@ -10848,8 +10865,12 @@
       },
       "GovernanceConfig": {
         "additionalProperties": false,
-        "description": "Governance of a realm's native composition. Empty by default: a stock\ngoverned realm keeps every operation at its local R1 tier and calls no\nreviewer. A present section ([`crate::Config::governance`]), even an\nempty one, replaces an inherited one as a whole.",
+        "description": "Governance of a realm's native composition. By default a stock governed\nrealm keeps every operation at its local R1 tier and calls no reviewer,\nand the stdio operator decides for the approver id `operator`.\nA present section ([`crate::Config::governance`]), even an empty one,\nreplaces an inherited one as a whole.",
         "properties": {
+          "decisions": {
+            "$ref": "#/components/schemas/DecisionGovernanceConfig",
+            "description": "The approver ids the stdio operator decides durable decisions for."
+          },
           "review": {
             "$ref": "#/components/schemas/StockReviewConfig",
             "description": "The review the stock governed host requires."
@@ -21810,6 +21831,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -22178,6 +22210,22 @@
         "description": "Exact host-generated context projected into provider requests for one\nruntime-owned logical turn.\n\nThis is deliberately not a [`crate::types::Message`]: it cannot be appended\nto a [`crate::Session`] or acquire durable transcript semantics. Runtime\ninput persistence owns the bytes until the input reaches a terminal state;\nthe agent only borrows this clone-cheap value while composing foreground\nprovider requests for that turn.",
         "minLength": 1,
         "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",

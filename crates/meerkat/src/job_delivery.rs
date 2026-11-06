@@ -1012,6 +1012,7 @@ pub fn job_delivery_event_input(
             authority_association: None,
             ingress_context: None,
             retained_resume: None,
+            requester: None,
         },
         event_type: event_type.to_string(),
         payload,

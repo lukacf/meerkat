@@ -101,6 +101,80 @@ them.
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: Core checks
+  the binding of an in-process peer delivery that governed work sent against
+  that work's origin. When `PeerIngressCommsOrigin::governed_origin` is set,
+  an installed `PeerIngressBinder`'s binding must keep the origin's
+  requester, name the sending agent as its ingress actor and name every work
+  of the sending work (`GovernedPeerOrigin::sender_work`) as a contributor.
+  Core refuses any other binding as malformed (`check_bound_original` with
+  the new `BoundOriginalPin::GovernedDelivery`), and the delivery ends
+  rejected. Previously such a binding was admitted under whatever requester
+  the binder named. A delivery over a network, from an ungoverned sender or
+  from a supervisor is checked as before. See Upgrade notes.
+
+- `meerkat-core`: `InMemoryDecisionStore` is no longer `UnwindSafe`: it now
+  holds its per-kind executor claims in an `Arc<parking_lot::Mutex<..>>`. A
+  host that moves it into `catch_unwind` wraps it in
+  `std::panic::AssertUnwindSafe`.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `DecisionExecutorLoop::start` no longer refuses a second executor of a
+  decision kind with `DecisionError::ExecutorHeld`. The loop starts without
+  the kind, executes none of its decisions
+  (`DecisionPassOutcome::KindNotClaimed`), and takes the kind over once the
+  other executor ends. A 0.9.10 executor and a 0.9.11 loop never execute on
+  one store at once: beside a 0.9.10 executor a loop executes nothing until
+  that executor ends, and a 0.9.10 executor is refused at start beside a
+  running loop. Upgrade every process that executes decisions on one store
+  together. See Changed.
+
+- `meerkat-core`, `meerkat-contracts`: the operator of an `rkat-rpc` stdio
+  connection decides durable decisions (see Added). `GovernanceConfig`
+  gains the public field `decisions: DecisionGovernanceConfig`, so code
+  that builds it literally must set it (`decisions: Default::default()` or
+  `..Default::default()` states the default list, `["operator"]`).
+  `GovernanceConfig::is_empty` is true only while the list is that default
+  too: a section that lists other operator approver ids is no longer empty
+  (see Upgrade notes).
+  `RpcMethodCatalogOptions` gains `decision_notices_enabled` (struct
+  literals need it): only a catalog for a connection that delivers decision
+  notices lists `decision/notice`.
+
+- `meerkat-core`, `meerkat-runtime`: an admitted input can carry its original
+  requester (see Added), so three public structs gain a public field, and
+  code that builds them literally must set it (`None` keeps the previous
+  behaviour): `types::TranscriptMessageIdentity.requester:
+  Option<TurnRequester>`, `service::StartTurnRuntimeSemantics.requester:
+  Option<PrincipalRef>` (meerkat-core) and `input::InputHeader.requester:
+  Option<PrincipalRef>` (meerkat-runtime).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`: the
+  MeerkatMachine gains the input `BindInputRequesterBatchKey`.
+  `MeerkatMachineInput` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and meerkat-runtime `meerkat_machine::dsl`)
+  gains the variant `BindInputRequesterBatchKey`, the kernel
+  `generated::meerkat::Input` and `InputKind` gain `BindInputRequesterBatchKey`
+  (with the struct `inputs::BindInputRequesterBatchKey`), and the kernel
+  `generated::meerkat::TransitionId` gains `BindInputRequesterBatchKeyIdle`,
+  `BindInputRequesterBatchKeyAttached`, `BindInputRequesterBatchKeyRunning`,
+  `BindInputRequesterBatchKeyRetired` and `BindInputRequesterBatchKeyStopped`,
+  all appended last, so an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a steer from
+  another requester no longer joins a running turn; it waits for a turn of
+  its own (see Changed). An input is refused when its host-supplied
+  requester is not a qualified principal or differs from its governed
+  association's requester, a keyed retry for another requester than the
+  input it would replay is an `InputIdempotencyConflict`, and an input whose
+  supersession key names a queued input of another requester is refused, as
+  one of another governed binding already is.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: work that
+  carries a requester (`WorkSpec::with_requester`) is refused with
+  `MobError::UnsupportedForMode` unless it is host human input to a local
+  runtime-backed member, so the requester is never dropped on the way.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -134,6 +208,146 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+- Peers keep the original requester in process. A governed agent's comms
+  send in process carries the origin of the governed work it was sent
+  under: its requester, the sending agent, and every work it names. Core's
+  `OriginalRequesterPeerBinder` binds the receiving work under that
+  requester, with the sending agent as ingress actor and every work of the
+  sending work as a contributor. The receiving work is bound in the sending
+  work's realm and ingress domain, so each of its operations is narrowed by
+  the requester's current grant at every hop. The host supplies only the
+  receiving agent's own side through `PeerServiceBasis`: its basis for
+  serving peers, its destination, its controller, and first-writer-wins
+  custody of what Core binds. The binder refuses, typed
+  (`PeerIngressBindRefusal::Refused` with `PeerIngressBindDenial`):
+  - a delivery with no origin, such as a network delivery
+    (`origin_unverifiable`);
+  - a sending work whose original narrows nothing, such as a host-policy or
+    service-mandate basis (`sender_basis_unbounded`);
+  - a sending work past the contributor bound (`contributor_bound_exceeded`);
+  - a receiver the host holds no basis for (`no_peer_service_basis`);
+  - a delivery whose original the host already holds enrolled differently
+    (`enrollment_conflict`).
+
+- `meerkat-core`: `GovernedSendOrigin`;
+  `WorkAuthorizationContext::with_governed_send_origin` and
+  `governed_send_origin`; `PeerIngressQueueClaim::governed_send_origin`;
+  `CommsRuntime::send_with_governed_origin` (the default sends without the
+  origin).
+
+- `meerkat-comms`: `RuntimeCommsCommandHandle::send_with_governed_origin`.
+
+- `meerkat-runtime`:
+  - `GovernedPeerOrigin`, `PeerIngressCommsOrigin::governed_origin`,
+    `PeerIngressBindRefusal::Refused`, `PeerIngressBindDenial` and
+    `BoundOriginalPin::GovernedDelivery`;
+  - `OriginalRequesterPeerBinder` (`new`, `with_supervisor_binder`,
+    `with_custody_retention`) and `DEFAULT_PEER_CUSTODY_RETENTION`;
+  - `PeerServiceBasis`, `PeerServiceRequest`, `PeerServiceGrant`
+    (`#[non_exhaustive]`, built with `PeerServiceGrant::new` and
+    `with_represented_subject`), `PeerServiceRefusal` and
+    `PeerServiceFuture`.
+
+- `meerkat-core`: the provided method `DecisionStore::claim_executor_kind`,
+  the executor claim of one decision kind of a store. At most one claim of a
+  kind is live at a time, in this process or any other, and none beside a
+  whole-store claim; claims of different kinds are independent. The default
+  refuses, so a `DecisionStore` wrapper forwards it, and
+  `InMemoryDecisionStore` keeps one claim per kind among the owners that
+  share it.
+- `meerkat-store`: `SqliteDecisionStore` claims a kind with an exclusive OS
+  lock on `approval_decisions.executor.<kind>.lock` beside the database
+  (`SqliteDecisionStore::executor_kind_lock_path`) and a shared one on
+  `approval_decisions.executor.lock`, so a whole-store claim and the claims
+  of kinds exclude each other across processes.
+- `meerkat-runtime`: `DurableDecisionService::claim_executor_kind`,
+  `DecisionExecutorPass::unclaimed`: each registered kind whose claim the
+  pass could not take, with the refusal (`DecisionError::ExecutorHeld` while
+  another executor holds the kind or the whole store), and
+  `DecisionPassOutcome::KindNotClaimed`, the outcome of a decision of such a
+  kind, which another executor executes.
+
+- Durable decisions on the RPC wire: `decision/list` (one page in decision
+  id order, filtered by kind, phase, approver id or requester, at most 500
+  decisions), `decision/get` (one decision, the held request when asked
+  for), `decision/rendering` (the rendering and its canonical parts for a
+  part size), `decision/present` (a host presenter's presentation, counted
+  only when it shows every canonical part to the party that decides now)
+  and `decision/withdraw` (as the host). A runtime whose persistence keeps
+  no durable decisions answers them capability unavailable
+  (`data.kind = "no_decision_store"`); a refusal is invalid params with
+  `data.kind = "decision_refused"` and its typed kind; store faults use the
+  approval store codes. `meerkat-contracts`: `WireDecision` and its
+  vocabularies (`WireDecisionPhase`, `WireDecisionStage`,
+  `WireDecisionNoticeState`, `WireDecisionTier`, `WireDecisionAssurance`,
+  `WireDecisionReviewVerdict`, `WirePresentationAudience`,
+  `WirePresentationRecord`, `WireCanonicalPart`, `WireDecisionEvidence`,
+  `WireDecisionOutcome`, `WireUnreadableDecision`), the closed
+  `WireDecisionRefusal` and `WireDecisionErrorData`, and the params and
+  results of the methods (`DecisionListParams`, `DecisionListResult`,
+  `DecisionGetParams`, `DecisionResult`, `DecisionRenderingParams`,
+  `DecisionRenderingResult`, `DecisionPresentParams`,
+  `DecisionPresentationRequest`, `DecisionAudienceRequest`,
+  `DecisionWithdrawParams`, `DecisionDecideParams`). The Python SDK wraps
+  the methods as `list_decisions`, `get_decision`, `decision_rendering`,
+  `present_decision` and `withdraw_decision`, the TypeScript SDK as
+  `listDecisions`, `getDecision`, `decisionRendering`, `presentDecision` and
+  `withdrawDecision`; neither decides a decision. The wrappers need a 0.9.11
+  or newer server: an older one answers method not found (`-32601`), which
+  both SDKs raise as an error that names the method.
+- Host-adapter decide: `meerkat-rpc`:
+  `MethodRouter::dispatch_with_decision_event` decides `decision/decide`
+  (`DECISION_DECIDE_METHOD`) with an `AuthenticatedDecisionEvent` the host
+  built from the human's authenticated event; the request names only the
+  decision, the answer, the presented digest and a reason, and must equal
+  what the event binds. Plain dispatch has no route to `decision/decide`.
+  `meerkat-core`: `AuthenticatedDecisionEvent`, `CanonicalPart::new` and
+  `PresentationRecord::new`. `meerkat-runtime`:
+  `DurableDecisionService::is_available` and the `decision::wire`
+  projection.
+- The operator of an `rkat-rpc` stdio connection decides durable decisions
+  (Unix builds with local authorization): the operating-system user who
+  started it, device trusted, in an authentication scope of the
+  connection's own. When its client lists (`decision/list`), the connection
+  presents each decision of the returned page that is open, waits for a
+  human and is addressed to an approver id the operator acts for, once per
+  connection, in page order: it writes a `decision/notice` notification
+  with the whole rendering, records the presentation once the notice is on
+  the pipe, and answers the page as recorded. Starting a connection
+  presents nothing. `decision/decide` on the connection decides as the
+  operator (ingress `rkat-rpc-stdio`): the request names only the decision,
+  the answer, the presented digest and a reason, and only a decision the
+  connection presented, whose approver id the configuration still lists,
+  is eligible, and only while the connection is open; any other decide is
+  refused `not_eligible`. A TCP
+  connection, plain dispatch and other builds keep answering
+  `decision/decide` method not found. The stock governed stdio pipe serves
+  both methods for its operator, in its consent surface's scope, with its
+  host's configuration as the pipe started. `meerkat-core`:
+  `[governance.decisions] operator_approver_ids`
+  (`DecisionGovernanceConfig`) names the approver ids the operator acts for,
+  `["operator"]` when absent; it is administered by the host like the rest
+  of `[governance]`. `meerkat-contracts`: `DECISION_NOTICE_NOTIFICATION`,
+  `WireDecisionNotice`, `WireDecisionNoticeEvent` (an event this version
+  does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
+  and the `decision/notice` entry of the RPC notification catalog.
+
+- `meerkat-core`, `meerkat-runtime`, `meerkat-mob`: an admitted input can
+  carry its original requester, an opaque, qualified principal that the host
+  supplies from the caller it authenticated, never from a request body, a
+  tool argument or model output. Core never interprets it. A host sets it
+  with `StartTurnRuntimeSemantics::with_requester` or `InputHeader.requester`
+  (for a mob member's host human input, `WorkSpec::with_requester`). It is
+  stored with the admitted input and returned on the input's receipt
+  (`InputState::requester`, after a restart too, and after the input's
+  payload retired), on the turn's transcript rows
+  (`TranscriptMessageIdentity.requester`, a `TurnRequester` that is direct
+  or carried) and to tool dispatch (`ToolDispatchContext::requester`, and
+  `ToolDispatchContext::direct_requester` for a requester that asked
+  directly, never one carried across a peer hop). `Input::requester` is the
+  one accessor: a governed input's requester is its work association's, any
+  other input's is the one its host supplied.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -143,6 +357,40 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
+- `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
+  decision kind it registers instead of the whole store, so two runtimes on
+  one store each execute their own kinds. A kind another executor holds is
+  not executed: the loop starts without it, each pass lists it as unclaimed
+  and asks for its claim again, and the loop takes the kind over once that
+  executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
+  whatever kinds it registers. See Breaking for the change to `start`.
+
+- `meerkat-runtime`: inputs of different requesters never share a run. The
+  requester joins the batch key the MeerkatMachine keeps for each input: an
+  ungoverned input with a requester is keyed by it (a governed input keeps
+  its binding's key, which already names its requester), so coalescing and
+  staging keep one requester per run, and a live-boundary join takes an
+  input only of the key its run staged. A steer from another requester, or
+  without a requester while the run has one (or the reverse), takes the
+  queued fallback and runs in a turn of its own. A recovered row keeps its
+  requester's key. The TLC lane runs a new audit of the rule
+  (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
+  So content from another party never enters a person's run: a
+  requester-less input (a peer message, request or response, a flow step,
+  an external event, a runtime continuation such as a detached job's
+  completion) that arrives while a person's run is going is handled in a
+  follow-up run of its own. The transcript keeps it, so the model still
+  sees it in context; only the per-person mechanics are absent in that run.
+  Operation inputs, which carry no content and are consumed on admission,
+  are unchanged.
+
+### Deprecated
+
+- `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
+  `DurableDecisionService::claim_executor`, the whole-store executor claim of
+  0.9.10. It still excludes every claim of a kind and is excluded by them; an
+  executor claims each kind it executes with `claim_executor_kind`.
 
 ### Fixed
 
@@ -221,6 +469,56 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+### Upgrade notes
+
+- A host binder of in-process deliveries from governed work binds them
+  under the origin's requester (`GovernedPeerOrigin::requester`). It names
+  the sending agent (`GovernedPeerOrigin::sender_executor`) as ingress actor
+  and every `GovernedPeerOrigin::sender_work` entry as a contributor, and it
+  binds the receiving work in `GovernedPeerOrigin::namespace()`, as Core's
+  binder does: the contributors resolve only there, so a work bound in
+  another namespace is refused at admission or denied every operation.
+  Alternatively, install `OriginalRequesterPeerBinder` over the host's
+  `PeerServiceBasis`, keeping the host's own binder for supervisor
+  deliveries (`with_supervisor_binder`).
+
+- A `CommsRuntime` wrapper that overrides `send` should also forward
+  `send_with_governed_origin`. Otherwise its governed in-process sends carry
+  no origin, and Core's binder refuses them (`origin_unverifiable`).
+
+- Upgrade every process that shares a realm before its configuration
+  states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
+  with a `decisions` key, so a 0.9.10 process on the realm fails to load
+  the realm's configuration document as a whole.
+
+- Stored input rows and transcript rows write the requester as one more
+  optional field. An older Core that reads them drops it, which leaves the
+  input and its turn without a requester, so nothing then acts for that
+  person.
+
+### Known limitations
+
+- Peers keep the original requester in process only. A delivery over a
+  network carries no origin, and Core's binder refuses it
+  (`origin_unverifiable`).
+
+- A runtime with `OriginalRequesterPeerBinder` installed refuses every
+  comms delivery that carries no governed origin (`origin_unverifiable`).
+  That includes in-process deliveries from an ungoverned sender, such as a
+  kickoff from an orchestrator that sends with no governed work. Only
+  supervisor-bridge deliveries have a fallback
+  (`with_supervisor_binder`).
+
+- The receiving work is bound in the sending work's ingress domain. A
+  receiver whose composition installs another ingress domain, such as a
+  peer under another composition or realm in the same process, refuses the
+  work at admission.
+
+- The original requester does not cross the supervisor bridge: a console
+  send to a member hosted on another runtime acts for no person there (its
+  runs have no requester). The mob refuses a requester on any delivery that
+  cannot carry it, so none is dropped silently.
 
 ## [0.9.10] - 2026-11-04
 

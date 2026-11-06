@@ -7090,6 +7090,7 @@ impl SessionBackend {
                 idempotency_key,
                 supersession_key: None,
                 correlation_id,
+                requester: req.runtime.requester.clone(),
             },
             content: prompt,
             typed_turn_appends: req.runtime.typed_turn_appends.clone(),
@@ -15928,6 +15929,12 @@ impl MobProvisioner for SessionBackend {
                     .to_string(),
             });
         }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
+            });
+        }
         self.session_service
             .start_turn(&session_id, req)
             .await
@@ -15977,6 +15984,12 @@ impl MobProvisioner for SessionBackend {
                     .to_string(),
             });
         }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
+            });
+        }
         self.admit_direct_session_turn(session_id, req, None, None)
             .await
     }
@@ -16010,6 +16023,12 @@ impl MobProvisioner for SessionBackend {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "stable external input identity requires a runtime-backed member"
                     .to_string(),
+            });
+        }
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester requires a runtime-backed member".to_string(),
             });
         }
         self.admit_direct_session_turn(
@@ -20153,6 +20172,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                         reason: "tracked turn event streams are not supported for peer-only members in phase 1".to_string(),
                     });
                 }
+                // The bridge delivery has no requester to carry: refuse one
+                // instead of delivering the turn without it.
+                if req.runtime.requester.is_some() {
+                    return Err(MobError::UnsupportedForMode {
+                        mode: crate::MobRuntimeMode::TurnDriven,
+                        reason: "a requester is not carried to peer-only members".to_string(),
+                    });
+                }
                 let peer = self.peer_only_spec(member_ref).await?;
                 let authorization = self
                     .ensure_supervisor_authorized(
@@ -20283,6 +20310,14 @@ impl MobProvisioner for MultiBackendProvisioner {
                 mode: crate::MobRuntimeMode::TurnDriven,
                 reason: "tracked turn event streams are not supported for placed members"
                     .to_string(),
+            });
+        }
+        // The bridge delivery has no requester to carry: refuse one instead
+        // of delivering the turn without it.
+        if req.runtime.requester.is_some() {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a requester is not carried to remotely hosted members".to_string(),
             });
         }
         let peer = Self::peer_only_spec_from_parts(peer_id, address, *pubkey)?;
@@ -21560,6 +21595,7 @@ mod bridge_rejection_tests {
                         run_id: None,
                         objective_id: Some(objective_id),
                         turn_input: None,
+                        requester: None,
                     },
                     ..Default::default()
                 },

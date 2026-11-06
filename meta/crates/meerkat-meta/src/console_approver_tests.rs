@@ -23,9 +23,11 @@ struct ApprovalConsole {
 }
 
 impl ApprovalConsole {
-    /// The Console with `decisions`, the session fence record `fences` and
-    /// the access controller `access`.
+    /// The Console `name` (its mob's id, unique per Console in a process)
+    /// with `decisions`, the session fence record `fences` and the access
+    /// controller `access`.
     async fn start(
+        name: &str,
         decisions: RuntimeDecisionState,
         fences: crate::auth::session_fence::ConsoleSessionFences,
         access: Option<AccessController>,
@@ -34,7 +36,7 @@ impl ApprovalConsole {
             crate::MetaConfig {
                 modules: vec![],
                 discovery: crate::DiscoverySpec {
-                    namespace: "console-approvers".to_string(),
+                    namespace: name.to_string(),
                     modules: vec![],
                 },
                 pre_spawn: vec![],
@@ -44,10 +46,9 @@ impl ApprovalConsole {
         )
         .expect("gating owner");
         let owner = Arc::new(tokio::sync::Mutex::new(owner));
-        let (directory, runtime) =
-            super::tests::build_empty_console_test_runtime("console-approvers")
-                .await
-                .expect("console runtime");
+        let (directory, runtime) = super::tests::build_empty_console_test_runtime(name)
+            .await
+            .expect("console runtime");
         let app = console_json_router_with_state(ConsoleJsonState {
             decisions,
             session_fences: fences,
@@ -157,7 +158,7 @@ fn person_token() -> String {
 /// `approver_unauthenticated`. The entry stays pending.
 #[tokio::test]
 async fn open_decide_is_unauthenticated() {
-    let console = ApprovalConsole::start(open(), detached(), None).await;
+    let console = ApprovalConsole::start("approvers-open", open(), detached(), None).await;
     let pending_id = console.pending(Some("person:bob")).await;
     let named = console_rpc_as(
         &console.app,
@@ -185,7 +186,8 @@ async fn open_decide_is_unauthenticated() {
 /// no person: neither decides a gate.
 #[tokio::test]
 async fn non_person_cannot_decide() {
-    let console = ApprovalConsole::start(enforced(), detached(), None).await;
+    let console =
+        ApprovalConsole::start("approvers-non-person", enforced(), detached(), None).await;
     let expiry = now_seconds() + 3600;
     let mut answers = Vec::new();
     for (label, claims) in [
@@ -242,7 +244,8 @@ async fn shared_account_token_cannot_decide() {
         &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
     )
     .expect("signed fixture JWT");
-    let console = ApprovalConsole::start(decisions, detached(), None).await;
+    let console =
+        ApprovalConsole::start("approvers-shared-account", decisions, detached(), None).await;
     let pending_id = console.pending(None).await;
     let answer = console.approve(Some(&shared), &pending_id).await;
     let pending = console.still_pending(&pending_id).await;
@@ -266,7 +269,8 @@ async fn decide_rechecks_human_after_last_await() {
     let fences =
         crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())
             .expect("fence record");
-    let console = ApprovalConsole::start(enforced(), fences.clone(), None).await;
+    let console =
+        ApprovalConsole::start("approvers-recheck", enforced(), fences.clone(), None).await;
     let pending_id = console.pending(None).await;
     let hold = super::gating_decide_holds::GatingDecideHold::install(&pending_id);
     let decide = tokio::spawn({
@@ -310,7 +314,7 @@ async fn decide_rechecks_human_after_last_await() {
 #[tokio::test]
 async fn person_decision_records_assurance_and_login_digest() {
     use sha2::Digest as _;
-    let console = ApprovalConsole::start(enforced(), detached(), None).await;
+    let console = ApprovalConsole::start("approvers-audit", enforced(), detached(), None).await;
     let pending_id = console.pending(None).await;
     let bearer = person_token();
     let decided = console.approve(Some(&bearer), &pending_id).await;
@@ -371,9 +375,18 @@ async fn routed_entry_needs_held_binding() {
         .expect("access controller")
     };
     let mut outcomes = Vec::new();
-    for holders in [Vec::new(), vec![BOB.to_string()]] {
+    // An approver id needs a holder: first someone else holds it, then the
+    // person does.
+    for (name, holders) in [
+        (
+            "approvers-other-holder",
+            vec!["carol@example.test".to_string()],
+        ),
+        ("approvers-holder", vec![BOB.to_string()]),
+    ] {
         let console =
-            ApprovalConsole::start(enforced(), detached(), Some(access(holders.clone()))).await;
+            ApprovalConsole::start(name, enforced(), detached(), Some(access(holders.clone())))
+                .await;
         let pending_id = console.pending(Some(ROUTED)).await;
         let answer = console.approve(Some(&person_token()), &pending_id).await;
         let pending = console.still_pending(&pending_id).await;

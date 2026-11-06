@@ -844,6 +844,13 @@ impl IngressView<'_> {
         self.driver.durable_steer_order()
     }
 
+    /// Whether `input_id` may join the current run `run_id` at a live
+    /// boundary: inputs of different requesters never share a run (see
+    /// [`EphemeralRuntimeDriver::live_boundary_joins_run_batch`]).
+    pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
+        self.driver.live_boundary_joins_run_batch(input_id, run_id)
+    }
+
     pub(crate) fn admission_order(&self) -> Vec<InputId> {
         self.driver.admission_order()
     }

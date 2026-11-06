@@ -106,6 +106,10 @@ fn stamp_input(
     semantics: crate::ingress_types::RuntimeInputSemantics,
 ) -> StampedInput {
     let mut metadata = input_own_turn_metadata(input);
+    // The turn's requester is runtime-owned: the admitted input's own (the
+    // one accessor over its association and its host-supplied requester),
+    // never a value written into caller-authored metadata.
+    metadata.transcript_identity.requester = input.turn_requester();
     // Directed terminal publication is runtime-minted capability data. Never
     // preserve IDs supplied through caller-authored turn metadata.
     metadata.directed_interaction_ids.clear();
@@ -229,6 +233,7 @@ pub(crate) fn merge_batch_turn_metadata(
 
     let mut acc: Option<RuntimeTurnMetadata> = None;
     let mut transcript_identity = TranscriptIdentityConsensus::default();
+    let mut batch_requester = RequesterConsensus::default();
     let mut request_reasoning = ReasoningPreferenceConsensus::default();
     // A batch executes as one turn, so it cannot honor multiple per-input
     // handling modes. The machine has already admitted and ordered every
@@ -248,6 +253,7 @@ pub(crate) fn merge_batch_turn_metadata(
         meta.work_authorization = None; // Rebuilt only from accepted contributor rows at staging.
         meta.handling_mode = None;
         transcript_identity.observe(&meta.transcript_identity, own_interaction);
+        batch_requester.observe(meta.transcript_identity.requester.as_ref());
         // The reasoning preference is folded across the whole batch (set
         // semantics, never a pairwise conflict), from each contributor's own
         // preference and its own explicit reasoning settings.
@@ -268,6 +274,7 @@ pub(crate) fn merge_batch_turn_metadata(
     if let Some(metadata) = acc.as_mut() {
         metadata.handling_mode = batch_handling_mode;
         metadata.transcript_identity = transcript_identity.finish();
+        metadata.transcript_identity.requester = batch_requester.finish()?;
         metadata.request_reasoning_disposition = request_reasoning.finish();
     }
     // Batch-level peer-reply capability mint: every peer *message* delivery
@@ -413,6 +420,59 @@ impl TurnInputConsensus {
         match self {
             Self::Agreed(input) => Some(input),
             Self::Unseen | Self::Conversational => None,
+        }
+    }
+}
+
+/// The requester a batch's inputs share. Absence is a value here: an input
+/// without a requester and one with a requester never share a run, nor do
+/// two inputs of different requesters (the machine's batch key keeps them
+/// apart), so a disagreement fails the fold closed instead of naming a
+/// requester the batch does not have. The same principal that one input
+/// carried across a hop and another brought directly is carried for the
+/// batch: a run is direct only when every one of its inputs is.
+#[derive(Debug, Clone, Default)]
+enum RequesterConsensus {
+    #[default]
+    Unseen,
+    Agreed(Option<meerkat_core::types::TurnRequester>),
+    Conflicted,
+}
+
+impl RequesterConsensus {
+    fn observe(&mut self, candidate: Option<&meerkat_core::types::TurnRequester>) {
+        use meerkat_core::types::TurnRequester;
+        *self = match (std::mem::take(self), candidate) {
+            (Self::Unseen, candidate) => Self::Agreed(candidate.cloned()),
+            (Self::Agreed(None), None) => Self::Agreed(None),
+            (Self::Agreed(Some(current)), Some(candidate))
+                if current.principal() == candidate.principal() =>
+            {
+                Self::Agreed(Some(if current.is_carried() || candidate.is_carried() {
+                    TurnRequester::carried(current.principal().clone())
+                } else {
+                    current
+                }))
+            }
+            _ => Self::Conflicted,
+        };
+    }
+
+    fn finish(
+        self,
+    ) -> Result<
+        Option<meerkat_core::types::TurnRequester>,
+        meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
+    > {
+        match self {
+            Self::Unseen => Ok(None),
+            Self::Agreed(requester) => Ok(requester),
+            Self::Conflicted => Err(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                    field: "transcript_identity.requester",
+                    reason: "inputs of different requesters never share a run",
+                },
+            ),
         }
     }
 }

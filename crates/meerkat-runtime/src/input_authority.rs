@@ -855,11 +855,55 @@ pub(crate) fn generated_binding(
             .ok_or_else(unavailable)?;
         return association_binding(canonical.association());
     }
-    input
-        .header()
-        .authority_association
-        .as_ref()
-        .map_or(Ok((None, None)), association_binding)
+    match input.header().authority_association.as_ref() {
+        Some(association) => association_binding(association),
+        // An ungoverned input has no binding. Its batch key is its
+        // requester's, when its host supplied one, so that inputs of
+        // different requesters never share a run.
+        None => Ok((
+            None,
+            input
+                .header()
+                .requester
+                .as_ref()
+                .map(requester_batch_key)
+                .transpose()?,
+        )),
+    }
+}
+
+/// The batch key of an ungoverned input whose host supplied `requester`:
+/// `requester:` and the hex SHA-256 of the requester's canonical bytes. A
+/// governed batch key is pure hex, so the two never collide. Identity only:
+/// the key grants nothing and no requester is parsed back out of it.
+pub(crate) fn requester_batch_key(
+    requester: &meerkat_core::PrincipalRef,
+) -> Result<String, RuntimeDriverError> {
+    let bytes = serde_json::to_vec(requester).map_err(|_| unavailable())?;
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat.input-requester-batch.v1\0");
+    digest.update(&bytes);
+    Ok(format!("requester:{}", hex(&digest.finalize())))
+}
+
+/// An input names at most one requester: its host-supplied requester must be
+/// a qualified principal, and a governed input (or a retained resume) whose
+/// header also names one must name its association's own requester.
+pub(crate) fn verify_single_requester(input: &Input) -> Result<(), RuntimeDriverError> {
+    let Some(requester) = input.header().requester.as_ref() else {
+        return Ok(());
+    };
+    if requester.validate_qualified().is_err() {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input's requester must be a qualified principal".into(),
+        });
+    }
+    match input.requester() {
+        Some(own) if own == requester => Ok(()),
+        _ => Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input carries two different requesters".into(),
+        }),
+    }
 }
 
 pub(crate) fn association_binding(
@@ -992,7 +1036,15 @@ pub(crate) fn verify_retained_replay(
         .find(|item| item.input_id() == &state.input_id);
     match (own, input.header().authority_association.as_ref()) {
         (Some(retained), Some(_)) => retained.verify_replay(input),
-        (None, None) if state.authority_contributors.is_empty() => Ok(()),
+        // An ungoverned retry replays only for the requester the row was
+        // admitted for (absence included): another requester's retry under
+        // the same key is a conflict, never that requester's receipt.
+        (None, None)
+            if state.authority_contributors.is_empty()
+                && state.requester.as_ref() == input.header().requester.as_ref() =>
+        {
+            Ok(())
+        }
         _ => Err(RuntimeDriverError::InputIdempotencyConflict {
             existing_id: state.input_id.clone(),
         }),

@@ -3048,6 +3048,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         if let Some(admission) = self.live_bridge_dispatch_admission.clone() {
             self.tool_dispatch_context = self
@@ -3239,6 +3244,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         let loop_result = self
             .run_loop(Some(prompt), event_tx.clone(), deferred_callback, None)
@@ -3337,6 +3347,11 @@ where
                 self.active_transcript_identity
                     .as_ref()
                     .and_then(|identity| identity.interaction_id),
+            )
+            .with_requester(
+                self.active_transcript_identity
+                    .as_ref()
+                    .and_then(|identity| identity.requester.clone()),
             );
         let resumed = super::state::ResumedRunStart {
             cursor,

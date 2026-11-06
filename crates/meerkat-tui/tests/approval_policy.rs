@@ -232,6 +232,89 @@ fn sealed_paths_are_denied_before_rules_and_classifier() {
     );
 }
 
+/// The seal check sees every patch target before any other verdict: an
+/// earlier protected (`build.rs`) or outside (`/tmp/x`) target does not hand
+/// a later sealed one to the classifier or to an `apply_patch *` allow rule.
+#[test]
+fn a_sealed_patch_target_after_a_protected_or_outside_one_is_sealed() {
+    let allowed = harness(Options {
+        rules: allow_rule("apply_patch", "*"),
+        ..Options::default()
+    });
+    for patch in [
+        "*** Begin Patch\n*** Add File: build.rs\n+x\n*** Update File: .git/config\n@@\n-a\n+b\n*** End Patch",
+        "*** Begin Patch\n*** Add File: /tmp/x\n+x\n*** Update File: .rkat/config.toml\n@@\n-a\n+b\n*** End Patch",
+    ] {
+        assert_eq!(
+            allowed.tier("apply_patch", json!({ "patch": patch })),
+            Tier::Sealed,
+            "{patch}"
+        );
+    }
+}
+
+/// State outside the workspace is sealed through the root's sealed roots:
+/// an enclosing repository's git dir, a worktree's git and common dirs, a
+/// realm and the user config dir; for `write_file` and as a patch target,
+/// while reading them is not sealed.
+#[test]
+fn sealed_roots_outside_the_workspace_are_sealed() {
+    use meerkat_tui::paths::git_dirs;
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let repo = base.join("repo");
+    let ws = repo.join("ws");
+    std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+    std::fs::create_dir_all(&ws).unwrap();
+    let main_git = base.join("main/.git");
+    let wt_git = main_git.join("worktrees/x");
+    std::fs::create_dir_all(&wt_git).unwrap();
+    std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+    let wt = base.join("wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+    let realm = base.join("state/realm");
+    let config = base.join("home/.rkat/tui");
+
+    let cases = [
+        (ws.clone(), repo.join(".git/hooks/pre-commit")),
+        (wt.clone(), main_git.join("hooks/pre-commit")),
+        (wt, wt_git.join("HEAD")),
+        (ws.clone(), realm.join("config.toml")),
+        (ws, config.join("trust.json")),
+    ];
+    for (workspace, target) in cases {
+        let root = ProjectRoot::new(&workspace)
+            .unwrap()
+            .with_sealed_roots(git_dirs(&workspace))
+            .with_sealed_roots([realm.clone(), config.clone()]);
+        let h = Harness {
+            _dir: tempfile::tempdir().unwrap(),
+            root,
+            rules: allow_rule("write_file", "*"),
+            trust_project_builds: true,
+            outside: String::new(),
+        };
+        let path = target.to_str().unwrap();
+        assert_eq!(
+            h.tier("write_file", json!({"path": path, "content": "x"})),
+            Tier::Sealed,
+            "{path}"
+        );
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch");
+        assert_eq!(
+            h.tier("apply_patch", json!({ "patch": patch })),
+            Tier::Sealed,
+            "{path}"
+        );
+        assert_ne!(
+            h.tier("read_file", json!({ "path": path })),
+            Tier::Sealed,
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn deny_rule_wins() {
     let h = harness(Options {

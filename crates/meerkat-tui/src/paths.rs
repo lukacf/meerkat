@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 /// internals and attributes, build/toolchain configuration that runs code, editor
 /// task configuration, and secrets.
 pub const PROTECTED_PATTERNS: &[&str] = &[
+    ".rkat",
     ".rkat/**",
     ".git",
     ".git/**",
@@ -95,7 +96,19 @@ fn protected_set() -> &'static ProtectedSet {
 /// URLs, the rules, the MCP servers, the sessions) and the repository's VCS
 /// internals (`.git`, hooks included). Each is also protected
 /// ([`PROTECTED_PATTERNS`]); a shell command is judged by the classifier.
-pub const SEALED_PATTERNS: &[&str] = &[".rkat/**", ".git", ".git/**", "**/.git", "**/.git/**"];
+///
+/// These cover the project tree only. The same state outside it (the git
+/// directory of an enclosing repository or of a worktree, a `--realm` or
+/// `--state-root` realm, the user config directory `~/.rkat/tui`) is sealed
+/// through [`ProjectRoot::with_sealed_roots`].
+pub const SEALED_PATTERNS: &[&str] = &[
+    ".rkat",
+    ".rkat/**",
+    ".git",
+    ".git/**",
+    "**/.git",
+    "**/.git/**",
+];
 
 fn sealed_set() -> &'static ProtectedSet {
     static SET: OnceLock<ProtectedSet> = OnceLock::new();
@@ -135,11 +148,20 @@ pub enum PathError {
 }
 
 /// The canonical project root. Constructed once at bootstrap.
+///
+/// Besides the in-project [`SEALED_PATTERNS`], it holds sealed roots:
+/// absolute directories a file tool never writes into wherever they lie
+/// (see [`Self::with_sealed_roots`] and [`git_dirs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectRoot(PathBuf);
+pub struct ProjectRoot {
+    root: PathBuf,
+    /// Canonical (as far as they exist) sealed directories.
+    sealed_roots: Vec<PathBuf>,
+}
 
 impl ProjectRoot {
-    /// Canonicalize `path` and use it as the project root.
+    /// Canonicalize `path` and use it as the project root, with no sealed
+    /// roots beyond [`SEALED_PATTERNS`].
     ///
     /// # Errors
     ///
@@ -150,13 +172,39 @@ impl ProjectRoot {
             path: path.to_path_buf(),
             source,
         })?;
-        Ok(Self(canonical))
+        Ok(Self {
+            root: canonical,
+            sealed_roots: Vec::new(),
+        })
+    }
+
+    /// Add sealed roots: every path at or below one of `dirs` resolves
+    /// [`ResolvedPath::sealed`], inside the project or not. Each directory is
+    /// canonicalized as far as it exists, so a symlinked spelling of it, or a
+    /// directory created later, still matches. Bootstrap passes the
+    /// repository's git directories ([`git_dirs`]), the realm directory and
+    /// the user config directory.
+    #[must_use]
+    pub fn with_sealed_roots(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        for dir in dirs {
+            let dir = canonicalize_existing_prefix(&dir).unwrap_or(dir);
+            if !self.sealed_roots.contains(&dir) {
+                self.sealed_roots.push(dir);
+            }
+        }
+        self
+    }
+
+    /// The sealed roots added with [`Self::with_sealed_roots`].
+    #[must_use]
+    pub fn sealed_roots(&self) -> &[PathBuf] {
+        &self.sealed_roots
     }
 
     /// The canonical root path.
     #[must_use]
     pub fn as_path(&self) -> &Path {
-        &self.0
+        &self.root
     }
 
     /// Resolve a model-supplied path against this root.
@@ -183,16 +231,17 @@ impl ProjectRoot {
         let joined = if expanded.is_absolute() {
             expanded
         } else {
-            self.0.join(expanded)
+            self.root.join(expanded)
         };
         let abs = resolve_physically(&joined)?;
-        let relative = abs.strip_prefix(&self.0).ok().map(Path::to_path_buf);
+        let relative = abs.strip_prefix(&self.root).ok().map(Path::to_path_buf);
         let protected = relative
             .as_deref()
             .is_some_and(|rel| protected_set().is_match(rel));
         let sealed = relative
             .as_deref()
-            .is_some_and(|rel| sealed_set().is_match(rel));
+            .is_some_and(|rel| sealed_set().is_match(rel))
+            || self.sealed_roots.iter().any(|dir| abs.starts_with(dir));
         Ok(ResolvedPath {
             abs,
             relative,
@@ -212,6 +261,51 @@ impl ProjectRoot {
     }
 }
 
+/// The git directories that govern `start`: for `start` and each of its
+/// ancestors, the `.git` entry there (a directory, or a file whose
+/// `gitdir: <path>` line names one, relative to the file's directory), and
+/// that directory's `commondir` (a worktree's or submodule's shared git
+/// directory, which holds the hooks and the config). Read from the
+/// filesystem only; no `git` subprocess. Paths that do not resolve are
+/// skipped.
+#[must_use]
+pub fn git_dirs(start: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in start.ancestors() {
+        let entry = dir.join(".git");
+        let Ok(meta) = std::fs::metadata(&entry) else {
+            continue;
+        };
+        let git_dir = if meta.is_dir() {
+            entry
+        } else {
+            match read_pointer(&entry, "gitdir:") {
+                Some(target) => dir.join(target),
+                None => {
+                    // An unreadable pointer is still the repository's.
+                    found.push(entry);
+                    continue;
+                }
+            }
+        };
+        let common = git_dir.join("commondir");
+        if common.is_file()
+            && let Some(target) = read_pointer(&common, "")
+        {
+            found.push(git_dir.join(target));
+        }
+        found.push(git_dir);
+    }
+    found
+}
+
+/// The first line of `file` with `prefix` stripped and trimmed, if any.
+fn read_pointer(file: &Path, prefix: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let target = text.lines().next()?.strip_prefix(prefix)?.trim();
+    (!target.is_empty()).then(|| PathBuf::from(target))
+}
+
 /// A path resolved against a [`ProjectRoot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPath {
@@ -219,10 +313,13 @@ pub struct ResolvedPath {
     pub abs: PathBuf,
     /// Path relative to the project root, or `None` when it lies outside.
     pub relative: Option<PathBuf>,
-    /// Whether the path matches [`PROTECTED_PATTERNS`] (always `false` outside the root).
+    /// Whether the path matches [`PROTECTED_PATTERNS`] (outside the root,
+    /// only when it is sealed).
     pub protected: bool,
-    /// Whether the path matches [`SEALED_PATTERNS`]: a file tool never
-    /// writes it (always `false` outside the root; implies `protected`).
+    /// Whether a file tool never writes the path: inside the root it matches
+    /// [`SEALED_PATTERNS`], or it lies at or below one of the root's sealed
+    /// roots (the git directories, the realm directory, the user config
+    /// directory), inside the project or not. Implies `protected`.
     pub sealed: bool,
 }
 
@@ -317,6 +414,10 @@ pub enum FileMode {
     /// Owner read/write only (`0600` on Unix): files that may hold secrets
     /// (rules with endpoint keys, notes, the trust record, cost data).
     Private,
+    /// Keep an existing target's permission bits; a new file gets `0666`
+    /// minus the umask, as `std::fs::write` would create it (the file
+    /// tools' writes).
+    Preserve,
 }
 
 /// Failures of [`write_atomic`] and [`check_no_symlinks`].
@@ -378,7 +479,8 @@ pub fn check_no_symlinks(path: &Path) -> Result<(), AtomicWriteError> {
 /// symlink is refused (only `root_trusted` — the part of `path` the caller
 /// itself chose, such as the user's config directory — is not checked), as
 /// is an existing target that is not a regular file. `mode` sets the file's
-/// permissions before the rename.
+/// permissions before the rename. The target's inode is never written:
+/// a hard link to the old content keeps it.
 ///
 /// # Errors
 ///
@@ -399,27 +501,46 @@ pub fn write_atomic(
         Some((root, rel)) => check_no_symlinks_from(root, rel, path)?,
         None => check_no_symlinks(path)?,
     }
-    match std::fs::symlink_metadata(path) {
+    let existing = match std::fs::symlink_metadata(path) {
         Ok(meta) if !meta.file_type().is_file() => {
             return Err(AtomicWriteError::NotRegular(path.to_path_buf()));
         }
-        Ok(_) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(meta) => Some(meta),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(AtomicWriteError::io("inspect", path, err)),
-    }
+    };
     std::fs::create_dir_all(parent)
         .map_err(|e| AtomicWriteError::io("create directory", parent, e))?;
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| AtomicWriteError::io("create a temporary file in", parent, e))?;
+    let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
-    if mode == FileMode::Private {
+    if mode == FileMode::Preserve && existing.is_none() {
+        // `open(2)` applies the umask to this mode, as for a plain create.
         use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let mut temp = builder
+        .tempfile_in(parent)
+        .map_err(|e| AtomicWriteError::io("create a temporary file in", parent, e))?;
+    let exact = match mode {
+        FileMode::Private => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                Some(std::fs::Permissions::from_mode(0o600))
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        }
+        FileMode::Preserve => existing.map(|meta| meta.permissions()),
+        FileMode::Default => None,
+    };
+    if let Some(permissions) = exact {
         temp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .set_permissions(permissions)
             .map_err(|e| AtomicWriteError::io("set permissions of", temp.path(), e))?;
     }
-    #[cfg(not(unix))]
-    let _ = mode;
     temp.write_all(bytes)
         .map_err(|e| AtomicWriteError::io("write", temp.path(), e))?;
     temp.as_file()
@@ -515,6 +636,8 @@ mod tests {
     fn sealed_paths_are_the_gate_state_and_vcs_internals_and_imply_protected() {
         let (_dir, root) = root();
         for p in [
+            // `.rkat/**` alone does not match the directory entry itself.
+            ".rkat",
             ".rkat/config.toml",
             ".rkat/tui/tui.toml",
             ".git",
@@ -531,6 +654,55 @@ mod tests {
         for pattern in SEALED_PATTERNS {
             assert!(PROTECTED_PATTERNS.contains(pattern), "{pattern}");
         }
+    }
+
+    /// Sealed roots outside the project: an enclosing repository's git dir,
+    /// a worktree's git dir and its common dir, a realm and a config dir.
+    #[test]
+    fn sealed_roots_seal_state_outside_the_project() {
+        let base = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(base.path()).unwrap();
+        // The workspace is a subdirectory of a repository.
+        let repo = base.join("repo");
+        let ws = repo.join("sub/ws");
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let root = ProjectRoot::new(&ws).unwrap();
+        assert!(!root.resolve("../../.git/hooks/pre-commit").unwrap().sealed);
+        let root = root.with_sealed_roots(git_dirs(&ws));
+        let r = root.resolve("../../.git/hooks/pre-commit").unwrap();
+        assert!(r.sealed && r.protected && !r.inside(), "{r:?}");
+        assert!(!root.resolve("../../README.md").unwrap().sealed);
+
+        // A worktree: `.git` is a file naming its git dir, whose `commondir`
+        // names the main repository's git dir (hooks, config).
+        let main_git = base.join("main/.git");
+        let wt_git = main_git.join("worktrees/x");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        let wt = base.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
+        let root = ProjectRoot::new(&wt).unwrap().with_sealed_roots(git_dirs(&wt));
+        for p in [
+            main_git.join("hooks/pre-commit"),
+            main_git.join("config"),
+            wt_git.join("HEAD"),
+        ] {
+            assert!(root.resolve(p.to_str().unwrap()).unwrap().sealed, "{p:?}");
+        }
+
+        // A realm and a config dir outside the workspace, sealed even before
+        // they exist.
+        let realm = base.join("state/realm-x");
+        let config = base.join("home/.rkat/tui");
+        let root = ProjectRoot::new(&ws)
+            .unwrap()
+            .with_sealed_roots([realm.clone(), config.clone()]);
+        for p in [realm.join("config.toml"), config.join("rules.toml")] {
+            assert!(root.resolve(p.to_str().unwrap()).unwrap().sealed, "{p:?}");
+        }
+        assert!(!root.resolve(base.join("state/other").to_str().unwrap()).unwrap().sealed);
     }
 
     #[test]
@@ -617,6 +789,19 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["secret.toml"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_never_writes_a_shared_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let alias = dir.path().join("alias");
+        std::fs::hard_link(&victim, &alias).unwrap();
+        write_atomic(&alias, b"new", FileMode::Preserve, Some(dir.path())).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read_to_string(&alias).unwrap(), "new");
     }
 
     #[cfg(unix)]

@@ -181,12 +181,33 @@ async fn workspace_mode_confines_writes_to_the_workspace() {
 
 /// A confined command gets rkat-tui's curated environment: `HOME` and
 /// `PATH` as rkat-tui has them (so `~/.cargo/bin` tools resolve), and none
-/// of the rest (the test runner's `CARGO_MANIFEST_DIR` stands in for a
-/// provider API key: set in rkat-tui's environment, not on the allowlist).
+/// of the rest (a sentinel `RKAT_TUI_TEST_SECRET` stands in for a provider
+/// API key: set in rkat-tui's environment, not on the allowlist).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::disallowed_methods)] // test-only process launch: this test rerun
 async fn workspace_mode_passes_the_curated_environment() {
+    // A sentinel variable the curated environment must drop. The test
+    // process cannot set one on itself (`set_var` is unsafe, and the crate
+    // denies unsafe code), so the test reruns itself with it set.
+    if std::env::var_os(SENTINEL_VAR).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "workspace_mode_passes_the_curated_environment",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(SENTINEL_VAR, "sentinel-secret")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        return;
+    }
     let ws = Workspace::new();
-    let command = "echo \"HOME=[$HOME]\"; echo \"PATH=[$PATH]\"; echo \"OUTSIDE=[${CARGO_MANIFEST_DIR:-unset}]\"; echo END";
+    let command = "echo \"HOME=[$HOME]\"; echo \"PATH=[$PATH]\"; echo \"OUTSIDE=[${RKAT_TUI_TEST_SECRET:-unset}]\"; echo END";
     let Some(output) = run_confined(&ws, "workspace", command).await else {
         return;
     };
@@ -197,10 +218,12 @@ async fn workspace_mode_passes_the_curated_environment() {
     if let Ok(path) = std::env::var("PATH") {
         assert!(output.contains(&format!("PATH=[{path}]")), "{output}");
     }
-    if std::env::var_os("CARGO_MANIFEST_DIR").is_some() {
-        assert!(output.contains("OUTSIDE=[unset]"), "{output}");
-    }
+    assert!(output.contains("OUTSIDE=[unset]"), "{output}");
+    assert!(!output.contains("sentinel-secret"), "{output}");
 }
+
+/// Set (in a rerun of the test) to a value the confined shell must not see.
+const SENTINEL_VAR: &str = "RKAT_TUI_TEST_SECRET";
 
 /// Name resolution inside workspace mode, with this host's real system
 /// paths (`HostPaths::detect`): `localhost` resolves from the granted

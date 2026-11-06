@@ -48,6 +48,37 @@ pub(super) enum RebuildReason {
     ModelSwitch,
 }
 
+/// How [`Runner::rebuild_session_workaround`] failed.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RebuildError {
+    /// The session could not be retired; it runs on as it was.
+    #[error("{0}")]
+    Retire(#[source] TuiError),
+    /// The rebuild failed and the session was resumed as it was before.
+    #[error("{0} (the session was resumed as it was)")]
+    KeptPrevious(#[source] TuiError),
+    /// The session was retired and could not be resumed: it is detached
+    /// until the user resumes it.
+    #[error(
+        "the session could not be resumed after a rebuild ({first}; retry: {retry}); \
+         it is detached: run /resume to reattach it"
+    )]
+    Detached {
+        /// The failed resume with the new settings.
+        first: TuiError,
+        /// The failed retry with the previous ones.
+        #[source]
+        retry: TuiError,
+    },
+}
+
+impl RebuildError {
+    /// Whether the runner holds no live session any more.
+    pub(super) fn detached(&self) -> bool {
+        matches!(self, Self::Detached { .. })
+    }
+}
+
 impl Runner {
     /// The native auto-compaction trigger the policy gives the current
     /// model (its profile's window; an estimated window counts as unknown).
@@ -59,19 +90,47 @@ impl Runner {
     /// The one place the TUI retires and resumes its own idle session (see
     /// the module docs): the agent is rebuilt from the current config with
     /// `trigger`, the event stream followed again, and the identity re-read.
+    ///
+    /// The runner never keeps a retired session behind a resume that
+    /// failed: the resume is retried once with the session's previous
+    /// trigger ([`RebuildError::KeptPrevious`]); only when that fails too is
+    /// the session left detached ([`RebuildError::Detached`]).
     pub(super) async fn rebuild_session_workaround(
         &mut self,
         reason: RebuildReason,
         trigger: CompactionTrigger,
-    ) -> Result<(), TuiError> {
+    ) -> Result<(), RebuildError> {
         tracing::debug!(?reason, ?trigger, "rebuilding the session (upstream workaround)");
         let id = self.session.id().clone();
-        self.session.retire().await?;
-        self.session =
-            SessionHandle::resume(&self.runtime, &id, self.template.options(None, trigger)).await?;
+        let previous = self.session.compaction();
+        self.session.retire().await.map_err(RebuildError::Retire)?;
+        let result = match SessionHandle::resume(
+            &self.runtime,
+            &id,
+            self.template.options(None, trigger),
+        )
+        .await
+        {
+            Ok(session) => {
+                self.session = session;
+                Ok(())
+            }
+            Err(first) => {
+                tracing::warn!(error = %first, "session rebuild failed; resuming as it was");
+                match SessionHandle::resume(&self.runtime, &id, self.template.options(None, previous))
+                    .await
+                {
+                    Ok(session) => {
+                        self.session = session;
+                        Err(RebuildError::KeptPrevious(first))
+                    }
+                    Err(retry) => return Err(RebuildError::Detached { first, retry }),
+                }
+            }
+        };
         self.follow_events().await;
         self.refresh_identity().await;
-        Ok(())
+        result
     }
 
     /// Rebuild the idle session when its agent runs on another trigger than
@@ -90,8 +149,13 @@ impl Runner {
             .rebuild_session_workaround(RebuildReason::CompactionTrigger, wanted)
             .await
         {
+            let level = if err.detached() {
+                NoticeLevel::Error
+            } else {
+                NoticeLevel::Warn
+            };
             self.notice(
-                NoticeLevel::Warn,
+                level,
                 format!("could not apply the compaction trigger to this session: {err}"),
             );
         }

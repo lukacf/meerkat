@@ -139,7 +139,9 @@ pub fn render_raw_args(args: &RawValue) -> String {
     }
 }
 
-fn truncate_text(s: &str, max: usize) -> String {
+/// The first `max` bytes of `s` (on a char boundary), with a marker naming
+/// the bytes cut when anything was.
+pub(crate) fn truncate_text(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

@@ -120,6 +120,11 @@ pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
             &realm_paths_in(&state_root, WORKSPACE_REALM_ID).root,
         )?;
         ensure_workspace_state_dir(&state_root)?;
+        let project_root = seal(
+            project_root,
+            &realm_paths_in(&state_root, WORKSPACE_REALM_ID).root,
+            global.as_ref(),
+        );
         return Ok(RuntimeScope {
             project_root,
             context_root,
@@ -157,6 +162,11 @@ pub fn resolve_scope(args: &Args) -> Result<RuntimeScope, TuiError> {
         &realm_paths_in(&locator.state_root, locator.realm.as_str()).root,
     )?;
 
+    let project_root = seal(
+        project_root,
+        &realm_paths_in(&locator.state_root, locator.realm.as_str()).root,
+        global.as_ref(),
+    );
     Ok(RuntimeScope {
         project_root,
         context_root,
@@ -293,6 +303,19 @@ fn ensure_workspace_state_dir(state_root: &Path) -> Result<(), TuiError> {
             .map_err(|e| TuiError::io("write workspace state .gitignore", e))?;
     }
     Ok(())
+}
+
+/// Seal what a file tool must never write wherever it lies: the git
+/// directories governing the project ([`crate::paths::git_dirs`]), the
+/// realm directory (its `config.toml`, rules, approvals, `tui.toml`,
+/// sessions) and the user config directory (global rules, trust records).
+fn seal(project_root: ProjectRoot, realm_root: &Path, global: Option<&GlobalDirs>) -> ProjectRoot {
+    let git = crate::paths::git_dirs(project_root.as_path());
+    project_root.with_sealed_roots(
+        git.into_iter()
+            .chain(std::iter::once(realm_root.to_path_buf()))
+            .chain(global.map(|g| g.config.clone())),
+    )
 }
 
 fn project_root_from(path: &Path) -> Result<ProjectRoot, TuiError> {

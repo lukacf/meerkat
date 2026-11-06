@@ -121,12 +121,37 @@ fn shape(
 
 /// A helper is a seated member, so the engine would let it `fork_off`; its
 /// fork child would seat without this customizer and so without the gate.
-/// Every helper carries the TUI's tool access policy unless its spec names
-/// one.
+/// Every helper's tool access policy denies the TUI's denied tools
+/// ([`crate::session::tool_access_policy`]), merged into whatever policy its
+/// spec names: none or `Inherit` becomes the TUI's deny list, a deny list
+/// gains the names, an allow list loses them, constraints gain a deny
+/// constraint, and `ReadOnly` (which already admits no mutating tool) stays.
 fn deny_ungated_tools(spec: &mut SpawnMemberSpec) {
-    if spec.tool_access_policy.is_none() {
+    use meerkat_core::ops::{ToolAccessConstraint, ToolAccessPolicy};
+    let ToolAccessPolicy::DenyList(denied) = crate::session::tool_access_policy() else {
+        // The TUI policy is a deny list; anything else is a programming
+        // error that must not widen a helper's tools.
         spec.tool_access_policy = Some(crate::session::tool_access_policy());
-    }
+        return;
+    };
+    spec.tool_access_policy = Some(match spec.tool_access_policy.take() {
+        None | Some(ToolAccessPolicy::Inherit) => ToolAccessPolicy::DenyList(denied),
+        Some(ToolAccessPolicy::DenyList(mut names)) => {
+            for name in denied.iter() {
+                names.insert(name.clone());
+            }
+            ToolAccessPolicy::DenyList(names)
+        }
+        Some(ToolAccessPolicy::AllowList(mut names)) => {
+            names.retain(|name| !denied.contains(name.as_str()));
+            ToolAccessPolicy::AllowList(names)
+        }
+        Some(ToolAccessPolicy::ReadOnly) => ToolAccessPolicy::ReadOnly,
+        Some(ToolAccessPolicy::Constraints(mut constraints)) => {
+            constraints.push(ToolAccessConstraint::DenyNames(denied));
+            ToolAccessPolicy::Constraints(constraints)
+        }
+    });
 }
 
 /// A refused helper, as the mob reports it.
@@ -226,28 +251,74 @@ impl SpawnMemberCustomizer for HelperCustomizer {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_helper_is_denied_the_ungated_spawn_tools_unless_its_spec_names_a_policy() {
-        let mut spec = SpawnMemberSpec::new("delegate", "worker");
-        deny_ungated_tools(&mut spec);
-        let denied = match &spec.tool_access_policy {
-            Some(meerkat_core::ops::ToolAccessPolicy::DenyList(names)) => {
-                names.0.iter().any(|n| n.as_str() == "fork_off")
-            }
-            _ => false,
-        };
-        assert!(denied, "{:?}", spec.tool_access_policy);
+    fn denies_fork_off(names: &meerkat_core::ToolNameSet) -> bool {
+        names.contains("fork_off")
+    }
 
-        let mut named = SpawnMemberSpec::new("delegate", "worker");
-        named.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
-        deny_ungated_tools(&mut named);
-        assert_eq!(
-            named.tool_access_policy,
-            Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly)
-        );
+    #[test]
+    fn a_helper_without_a_policy_or_inheriting_gets_the_tui_deny_list() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        for policy in [None, Some(ToolAccessPolicy::Inherit)] {
+            let mut spec = SpawnMemberSpec::new("delegate", "worker");
+            spec.tool_access_policy = policy;
+            deny_ungated_tools(&mut spec);
+            assert_eq!(spec.tool_access_policy, Some(crate::session::tool_access_policy()));
+        }
+    }
+
+    #[test]
+    fn a_helpers_deny_list_gains_the_tui_names() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        spec.tool_access_policy = Some(ToolAccessPolicy::DenyList(
+            ["web_fetch"].into_iter().collect(),
+        ));
+        deny_ungated_tools(&mut spec);
+        let Some(ToolAccessPolicy::DenyList(names)) = &spec.tool_access_policy else {
+            panic!("{:?}", spec.tool_access_policy);
+        };
+        assert!(names.contains("web_fetch") && denies_fork_off(names), "{names:?}");
+    }
+
+    #[test]
+    fn a_helpers_allow_list_loses_the_tui_names() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        spec.tool_access_policy = Some(ToolAccessPolicy::AllowList(
+            ["read_file", "fork_off"].into_iter().collect(),
+        ));
+        deny_ungated_tools(&mut spec);
+        let Some(ToolAccessPolicy::AllowList(names)) = &spec.tool_access_policy else {
+            panic!("{:?}", spec.tool_access_policy);
+        };
+        assert!(names.contains("read_file") && !names.contains("fork_off"), "{names:?}");
+    }
+
+    #[test]
+    fn a_read_only_helper_stays_read_only_and_constraints_gain_a_deny() {
+        use meerkat_core::ops::{ToolAccessConstraint, ToolAccessPolicy};
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        spec.tool_access_policy = Some(ToolAccessPolicy::ReadOnly);
+        deny_ungated_tools(&mut spec);
+        assert_eq!(spec.tool_access_policy, Some(ToolAccessPolicy::ReadOnly));
+
+        let mut spec = SpawnMemberSpec::new("delegate", "worker");
+        spec.tool_access_policy = Some(ToolAccessPolicy::Constraints(vec![
+            ToolAccessConstraint::ReadOnly,
+        ]));
+        deny_ungated_tools(&mut spec);
+        let Some(ToolAccessPolicy::Constraints(constraints)) = &spec.tool_access_policy else {
+            panic!("{:?}", spec.tool_access_policy);
+        };
+        assert_eq!(constraints.len(), 2);
+        assert!(matches!(
+            &constraints[1],
+            ToolAccessConstraint::DenyNames(names) if denies_fork_off(names)
+        ));
     }
 
     #[test]

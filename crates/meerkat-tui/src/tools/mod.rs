@@ -3,7 +3,9 @@
 //! [`FileToolDispatcher`] implements [`AgentToolDispatcher`] and is injected
 //! into sessions as an external tool source. It is deliberately policy-free:
 //! out-of-project paths are not refused here (the approval layer decides), and
-//! the only hard refusal is writing through a symlinked final path component.
+//! the only hard refusals are writing through a symlink and writing a file
+//! with more than one hard link. Writes replace the file (a temporary file
+//! renamed over it), so a shared inode is never written.
 //!
 //! Every model-supplied path goes through [`ProjectRoot::resolve`] so the tools
 //! and the approval policy agree on what a path means.
@@ -260,7 +262,8 @@ impl Shared {
     }
 
     /// Verify that an existing file may be overwritten: the final component is
-    /// not a symlink, it is not a directory, and it was read (and not changed
+    /// not a symlink, it is a regular file with no other hard link (on Unix),
+    /// and it was read (and not changed
     /// since) in this session.
     ///
     /// Returns `Ok(None)` when the target does not exist yet, and the current
@@ -293,6 +296,17 @@ impl Shared {
         };
         if !meta.is_file() {
             return Err(ReadRefusal::NotRegular(meta.file_type()).into_failure("write", &display));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if meta.nlink() > 1 {
+                return Err(ToolFailure::recoverable(format!(
+                    "refusing to write {display}: it is a hard link shared with {} other path(s), \
+                     which a write would change as well; edit the file at its own path",
+                    meta.nlink() - 1
+                )));
+            }
         }
         let current = meta
             .modified()
@@ -339,12 +353,20 @@ impl Shared {
         content: &str,
     ) -> Result<FileDiff, ToolFailure> {
         let display = self.display(resolved);
-        if let Some(parent) = resolved.abs.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| ToolFailure::io("create parent directories for", &display, &err))?;
-        }
-        std::fs::write(&resolved.abs, content)
-            .map_err(|err| ToolFailure::io("write", &display, &err))?;
+        // A temporary file renamed over the target: a hard link created
+        // after `check_writable` keeps the old content, never this write.
+        crate::paths::write_atomic(
+            &resolved.abs,
+            content.as_bytes(),
+            crate::paths::FileMode::Preserve,
+            None,
+        )
+        .map_err(|err| match err {
+            crate::paths::AtomicWriteError::Io { op, source, .. } => {
+                ToolFailure::io(op, &display, &source)
+            }
+            other => ToolFailure::recoverable(other.to_string()),
+        })?;
         let mtime = std::fs::metadata(&resolved.abs)
             .and_then(|meta| meta.modified())
             .map_err(|err| ToolFailure::io("read the modification time of", &display, &err))?;

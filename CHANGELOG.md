@@ -70,9 +70,13 @@ them.
   outside). User-global files live in `~/.rkat/tui`
   (`--config-dir` overrides; an existing `~/.config/rkat-tui` is used with a
   notice until the new directory exists). File tools never write the gate's
-  own `.rkat/` state or `.git/` (sealed paths: denied before the classifier
-  and any allow rule), and `fork_off` is denied to sessions and helpers (a
-  fork child would seat outside the approval gate); the session's own `fork`
+  own `.rkat/` state or `.git/`, nor, wherever they lie, the git directories
+  governing the project (an enclosing repository's, a worktree's and its
+  common dir), the realm directory or the user config directory (sealed
+  paths: denied before the classifier and any allow rule, for every target
+  of a patch), nor a file with another hard link, and `fork_off` is denied
+  to sessions and helpers (a fork child would seat outside the approval
+  gate); the session's own `fork`
   tool runs a helper that starts with the session's conversation, rendered
   as text, as context, behind the same gate. See
   `crates/meerkat-tui/README.md`.

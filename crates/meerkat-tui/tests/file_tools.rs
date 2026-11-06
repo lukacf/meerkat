@@ -337,6 +337,69 @@ async fn write_refuses_symlink_final_component() {
     assert!(!fx.path("nowhere.txt").exists());
 }
 
+/// A hard link makes a harmless-looking name share an inode with a sealed
+/// or protected file (`ln .git/config notes.txt`): writing it is refused,
+/// and the link's other name keeps its content.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_and_edit_refuse_a_hard_linked_file() {
+    let fx = Fixture::new();
+    fx.write(".git/config", "[core]\n");
+    std::fs::hard_link(fx.path(".git/config"), fx.path("notes.txt")).unwrap();
+    fx.ok("read_file", json!({"path": "notes.txt"})).await;
+    let msg = fx
+        .err(
+            "write_file",
+            json!({"path": "notes.txt", "content": "pwned"}),
+        )
+        .await;
+    assert!(msg.contains("hard link"), "{msg}");
+    let msg = fx
+        .err(
+            "edit_file",
+            json!({"path": "notes.txt", "old_string": "[core]", "new_string": "pwned"}),
+        )
+        .await;
+    assert!(msg.contains("hard link"), "{msg}");
+    assert_eq!(fx.read(".git/config"), "[core]\n");
+    assert_eq!(fx.read("notes.txt"), "[core]\n");
+}
+
+/// A write replaces the file instead of writing its inode, keeping its
+/// permission bits: a hard link made after the checks keeps the old content.
+#[cfg(unix)]
+#[tokio::test]
+async fn writes_replace_the_file_and_keep_its_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = Fixture::new();
+    fx.write("run.sh", "echo one\n");
+    std::fs::set_permissions(fx.path("run.sh"), std::fs::Permissions::from_mode(0o750)).unwrap();
+    fx.ok("read_file", json!({"path": "run.sh"})).await;
+    let before =
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(fx.path("run.sh")).unwrap());
+    fx.ok(
+        "write_file",
+        json!({"path": "run.sh", "content": "echo two\n"}),
+    )
+    .await;
+    let meta = std::fs::metadata(fx.path("run.sh")).unwrap();
+    assert_ne!(std::os::unix::fs::MetadataExt::ino(&meta), before);
+    assert_eq!(meta.permissions().mode() & 0o777, 0o750);
+    assert_eq!(fx.read("run.sh"), "echo two\n");
+    // A new file gets the mode a plain create gives it (the umask decides).
+    fx.ok("write_file", json!({"path": "new.txt", "content": "x"}))
+        .await;
+    fx.write("probe.txt", "x");
+    let mode = |rel: &str| {
+        std::fs::metadata(fx.path(rel))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("new.txt"), mode("probe.txt"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn write_through_symlinked_dir_escaping_root_is_allowed_by_dispatcher() {

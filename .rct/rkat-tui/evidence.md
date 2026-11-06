@@ -224,16 +224,16 @@ timestamp, and output excerpts.
      or `[models.<id>]`-in-definition models, so a session on an endpoint-only model id (e.g. `proxy:my-alias`) cannot
      `delegate` ("unknown_model: profiles.delegate model … neither catalogued …", returned to the model as the tool
      error). Ask: let the implicit mob inherit the delegator's provider / custom model profile. **Resolved on-branch**
-     (2026-11-06, engine change in `meerkat-mob-mcp`): `MobMcpState::with_implicit_mob_definition_customizer` takes an
-     `ImplicitMobDefinitionCustomizer`, asked with an `ImplicitMobContext` (owner bridge session, model) between
-     `MobDefinition::implicit` and the create; the engine refuses a customizer that changes the mob id or the delegate
-     profile's model (`implicit_mob::implicit_mob_definition`). Opt-in; no other surface installs one. The TUI's
-     `mobs::endpoint_models::EndpointModels` sets the delegate profile's `provider` from the realm's `[models.<id>]`
-     profile (read from `Runtime::effective`); a `models[<id>]` definition entry would collide with the realm's entry
-     at the member build ("model id … must be unique across built-in, custom, and self-hosted entries"). Unit:
+     (2026-11-06, engine change in `meerkat-mob-mcp`; narrowed for review the same day):
+     `MobMcpState::with_implicit_mob_customizer` takes an `ImplicitMobCustomizer`, asked once with an `ImplicitMobContext` (owner bridge session, model) for
+     `delegate_provider` before the create; the engine sets `profiles.delegate.provider` from a `Some` answer and the
+     host never touches the definition (`implicit_mob::implicit_mob_definition`). Opt-in; no other surface installs
+     one. The TUI's `mobs::endpoint_models::EndpointModels` answers the provider of the realm's `[models.<id>]` profile
+     (read from `Runtime::effective`); the member build reads that profile from the realm config. Unit:
      `implicit_mob::tests::*`, `tests::implicit_mob_for_an_uncatalogued_model_is_refused_without_a_customizer`,
-     `tests::implicit_mob_customizer_makes_an_uncatalogued_model_validate_and_is_reused`,
-     `tests::implicit_mob_customizer_that_changes_the_delegate_model_is_refused`; TUI:
+     `tests::implicit_mob_without_a_customizer_is_exactly_the_implicit_definition`,
+     `tests::implicit_mob_customizer_provider_makes_an_uncatalogued_model_validate_and_is_reused`,
+     `tests::implicit_mob_customizer_error_refuses_the_create`; TUI:
      `mobs::a_session_on_an_endpoint_only_model_delegates_on_it`. Found with it: the agent's mob tools capture the
      model at build (`AgentMobToolSurface.model`), so after a hot `/model` switch `delegate` helpers ran on the old
      model. The TUI now rebuilds the session after every switch
@@ -517,9 +517,14 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
   symlink's target at the link's path. **Resolved on-branch** (2026-11-06, the branch's first engine change):
   `meerkat-sandbox`'s Linux `Mount::capture` accepts a read-only file grant whose final component is a symlink to a
   regular file (ancestors real directories) and binds the pinned canonical target at the link's path; `validate()`
-  still re-resolves the link to the pinned target, so a retargeted link fails closed. Unit:
-  `linux::tests::a_final_component_link_grants_its_regular_file_target_read_only`; positive lane (ignored here, no
-  user namespaces): `linux_file_grant_through_a_final_symlink_binds_its_target_at_the_link`. The TUI now grants the
+  still re-resolves the link to the pinned target, so a retargeted link fails closed. Narrowed for review: the link
+  is accepted only when the link and every directory from `/` to its parent are owned by root or the euid and none is
+  group/other-writable unless sticky (`link_is_trusted`); `meerkat_sandbox::literal_file_grantable` exports the
+  backend's rule and the TUI's `canonical` calls it. Unit:
+  `linux::tests::a_final_component_link_grants_its_regular_file_target_read_only`,
+  `linux::tests::a_final_component_link_in_a_shared_writable_directory_is_refused`,
+  `linux::tests::a_final_component_link_owned_by_another_user_is_refused` (root only); positive lane:
+  `linux_file_grant_through_a_final_symlink_binds_its_target_at_the_link`. The TUI now grants the
   link only (`canonical` admits a final file link on Linux; the target's directory is not granted); the
   `resolv_conf_link` notice is gone, and
   `workspace_mode_resolves_localhost_and_dns_names` no longer skips DNS for a link.
@@ -583,3 +588,61 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
   `fork::context` tests, the catalog family test.
 - Upstream ask: a host hook to shape fork seats (the spawn customizer for persisted-fork children). It only matters once
   the main session is a durable mob member, which would make `fork_off` (exact context) usable behind the gate.
+
+## Review fixes — 2026-11-06 (sealing, fork prompt, model switch)
+
+- S1 hard links: `Shared::check_writable` refuses (Unix) a target with `nlink() > 1` (recoverable error naming the
+  hard link); `commit_write` writes through `paths::write_atomic` with the new `FileMode::Preserve` (temp file renamed
+  over the target, the old permission bits kept, a new file `0666` minus the umask), so a shared inode is never
+  written. Tests: `tests/file_tools.rs` `write_and_edit_refuse_a_hard_linked_file` (`ln .git/config notes.txt`; both
+  tools refuse, both names keep `[core]`), `writes_replace_the_file_and_keep_its_mode`; `paths` unit
+  `atomic_write_never_writes_a_shared_inode`.
+- S2 sealing outside the workspace: `ProjectRoot::with_sealed_roots` (canonicalized as far as they exist) and
+  `paths::git_dirs` (the `.git` entry at the root and every ancestor: a directory, or a `gitdir:` file; plus the
+  git dir's `commondir`; no subprocess). `bootstrap::scope::resolve_scope` seals the git dirs, the realm root and the
+  user config dir. Tests: `paths` unit `sealed_roots_seal_state_outside_the_project`; `tests/approval_policy.rs`
+  `sealed_roots_outside_the_workspace_are_sealed` (repo-subdir workspace, worktree `gitdir:` + `commondir`, realm,
+  config dir; `write_file` and patch target Sealed, `read_file` not).
+- A5 `.rkat` itself: `SEALED_PATTERNS`/`PROTECTED_PATTERNS` gain `.rkat` (`.rkat/**` does not match the base).
+  Test: `sealed_paths_are_the_gate_state_and_vcs_internals_and_imply_protected` covers `.rkat`.
+- S3 order-dependent patch check: `builtin_tier` checks every `FileWrite` target for a seal before the
+  outside/protected loop. Tests: `policy` unit `a_later_sealed_patch_target_seals_the_patch`, `tests/approval_policy.rs`
+  `a_sealed_patch_target_after_a_protected_or_outside_one_is_sealed` (`build.rs` before `.git/config`, `/tmp/x`
+  before `.rkat/config.toml`, under `apply_patch *`).
+- S4 forged roles in the fork prompt: `fork::context::entry` indents every continuation line (any line break,
+  `\r`/VT/FF/NEL/U+2028/U+2029 included) with `  | `. Test: `content_lines_cannot_pose_as_entries`.
+- S5 fork child tooling: `working_profile` takes `ParentTooling` (the caller session's persisted `SessionTooling`
+  builtins/shell resolved against the TUI factory's defaults, both on) instead of forcing both on. Note: the realm
+  `[tools] shell_enabled` is not read by the factory for TUI sessions (`build_factory` sets `.builtins(true)
+  .shell(true)`), so the parent's effective tooling is its session overrides over those defaults. Test:
+  `the_child_gets_the_parents_builtins_and_shell`.
+- S6 proxies: README "Environment" says proxy URLs pass unchanged, credentials included.
+- S7 + A6 state-dir error: `error::shell_quote` (`'\''` escaping) for the `mv`/`--state-root`/`--realm` hint, which
+  is attached only when `error::suggests_move_aside` finds a schema/ledger/manifest incompatibility
+  (`StoreError::{SchemaFromTheFuture, UnledgeredDomainObjects, ManifestFromTheFuture, CorruptLedger}` anywhere in
+  the source chain). Tests: `a_state_dir_from_another_version_names_both_ways_out`,
+  `other_open_failures_get_no_move_aside_advice` (governed realm, manifest lock timeout, permission error),
+  `hint_paths_with_quotes_stay_one_shell_word`.
+- C1 failed rebuild: `rebuild_session_workaround` returns `RebuildError` (`Retire`, `KeptPrevious` after a resume
+  retried with the previous trigger, `Detached` when both resumes fail); `set_model` words the notice by kind
+  (`model_switch_rebuild_notice`) and skips the trigger upkeep on a detached session. Tests (unit; the rig cannot
+  inject a resume failure): `a_detached_session_is_reported_as_such_and_points_at_resume`,
+  `a_session_still_running_only_keeps_its_helpers_on_the_old_model`.
+- C2 repeated request: `render` skips the running turn's request only when the last conversational user message
+  has its text and no assistant reply since ended a turn (each one asked for tools: the running turn's own
+  committed tool rounds, which `the_conversation_renders_without_the_system_prompt` shows can be in the snapshot).
+  Test: `a_repeated_request_after_an_answer_is_still_added`.
+- C3 + A2 fork labels and errors: `fresh_label` takes the handle and lists `list_members_including_retiring`;
+  `fork()` returns a `thiserror` `ForkError` rendered at the tool boundary; the handle is fetched once.
+- C4 context entries: tool calls clipped to 1 KiB as a whole, assistant blocks in their own order. Test:
+  `a_huge_tool_call_is_clipped_and_blocks_keep_their_order`.
+- A1 delegate guards in `fork`: `admit_child_tool_policy()` before the implicit mob is ensured, and the handle must
+  be the caller's implicit mob (`owner_bridge_session_lifecycle_authority`: implicit flag and bridge session ==
+  caller). Test (unit): `only_the_callers_own_implicit_mob_is_acted_on`.
+- A3 `fork::context` reuses `approval::transcript::truncate_text` (now `pub(crate)`).
+- A4 helper policy merge: `deny_ungated_tools` merges the TUI denies into any policy (none/`Inherit` → the TUI
+  list, deny list + names, allow list − names, constraints + a deny constraint, `ReadOnly` kept). Tests:
+  `a_helper_without_a_policy_or_inheriting_gets_the_tui_deny_list`, `a_helpers_deny_list_gains_the_tui_names`,
+  `a_helpers_allow_list_loses_the_tui_names`, `a_read_only_helper_stays_read_only_and_constraints_gain_a_deny`.
+- C5 vacuous env test: `workspace_mode_passes_the_curated_environment` reruns itself with `RKAT_TUI_TEST_SECRET` set
+  (unsafe `set_var` is denied) and asserts the confined shell does not see it.

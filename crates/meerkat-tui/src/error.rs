@@ -39,12 +39,14 @@ pub enum TuiError {
     #[error("failed to open realm persistence: {0}")]
     Persistence(#[from] meerkat::PersistenceError),
     /// The workspace's (or realm's) state directory could not be opened at
-    /// start-up: the message names the directory and how to start fresh or
-    /// carry its sessions forward, since another `rkat-tui` or `rkat` version
-    /// may have written it.
+    /// start-up: the message names the directory and, when another `rkat-tui`
+    /// or `rkat` version may have written it (a schema, ledger or manifest it
+    /// does not understand; see [`suggests_move_aside`]), how to start fresh
+    /// or carry its sessions forward. Other failures (a realm another process
+    /// holds, contention, permissions) get the plain error.
     #[error(
-        "failed to open the state directory {}: {source}\n\nIf another rkat-tui or rkat version wrote it and you do not need its sessions, move it aside and start fresh:\n  mv '{}' '{}.old'\nTo keep them, follow the message above with `--state-root '{}' --realm '{realm_id}'`.",
-        realm_root.display(), realm_root.display(), realm_root.display(), state_root.display()
+        "{}",
+        persistence_open_message(realm_root, state_root, realm_id, source)
     )]
     PersistenceOpen {
         /// The realm's directory (`<state_root>/<realm_id>`).
@@ -189,21 +191,102 @@ impl TuiError {
     }
 }
 
+/// `path` as one POSIX shell word: single-quoted, each `'` written `'\''`.
+#[must_use]
+pub fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
+/// Whether `err` says the state directory was written by another version
+/// (a schema, ledger or manifest from the future, unledgered or malformed
+/// schema objects): the one case where moving it aside helps. Every error
+/// in the source chain is inspected.
+#[must_use]
+pub fn suggests_move_aside(err: &meerkat::PersistenceError) -> bool {
+    use meerkat_store::StoreError;
+    fn incompatible(store: &StoreError) -> bool {
+        matches!(
+            store,
+            StoreError::SchemaFromTheFuture { .. }
+                | StoreError::UnledgeredDomainObjects { .. }
+                | StoreError::ManifestFromTheFuture { .. }
+                | StoreError::CorruptLedger { .. }
+        )
+    }
+    // A transparent wrapper's `source()` skips the wrapped error itself, so
+    // each level is matched as a store error or a persistence error.
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(error) = current {
+        let store = error.downcast_ref::<StoreError>().or_else(|| {
+            match error.downcast_ref::<meerkat::PersistenceError>() {
+                Some(meerkat::PersistenceError::Store(store)) => Some(store),
+                _ => None,
+            }
+        });
+        if store.is_some_and(incompatible) {
+            return true;
+        }
+        current = error.source();
+    }
+    false
+}
+
+fn persistence_open_message(
+    realm_root: &std::path::Path,
+    state_root: &std::path::Path,
+    realm_id: &str,
+    source: &meerkat::PersistenceError,
+) -> String {
+    let mut out = format!(
+        "failed to open the state directory {}: {source}",
+        realm_root.display()
+    );
+    if suggests_move_aside(source) {
+        let old = realm_root.with_file_name(format!(
+            "{}.old",
+            realm_root
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        out.push_str(&format!(
+            "\n\nIf another rkat-tui or rkat version wrote it and you do not need its sessions, \
+             move it aside and start fresh:\n  mv {} {}\nTo keep them, follow the message above \
+             with `--state-root {} --realm {}`.",
+            shell_quote(realm_root),
+            shell_quote(&old),
+            shell_quote(state_root),
+            shell_quote(std::path::Path::new(realm_id)),
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::TuiError;
     use std::path::PathBuf;
 
-    #[test]
-    fn a_failed_state_dir_open_names_the_directory_and_both_ways_out() {
-        let err = TuiError::PersistenceOpen {
-            realm_root: PathBuf::from("/work/.rkat/tui"),
-            state_root: PathBuf::from("/work/.rkat"),
+    fn open_error(realm_root: &str, state_root: &str, source: meerkat::PersistenceError) -> TuiError {
+        TuiError::PersistenceOpen {
+            realm_root: PathBuf::from(realm_root),
+            state_root: PathBuf::from(state_root),
             realm_id: "tui".to_string(),
-            source: Box::new(meerkat::PersistenceError::RealmGoverned {
-                realm_id: "tui".to_string(),
-            }),
-        };
+            source: Box::new(source),
+        }
+    }
+
+    fn from_another_version() -> meerkat::PersistenceError {
+        meerkat::PersistenceError::Store(meerkat_store::StoreError::SchemaFromTheFuture {
+            domain: "session-store".to_string(),
+            found: 9,
+            supported: 3,
+        })
+    }
+
+    #[test]
+    fn a_state_dir_from_another_version_names_both_ways_out() {
+        let err = open_error("/work/.rkat/tui", "/work/.rkat", from_another_version());
         let text = err.to_string();
         assert!(
             text.starts_with("failed to open the state directory /work/.rkat/tui: "),
@@ -218,5 +301,43 @@ mod tests {
             "{text}"
         );
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn other_open_failures_get_no_move_aside_advice() {
+        for source in [
+            meerkat::PersistenceError::RealmGoverned {
+                realm_id: "tui".to_string(),
+            },
+            meerkat::PersistenceError::Store(meerkat_store::StoreError::RealmManifestLockTimeout {
+                realm_id: "tui".to_string(),
+            }),
+            meerkat::PersistenceError::Store(meerkat_store::StoreError::Io(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )),
+        ] {
+            let text = open_error("/work/.rkat/tui", "/work/.rkat", source).to_string();
+            assert!(
+                text.starts_with("failed to open the state directory /work/.rkat/tui: "),
+                "{text}"
+            );
+            assert!(!text.contains("mv "), "{text}");
+            assert!(!text.contains("--state-root"), "{text}");
+        }
+    }
+
+    #[test]
+    fn hint_paths_with_quotes_stay_one_shell_word() {
+        assert_eq!(
+            super::shell_quote(std::path::Path::new("/it's here")),
+            "'/it'\\''s here'"
+        );
+        let err = open_error("/w/it's/.rkat/tui", "/w/it's/.rkat", from_another_version());
+        let text = err.to_string();
+        assert!(
+            text.contains("mv '/w/it'\\''s/.rkat/tui' '/w/it'\\''s/.rkat/tui.old'"),
+            "{text}"
+        );
+        assert!(text.contains("--state-root '/w/it'\\''s/.rkat'"), "{text}");
     }
 }

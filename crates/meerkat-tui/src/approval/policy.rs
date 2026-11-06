@@ -49,7 +49,10 @@ pub enum Tier {
     /// Tier 0: a user deny rule matched.
     UserDeny,
     /// Tier 0: a file tool targets a sealed path (the gate's own `.rkat/`
-    /// state or `.git/`); denied before any rule or classifier.
+    /// state, the realm and user config directories, or a git directory
+    /// governing the project, inside it or not; see
+    /// [`crate::paths::ResolvedPath::sealed`]); denied before any rule or
+    /// classifier.
     Sealed,
     /// Tier 1: read-only builtin, in-project read, allowlisted shell, or narrow allow rule.
     AlwaysAllow,
@@ -527,6 +530,20 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
             ))
         }
         ActionKind::FileWrite { paths } => {
+            // Every target is checked for a seal before any other verdict:
+            // an earlier outside or protected target must not hide a later
+            // sealed one behind the classifier or an allow rule.
+            for path in paths {
+                if ctx.root.resolve(path).is_ok_and(|resolved| resolved.sealed) {
+                    return Ok(TierDecision::new(
+                        Tier::Sealed,
+                        format!(
+                            "`{path}` is sealed: file tools never write the gate's own state \
+                             (`.rkat/`, the realm and user config directories) or the git directories"
+                        ),
+                    ));
+                }
+            }
             for path in paths {
                 let resolved = ctx
                     .root
@@ -534,14 +551,6 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
                     .map_err(|e| format!("path `{path}`: {e}"))?;
                 if !resolved.inside() {
                     return Err(format!("`{path}` is outside the project"));
-                }
-                if resolved.sealed {
-                    return Ok(TierDecision::new(
-                        Tier::Sealed,
-                        format!(
-                            "`{path}` is sealed: file tools never write the gate's own `.rkat/` state or `.git/`"
-                        ),
-                    ));
                 }
                 if resolved.protected {
                     return Err(format!("`{path}` is a protected path"));
@@ -679,6 +688,25 @@ mod tests {
             tier(&root, &RuleSet::default(), false, "apply_patch", &args),
             Tier::Sealed
         );
+    }
+
+    /// A sealed target later in a patch seals it, whatever comes before it
+    /// (a protected `build.rs`, an outside `/tmp` path) and under an allow
+    /// rule for the tool.
+    #[test]
+    fn a_later_sealed_patch_target_seals_the_patch() {
+        let (_dir, root) = project();
+        let mut rules = RuleSet::default();
+        rules.push(Rule::new(RuleKind::Allow, "apply_patch", Some("*"), RuleOrigin::Realm).unwrap());
+        for patch in [
+            "*** Begin Patch\n*** Add File: build.rs\n+x\n*** Update File: .git/config\n@@\n-a\n+b\n*** End Patch",
+            "*** Begin Patch\n*** Add File: /tmp/x\n+x\n*** Update File: .rkat/config.toml\n@@\n-a\n+b\n*** End Patch",
+        ] {
+            let args = json!({ "patch": patch });
+            for set in [&RuleSet::default(), &rules] {
+                assert_eq!(tier(&root, set, false, "apply_patch", &args), Tier::Sealed, "{patch}");
+            }
+        }
     }
 
     #[test]

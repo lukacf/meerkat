@@ -29,7 +29,7 @@ use meerkat_core::Provider;
 use tokio::task::JoinHandle;
 
 use super::Runner;
-use super::context::RebuildReason;
+use super::context::{RebuildError, RebuildReason};
 use crate::bootstrap::Runtime;
 use crate::endpoints::registry_context_window;
 use crate::endpoints::{EndpointRef, ModelRefError, needs_lookup, parse_model_ref};
@@ -258,22 +258,27 @@ impl Runner {
                 } else {
                     self.session_trigger()
                 };
-                if let Err(err) = self
+                let detached = match self
                     .rebuild_session_workaround(RebuildReason::ModelSwitch, trigger)
                     .await
                 {
-                    self.notice(
-                        NoticeLevel::Warn,
-                        format!("helpers keep the previous model until the session is rebuilt: {err}"),
-                    );
-                }
+                    Ok(()) => false,
+                    Err(err) => {
+                        let (level, text) = model_switch_rebuild_notice(&err);
+                        self.notice(level, text);
+                        err.detached()
+                    }
+                };
                 self.send(Msg::Status(StatusUpdate::Model {
                     provider: self.current_endpoint_name().to_string(),
                     model: self.identity.model.clone(),
                 }));
                 self.push_context_window();
-                // The new model's window moves an auto-mode trigger.
-                self.ensure_trigger().await;
+                // The new model's window moves an auto-mode trigger (a
+                // detached session waits for `/resume`).
+                if !detached {
+                    self.ensure_trigger().await;
+                }
             }
             Err(err) => self.notice(NoticeLevel::Error, failed(err.to_string())),
         }
@@ -295,10 +300,59 @@ impl Runner {
     }
 }
 
+/// The notice for a model switch whose session rebuild failed, worded by
+/// how it failed: a detached session must be resumed, while one still
+/// running has switched, only its helpers keep the previous model.
+fn model_switch_rebuild_notice(err: &RebuildError) -> (NoticeLevel, String) {
+    if err.detached() {
+        (NoticeLevel::Error, format!("model switched, but {err}"))
+    } else {
+        (
+            NoticeLevel::Warn,
+            format!("helpers keep the previous model until the session is rebuilt: {err}"),
+        )
+    }
+}
+
 /// The context window of `model` on `provider`: the engine's model
 /// profile's (see the module docs), else [`DEFAULT_CONTEXT_WINDOW`] as an
 /// estimate (`true`).
 pub(crate) fn window_of(runtime: &Runtime, provider: Provider, model: &str) -> (u64, bool) {
     registry_context_window(&runtime.effective.read(), provider, model)
         .map_or((DEFAULT_CONTEXT_WINDOW, true), |window| (window, false))
+}
+
+#[cfg(test)]
+mod rebuild_notice_tests {
+    use super::*;
+    use crate::error::TuiError;
+
+    fn failure(what: &str) -> TuiError {
+        TuiError::io(what, std::io::Error::other("boom"))
+    }
+
+    #[test]
+    fn a_detached_session_is_reported_as_such_and_points_at_resume() {
+        let (level, text) = model_switch_rebuild_notice(&RebuildError::Detached {
+            first: failure("resume"),
+            retry: failure("resume again"),
+        });
+        assert_eq!(level, NoticeLevel::Error);
+        assert!(text.contains("detached") && text.contains("/resume"), "{text}");
+        assert!(!text.contains("helpers keep"), "{text}");
+    }
+
+    #[test]
+    fn a_session_still_running_only_keeps_its_helpers_on_the_old_model() {
+        for err in [
+            RebuildError::Retire(failure("retire")),
+            RebuildError::KeptPrevious(failure("resume")),
+        ] {
+            assert!(!err.detached());
+            let (level, text) = model_switch_rebuild_notice(&err);
+            assert_eq!(level, NoticeLevel::Warn);
+            assert!(text.contains("helpers keep the previous model"), "{text}");
+            assert!(!text.contains("/resume"), "{text}");
+        }
+    }
 }

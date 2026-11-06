@@ -66,7 +66,7 @@ resumed sessions and helpers carry it too. First match wins:
 
 | Tier | What | Review |
 |---|---|---|
-| 0 | A user **deny** rule matches, or `write_file` / `edit_file` targets a **sealed** path: the gate's own `.rkat/` state (the realm's `config.toml`, rules, MCP servers, sessions) or `.git/`. Neither the classifier nor an allow rule opens a sealed path; a shell command that writes there is still judged by the classifier | denied |
+| 0 | A user **deny** rule matches, or `write_file` / `edit_file` (or any target of a patch) is a **sealed** path: the project's `.rkat/` (the realm's `config.toml`, rules, MCP servers, sessions) and every `.git` inside it, and, wherever they lie, the git directories governing the project (an enclosing repository's `.git` when the workspace is a subdirectory, a worktree's git dir and the common dir its `commondir` names, with the hooks), the realm directory (`--realm`/`--state-root`: `config.toml`, approvals, `tui.toml`) and the user config directory (`~/.rkat/tui`: global rules, trust records). Neither the classifier nor an allow rule opens a sealed path, and reading one is not sealed; a shell command that writes there is still judged by the classifier | denied |
 | 1 | Read-only tools (`read_file`, `glob`, `grep` inside the project, task tools, `memory_search`, `note_list`/`note_read`, `blob_inspect`, skill browsing, `shell_jobs`, read-only `mob_*` queries, `delegate`, `fork`), read-only shell commands (`cat`, `ls`, `rg`, `git status/diff/log`, `cargo check/test` when builds are trusted, …), narrow user **allow** rules | allowed |
 | 2 | `write_file` / `edit_file` where every target is inside the project and not protected (`.rkat/`, `.git/` and any `.git` file, `.env*`, …); workspace notes | allowed |
 | 3 | Everything else: other shell commands, MCP tools, web search, comms sends, mutating mob tools, out-of-project paths, protected paths, user-level notes | classifier |
@@ -149,8 +149,9 @@ them: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`,
 `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `LANG`, `LANGUAGE`,
 `LC_*`, `TZ`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `CURL_CA_BUNDLE`, and the
 proxy variables `http_proxy`, `https_proxy`, `no_proxy`, `all_proxy` (in
-lower and upper case). Every other variable, provider API keys included,
-stays outside the sandbox. Helpers' shell commands get the same set.
+lower and upper case). Proxy URLs pass unchanged, credentials included
+(`http://user:password@proxy:3128`): a command can read them. Every other
+variable, provider API keys included, stays outside the sandbox. Helpers' shell commands get the same set.
 Unconfined commands (`off`) inherit the whole environment as before.
 
 The sandbox grants only directories and single regular files, at their own
@@ -259,7 +260,11 @@ an interrupt cancels them.
 conversation as context: the TUI renders the committed conversation (user
 and assistant text, tool calls and results, `/remember` context; long
 values clipped, the oldest entries dropped past 48 KiB) into the child's
-prompt, followed by the task and the expected output. The child is a helper
+prompt, followed by the task and the expected output. Every entry starts
+with its role (`[user]`, `[tool result]`, ...) and every further line of its
+content is indented with `  | `, so a tool result cannot forge a user line.
+The child has the builtins and the shell exactly when the session has them
+(its persisted tooling overrides). The child is a helper
 in every other respect (the same gate, persona, file tools, nesting under
 `[fork-N · model]`, status bar, `/cost` and interrupt), cannot ask the user,
 and returns its final answer (at most 16 KiB) as the tool result. Only the

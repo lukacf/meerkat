@@ -11,8 +11,10 @@ use meerkat_core::{
 };
 use meerkat_mob::{
     AgentIdentity, BoundedResultSpec, DelegationExecutionRequest, DelegationExecutionService,
-    DelegationMemberOptions, MobId,
+    DelegationMemberOptions, MobError, MobHandle, MobId,
 };
+use meerkat_mob::runtime::OwnerBridgeSessionLifecycleAuthority;
+use meerkat_mob_mcp::ChildToolPolicyRefused;
 use serde::Deserialize;
 
 use super::context::{CONTEXT_BUDGET, prompt, render};
@@ -87,17 +89,16 @@ impl ForkToolDispatcher {
         }
     }
 
-    /// A member identity no member of `mob` holds yet.
-    async fn fresh_label(&self, mob: &MobId) -> AgentIdentity {
-        let taken: Vec<AgentIdentity> = match self.helpers.state().handle_for(mob).await {
-            Ok(handle) => handle
-                .list_members()
-                .await
-                .into_iter()
-                .map(|member| member.agent_identity)
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+    /// A member identity no member of `handle`'s mob holds yet, retiring
+    /// members included (the counter restarts with every process, and a
+    /// retiring child still holds its identity).
+    async fn fresh_label(&self, handle: &MobHandle) -> AgentIdentity {
+        let taken: Vec<AgentIdentity> = handle
+            .list_members_including_retiring()
+            .await
+            .into_iter()
+            .map(|member| member.agent_identity)
+            .collect();
         loop {
             let n = self.next.fetch_add(1, Ordering::Relaxed);
             let identity = AgentIdentity::from(format!("{FORK_LABEL_PREFIX}{n}"));
@@ -107,55 +108,64 @@ impl ForkToolDispatcher {
         }
     }
 
-    /// Run one fork child for `caller`; `Err` is the model-facing reason
-    /// it did not run or did not finish.
+    /// Run one fork child for `caller` and return its final answer.
     async fn fork(
         &self,
         caller: &SessionId,
         args: ForkArgs,
         current_turn: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ForkError> {
         let model = self
             .helpers
             .registry()
             .model_of(caller)
-            .ok_or_else(|| format!("session {caller} is not open in rkat-tui"))?;
+            .ok_or_else(|| ForkError::NotOpen(caller.clone()))?;
         // The caller's turn is running: its committed snapshot, read
         // through the run's provisional tail (a reader's view).
         let session = self
             .service
             .load_committed_session_tolerating_tail(caller)
             .await
-            .map_err(|err| format!("cannot read this conversation: {err}"))?
-            .ok_or_else(|| format!("session {caller} has no committed conversation"))?;
+            .map_err(|err| ForkError::Conversation(err.to_string()))?
+            .ok_or_else(|| ForkError::NoConversation(caller.clone()))?;
+        let tooling = ParentTooling::of(&session)?;
         let conversation = render(session.messages(), current_turn.as_deref(), CONTEXT_BUDGET);
         let task = prompt(&conversation, &args.task, args.expected_output.as_deref());
         let state = self.helpers.state();
+        // The child runs in a child mob under the host's child policy:
+        // refused before the implicit mob is created, as `delegate` is.
+        state.admit_child_tool_policy()?;
         let (mob, _) = state
             .ensure_implicit_mob_for_model(&caller.to_string(), &model, None)
             .await
-            .map_err(|err| format!("cannot host the fork: {err}"))?;
-        let identity = self.fresh_label(&mob).await;
-        let handle = state
-            .handle_for(&mob)
-            .await
-            .map_err(|err| format!("cannot reach the fork's mob: {err}"))?;
+            .map_err(ForkError::Host)?;
+        let handle = state.handle_for(&mob).await.map_err(ForkError::Host)?;
+        // The mob under the implicit id must still be the caller's own
+        // implicit mob: one registered under the id since (after a
+        // destroy) is never acted on.
+        if !is_implicit_mob_of(handle.owner_bridge_session_lifecycle_authority(), caller) {
+            return Err(ForkError::NotCallersMob(mob));
+        }
+        let identity = self.fresh_label(&handle).await;
         let result_spec = BoundedResultSpec::new(RESULT_LABEL, MAX_RESULT_BYTES)
-            .map_err(|err| format!("invalid fork result bound: {err}"))?;
+            .map_err(|err| ForkError::ResultBound(err.to_string()))?;
         let mut member = DelegationMemberOptions::default();
         // The helper customizer would apply the same policy; naming it here
         // keeps `fork_off` out of the child whatever the defaults become.
         member.tool_access_policy = Some(crate::session::tool_access_policy());
         // The implicit mob's profile enables comms only (a `delegate` helper
         // inherits its parent's visible tools instead): a fork child works
-        // like its parent, with the builtins and the shell.
-        member.override_profile = Some(working_profile(handle.definition(), &identity)?);
+        // like its parent, with the builtins and the shell the parent has.
+        member.override_profile = Some(working_profile(handle.definition(), &identity, tooling)?);
         let mut request = DelegationExecutionRequest::new(identity.clone(), task, result_spec);
         request.member = member;
         let outcome = DelegationExecutionService::new(handle)
             .execute(request)
             .await
-            .map_err(|err| format!("{identity} failed: {err}"))?;
+            .map_err(|err| ForkError::Failed {
+                identity: identity.clone(),
+                reason: err.to_string(),
+            })?;
         if let Some(err) = outcome.retirement_error() {
             tracing::warn!(fork = %identity, error = %err, "fork child not retired");
         }
@@ -189,7 +199,7 @@ impl ForkToolDispatcher {
         let id = call.id.to_string();
         let result = match self.fork(caller, args, current_turn).await {
             Ok(text) => ToolResult::new(id, text, false),
-            Err(reason) => ToolResult::new(id, reason, true),
+            Err(err) => ToolResult::new(id, err.to_string(), true),
         };
         Ok(ToolDispatchOutcome::from(result))
     }
@@ -219,23 +229,138 @@ impl AgentToolDispatcher for ForkToolDispatcher {
     }
 }
 
-/// The implicit mob's `delegate` profile with the builtins and the shell
-/// enabled.
+/// Why a fork did not run or did not finish; rendered as the model-facing
+/// error result of the `fork` call.
+#[derive(Debug, thiserror::Error)]
+enum ForkError {
+    #[error("session {0} is not open in rkat-tui")]
+    NotOpen(SessionId),
+    #[error("cannot read this conversation: {0}")]
+    Conversation(String),
+    #[error("session {0} has no committed conversation")]
+    NoConversation(SessionId),
+    #[error("cannot read this session's tool settings: {0}")]
+    Tooling(#[source] serde_json::Error),
+    #[error("cannot fork: {0}")]
+    ChildPolicy(#[from] ChildToolPolicyRefused),
+    #[error("cannot host the fork: {0}")]
+    Host(#[source] MobError),
+    #[error("cannot fork: mob {0} is no longer this session's own helper mob")]
+    NotCallersMob(MobId),
+    #[error("invalid fork result bound: {0}")]
+    ResultBound(String),
+    #[error("{identity}: {reason}")]
+    Profile {
+        identity: AgentIdentity,
+        reason: String,
+    },
+    #[error("{identity} failed: {reason}")]
+    Failed {
+        identity: AgentIdentity,
+        reason: String,
+    },
+}
+
+/// Whether a mob with this owner authority is `caller`'s implicit
+/// delegation mob (the engine's `delegate` check).
+fn is_implicit_mob_of(
+    authority: Option<OwnerBridgeSessionLifecycleAuthority>,
+    caller: &SessionId,
+) -> bool {
+    authority.is_some_and(|authority| {
+        authority.implicit_delegation_mob && authority.bridge_session_id == *caller
+    })
+}
+
+/// The builtins and shell the calling session has: its persisted tooling
+/// overrides resolved against the TUI factory's defaults (both on; see
+/// `build_factory` in [`crate::bootstrap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ParentTooling {
+    builtins: bool,
+    shell: bool,
+}
+
+impl ParentTooling {
+    fn of(session: &meerkat_core::Session) -> Result<Self, ForkError> {
+        let tooling = session
+            .try_session_metadata()
+            .map_err(ForkError::Tooling)?
+            .map(|metadata| metadata.tooling)
+            .unwrap_or_default();
+        Ok(Self::resolve(&tooling))
+    }
+
+    fn resolve(tooling: &meerkat_core::SessionTooling) -> Self {
+        Self {
+            builtins: tooling.builtins.resolve(true),
+            shell: tooling.shell.resolve(true),
+        }
+    }
+}
+
+/// The implicit mob's `delegate` profile with the parent's builtins and
+/// shell.
 fn working_profile(
     definition: &meerkat_mob::MobDefinition,
     identity: &AgentIdentity,
-) -> Result<meerkat_mob::Profile, String> {
+    tooling: ParentTooling,
+) -> Result<meerkat_mob::Profile, ForkError> {
+    let profile_error = |reason: String| ForkError::Profile {
+        identity: identity.clone(),
+        reason,
+    };
     let binding = definition
         .profiles
         .get(&meerkat_mob::ProfileName::from(DELEGATE_PROFILE))
-        .ok_or_else(|| format!("{identity}: the implicit mob has no `{DELEGATE_PROFILE}` profile"))?;
+        .ok_or_else(|| profile_error(format!("the implicit mob has no `{DELEGATE_PROFILE}` profile")))?;
     let meerkat_mob::ProfileBinding::Inline(profile) = binding else {
-        return Err(format!(
-            "{identity}: the implicit mob's `{DELEGATE_PROFILE}` profile is not inline"
-        ));
+        return Err(profile_error(format!(
+            "the implicit mob's `{DELEGATE_PROFILE}` profile is not inline"
+        )));
     };
     let mut profile = profile.as_ref().clone();
-    profile.tools.builtins = true;
-    profile.tools.shell = true;
+    profile.tools.builtins = tooling.builtins;
+    profile.tools.shell = tooling.shell;
     Ok(profile)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use meerkat_core::ToolCategoryOverride;
+
+    #[test]
+    fn only_the_callers_own_implicit_mob_is_acted_on() {
+        let caller = SessionId::new();
+        let authority = |session: &SessionId, implicit: bool| {
+            Some(OwnerBridgeSessionLifecycleAuthority {
+                bridge_session_id: session.clone(),
+                destroy_on_owner_archive: true,
+                implicit_delegation_mob: implicit,
+            })
+        };
+        assert!(is_implicit_mob_of(authority(&caller, true), &caller));
+        // A squatter: another owner's mob, or the caller's explicit one.
+        assert!(!is_implicit_mob_of(authority(&SessionId::new(), true), &caller));
+        assert!(!is_implicit_mob_of(authority(&caller, false), &caller));
+        assert!(!is_implicit_mob_of(None, &caller));
+        let err = ForkError::NotCallersMob(MobId::from("implicit-x"));
+        assert!(err.to_string().contains("no longer this session's own"), "{err}");
+    }
+
+    #[test]
+    fn the_child_gets_the_parents_builtins_and_shell() {
+        let mut tooling = meerkat_core::SessionTooling::default();
+        assert_eq!(
+            ParentTooling::resolve(&tooling),
+            ParentTooling { builtins: true, shell: true }
+        );
+        tooling.shell = ToolCategoryOverride::Disable;
+        assert_eq!(
+            ParentTooling::resolve(&tooling),
+            ParentTooling { builtins: true, shell: false }
+        );
+    }
 }

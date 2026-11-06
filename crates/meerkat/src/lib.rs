@@ -463,6 +463,7 @@ pub use factory::{
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use factory::{
     McpAdapterComposeRefusal, McpAdapterComposer, McpAdapterCustody, McpAdapterCustodyClosed,
+    decode_mcp_auth_resolver_override_from_service, encode_mcp_auth_resolver_override_for_service,
 };
 // The untrusted MCP target resolvers stay exported, deprecated.
 #[cfg(not(target_arch = "wasm32"))]

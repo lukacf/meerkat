@@ -575,6 +575,9 @@ pub fn resolve_effective_turn_config(
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
         llm_client_override: context.llm_client_override,
+        // Process-local like the client override, but never carried by
+        // recovery: the owning host supplies it on every build it makes.
+        mcp_auth_resolver_override: None,
         agent_llm_client_decorator: context.agent_llm_client_decorator,
         override_builtins: overrides
             .override_builtins

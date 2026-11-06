@@ -675,6 +675,38 @@ pub fn decode_llm_client_override_from_service(
         .map(|typed| typed.0.clone())
 }
 
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+#[derive(Clone)]
+struct ErasedMcpAuthResolverOverride(Arc<dyn meerkat_mcp::McpAuthResolver>);
+
+/// Encode a build's own MCP credential source for transport in
+/// `SessionBuildOptions::mcp_auth_resolver_override`.
+///
+/// `SessionBuildOptions` lives in `meerkat-core` and cannot name
+/// `meerkat_mcp::McpAuthResolver`, so the source is carried as
+/// `Arc<dyn Any + Send + Sync>`, as an LLM client override is.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn encode_mcp_auth_resolver_override_for_service(
+    resolver: Arc<dyn meerkat_mcp::McpAuthResolver>,
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    Arc::new(ErasedMcpAuthResolverOverride(resolver))
+}
+
+/// Decode a build's own MCP credential source from `SessionBuildOptions`.
+///
+/// Accepts exactly the typed wrapper produced by
+/// [`encode_mcp_auth_resolver_override_for_service`]; any other payload
+/// decodes to `None`.
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+pub fn decode_mcp_auth_resolver_override_from_service(
+    value: &Arc<dyn std::any::Any + Send + Sync>,
+) -> Option<Arc<dyn meerkat_mcp::McpAuthResolver>> {
+    value
+        .as_ref()
+        .downcast_ref::<ErasedMcpAuthResolverOverride>()
+        .map(|typed| Arc::clone(&typed.0))
+}
+
 /// Resolve a pre-built session comms runtime override (multi-host mobs
 /// DEC-P3H-3). Fail closed on both failure modes: an unrecognized payload
 /// never falls back to config-mode construction, and a runtime whose
@@ -1543,6 +1575,7 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            mcp_auth_resolver_override: None,
             agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,

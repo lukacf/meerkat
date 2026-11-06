@@ -152,6 +152,11 @@ pub struct ConsoleJsonState {
     /// built without a runtime, or over a metadata store that keeps no realm
     /// documents.
     pub(crate) console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The person-addressed attention items (`crate::console_replies`) that
+    /// `meta/console/attention` reads and `meta/console/attention/dismiss`
+    /// dismisses, each caller its own. `None` on a router built without a
+    /// runtime, or over a metadata store that keeps no realm documents.
+    pub(crate) console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
 }
 
 #[derive(Debug, Clone)]
@@ -661,6 +666,7 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
         console_audit: None,
+        console_attention: None,
     })
 }
 
@@ -707,6 +713,7 @@ pub fn console_json_router_with_aggregator_and_access(
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
         console_audit: None,
+        console_attention: None,
     })
 }
 
@@ -773,6 +780,7 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
         None,
+        None,
     )
 }
 
@@ -802,6 +810,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
     console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
 ) -> Router {
     let console_aggregator = shared_aggregator.or_else(|| {
         console_events.clone().map(|events| {
@@ -865,6 +874,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         governed_ingress,
         mob_announcements,
         console_audit,
+        console_attention,
     })
 }
 
@@ -3264,6 +3274,10 @@ mod console_schedule_tests;
 #[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
+
+#[cfg(test)]
+#[path = "console_reply_tests.rs"]
+mod console_reply_tests;
 
 #[cfg(test)]
 #[path = "console_audit_tests.rs"]
@@ -20917,6 +20931,7 @@ message = "review"
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
             console_audit: None,
+            console_attention: None,
         };
         let authenticate = |subject: &str| {
             let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -30042,6 +30057,7 @@ mod console_viewer_resolver_tests {
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 
@@ -30546,6 +30562,7 @@ mod console_human_admission_tests {
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 

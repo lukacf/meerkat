@@ -460,6 +460,7 @@ async fn enforced_access_reads_the_roster_at_most_once_per_replay_page() {
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
         console_audit: None,
+        console_attention: None,
     });
 
     let mut sse = open_stream(&app, "console:0")

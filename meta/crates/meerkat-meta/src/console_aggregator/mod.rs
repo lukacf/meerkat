@@ -33,6 +33,7 @@ mod send_recovery_tests;
 mod send_scope;
 mod state;
 mod store;
+mod thread;
 mod types;
 
 use member_cut::{
@@ -82,6 +83,7 @@ pub use store::{
     ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleSendDedupeDurability,
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
+pub(crate) use thread::{ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference};
 pub use types::{
     AppendDisposition, AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
     ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,

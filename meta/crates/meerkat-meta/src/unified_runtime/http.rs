@@ -487,6 +487,7 @@ impl UnifiedRuntime {
             self.console_session_fences().clone(),
             self.mob_announcements_slot(),
             self.console_audit_log(),
+            self.console_attention(),
         )
     }
 

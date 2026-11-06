@@ -167,6 +167,20 @@ pub trait ConsoleLogStore: Send + Sync {
     async fn frame_by_dedupe_key(&self, dedupe_key: &str)
     -> ConsoleLogResult<Option<ConsoleFrame>>;
 
+    /// The send record of the console send whose interaction id is
+    /// `interaction_id`: its `user_input` frame, read newest first, so a
+    /// recent send is found after the frames written since. A send's
+    /// interaction id is unique (it is derived from the send's dedupe key).
+    /// Stores that cannot answer keep the default and report none: a reply
+    /// to such a send then has no thread to go to. A store that wraps
+    /// another must forward this method.
+    async fn send_frame_by_interaction(
+        &self,
+        _interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        Ok(None)
+    }
+
     /// Console sends that have not settled (`user_input` frames of a send,
     /// still accepted, dispatching, or redacted at acceptance), oldest first.
     /// Bounded: only the frames at the newest `window` cursors are examined,

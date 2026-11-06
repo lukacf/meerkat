@@ -647,6 +647,7 @@ mod tests {
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
             console_audit: None,
+            console_attention: None,
         }
     }
 

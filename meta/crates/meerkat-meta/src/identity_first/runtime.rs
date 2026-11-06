@@ -20825,7 +20825,7 @@ mod wake_per_reason_tests {
             let refusal = (self.refusal)(&session_id);
             if self.core_breaks {
                 let mut broken = super::super::bridge::CoreBrokenMember::new(refusal.to_string())
-                    .with_session(session_id.clone());
+                    .with_session(session_id);
                 match &refusal {
                     BridgeError::ResumeRejected {
                         kind: ResumeRejectionKind::Held { hold },

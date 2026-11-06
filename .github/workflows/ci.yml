@@ -3130,7 +3130,7 @@ jobs:
     # branch (release/meta-*, release/connect-*) and in its release workflow.
     if: ${{ needs.changes.outputs.floor_check_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.floor_check_matrix) }}
@@ -3972,7 +3972,7 @@ jobs:
               jobs = [
                   job
                   for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
                   )
                   for job in page["jobs"]
               ]

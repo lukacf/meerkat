@@ -102,6 +102,17 @@ impl Fixture {
         sign_in: bool,
         access: Option<AccessController>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_host_policy(mob_id, sign_in, access, None).await
+    }
+
+    /// The console, with `host_policy` as the composition's host payload
+    /// policy when one is given (it applies before frames are stored).
+    async fn with_host_policy(
+        mob_id: &str,
+        sign_in: bool,
+        access: Option<AccessController>,
+        host_policy: Option<Arc<dyn crate::console_aggregator::ConsoleVisibilityPolicy>>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let dir = tempfile::tempdir()?;
         let mut builder = crate::unified_runtime::UnifiedRuntimeBuilder::default()
             .definition(meerkat_mob::MobDefinition::from_toml(&format!(
@@ -114,6 +125,9 @@ impl Fixture {
             builder = builder.access_controller(access);
         }
         let owner = builder.build().await.map_err(|error| error.to_string())?;
+        if let Some(policy) = host_policy {
+            owner.initialize_console_projection_with_policy(policy)?;
+        }
         seeded_member(owner.mob_runtime(), "worker", "alpha", &[]).await?;
         let mut decisions = state().decisions;
         decisions
@@ -606,6 +620,63 @@ async fn a_private_reply_is_delivered_once_per_reply_id() -> TestResult {
         items.as_ref().map(Vec::len),
         Ok(1),
         "Alice holds one item: {items:?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A host's payload policy may redact a private reply's frame before it is
+/// stored. The reply is still delivered once into the person's thread: the
+/// first delivery answers its receipt, the same reply again answers it too,
+/// and the text the stored frame no longer carries is not read as other
+/// text.
+#[tokio::test]
+async fn a_redacted_private_reply_is_delivered_once() -> TestResult {
+    struct RedactReplies;
+    impl crate::console_aggregator::ConsoleVisibilityPolicy for RedactReplies {
+        fn redact_payload(
+            &self,
+            frame: &crate::console_aggregator::NewConsoleFrame,
+        ) -> Option<Value> {
+            (frame.kind == "private_reply").then(|| json!({ "redacted": true }))
+        }
+    }
+    let fixture = Fixture::with_host_policy(
+        "mu16-redacted-reply",
+        true,
+        Some(everyone_drives_every_agent()),
+        Some(Arc::new(RedactReplies)),
+    )
+    .await?;
+    let alice = alice();
+    fork_side_chat(&fixture.app, &alice, "alpha", "alpha-side").await;
+    let sent = send(
+        &fixture.app,
+        Some(&alice),
+        "alpha-side",
+        "redacted-question",
+    )
+    .await;
+    let interaction = interaction_of(&sent);
+    let replies = fixture.replies();
+
+    let first = replies.deliver(&interaction, "reply-1", REPLY_TEXT).await;
+    let Ok(first) = first else {
+        panic!("the redacted reply is delivered: {first:?}");
+    };
+    assert!(
+        matches!(first.delivery, ConsoleReplyDelivery::Thread { .. }),
+        "the reply is appended to her private thread: {first:?}"
+    );
+    assert_eq!(
+        replies.deliver(&interaction, "reply-1", REPLY_TEXT).await,
+        Ok(first.clone()),
+        "the same reply again answers the first delivery's receipt"
+    );
+    assert_eq!(
+        replies.delivered(&interaction, "reply-1").await,
+        Ok(Some(first)),
+        "the delivery is answered afterwards"
     );
     fixture.stop().await;
     Ok(())

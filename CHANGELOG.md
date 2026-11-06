@@ -35,6 +35,115 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-contracts`: `WireMemberPreviewUnavailable` gains `StoreRefused`
+  (wire `store_refused`), appended last. The enum is exhaustive, so a
+  downstream exhaustive match needs an arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-contracts`: a member status read whose session the store refuses
+  until its realm is reopened answers `preview_unavailable: "store_refused"`
+  (`mob/member_status`, and the members of `mob/wait_kickoff` and
+  `mob/wait_ready`), where 0.9.10 sent `read_failed`;
+  `MemberPreviewUnavailable::StoreRefused` serializes as `store_refused` and
+  reads back from it. A client that keeps the closed vocabulary of an earlier
+  release (the Python and TypeScript SDKs through 0.9.10) fails such a read
+  with `INVALID_RESPONSE`: update the SDK with the server.
+
+- Python and TypeScript SDKs (not measured by the gate): a member's preview
+  marker (`preview_unavailable` in Python, `previewUnavailable` in
+  TypeScript, on member status snapshots and on the members of the kickoff
+  and ready waits) is now `WireMemberPreviewUnavailable |
+  MobMemberPreviewUnavailableUnknown`. A reason the SDK does not know reads
+  as `{"unknown": <value>}` instead of failing the read with
+  `INVALID_RESPONSE`; code that treats the field as a known reason must
+  handle the unknown form. A value that is not a string still fails closed.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
+  commit whose batch is still unsettled at the self-fence deadline of the
+  fence token it carries fails with `SpiError::UnsettledAtFenceWindow`, and
+  through the runtime store with `RuntimeStoreError::UnsettledAtFenceWindow`.
+  Before, it was retried until its retry budget ran out and then failed with
+  `SpiError::Host` (`RuntimeStoreError::WriteFailed`), unless a retry sent
+  past the deadline landed. While renews fail, the retry budget is therefore
+  cut at the self-fence window. Through the session service, a checkpoint
+  write (a round commit or a closing save) that stops so answers the
+  teardown class (`AgentError::SessionDurableProjectionAuthorityUnknown`),
+  where a failed checkpoint write answered `AgentError::InternalError`. See
+  Fixed.
+
+### Added
+
+- `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
+  last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
+  store commit that stopped at its fence token's self-fence deadline with
+  its outcome unknown, so a caller classifies it by type. Both enums are
+  `#[non_exhaustive]`.
+
+- `meerkat-contracts`, `meerkat-mob`, Python and TypeScript SDKs: the
+  `store_refused` value of a member's `preview_unavailable`
+  (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the
+  member's session until its realm is reopened. The SDKs read it as a known
+  reason, and read a reason a later server adds as
+  `MobMemberPreviewUnavailableUnknown`.
+
+### Fixed
+
+- `meerkat-runtime`: a host store commit no longer sends its batch past its
+  fence token's lease. A commit whose outcome stayed unknown or unavailable
+  was retried for its whole retry budget (30 s by default), also after
+  renews failed and the self-fence window of the token its batch carries
+  closed. Once the store's lease for that token ended, another process could
+  acquire, and a store that only hides the old token's batches at load
+  (outside the contract, which refuses them at commit) acknowledged a retry
+  that no load shows. Core now sends a batch, the first time or again, only
+  while the realm holds its fence and before the token's self-fence
+  deadline (the start of its last successful acquire or renew plus the
+  self-fence window); a commit still unsettled there stops, typed, and
+  poisons its scopes like any batch whose outcome stays unknown. Affects
+  0.9.5 through 0.9.10.
+
+- `meerkat-session`: a round commit or a closing save whose batch the host
+  store left unsettled at its fence window is no longer waited on and
+  written again, or suspended as if nothing had been written: its outcome is
+  unknown, so the checkpoint answers the teardown class at once, the live
+  session is torn down, and it is reloaded from what the store holds (after
+  a reopen of the realm, what landed). A direct turn whose round commit
+  failed at a store fence gap no longer says that the round was not written:
+  its retryable store error says that the round commit failed.
+
+- `meerkat-runtime`: a stopped host store writer no longer poisons its realm
+  when the store grants an acquire the writer gave up on. Each acquire of a
+  re-acquire runs under `SpiRealmConfig::renew_timeout`; a store that still
+  granted a timed-out one left a token the writer never recorded, and the
+  writer's next re-acquire met it as another holder and poisoned the realm
+  until a reopen. While an acquire of its own timed out since its last
+  grant, the writer now waits out such a holder's recorded lease and
+  acquires again; it poisons the realm only when that holder renewed its
+  lease or the listing shows a batch it did not write. With no timed-out
+  acquire, a holder it does not know poisons the realm at once, as before.
+  Affects 0.9.5 through 0.9.10.
+
+### Upgrade notes
+
+- Host store hosts: Core now sends no commit attempt past the self-fence
+  deadline of the token it carries, so while renews fail a
+  `SpiRealmConfig::commit_retry_budget` longer than the self-fence window
+  (20 s at the default timing) is cut there. To tolerate a slower store, set
+  `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
+  the timing as the host store SPI reference describes (Core's Timeouts And
+  The Safety Condition).
+
+### Known limitations
+
+- `meerkat-runtime`: a takeover acquire that a host store grants after the
+  writer gave up on it, and after the writer's next successful acquire,
+  supersedes the writer's live token: the writer meets `FencedOut` and the
+  realm is poisoned until it is reopened. A store that gives each acquire a
+  server-side deadline below Core's acquire timeout
+  (`SpiRealmConfig::renew_timeout`) avoids it.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

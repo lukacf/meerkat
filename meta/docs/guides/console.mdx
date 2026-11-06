@@ -531,6 +531,12 @@ shared conversation:
   the agent's conversation, and no other viewer's stream carries it. So does
   a request whose private conversation is gone by the time the reply comes.
 
+The console counts the person's items in **Needs you** and lists them in its
+inbox after the approvals. Each names the agent that answered and opens the
+chat it answers, and **Dismiss** takes it off the list (a read-only console
+offers no Dismiss). A reply in the person's own conversation reads there as
+the agent's message.
+
 Each console send records where it came from (its `user_input` frame's
 `thread`): the agent, the interaction, and who may read the replies to it.
 Only a person signed in on a console with sign-in can receive private

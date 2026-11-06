@@ -142,11 +142,25 @@ export function startConsoleAttentionPolling(
       }
     }
   };
-  void load();
+  // The timers first: a read that stops the polling at once clears them.
   timer = environment.setInterval(() => void load(), intervalMs);
   stopVisible = environment.onVisible(() => void load());
+  void load();
   return {
     refresh: () => void load(true),
     stop,
   };
+}
+
+/** The console frame kind of a reply appended to the person's own private
+ *  thread: `payload.text`, and `payload.in_reply_to` with the request's
+ *  interaction and `user_input` frame. */
+export const PRIVATE_REPLY_FRAME_EVENT = "private_reply";
+
+/** The text of a private reply frame, or null when the frame is not one or
+ *  carries no text. */
+export function privateReplyText(frame: { event?: string; data?: unknown }): string | null {
+  if (frame.event !== PRIVATE_REPLY_FRAME_EVENT) return null;
+  const data = frame.data && typeof frame.data === "object" ? frame.data as Record<string, unknown> : null;
+  return stringOf(data?.text);
 }

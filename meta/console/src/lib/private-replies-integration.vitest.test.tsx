@@ -180,7 +180,7 @@ describe("private replies in the console", () => {
     }
   }, 30_000);
 
-  it("a reply opens the chat it answers and is dismissed from the inbox", async () => {
+  it("a reply opens the chat it answers", async () => {
     const harness = transport();
     const view = render(<ConsoleApp baseUrl="" transport={harness} />);
     await settle();
@@ -189,7 +189,13 @@ describe("private replies in the console", () => {
       fireEvent.click(view.getByTestId("console-attention-open:reply-1"));
     });
     await view.findByTestId(`chat-pane:${AGENT}`, undefined, { timeout: 5_000 });
+    view.unmount();
+  }, 30_000);
 
+  it("a reply is dismissed from the inbox", async () => {
+    const harness = transport();
+    const view = render(<ConsoleApp baseUrl="" transport={harness} />);
+    await settle();
     await openInbox(view);
     await act(async () => {
       fireEvent.click(view.getByTestId("console-attention-dismiss:reply-1"));

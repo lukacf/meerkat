@@ -142,7 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   items and `meta/console/attention/dismiss` dismisses one; a reply in a
   private conversation is a `private_reply` frame there. A request from an
   open console, a service or a token that names no person has no private
-  reply route.
+  reply route. The Console counts the person's items in **Needs you** and
+  lists them in its inbox, where each opens the chat it answers and can be
+  dismissed; a private reply reads as the agent's message in the person's
+  own conversation.
 - Rust: `ConsoleLogStore` gains the provided
   `send_frame_by_interaction`. A store outside Meta answers none unless it
   implements it, so no reply reaches the senders of the sends it holds

@@ -8,6 +8,7 @@ import { canonicalAssistantToolCounterparts, isCanonicalAssistantMessage, reconc
 import { loadedTimelineStartMs, reconcileAssistantHistoryPositions, reconcileRuntimeAppendFrames, runtimeAppendNoticeKey, runtimeSourceScope, runtimeSourceSequence } from "../../../packages/console-core/src/runtime-append-projection";
 import { settledToolCompletion, toolCompletionFromFrame, unknownToolCompletion, type ToolCompletionEvidence } from "../../../packages/console-core/src/tool-completion";
 import { parseConsoleContextMessage } from "../../../packages/console-core/src/context-record";
+import { PRIVATE_REPLY_FRAME_EVENT, privateReplyText } from "../../../packages/console-core/src/console-attention";
 import {
   councilArgsByCallId,
   councilEntryFromFrame,
@@ -5547,6 +5548,26 @@ function createTimelineFold(
       flushPendingReasoning(true);
       flushPendingText();
       entries.push(entry);
+      return;
+    }
+
+    // A reply meant for this thread's person alone, appended after the turn
+    // that asked: the agent's message, never a runtime event. One without
+    // text shows nothing.
+    if (frame.event === PRIVATE_REPLY_FRAME_EVENT) {
+      const text = privateReplyText(frame);
+      if (!text) return;
+      flushPendingReasoning(true);
+      flushPendingText();
+      const blocks = messageTextBlocks(text, textMode);
+      entries.push({
+        kind: "message",
+        id: entryId,
+        identity: agentIdentity(agent),
+        variant: blocks.length > 0 ? "rich" : "plain",
+        createdAt: isoFromTimestampMs(frame.timestampMs),
+        ...(blocks.length > 0 ? { blocks } : { text }),
+      });
       return;
     }
 

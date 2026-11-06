@@ -110,6 +110,8 @@ interface SidebarProps {
   onOpenApproval?: (pendingId?: string) => void;
   /** Host-provided attention items, counted in "Needs you". */
   hostAttentionCount?: number;
+  /** Replies meant for the signed-in person alone, counted there too. */
+  attentionReplyCount?: number;
   /** Comfortable (two-line 44 px rows) or compact (one-line 32 px rows). */
   density?: SidebarDensity;
   /** The view the focused pane shows: its nav entry wears the accent rule. */
@@ -2132,6 +2134,7 @@ export const Sidebar = React.memo(function Sidebar({
   approvals,
   onOpenApproval,
   hostAttentionCount = 0,
+  attentionReplyCount = 0,
   density = "comfortable",
   activeControl = null,
   openControls,
@@ -2898,7 +2901,7 @@ export const Sidebar = React.memo(function Sidebar({
       >
         {orderAnnouncement}
       </div>
-      {approvals || hostAttentionCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
+      {approvals || hostAttentionCount || attentionReplyCount ? <ApprovalAttention snapshot={approvals} hostItems={hostAttentionCount} replies={attentionReplyCount} onOpen={onOpenApproval || (() => onOpenControl("gating"))} /> : null}
       {/* The roster's mast and search: the view menu's trigger shows while
           either is hovered or focused, and always while the view is not
           the default (A5). */}

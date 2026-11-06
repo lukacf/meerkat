@@ -258,6 +258,16 @@ test("console contract route and method names stay synchronized with Rust http c
       dispatchedRpcMethods.add(method);
     }
   }
+  // The console's own methods dispatch by rpc.rs's named constants
+  // (`request_method == crate::rpc::CONSOLE_..._METHOD`, or a `matches!` of
+  // them): resolve the constants the dispatcher compares the method with.
+  const consoleConstants = parseConsoleMethodDispatchConstants(rustSource);
+  if (consoleConstants.size) {
+    const rpcSource = readFileSync(resolve(process.cwd(), "../crates/meerkat-meta/src/rpc.rs"), "utf8");
+    for (const [name, method] of parseMethodConstants(rpcSource)) {
+      if (consoleConstants.has(name)) dispatchedRpcMethods.add(method);
+    }
+  }
   const contractedRoutes = contractRoutes(schema);
   const frontendRoutes = new Set([
     "GET /",
@@ -372,6 +382,26 @@ function parseTopologyMethods(source: string): Set<string> {
     methods.add(match[1]!);
   }
   return methods;
+}
+
+function parseConsoleMethodDispatchConstants(source: string): Set<string> {
+  const names = new Set<string>();
+  const constant = /crate::rpc::(CONSOLE_[A-Z_]+_METHOD)\b/g;
+  for (const match of source.matchAll(/request_method == crate::rpc::(CONSOLE_[A-Z_]+_METHOD)\b/g)) {
+    names.add(match[1]!);
+  }
+  for (const arms of source.matchAll(/matches!\(\s*request_method\.as_str\(\),\s*([^)]*)\)/g)) {
+    for (const match of arms[1]!.matchAll(constant)) names.add(match[1]!);
+  }
+  return names;
+}
+
+function parseMethodConstants(source: string): Map<string, string> {
+  const constants = new Map<string, string>();
+  for (const match of source.matchAll(/pub const ([A-Z_]+_METHOD): &str = "([^"]+)"/g)) {
+    constants.set(match[1]!, match[2]!);
+  }
+  return constants;
 }
 
 function contractRoutes(schema: ContractSchema): Set<string> {

@@ -1726,27 +1726,16 @@ impl IdentityRuntime {
                 }
             }
         }
-        // A member a held pass could not publish owes its host a fresh held
-        // completion, and a running held pass creates the identities it
-        // covers: either way the identity's creation is held.
-        let marks_read = match self.load_held_completion_marks().await {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "the held-completion marks could not be read; the identities are declared \
-                     held, so none is created outside its held protocol"
-                );
-                false
-            }
-        };
+        // The host's hold: an identity the host asked to hold in this
+        // process, or one a held pass in progress covers, is declared held,
+        // and Core decides (an identity it never created awaits its held
+        // creation).
         let held_pass = self.held_create_pass();
         let held = specs
             .iter()
             .map(|spec| &spec.identity)
             .filter(|identity| {
-                !marks_read
-                    || self.held_completion_owed(identity)
+                self.host_holds(identity)
                     || held_pass.as_ref().is_some_and(|pass| pass.covers(identity))
             })
             .cloned()

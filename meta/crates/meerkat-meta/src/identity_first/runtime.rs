@@ -1059,11 +1059,13 @@ pub enum IdentityRuntimeError {
         refusal: super::held_bootstrap::HeldBootstrapRefusal,
         completion: super::held_bootstrap::HeldCompletionOutcome,
     },
-    /// A held bootstrap's member that the pass did not publish owes its host
-    /// a fresh held completion: an ordinary (unheld) embodiment would publish
-    /// a new instance whose finished surface the host's completion never saw,
-    /// so every wake outside a held pass that covers it refuses it typed,
-    /// until such a pass completes it.
+    /// An identity whose creation its host holds in this process (a held
+    /// bootstrap's roster, a held add), and whose member no held pass
+    /// published, owes its host a fresh held completion: Core never created
+    /// it, and an ordinary (unheld) embodiment would publish a new instance
+    /// whose finished surface the host's completion never saw, so every wake
+    /// outside a held pass that covers it refuses it typed, until such a
+    /// pass completes it.
     HeldCompletionOwed {
         identity: AgentIdentity,
     },
@@ -1396,11 +1398,11 @@ impl std::fmt::Display for IdentityRuntimeError {
             ),
             Self::HeldCompletionOwed { identity } => write!(
                 f,
-                "identity {identity} owes its host a fresh held completion: its held member \
-                 was not published, so it is not embodied unheld. Run the host's held \
-                 bootstrap again (a pass that covers the identity publishes it); if the host \
-                 will never complete it, remove its mark from the state directory's \
-                 held-completion-owed directory"
+                "identity {identity} owes its host a fresh held completion: its host holds its \
+                 creation and its held member was not published, so it is not embodied unheld. \
+                 A held pass that covers the identity publishes it (the host's held bootstrap, \
+                 or a held add of it); a restarted host that no longer holds it creates it as \
+                 any other identity"
             ),
             Self::IdentityUnresumable {
                 identity,
@@ -3454,19 +3456,6 @@ impl IdentityEdgeOwnership {
 pub(crate) type HeldFreshnessHook =
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
 
-/// The durable held-completion marks as this process knows them (see
-/// [`super::held_bootstrap::HeldCompletionMarks`]).
-enum HeldMarks {
-    /// No state directory or host store realm is configured: the marks live
-    /// in memory only.
-    NoStateDir,
-    /// Not read yet: the first wake or held pass reads them into
-    /// `held_completion_owed`.
-    Unread(super::held_bootstrap::HeldCompletionMarksAt),
-    /// Read into `held_completion_owed`; new marks are written here.
-    Read(super::held_bootstrap::HeldCompletionMarksAt),
-}
-
 /// The first-boot manifest as this process knows it.
 enum FirstBootRows {
     /// No state directory or host store realm is configured, so there is no
@@ -3599,18 +3588,20 @@ pub struct IdentityRuntime {
     /// The held bootstrap pass in progress, if any: fresh creations of its
     /// roster identities are held until the pass decides them.
     held_create_pass: StdMutex<Option<Arc<super::held_bootstrap::HeldCreatePass>>>,
-    /// Identities whose member a held bootstrap pass did not publish (it
-    /// ended Broken in that pass): each owes its host a fresh held
-    /// completion, and no embodiment outside a held pass that covers it
-    /// creates it meanwhile. A held pass that publishes it discharges it.
-    /// With a state directory it also holds the durable marks read back
-    /// after a restart (`held_completion_marks`).
-    held_completion_owed: StdMutex<BTreeSet<AgentIdentity>>,
-    /// Where the held-completion marks are kept durably, so a restart
-    /// keeps them.
-    held_completion_marks: StdMutex<HeldMarks>,
-    /// Serializes the first read of the durable held-completion marks.
-    held_completion_marks_reader: Mutex<()>,
+    /// The host's hold: the identities it asked to hold in this process
+    /// (a held bootstrap's roster, each held add's identity), its input to
+    /// every declaration of them (`held_creation`). Core decides: an
+    /// identity it never created awaits its held creation, which only a
+    /// held pass carries out, and no other embodiment creates it. An
+    /// identity leaves the set when a held pass publishes its member or
+    /// when it is deleted. Kept in memory and never written: after a
+    /// restart the host holds an identity again through its held bootstrap
+    /// or a held add.
+    host_held: StdMutex<BTreeSet<AgentIdentity>>,
+    /// Where this runtime writes the held-completion marks: the mirror for
+    /// a rollback to 0.9.10, whose runtime reads them back after a restart
+    /// (O3, until 0.9.12). Nothing here reads them.
+    held_completion_marks: StdMutex<Option<super::held_bootstrap::HeldCompletionMarksAt>>,
     /// The first-boot manifest: the rows of it this process has not
     /// carried out yet. Process-local: each row is read against Core's
     /// member history again before it is carried out.
@@ -4226,52 +4217,56 @@ impl IdentityRuntime {
             .clone()
     }
 
-    /// Whether `identity` owes its host a fresh held completion (see
-    /// [`IdentityRuntimeError::HeldCompletionOwed`]).
-    pub(crate) fn held_completion_owed(&self, identity: &AgentIdentity) -> bool {
-        self.held_completion_owed
+    /// Whether the host holds `identity`'s creation in this process (see
+    /// `host_held`): every declaration of it carries `held_creation`, and an
+    /// identity Core never created then awaits its held creation
+    /// ([`IdentityRuntimeError::HeldCompletionOwed`] outside a held pass that
+    /// covers it).
+    pub(crate) fn host_holds(&self, identity: &AgentIdentity) -> bool {
+        self.host_held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(identity)
     }
 
-    /// Record how a held pass settled `identity`'s member: published, it
-    /// discharges any held completion the identity owed; Broken, the
-    /// identity owes its host a fresh held completion.
+    /// Record how a held pass settled `identity`'s member: a published member
+    /// leaves the host's hold. A member the pass did not publish stays held,
+    /// as the pass's own marking left it.
     pub(crate) fn record_held_completion(&self, identity: &AgentIdentity, published: bool) {
-        let mut owed = self
-            .held_completion_owed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if published {
-            owed.remove(identity);
-        } else {
-            owed.insert(identity.clone());
+            self.release_host_hold(identity);
         }
     }
 
-    /// Point the runtime at its state directory, where the held-completion
-    /// marks are kept durably, one file per identity under
-    /// [`super::HELD_COMPLETION_OWED_DIR`]; the first wake or
-    /// held pass reads them. `None` keeps the marks in memory only, so a
-    /// restart forgets them.
+    /// `identity` leaves the host's hold: a held pass published its member,
+    /// or it was deleted.
+    pub(crate) fn release_host_hold(&self, identity: &AgentIdentity) {
+        self.host_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(identity);
+    }
+
+    /// Point the runtime at its state directory, where it writes the
+    /// held-completion marks, one file per identity under
+    /// [`super::HELD_COMPLETION_OWED_DIR`]: the mirror for a rollback to
+    /// 0.9.10, whose runtime reads them back after a restart (until 0.9.12).
+    /// This runtime never reads them: held creation follows the host's hold
+    /// in this process and Core's verdict. `None` writes no marks.
     pub fn set_held_completion_state_dir(&self, state_dir: Option<PathBuf>) {
         *self
             .held_completion_marks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = match state_dir {
-            Some(state_dir) => {
-                HeldMarks::Unread(super::held_bootstrap::HeldCompletionMarksAt::StateDir(
-                    super::held_bootstrap::HeldCompletionMarks::in_state_dir(&state_dir),
-                ))
-            }
-            None => HeldMarks::NoStateDir,
-        };
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = state_dir.map(|state_dir| {
+            super::held_bootstrap::HeldCompletionMarksAt::StateDir(
+                super::held_bootstrap::HeldCompletionMarks::in_state_dir(&state_dir),
+            )
+        });
     }
 
-    /// Point the runtime at the host store realm that keeps its
-    /// held-completion marks, one document per identity; the first wake or
-    /// held pass reads them, on whichever host the runtime starts.
+    /// Point the runtime at the host store realm where it writes the
+    /// held-completion marks, one document per identity: the rollback mirror,
+    /// as [`Self::set_held_completion_state_dir`] writes it.
     pub(crate) fn set_held_completion_host_store(
         &self,
         documents: crate::host_store_documents::MetaDocuments,
@@ -4279,98 +4274,33 @@ impl IdentityRuntime {
         *self
             .held_completion_marks
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = HeldMarks::Unread(
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
             super::held_bootstrap::HeldCompletionMarksAt::HostStore(documents),
         );
     }
 
-    /// The durable held-completion marks, when a state directory or a host
-    /// store realm keeps them.
+    /// Where the held-completion marks are written, when a state directory or
+    /// a host store realm keeps them.
     fn held_completion_marks(&self) -> Option<super::held_bootstrap::HeldCompletionMarksAt> {
-        match &*self
-            .held_completion_marks
+        self.held_completion_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            HeldMarks::NoStateDir => None,
-            HeldMarks::Unread(marks) | HeldMarks::Read(marks) => Some(marks.clone()),
-        }
+            .clone()
     }
 
-    /// Read the durable held-completion marks into `held_completion_owed`,
-    /// once. A marked identity that Core's member history binds was
-    /// published by the held pass that marked it (removing its mark did not
-    /// land), so it owes nothing and its mark is removed now. A read that
-    /// fails refuses the caller, and the next call reads again: which
-    /// identities owe a completion is unknown until then.
-    async fn load_held_completion_marks(&self) -> Result<(), IdentityRuntimeError> {
-        let unread = matches!(
-            &*self
-                .held_completion_marks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            HeldMarks::Unread(_)
-        );
-        if !unread {
-            return Ok(());
-        }
-        let _reader = self.held_completion_marks_reader.lock().await;
-        let marks = match &*self
-            .held_completion_marks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
-            HeldMarks::Unread(marks) => marks.clone(),
-            HeldMarks::NoStateDir | HeldMarks::Read(_) => return Ok(()),
-        };
-        let marked = match &marks {
-            super::held_bootstrap::HeldCompletionMarksAt::StateDir(files) => {
-                let reader = files.clone();
-                tokio::task::spawn_blocking(move || reader.read())
-                    .await
-                    .map_err(|error| {
-                        IdentityRuntimeError::Internal(format!(
-                            "reading the held-completion marks did not finish: {error}"
-                        ))
-                    })?
-                    .map_err(|error| error.to_string())
-            }
-            super::held_bootstrap::HeldCompletionMarksAt::HostStore(documents) => {
-                super::held_bootstrap::read_host_store_marks(documents).await
-            }
-        }
-        .map_err(|error| {
-            IdentityRuntimeError::Internal(format!(
-                "reading the held-completion marks in {}: {error}",
-                marks.describe()
-            ))
-        })?;
-        let mut owed = BTreeSet::new();
-        for identity in marked {
-            if self.bridge.is_some() && self.core_last_binding(&identity).await?.is_some() {
-                self.clear_held_completion_mark(&identity).await;
-                continue;
-            }
-            owed.insert(identity);
-        }
-        self.held_completion_owed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(owed);
-        *self
-            .held_completion_marks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = HeldMarks::Read(marks);
-        Ok(())
-    }
-
-    /// Mark `identities` durably as owing their host a held completion,
-    /// before a held pass creates any of their members.
+    /// The host holds `identities`' creation in this process: a held pass is
+    /// about to create their members. Each is marked in the rollback mirror,
+    /// durably and before any member exists, as 0.9.10 marks it (a write that
+    /// fails refuses the pass, as it does there); nothing here reads the
+    /// marks.
     pub(crate) async fn mark_held_completion_owed(
         &self,
         identities: &[AgentIdentity],
     ) -> Result<(), IdentityRuntimeError> {
-        self.load_held_completion_marks().await?;
+        self.host_held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(identities.iter().cloned());
         let Some(marks) = self.held_completion_marks() else {
             return Ok(());
         };
@@ -4396,10 +4326,10 @@ impl IdentityRuntime {
         })
     }
 
-    /// Remove `identity`'s durable held-completion mark once a held pass
-    /// published its member. A removal that fails leaves a stale mark, which
-    /// the next read drops, since Core's member history then binds the
-    /// identity.
+    /// Remove `identity`'s held-completion mark from the rollback mirror once
+    /// a held pass published its member, as 0.9.10 removes it. A removal that
+    /// fails leaves a stale mark, which a rollback's read drops, since Core's
+    /// member history then binds the identity.
     pub(crate) async fn clear_held_completion_mark(&self, identity: &AgentIdentity) {
         let Some(marks) = self.held_completion_marks() else {
             return;
@@ -4423,8 +4353,8 @@ impl IdentityRuntime {
         tracing::warn!(
             %identity,
             error = %failure,
-            "the held-completion mark of a published member was not removed; the next read \
-             of the marks drops it"
+            "the held-completion mark of a published member was not removed; a rollback's \
+             read of the marks drops it"
         );
     }
 
@@ -4482,9 +4412,8 @@ impl IdentityRuntime {
             bootstrap_generation: StdMutex::new(0),
             bootstrap_controller: Mutex::new(()),
             held_create_pass: StdMutex::new(None),
-            held_completion_owed: StdMutex::new(BTreeSet::new()),
-            held_completion_marks: StdMutex::new(HeldMarks::NoStateDir),
-            held_completion_marks_reader: Mutex::new(()),
+            host_held: StdMutex::new(BTreeSet::new()),
+            held_completion_marks: StdMutex::new(None),
             first_boot: StdMutex::new(FirstBootRows::NoStateDir),
             first_boot_writer: Arc::new(Mutex::new(())),
             #[cfg(test)]
@@ -9249,7 +9178,6 @@ impl IdentityRuntime {
         override_customizer: Option<&dyn AgentCustomizer>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         refuse_runtime_plane_creation(identity)?;
-        self.load_held_completion_marks().await?;
         // A candidate launch creates no member: the roster is the
         // authoritative launch's to change.
         if self.is_candidate_launch() {
@@ -14270,21 +14198,6 @@ impl IdentityRuntime {
         last: Option<meerkat_mob::MemberBinding>,
     ) -> Result<SessionId, IdentityRuntimeError> {
         let operation = life.operation();
-        // An identity a held pass did not publish owes its host a fresh held
-        // completion. A fresh life outside a held pass that covers it would
-        // have Core bind a member that completion never saw, and after a
-        // restart that binding would read as the pass's publication and drop
-        // the mark; so it is refused typed before Core is asked anything.
-        self.load_held_completion_marks().await?;
-        if self.held_completion_owed(identity)
-            && self
-                .held_create_pass()
-                .is_none_or(|pass| !pass.covers(identity))
-        {
-            return Err(IdentityRuntimeError::HeldCompletionOwed {
-                identity: identity.clone(),
-            });
-        }
         let bridge = Arc::clone(self.core_bridge(identity)?);
         let spec = self
             .entries
@@ -14294,6 +14207,20 @@ impl IdentityRuntime {
             .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
             .spec
             .clone();
+        // An identity whose creation its host holds, that Core never created,
+        // awaits its held creation: a fresh life outside a held pass that
+        // covers it would have Core bind a member its host's completion never
+        // saw. Core's verdict says so, asked by the identity's declaration,
+        // which answers it typed (`HeldCompletionOwed`) before Core is asked
+        // for any fresh life.
+        if last.is_none()
+            && self.host_holds(identity)
+            && self
+                .held_create_pass()
+                .is_none_or(|pass| !pass.covers(identity))
+        {
+            self.declare_identity_locked(&spec, None).await?;
+        }
         if self.core_live_member(identity).await?.is_some() {
             self.clear_wake_notes_of_live_member(identity).await;
         }
@@ -14609,6 +14536,8 @@ impl IdentityRuntime {
         // retired.
         self.start_fresh_life_locked(identity, &mut foreground_shutdown, FreshLife::Delete, last)
             .await?;
+        // A deleted identity leaves the host's hold.
+        self.release_host_hold(identity);
 
         // The fresh life is committed in Core from here. The drop of the old
         // session's semantic-memory scope (Ask 2 GC: the identity never

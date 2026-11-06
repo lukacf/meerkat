@@ -1419,7 +1419,7 @@ async fn a_takeover_of_a_paused_process_fences_it_out_at_its_next_write() {
 #[tokio::test]
 async fn held_completion_marks_survive_a_restart_and_a_failover() {
     use crate::identity_first::held_bootstrap::{
-        clear_host_store_mark, mark_host_store, read_host_store_marks,
+        clear_host_store_mark, mark_host_store, read_host_store_rollback_marks,
     };
     let fixture = Fixture::new();
     let (alice, bob) = (id(ALICE), id(BOB));
@@ -1433,7 +1433,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
     fixture.lapse();
     {
         let provider = fixture.open(&fixture.process()).await.expect("restart");
-        let marked = read_host_store_marks(provider.realm.documents())
+        let marked = read_host_store_rollback_marks(provider.realm.documents())
             .await
             .expect("read the marks");
         assert_eq!(marked, BTreeSet::from([alice.clone(), bob.clone()]));
@@ -1444,7 +1444,7 @@ async fn held_completion_marks_survive_a_restart_and_a_failover() {
 
     fixture.lapse();
     let provider = fixture.open(&fixture.process()).await.expect("failover");
-    let marked = read_host_store_marks(provider.realm.documents())
+    let marked = read_host_store_rollback_marks(provider.realm.documents())
         .await
         .expect("read the marks");
     assert_eq!(marked, BTreeSet::from([bob]));

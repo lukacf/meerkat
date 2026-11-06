@@ -1211,6 +1211,99 @@ mod tests {
         );
     }
 
+    /// A principal keeps at most 64 sign-outs that only a fence of the
+    /// principal ends: a `sid` login's, or a token's that never expires.
+    /// The 65th folds the oldest into a fence of every login of the
+    /// principal, which refuses every token the folded sign-out refused,
+    /// and the record keeps the 64 newest. The principal's own fence, which
+    /// a revocation sets, is untouched. The sign-out of a token that expires
+    /// is not counted: it is dropped once its token is refused on expiry.
+    #[test]
+    fn the_sign_out_cap_folds_the_oldest_into_a_fence_of_every_login() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fences = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("open");
+        let principal = "alice@example.test";
+        fences
+            .sign_out_login(
+                principal,
+                "token-login",
+                3_000,
+                Some(now_epoch_seconds() + 3_600),
+            )
+            .expect("sign out a token that expires");
+        for login in 0..64_u64 {
+            fences
+                .sign_out_login(principal, &format!("login-{login}"), 2_000 + login, None)
+                .expect("sign out");
+        }
+        fences
+            .sign_out_login("bob@example.test", "login-0", 1_000, None)
+            .expect("another principal signs out");
+        assert_eq!(
+            fences.login_not_before(principal, "never-signed-out"),
+            None,
+            "64 kept sign-outs and one that expires fold nothing"
+        );
+
+        fences
+            .sign_out_login(principal, "login-64", 2_064, None)
+            .expect("the 65th kept sign-out");
+        assert_eq!(
+            fences.login_not_before(principal, "never-signed-out"),
+            Some(2_000),
+            "every login of the principal is signed out up to the oldest sign-out"
+        );
+        assert_eq!(
+            fences.login_not_before(principal, "login-0"),
+            Some(2_000),
+            "the folded sign-out still refuses its login"
+        );
+        for login in 1..=64_u64 {
+            assert_eq!(
+                fences.login_not_before(principal, &format!("login-{login}")),
+                Some(2_000 + login),
+                "the 64 newest are kept"
+            );
+        }
+        assert_eq!(
+            fences.login_not_before(principal, "token-login"),
+            Some(3_000),
+            "the sign-out of a token that expires is kept and not counted"
+        );
+        assert_eq!(
+            fences.not_before(principal),
+            None,
+            "a fold revokes nothing: the principal's own fence is untouched"
+        );
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "never-signed-out"),
+            None,
+            "another principal"
+        );
+        assert_eq!(
+            fences.login_not_before("bob@example.test", "login-0"),
+            Some(1_000)
+        );
+
+        let reopened = ConsoleSessionFences::open_in_state_dir(dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.login_not_before(principal, "never-signed-out"),
+            Some(2_000)
+        );
+        assert_eq!(reopened.not_before(principal), None);
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join(CONSOLE_SESSION_FENCES_FILE)).expect("read"),
+        )
+        .expect("json");
+        assert_eq!(
+            stored["signed_out_logins"][principal]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(65),
+            "64 kept sign-outs and the one that expires: {stored}"
+        );
+    }
+
     /// A record that never had a sign-out keeps its shape, so a binary
     /// without sign-out reads exactly what it wrote. Sign-outs, and fields
     /// of them this binary does not know, are kept when the record is

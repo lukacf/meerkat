@@ -1351,6 +1351,48 @@
             }
           ]
         },
+        "meta/console/attention": {
+          "success": {
+            "required_fields": [
+              "items",
+              "retention"
+            ],
+            "note": "The caller's own attention items, newest first, at most 100: replies meant for the caller alone that no private thread of theirs took. Only a verified person on a console that requires sign-in holds items; every other caller reads an empty list. An item has id, created_at_ms and kind; a private_reply item adds text and origin {identity, interaction_id, input_frame_id}. A client shows the kinds it knows and skips the rest. retention is durable or process."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/console/attention/dismiss": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "item_id"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item_id",
+              "dismissed"
+            ],
+            "note": "dismissed is false when the caller holds no such item, another person's included. A dismissed item is no longer listed."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32601
+              ]
+            }
+          ]
+        },
         "meta/access/status": {
           "success": {
             "required_fields": [

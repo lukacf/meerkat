@@ -485,6 +485,7 @@ export type {
 
 export * from "./pending-approvals";
 export * from "./host-attention";
+export * from "./console-attention";
 
 export * from "./send-attempt";
 

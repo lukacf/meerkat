@@ -118,6 +118,8 @@ export const CONSOLE_COMMAND_NAMES = {
   listGatingPending: "listGatingPending",
   listGatingAudit: "listGatingAudit",
   decideGating: "decideGating",
+  listConsoleAttention: "listConsoleAttention",
+  dismissConsoleAttention: "dismissConsoleAttention",
   accessStatus: "accessStatus",
   getAccessConfig: "getAccessConfig",
   setAccessConfig: "setAccessConfig",
@@ -276,6 +278,16 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   },
   [CONSOLE_COMMAND_NAMES.decideGating]: {
     method: CONSOLE_RPC_METHODS.gatingDecide,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
+  },
+  // The caller's own attention items, listed in the inbox beside the
+  // approvals.
+  [CONSOLE_COMMAND_NAMES.listConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS.consoleAttention,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
+  },
+  [CONSOLE_COMMAND_NAMES.dismissConsoleAttention]: {
+    method: CONSOLE_RPC_METHODS.consoleAttentionDismiss,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
   },
   [CONSOLE_COMMAND_NAMES.accessStatus]: {

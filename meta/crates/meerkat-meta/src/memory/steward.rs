@@ -4548,13 +4548,24 @@ mod tests {
 
     struct ScriptedTranscripts {
         sessions: StdMutex<HashMap<String, Vec<String>>>,
+        /// Sessions of members private to a person.
+        private: StdMutex<HashSet<String>>,
     }
 
     impl ScriptedTranscripts {
         fn new() -> Self {
             Self {
                 sessions: StdMutex::new(HashMap::new()),
+                private: StdMutex::new(HashSet::new()),
             }
+        }
+
+        /// Mark `session` as the session of a member private to a person.
+        fn mark_private(&self, session: &str) {
+            self.private
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session.to_string());
         }
 
         fn insert(&self, session: &str, messages: Vec<&str>) {
@@ -4599,6 +4610,17 @@ mod tests {
                     })
                     .collect(),
             }))
+        }
+
+        async fn private_to_a_person(
+            &self,
+            session_key: &str,
+        ) -> Result<bool, crate::memory::distiller::DistillerError> {
+            Ok(self
+                .private
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(session_key))
         }
     }
 
@@ -7618,6 +7640,152 @@ mod tests {
         assert_eq!(harvests.len(), 1);
         assert_eq!(harvests[0].identity, "identity:gone");
         assert_eq!(harvests[0].cause, "delete");
+    }
+
+    /// One mob whose roster holds a shared member and a member private to a
+    /// person (a private console side chat).
+    struct PrivateMemberSource;
+
+    impl MobPurposeSource for PrivateMemberSource {
+        fn mob_contexts(&self) -> Vec<MobContext> {
+            vec![MobContext {
+                mob: "mob:main".to_string(),
+                purpose: Some("run the team".to_string()),
+                member_labels: vec![
+                    ("identity:worker".to_string(), BTreeMap::new()),
+                    (
+                        "identity:alice-side".to_string(),
+                        BTreeMap::from([(
+                            crate::access::PRIVATE_TO_LABEL.to_string(),
+                            "console-caller:v1:aa".to_string(),
+                        )]),
+                    ),
+                ],
+            }]
+        }
+    }
+
+    /// A member private to a person (`console.private_to`) feeds no dream,
+    /// as the Distiller distills none of it: its identity scope and its
+    /// proposals reach no phase's prompt, and its exit interview is skipped,
+    /// promotes nothing and is remembered, so the dreams after it left the
+    /// roster keep its scope out too. A shared member's memory is dreamed as
+    /// before.
+    #[tokio::test]
+    async fn steward_skips_private_side_chats() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        let engine = Arc::new(
+            StewardEngine::new(
+                StewardProfile::embedded_default(),
+                StewardConfig {
+                    enabled: true,
+                    min_signals: 1,
+                    ..StewardConfig::default()
+                },
+                Arc::new(ScriptedHandle {
+                    client: fixture.llm.clone(),
+                }),
+                fixture.store.clone(),
+                fixture.transcripts.clone(),
+                REALM,
+            )
+            .with_mob_context(Arc::new(PrivateMemberSource)),
+        );
+        for (identity, title, body) in [
+            (
+                "identity:worker",
+                "Shared release note",
+                "SHARED-RELEASE-DETAIL",
+            ),
+            (
+                "identity:alice-side",
+                "Alice salary note",
+                "PRIVATE-LIVE-DETAIL",
+            ),
+            (
+                "identity:closed-side",
+                "Closed side chat note",
+                "PRIVATE-CLOSED-DETAIL",
+            ),
+        ] {
+            fixture
+                .store
+                .remember_authored(
+                    &identity_scope(identity),
+                    new_record(title, body),
+                    MemoryAuthor::Operator,
+                )
+                .await
+                .expect("seed identity record");
+        }
+        fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("Alice private proposal", "PRIVATE-PROPOSAL-DETAIL"),
+                MemoryAuthor::Agent {
+                    identity: "identity:alice-side".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        // A private side chat that was closed: off the roster, its session
+        // the store's record that it was private.
+        fixture
+            .transcripts
+            .insert("sess-closed", vec!["PRIVATE-TRANSCRIPT-DETAIL"]);
+        fixture.transcripts.mark_private("sess-closed");
+        engine
+            .note_identity_retired("identity:closed-side", Some("sess-closed"), "retire")
+            .await;
+
+        let outcome = engine.dream_now().await;
+        assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+        let prompts = fixture.llm.prompts().join("\n");
+        assert!(
+            prompts.contains("Shared release note"),
+            "a shared member's memory is dreamed"
+        );
+        for private in [
+            "Alice salary note",
+            "PRIVATE-LIVE-DETAIL",
+            "Alice private proposal",
+            "PRIVATE-PROPOSAL-DETAIL",
+            "Closed side chat note",
+            "PRIVATE-CLOSED-DETAIL",
+            "PRIVATE-TRANSCRIPT-DETAIL",
+        ] {
+            assert!(!prompts.contains(private), "no prompt holds {private}");
+        }
+        assert!(
+            fixture
+                .store
+                .pending_harvests(REALM, 8)
+                .await
+                .expect("harvests")
+                .is_empty(),
+            "the private exit interview is settled"
+        );
+        let mob_records = fixture
+            .store
+            .manifest(&[mob_scope()], ManifestTier::Full)
+            .await
+            .expect("mob manifest");
+        assert!(
+            mob_records.is_empty(),
+            "nothing of theirs reaches mob scope: {mob_records:?}"
+        );
+
+        // A later dream keeps the closed side chat's scope out too.
+        let before = fixture.llm.prompts().len();
+        engine.note_session_completed();
+        let outcome = engine.dream_now().await;
+        assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+        let later = fixture.llm.prompts()[before..].join("\n");
+        assert!(later.contains("Shared release note"), "a later dream ran");
+        for private in ["Closed side chat note", "PRIVATE-CLOSED-DETAIL"] {
+            assert!(!later.contains(private), "no later prompt holds {private}");
+        }
     }
 
     // -- §7.2 P4 operator-scope routing --------------------------------------

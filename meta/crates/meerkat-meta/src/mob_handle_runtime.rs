@@ -13790,6 +13790,109 @@ mod tests {
         );
     }
 
+    /// An agent's spawn naming a label only Meta writes (a side chat's
+    /// lineage or creator, or a private owner) is refused typed, as invalid
+    /// arguments naming the label, before the mob tools see it: in a spawn's
+    /// own labels, a batch spec's, or a member spec's. A spawn without one
+    /// reaches them.
+    #[tokio::test]
+    async fn an_agent_spawn_naming_a_reserved_label_is_refused_typed() {
+        use meerkat_core::AgentToolDispatcher as _;
+        let dispatcher = wrapper_with_overrides(ImplicitDelegateRetirementOverrides::default());
+        let refused_spawns = [
+            (
+                "spawn_member",
+                "console.private_to",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-1",
+                    "labels": { "console.private_to": "console-caller:v1:00" },
+                }),
+            ),
+            (
+                "spawn_many_members",
+                "side_chat_of",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "member_id": "worker-2",
+                        "labels": { "side_chat_of": "alpha" },
+                    }],
+                }),
+            ),
+            (
+                "mob_spawn_member",
+                "side_chat_creator",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "specs": [{
+                        "profile": "worker",
+                        "agent_identity": "worker-3",
+                        "labels": { "side_chat_creator": "alice@example.test" },
+                    }],
+                }),
+            ),
+            (
+                "spawn_member",
+                "side_chat_of_session",
+                serde_json::json!({
+                    "mob_id": "child",
+                    "profile": "worker",
+                    "member_id": "worker-4",
+                    "members": [{ "labels": { "side_chat_of_session": "session" } }],
+                }),
+            ),
+        ];
+        for (tool, label, args) in refused_spawns {
+            let args =
+                serde_json::value::RawValue::from_string(args.to_string()).expect("raw args");
+            let refused = dispatcher
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "spawn-reserved",
+                        name: tool,
+                        args: &args,
+                    },
+                    &meerkat_core::ToolDispatchContext::default(),
+                )
+                .await
+                .expect_err("a reserved label is refused");
+            assert!(
+                matches!(&refused, meerkat_core::ToolError::InvalidArguments { name, reason }
+                    if name == tool && reason.contains(label)),
+                "{tool} meets the refusal typed, naming {label}: {refused:?}"
+            );
+        }
+
+        let plain = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "mob_id": "child",
+                "profile": "worker",
+                "member_id": "worker-5",
+                "labels": { "team": "blue" },
+            })
+            .to_string(),
+        )
+        .expect("raw args");
+        let passed = dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "spawn-plain",
+                    name: "spawn_member",
+                    args: &plain,
+                },
+                &meerkat_core::ToolDispatchContext::default(),
+            )
+            .await
+            .expect_err("the empty mob tools know no tool");
+        assert!(
+            matches!(passed, meerkat_core::ToolError::NotFound { .. }),
+            "a spawn without a reserved label reaches the mob tools: {passed:?}"
+        );
+    }
+
     fn launch_binding_b() -> meerkat_core::AuthBindingRef {
         meerkat_core::AuthBindingRef {
             realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),

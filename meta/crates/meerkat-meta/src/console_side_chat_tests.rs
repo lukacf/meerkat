@@ -115,7 +115,7 @@ async fn persistent_gateway_runtime(
 
 /// [`persistent_gateway_runtime`] over the state directory `state`, which a
 /// later runtime composed over the same directory restores.
-async fn persistent_gateway_runtime_in(
+pub(super) async fn persistent_gateway_runtime_in(
     state: &std::path::Path,
     mob_id: &str,
     mob_header: &str,

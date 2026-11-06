@@ -692,3 +692,211 @@ async fn a_private_owner_label_hides_a_side_chat_on_every_surface_and_a_forged_l
     assert!(row(&sidebar(&app, Some(&bearer(bob_claims()))).await, "forger").is_some());
     Ok(())
 }
+
+/// The labels only Meta writes: a side chat's source, source session and
+/// creator, and the private owner.
+const RESERVED: [&str; 4] = [
+    crate::side_chat::SIDE_CHAT_OF_LABEL,
+    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+    crate::side_chat::SIDE_CHAT_CREATOR_LABEL,
+    PRIVATE_TO,
+];
+
+/// Every caller label path refuses a label only Meta writes, as invalid
+/// params naming it, and seats nothing: console member creation
+/// (`meta/ensure_member`) and every other member-creation surface, which
+/// validates its labels with the same check. So no member can mark itself a
+/// side chat, name a creator or make itself private to someone.
+#[tokio::test]
+async fn reserved_side_chat_labels_refused_from_callers() -> TestResult {
+    let (_temp_dir, runtime) = runtime("reserved-side-chat-labels").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    for (index, key) in RESERVED.into_iter().enumerate() {
+        let member = format!("eve-{index}");
+        let refused = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/ensure_member",
+            json!({
+                "role": "worker",
+                "agent_identity": member,
+                "labels": { key: "alpha" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            refused["error"]["code"],
+            json!(-32602),
+            "{key}: {refused:#}"
+        );
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(key)),
+            "the refusal names {key}: {refused:#}"
+        );
+        assert!(
+            runtime
+                .handle()
+                .get_member(&AgentIdentity::from(member.as_str()))
+                .await?
+                .is_none(),
+            "nothing is seated for {key}"
+        );
+        let labels = BTreeMap::from([(key.to_string(), "alpha".to_string())]);
+        let message = crate::member_comms_id::validate_member_creation_labels(&labels)
+            .expect_err("every member-creation surface refuses it");
+        assert!(message.contains(key), "{message}");
+    }
+    Ok(())
+}
+
+/// The labels the build of the member that ran session `session_id`
+/// recorded.
+async fn session_labels(
+    runtime: &MobRuntime,
+    session_id: &str,
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let service = runtime
+        .session_service()
+        .ok_or("the runtime has a session service")?;
+    let session_id = meerkat_core::types::SessionId::parse(session_id)?;
+    Ok(service.read(&session_id).await?.state.labels)
+}
+
+/// A helper forked from a side chat (`meta/fork_helper`, the prompt-context
+/// fork) inherits none of the side chat's lineage or creator labels, and a
+/// helper forked from a private side chat is private to the same person: its
+/// first prompt holds the private conversation.
+#[tokio::test]
+async fn fork_helper_child_inherits_no_side_chat_labels() -> TestResult {
+    let (_temp_dir, runtime) = runtime("private-side-chat-fork-helper").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let alice_scope = console_rpc_as(&app, Some(&alice), "meta/console/whoami", json!({})).await
+        ["result"]["caller_scope"]
+        .as_str()
+        .expect("Alice's caller scope")
+        .to_string();
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+
+    let helped = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/fork_helper",
+        json!({
+            "source_member_id": "alpha-side",
+            "agent_identity": "alpha-side-helper",
+            "task": "answer briefly",
+            "result_label": "alpha-side-helper",
+            "max_text_bytes": 4096,
+        }),
+    )
+    .await;
+    assert!(helped["error"].is_null(), "{helped:#}");
+    let session_id = helped["result"]["session_id"]
+        .as_str()
+        .ok_or("the helper's session")?;
+    let labels = session_labels(&runtime, session_id).await?;
+    for key in [
+        crate::side_chat::SIDE_CHAT_OF_LABEL,
+        crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL,
+        crate::side_chat::SIDE_CHAT_CREATOR_LABEL,
+    ] {
+        assert!(
+            labels.get(key).is_none_or(|value| value.trim().is_empty()),
+            "the helper inherits no {key}: {labels:?}"
+        );
+    }
+    assert_eq!(
+        labels.get(PRIVATE_TO),
+        Some(&alice_scope),
+        "the helper is private to the side chat's owner: {labels:?}"
+    );
+    Ok(())
+}
+
+/// A member a private side chat's own turn creates is private to the same
+/// person, by the label Meta writes at its spawn, which needs no lineage
+/// walk: after the side chat retires and the gateway restarts, another
+/// person still sees the helper on no surface and is answered as for an
+/// unknown member, while its owner and the access admins see it.
+#[tokio::test]
+async fn private_side_chat_helper_stays_private_after_retire() -> TestResult {
+    use super::console_side_chat_tests::persistent_gateway_runtime_in;
+
+    const MOB: &str = "private-side-chat-helper-restart";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(
+        &runtime,
+        Some(everyone_drives_every_agent()),
+    ));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+
+    // The side chat's own turn spawns a helper: a spawn bound to the side
+    // chat's session, as the agent mob tools spawn one.
+    let side_chat = AgentIdentity::from("alpha-side");
+    runtime.handle().ensure_member_live(&side_chat).await?;
+    let side_session = runtime
+        .handle()
+        .get_member(&side_chat)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("the side chat has a session")?;
+    Box::pin(runtime.handle().spawn_spec_with_generated_owner_context(
+        SpawnMemberSpec::new("worker", AgentIdentity::from("alpha-helper")),
+        side_session,
+    ))
+    .await?;
+
+    // The side chat closes, and the gateway restarts over the same state.
+    runtime.handle().retire(side_chat.clone()).await?;
+    runtime.handle().shutdown().await?;
+    let _ = runtime
+        .stand_down_child_mobs(std::time::Instant::now() + std::time::Duration::from_secs(90))
+        .await;
+    drop(runtime);
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    let app = console_json_router_with_state(enforced_console(
+        &runtime,
+        Some(everyone_drives_every_agent()),
+    ));
+
+    let bob = bearer(bob_claims());
+    assert!(
+        row(&sidebar(&app, Some(&bob)).await, "alpha-helper").is_none(),
+        "another person sees the helper on no surface"
+    );
+    let read = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/get_member",
+        json!({ "member_id": "alpha-helper" }),
+    )
+    .await;
+    assert_unknown_identity(&read, "alpha-helper");
+    assert!(
+        row(
+            &sidebar(&app, Some(&bearer(alice_claims()))).await,
+            "alpha-helper"
+        )
+        .is_some(),
+        "its owner sees it"
+    );
+    assert!(
+        row(
+            &sidebar(&app, Some(&bearer(root_claims()))).await,
+            "alpha-helper"
+        )
+        .is_some(),
+        "the access admin sees it"
+    );
+    Ok(())
+}

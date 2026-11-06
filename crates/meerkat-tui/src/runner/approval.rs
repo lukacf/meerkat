@@ -113,6 +113,7 @@ impl Runner {
             tool: prompt.tool.clone(),
             args_preview: prompt.args_preview,
             hint: prompt.classifier_hint,
+            reason: prompt.policy_reason,
         };
         self.approval.pending.insert(
             prompt.id,
@@ -210,7 +211,8 @@ impl Runner {
                 let allowed = verdict.is_allowed();
                 // Tier-1/2 allows are routine; a classifier allow is one dim
                 // line under its tool block; other reviewed or denied
-                // actions get a line of their own.
+                // actions (a human's answer to a protected write included)
+                // get a line of their own.
                 if let VerdictSummary::Allowed {
                     by: Decider::Classifier,
                     ..
@@ -220,7 +222,7 @@ impl Runner {
                         tool_use_id,
                         text: classifier_allow_note(reason.as_deref()),
                     });
-                } else if !allowed || tier == Tier::Classifier {
+                } else if !allowed || matches!(tier, Tier::Classifier | Tier::AskUser) {
                     let decider = match verdict {
                         VerdictSummary::Allowed { by, .. } | VerdictSummary::Denied { by, .. } => {
                             by

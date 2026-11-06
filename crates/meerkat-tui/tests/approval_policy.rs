@@ -165,19 +165,56 @@ fn in_project_edit_is_tier_two() {
     );
 }
 
+/// A protected path inside the project is the user's call, never the
+/// classifier's (the classifier allowed a `.env.dogfood` write once and
+/// denied it once): a user allow rule for the path allows it, a deny rule
+/// denies it.
 #[test]
-fn protected_path_edit_goes_to_classifier() {
+fn protected_path_edit_asks_the_user() {
     let h = harness(Options::default());
-    for path in [".env", ".env.local", "build.rs", "AGENTS.md"] {
-        assert_eq!(
-            h.tier(
-                "edit_file",
-                json!({"path": path, "old_string": "", "new_string": "x"}),
-            ),
-            Tier::Classifier,
-            "{path}"
+    for path in [".env", ".env.local", "build.rs", "AGENTS.md", ".gitmodules"] {
+        let decision = h.decide(
+            "edit_file",
+            &json!({"path": path, "old_string": "", "new_string": "x"}),
+        );
+        assert_eq!(decision.tier, Tier::AskUser, "{path}");
+        assert!(
+            decision.detail.contains(&format!("`{path}`"))
+                && decision
+                    .detail
+                    .ends_with("the policy always asks for these"),
+            "{}",
+            decision.detail
         );
     }
+    let allowed = harness(Options {
+        rules: allow_rule("write_file", ".env.local"),
+        ..Options::default()
+    });
+    assert_eq!(
+        allowed.tier("write_file", json!({"path": ".env.local", "content": "x"})),
+        Tier::AlwaysAllow
+    );
+    assert_eq!(
+        allowed.tier("write_file", json!({"path": ".env", "content": "x"})),
+        Tier::AskUser
+    );
+    let denied = harness(Options {
+        rules: deny_rule("write_file", ".env*"),
+        ..Options::default()
+    });
+    assert_eq!(
+        denied.tier("write_file", json!({"path": ".env.local", "content": "x"})),
+        Tier::UserDeny
+    );
+    // One protected target among ordinary ones puts the patch to the user.
+    assert_eq!(
+        h.tier(
+            "apply_patch",
+            json!({"patch": "*** Begin Patch\n*** Add File: src/a.rs\n+x\n*** Add File: build.rs\n+x\n*** End Patch"}),
+        ),
+        Tier::AskUser
+    );
 }
 
 /// The gate's own state and the VCS internals are sealed: a file tool

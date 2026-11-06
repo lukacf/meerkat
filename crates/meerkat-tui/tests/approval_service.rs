@@ -348,3 +348,110 @@ async fn a_resumed_session_reseeds_the_classifier_transcript() {
     assert!(!marker.exists());
     rig.quit().await;
 }
+
+/// A protected write (`.env.local`) goes to the human, not the classifier
+/// (scripted to allow): the dialog names the path and why; "deny" denies
+/// it, "allow + rule" runs it and adds a rule for that file, and the next
+/// identical write runs without a dialog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_protected_write_asks_the_user_and_allow_always_stops_the_prompts() {
+    let ws = Workspace::new();
+    let target = ws.root.join(".env.local");
+    let classifier = ScriptedClassifier::new(vec![
+        Ok(ClassifierVerdict::allow("ok")),
+        Ok(ClassifierVerdict::allow("ok")),
+        Ok(ClassifierVerdict::allow("ok")),
+    ]);
+    let write = |content: &str| json!({ "path": ".env.local", "content": content });
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "w1",
+            name: "write_file",
+            args: write("DENIED=1\n"),
+        },
+        Step::Text("denied"),
+        Step::Tool {
+            id: "w2",
+            name: "write_file",
+            args: write("FIRST=1\n"),
+        },
+        Step::Text("first"),
+        Step::Tool {
+            id: "w3",
+            name: "write_file",
+            args: write("SECOND=1\n"),
+        },
+        Step::Text("second"),
+    ]);
+    let mut rig = Rig::start_with(&ws.root, &llm, Start::New, overrides(&classifier)).await;
+
+    rig.send(Effect::StartTurn("set a secret".into()));
+    let Msg::Escalation(prompt, id) = rig.wait_for(|msg| matches!(msg, Msg::Escalation(..))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(prompt.tool, "write_file");
+    assert_eq!(prompt.hint, None, "no classifier opinion");
+    assert_eq!(
+        prompt.reason.as_deref(),
+        Some("protected path: `.env.local` (secrets); the policy always asks for these")
+    );
+    rig.send(Effect::RespondEscalation(id, EscalationAnswer::Deny));
+    let notice = rig
+        .wait_for(|msg| matches!(msg, Msg::Approval(ApprovalNotice { allowed: false, .. })))
+        .await;
+    let Msg::Approval(notice) = notice else {
+        unreachable!()
+    };
+    assert_eq!(notice.tier, "ask the user · human");
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "denied"
+    );
+    assert!(!target.exists());
+
+    rig.send(Effect::StartTurn("set it after all".into()));
+    let Msg::Escalation(_, id) = rig.wait_for(|msg| matches!(msg, Msg::Escalation(..))).await
+    else {
+        unreachable!()
+    };
+    rig.send(Effect::RespondEscalation(
+        id,
+        EscalationAnswer::AllowAndAddRule,
+    ));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "first"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "FIRST=1\n");
+    let rules = rig.approval.rules();
+    let added: Vec<String> = rules
+        .allow()
+        .map(|(_, rule)| {
+            format!(
+                "{} {}",
+                rule.tool.as_str(),
+                rule.arg.as_ref().map_or("", |a| a.as_str())
+            )
+        })
+        .collect();
+    assert_eq!(added, ["write_file .env.local"]);
+
+    rig.send(Effect::StartTurn("change it".into()));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "second"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "SECOND=1\n");
+    let escalations = rig
+        .seen
+        .iter()
+        .filter(|msg| matches!(msg, Msg::Escalation(..)))
+        .count();
+    assert_eq!(escalations, 2, "the rule stopped the prompts");
+    assert!(
+        classifier.seen().is_empty(),
+        "the classifier was never asked"
+    );
+    rig.quit().await;
+}

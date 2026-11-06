@@ -104,7 +104,11 @@ them.
   allowed shows a dim `allowed by classifier: <reason>` line under its tool
   block, a denial's tag reads `[classifier checked N files, M searches]`,
   and a block for lack of user intent asks the agent to get the user's
-  confirmation instead of claiming the user never asked. See
+  confirmation instead of claiming the user never asked. A file-tool write
+  to a protected path in the project (`.env*`, `build.rs`, `.cargo/`,
+  `AGENTS.md`, `.gitmodules`, …) always asks you in the escalation dialog,
+  naming the path and why, instead of going to the classifier; an allow
+  rule for the path (the dialog's "allow + rule") stops the prompts. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

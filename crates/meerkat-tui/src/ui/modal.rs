@@ -46,6 +46,8 @@ pub struct EscalationPrompt {
     pub args_preview: String,
     /// Classifier explanation, if any.
     pub hint: Option<String>,
+    /// Why the policy asks without the classifier (a protected path), if so.
+    pub reason: Option<String>,
 }
 
 /// Session picker for `/resume` without a reference.
@@ -256,6 +258,14 @@ fn escalation_lines(prompt: &EscalationPrompt, width: usize) -> Vec<Line<'static
     lines.extend(args.into_iter().take(MAX_ARGS_LINES).map(Line::from));
     if extra > 0 {
         lines.push(Line::styled(format!("… ({extra} more lines)"), dim));
+    }
+    if let Some(reason) = &prompt.reason {
+        lines.push(Line::default());
+        lines.extend(
+            wrap_text(&format!("Policy: {reason}"), width)
+                .into_iter()
+                .map(|l| Line::styled(l, Style::default().fg(Color::Yellow))),
+        );
     }
     if let Some(hint) = &prompt.hint {
         lines.push(Line::default());

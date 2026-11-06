@@ -9,7 +9,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Root-relative glob patterns that are never writable without classifier review,
+/// Root-relative glob patterns a file tool never writes without asking the user,
 /// even inside the project: agent configuration and instruction files, VCS
 /// internals and attributes, build/toolchain configuration that runs code, editor
 /// task configuration, and secrets.

@@ -21,7 +21,7 @@ use meerkat_tui::bootstrap::ApprovalOverrides;
 use meerkat_tui::delivery::PendingId;
 use meerkat_tui::runner::Start;
 use meerkat_tui::session::resolve_session_ref;
-use meerkat_tui::ui::{Block, Effect, Msg, StatusUpdate, TurnFailure};
+use meerkat_tui::ui::{Block, Effect, EscalationAnswer, Msg, StatusUpdate, TurnFailure};
 use serde_json::json;
 use tokio::sync::Notify;
 
@@ -620,6 +620,52 @@ async fn a_classifier_allowed_call_gets_a_note_and_a_tier1_call_does_not() {
     assert_eq!(notes.len(), 1, "only the reviewed call is noted: {notes:?}");
     // The classifier allow no longer logs a separate approval line.
     assert!(!rig.seen.iter().any(|msg| matches!(msg, Msg::Approval(_))));
+    rig.quit().await;
+}
+
+/// The model writes a protected `.env.test`: even with a classifier that
+/// allows everything, the UI gets an escalation naming the protected path;
+/// answering allow runs the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_protected_write_is_put_to_the_user_and_runs_when_allowed() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        Step::Tool {
+            id: "env",
+            name: "write_file",
+            args: json!({ "path": ".env.test", "content": "API_URL=http://localhost\n" }),
+        },
+        Step::Text("configured"),
+    ]);
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, allow_shell()).await;
+    rig.send(Effect::StartTurn("add a test env file".into()));
+    let Msg::Escalation(prompt, id) = rig.wait_for(|msg| matches!(msg, Msg::Escalation(..))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(prompt.tool, "write_file");
+    assert!(
+        prompt
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("protected path: `.env.test` (secrets)")),
+        "{prompt:?}"
+    );
+    rig.send(Effect::RespondEscalation(id, EscalationAnswer::AllowOnce));
+    assert_eq!(
+        rig.turn_finished().await.result.expect("turn").text,
+        "configured"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.root.join(".env.test")).unwrap(),
+        "API_URL=http://localhost\n"
+    );
+    assert!(
+        !rig.seen
+            .iter()
+            .any(|msg| matches!(msg, Msg::ToolNote { .. })),
+        "no classifier note"
+    );
     rig.quit().await;
 }
 

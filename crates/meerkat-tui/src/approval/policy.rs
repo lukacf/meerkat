@@ -1,6 +1,7 @@
 //! Tier classification: decides, without any LLM call, whether a tool call is
 //! denied by a user rule (Tier 0), always allowed (Tier 1), an in-project edit
-//! (Tier 2), or must be reviewed by the classifier (Tier 3).
+//! (Tier 2), a write to a protected path the user must answer for
+//! ([`Tier::AskUser`]), or must be reviewed by the classifier (Tier 3).
 //!
 //! # The tiers and the OS confinement
 //!
@@ -26,7 +27,7 @@
 //!
 //! Not contained by any mode: anything inside the workspace (deleting the
 //! project, rewriting git history, editing `.rkat/` state; protected paths
-//! keep Tier 2 off them, and on Linux the backend has no deny lists), and
+//! keep Tier 2 off them and put file-tool writes to them to the user, and on Linux the backend has no deny lists), and
 //! everything the model does through the network in `workspace` mode.
 
 use super::patch_targets::{ParseError, affected_paths};
@@ -58,6 +59,11 @@ pub enum Tier {
     AlwaysAllow,
     /// Tier 2: write/edit/patch where every target is inside the project and unprotected.
     InProjectEdit,
+    /// Between tiers 2 and 3: a write/edit/patch with a protected target
+    /// inside the project ([`crate::paths::PROTECTED_PATTERNS`]: secrets,
+    /// build scripts, toolchain and agent configuration). The classifier is
+    /// never asked; the human is, every time, unless a user rule decides.
+    AskUser,
     /// Tier 3: needs classifier review.
     Classifier,
 }
@@ -69,6 +75,7 @@ impl fmt::Display for Tier {
             Self::Sealed => "sealed path",
             Self::AlwaysAllow => "always allow",
             Self::InProjectEdit => "in-project edit",
+            Self::AskUser => "ask the user",
             Self::Classifier => "classifier",
         })
     }
@@ -473,9 +480,12 @@ pub fn classify_tier_with(
         };
     }
 
+    // A protected write asks the user unless an allow rule says otherwise
+    // (the dialog's "allow + rule" is how repeat prompts stop).
     let fallback = match builtin_tier(action, ctx) {
-        Ok(decision) => return decision,
-        Err(reason) => reason,
+        Ok(decision) if decision.tier != Tier::AskUser => return decision,
+        Ok(ask) => ask,
+        Err(reason) => TierDecision::new(Tier::Classifier, reason),
     };
 
     if let Some(id) = rules.matches_allow(action.name, subjects) {
@@ -485,10 +495,11 @@ pub fn classify_tier_with(
             rule: Some(id),
         };
     }
-    TierDecision::new(Tier::Classifier, fallback)
+    fallback
 }
 
-/// Tiers 1–2 without user rules. `Err` carries why the action needs review.
+/// Tiers 1–2 and [`Tier::AskUser`] without user rules. `Err` carries why the
+/// action needs classifier review.
 fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDecision, String> {
     match &action.kind {
         ActionKind::ReadOnlyBuiltin => {
@@ -544,17 +555,43 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
                     ));
                 }
             }
+            let mut protected = Vec::new();
+            let mut outside = None;
             for path in paths {
                 let resolved = ctx
                     .root
                     .resolve(path)
                     .map_err(|e| format!("path `{path}`: {e}"))?;
-                if !resolved.inside() {
-                    return Err(format!("`{path}` is outside the project"));
+                if resolved.protected
+                    && let Some(relative) = resolved.relative.as_deref()
+                {
+                    protected.push(format!(
+                        "`{}` ({})",
+                        ctx.root.display_of(&resolved),
+                        protected_kind(relative)
+                    ));
+                } else if !resolved.inside() && outside.is_none() {
+                    outside = Some(path);
                 }
-                if resolved.protected {
-                    return Err(format!("`{path}` is a protected path"));
-                }
+            }
+            // Any protected target puts the whole call to the user, outside
+            // targets included: the human is the stricter reviewer.
+            if !protected.is_empty() {
+                let noun = if protected.len() == 1 {
+                    "protected path"
+                } else {
+                    "protected paths"
+                };
+                return Ok(TierDecision::new(
+                    Tier::AskUser,
+                    format!(
+                        "{noun}: {}; the policy always asks for these",
+                        protected.join(", ")
+                    ),
+                ));
+            }
+            if let Some(path) = outside {
+                return Err(format!("`{path}` is outside the project"));
             }
             Ok(TierDecision::new(
                 Tier::InProjectEdit,
@@ -580,6 +617,39 @@ fn builtin_tier(action: &Action<'_>, ctx: &PolicyContext<'_>) -> Result<TierDeci
             action.name
         )),
         ActionKind::Other => Err(format!("`{}` requires review", action.name)),
+    }
+}
+
+/// What a protected root-relative path is, for the dialog's reason.
+fn protected_kind(relative: &std::path::Path) -> &'static str {
+    use std::path::Component;
+    let names: Vec<&str> = relative
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect();
+    let file = names.last().copied().unwrap_or_default();
+    let under = |dir: &str| names.iter().rev().skip(1).any(|n| *n == dir);
+    if file == ".env" || file == ".envrc" || file.starts_with(".env.") {
+        "secrets"
+    } else if file == "build.rs" {
+        "build script"
+    } else if under(".cargo") || file == ".cargo" {
+        "Cargo configuration"
+    } else if file.starts_with("rust-toolchain") {
+        "toolchain"
+    } else if file.starts_with("AGENTS") || under(".claude") {
+        "agent instructions"
+    } else if file == "tui.toml" {
+        "TUI configuration"
+    } else if file == ".gitmodules" || file == ".gitattributes" {
+        "git configuration"
+    } else if under(".vscode") || under(".idea") {
+        "editor tasks"
+    } else {
+        "protected"
     }
 }
 
@@ -706,6 +776,86 @@ mod tests {
             for set in [&RuleSet::default(), &rules] {
                 assert_eq!(tier(&root, set, false, "apply_patch", &args), Tier::Sealed, "{patch}");
             }
+        }
+    }
+
+    /// A protected write asks the user: a seal still wins, a user allow rule
+    /// for the path allows it, a deny rule denies it, and a protected target
+    /// among ordinary ones (or an outside one) puts the whole patch to the
+    /// user. The reason names each protected path and what it is.
+    #[test]
+    fn protected_writes_ask_the_user_unless_a_rule_or_seal_decides() {
+        let (_dir, root) = project();
+        let ctx = PolicyContext {
+            root: &root,
+            trust_project_builds: false,
+            posix_shell: true,
+        };
+        let env = json!({"path": ".env.local", "content": "K=v"});
+        let raw_env = raw(&env);
+        let decision = classify_tier(
+            &parse("write_file", &raw_env),
+            &RuleSet::default(),
+            &ctx,
+        );
+        assert_eq!(decision.tier, Tier::AskUser);
+        assert_eq!(
+            decision.detail,
+            "protected path: `.env.local` (secrets); the policy always asks for these"
+        );
+
+        let mut allow = RuleSet::default();
+        allow.push(Rule::literal(RuleKind::Allow, "write_file", ".env.local", RuleOrigin::Realm).unwrap());
+        assert_eq!(tier(&root, &allow, false, "write_file", &env), Tier::AlwaysAllow);
+        // The literal rule is that file's only: another protected path still asks.
+        assert_eq!(
+            tier(&root, &allow, false, "write_file", &json!({"path": ".env", "content": ""})),
+            Tier::AskUser
+        );
+        let mut deny = RuleSet::default();
+        deny.push(Rule::new(RuleKind::Deny, "write_file", Some(".env*"), RuleOrigin::Realm).unwrap());
+        assert_eq!(tier(&root, &deny, false, "write_file", &env), Tier::UserDeny);
+
+        // A seal wins over a protected target and an allow rule.
+        let mut allow_all = RuleSet::default();
+        allow_all.push(Rule::new(RuleKind::Allow, "apply_patch", Some("*"), RuleOrigin::Realm).unwrap());
+        let sealed = json!({"patch": "*** Begin Patch\n*** Add File: .env\n+x\n*** Update File: .rkat/config.toml\n@@\n-a\n+b\n*** End Patch"});
+        for set in [&RuleSet::default(), &allow_all] {
+            assert_eq!(tier(&root, set, false, "apply_patch", &sealed), Tier::Sealed);
+        }
+
+        let mixed = json!({"patch": "*** Begin Patch\n*** Add File: src/a.rs\n+x\n*** Add File: build.rs\n+x\n*** Add File: /tmp/out.txt\n+x\n*** Add File: AGENTS.md\n+x\n*** End Patch"});
+        let raw_mixed = raw(&mixed);
+        let decision = classify_tier(
+            &parse("apply_patch", &raw_mixed),
+            &RuleSet::default(),
+            &ctx,
+        );
+        assert_eq!(decision.tier, Tier::AskUser);
+        assert_eq!(
+            decision.detail,
+            "protected paths: `build.rs` (build script), `AGENTS.md` (agent instructions); \
+             the policy always asks for these"
+        );
+    }
+
+    #[test]
+    fn protected_kinds_name_what_the_path_is() {
+        use std::path::Path;
+        for (path, kind) in [
+            (".env", "secrets"),
+            ("sub/.env.test", "secrets"),
+            (".envrc", "secrets"),
+            ("crates/x/build.rs", "build script"),
+            (".cargo/config.toml", "Cargo configuration"),
+            ("rust-toolchain.toml", "toolchain"),
+            ("AGENTS.local.md", "agent instructions"),
+            (".claude/settings.json", "agent instructions"),
+            ("tui.toml", "TUI configuration"),
+            (".gitmodules", "git configuration"),
+            (".vscode/tasks.json", "editor tasks"),
+        ] {
+            assert_eq!(protected_kind(Path::new(path)), kind, "{path}");
         }
     }
 
@@ -932,13 +1082,43 @@ mod tests {
                 "write_file",
                 json!({"path": ".env"}),
                 true,
-                Tier::Classifier,
+                Tier::AskUser,
+            ),
+            (
+                "write_file",
+                json!({"path": ".env.local"}),
+                true,
+                Tier::AskUser,
+            ),
+            (
+                "edit_file",
+                json!({"path": "build.rs"}),
+                true,
+                Tier::AskUser,
+            ),
+            (
+                "write_file",
+                json!({"path": "AGENTS.md"}),
+                true,
+                Tier::AskUser,
+            ),
+            (
+                "write_file",
+                json!({"path": ".gitmodules"}),
+                true,
+                Tier::AskUser,
             ),
             (
                 "write_file",
                 json!({"path": "tui.toml"}),
                 true,
-                Tier::Classifier,
+                Tier::AskUser,
+            ),
+            (
+                "apply_patch",
+                json!({"patch": "*** Begin Patch\n*** Add File: src/x.rs\n+a\n*** Update File: .cargo/config.toml\n@@\n-a\n+b\n*** End Patch"}),
+                true,
+                Tier::AskUser,
             ),
             (
                 "write_file",

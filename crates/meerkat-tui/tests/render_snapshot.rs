@@ -153,6 +153,7 @@ fn escalation_modal_is_drawn_over_the_transcript() {
             tool: "shell".into(),
             args_preview: "rm -rf build".into(),
             hint: None,
+            reason: None,
         },
         EscalationId(1),
     ));

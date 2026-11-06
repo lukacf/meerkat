@@ -704,7 +704,7 @@ impl ApprovalEngine {
         classify_tier_with(&facts.action, &facts.subjects, &self.rules.read(), &ctx)
     }
 
-    /// Verdict for tiers 0–2; `None` for Tier 3.
+    /// Verdict for tiers 0–2; `None` for [`Tier::AskUser`] and Tier 3.
     fn static_verdict(&self, decision: TierDecision) -> Option<Verdict> {
         match decision.tier {
             Tier::UserDeny => {
@@ -731,7 +731,7 @@ impl ApprovalEngine {
                 by: Decider::Policy,
                 why: decision.detail,
             }),
-            Tier::Classifier => None,
+            Tier::AskUser | Tier::Classifier => None,
         }
     }
 
@@ -742,7 +742,25 @@ impl ApprovalEngine {
         tool_use_id: &str,
         facts: &Facts<'_>,
     ) -> Verdict {
-        if let Some(verdict) = self.static_verdict(self.tier_of(facts)) {
+        let decision = self.tier_of(facts);
+        if decision.tier == Tier::AskUser {
+            // A protected write: the human answers, every time; the
+            // classifier, auto mode and its pause play no part.
+            if self.stopped(session_id) {
+                return deny_at(Tier::AskUser, DenyReason::Stopped);
+            }
+            return self
+                .escalate(
+                    session_id,
+                    agent,
+                    tool_use_id,
+                    facts,
+                    Asking::Policy(decision.detail),
+                    None,
+                )
+                .await;
+        }
+        if let Some(verdict) = self.static_verdict(decision) {
             return verdict;
         }
         if self.stopped(session_id) {
@@ -775,7 +793,14 @@ impl ApprovalEngine {
             };
             let fallback = result.ok();
             return self
-                .escalate(session_id, agent, tool_use_id, facts, hint, fallback)
+                .escalate(
+                    session_id,
+                    agent,
+                    tool_use_id,
+                    facts,
+                    Asking::Classifier(hint),
+                    fallback,
+                )
                 .await;
         }
 
@@ -789,7 +814,7 @@ impl ApprovalEngine {
                         agent,
                         tool_use_id,
                         facts,
-                        format!("classifier error: {err}"),
+                        Asking::Classifier(format!("classifier error: {err}")),
                         None,
                     )
                     .await
@@ -861,21 +886,28 @@ impl ApprovalEngine {
     /// Stop, the rules, auto mode and the pause are checked again (they may
     /// have changed while other dialogs were open): a call whose pause has
     /// ended meanwhile gets the classifier's `fallback` verdict instead. A
-    /// ledger write that fails denies the call.
+    /// policy question ([`Asking::Policy`]) ignores auto mode and its pause,
+    /// and its answer leaves the denial counters alone. A ledger write that
+    /// fails denies the call.
     async fn escalate(
         &self,
         session_id: &SessionId,
         agent: Option<&str>,
         tool_use_id: &str,
         facts: &Facts<'_>,
-        hint: String,
+        asking: Asking,
         fallback: Option<ClassifierVerdict>,
     ) -> Verdict {
+        let tier = asking.tier();
         let Some(broker) = &self.broker else {
-            return deny3(DenyReason::ClassifierUnavailable(
-                "no human is available to review this action".to_string(),
-            ));
+            return deny_at(
+                tier,
+                DenyReason::ClassifierUnavailable(
+                    "no human is available to review this action".to_string(),
+                ),
+            );
         };
+        let hint = asking.text().to_string();
         let id = self.next_escalation.fetch_add(1, Ordering::Relaxed);
         let mut pending = PendingEscalation {
             engine: self,
@@ -886,7 +918,7 @@ impl ApprovalEngine {
         let asked = tokio::time::timeout(self.escalation_timeout, async {
             let guard = broker.serial().await;
             if self.stopped(session_id) {
-                return Asked::Settled(deny3(DenyReason::Stopped));
+                return Asked::Settled(deny_at(tier, DenyReason::Stopped));
             }
             if let Some(verdict) = self.static_verdict(self.tier_of(facts)) {
                 return Asked::Settled(verdict);
@@ -895,10 +927,11 @@ impl ApprovalEngine {
                 let auto = self.auto.lock();
                 (auto.disabled(), auto.escalating())
             };
-            if disabled {
+            if tier == Tier::AskUser {
+                // Neither auto mode nor its pause changes a policy question.
+            } else if disabled {
                 return Asked::Settled(deny3(DenyReason::AutoDisabled));
-            }
-            if !escalating && let Some(verdict) = fallback.clone() {
+            } else if !escalating && let Some(verdict) = fallback.clone() {
                 return Asked::Settled(self.apply_classifier(session_id, verdict, None));
             }
             match self
@@ -906,8 +939,12 @@ impl ApprovalEngine {
                 .await
             {
                 Ok(record) => pending.record = record,
-                Err(err) => return Asked::Settled(self.ledger_failed(err)),
+                Err(err) => return Asked::Settled(self.ledger_failed(tier, err)),
             }
+            let (classifier_hint, policy_reason) = match &asking {
+                Asking::Classifier(hint) => (Some(hint.clone()), None),
+                Asking::Policy(reason) => (None, Some(reason.clone())),
+            };
             let prompt = EscalationPrompt {
                 id,
                 session_id: session_id.clone(),
@@ -915,7 +952,8 @@ impl ApprovalEngine {
                 tool: facts.action.name.to_string(),
                 args_preview: args_preview(&facts.action),
                 subjects: facts.subjects.clone(),
-                classifier_hint: Some(hint.clone()),
+                classifier_hint,
+                policy_reason,
             };
             let answer = broker.ask_locked(&guard, prompt).await;
             // A Stop applies before the serial lock is released, so an
@@ -929,7 +967,7 @@ impl ApprovalEngine {
         let decision = match asked {
             Err(_) => {
                 pending.settle_without_human("nobody answered in time").await;
-                return deny3(DenyReason::EscalationTimedOut);
+                return deny_at(tier, DenyReason::EscalationTimedOut);
             }
             Ok(Asked::Settled(verdict)) => {
                 pending.settled = true;
@@ -943,17 +981,17 @@ impl ApprovalEngine {
                     .settle(ApprovalDecision::Approve, "allowed once")
                     .await
                 {
-                    return self.ledger_failed(err);
+                    return self.ledger_failed(tier, err);
                 }
-                self.human_allowed();
-                allow3(Decider::Human, "allowed once by the user")
+                self.human_allowed(tier);
+                allow_at(tier, Decider::Human, "allowed once by the user")
             }
             HumanDecision::AllowAndAddRule(rule) => {
                 if let Err(err) = pending
                     .settle(ApprovalDecision::Approve, "allowed; allow rule added")
                     .await
                 {
-                    return self.ledger_failed(err);
+                    return self.ledger_failed(tier, err);
                 }
                 let snapshot = self.push_rule(*rule);
                 if let Err(err) = self.persist_blocking(snapshot).await {
@@ -962,19 +1000,19 @@ impl ApprovalEngine {
                         "the allow rule is active for this run but was not saved: {err}"
                     )));
                 }
-                self.human_allowed();
-                allow3(Decider::Human, "allowed by the user (rule added)")
+                self.human_allowed(tier);
+                allow_at(tier, Decider::Human, "allowed by the user (rule added)")
             }
             HumanDecision::Deny => {
                 // A denial stands whether or not it could be recorded.
                 let _ = pending.settle(ApprovalDecision::Deny, "denied").await;
-                deny3(DenyReason::Human)
+                deny_at(tier, DenyReason::Human)
             }
             HumanDecision::Stop => {
                 let _ = pending
                     .settle(ApprovalDecision::Deny, "denied; turn stopped")
                     .await;
-                deny3(DenyReason::Stopped)
+                deny_at(tier, DenyReason::Stopped)
             }
         }
     }
@@ -1008,15 +1046,21 @@ impl ApprovalEngine {
     }
 
     /// The ledger failed: deny, and tell the human why.
-    fn ledger_failed(&self, err: String) -> Verdict {
+    fn ledger_failed(&self, tier: Tier, err: String) -> Verdict {
         tracing::warn!(error = %err, "approval ledger write failed; denying");
         self.emit(ApprovalEvent::Notice(format!(
             "an approval request could not be recorded, so the action was denied: {err}"
         )));
-        deny3(DenyReason::LedgerUnavailable(err))
+        deny_at(tier, DenyReason::LedgerUnavailable(err))
     }
 
-    fn human_allowed(&self) {
+    /// The human allowed a call: a classifier escalation counts as an allow
+    /// and ends a denial pause; a policy question ([`Tier::AskUser`]) is
+    /// outside auto mode and changes nothing there.
+    fn human_allowed(&self, tier: Tier) {
+        if tier == Tier::AskUser {
+            return;
+        }
         let resumed = {
             let mut auto = self.auto.lock();
             auto.record_allow();
@@ -1272,17 +1316,46 @@ impl Drop for PendingEscalation<'_> {
 }
 
 fn allow3(by: Decider, why: impl Into<String>) -> Verdict {
+    allow_at(Tier::Classifier, by, why)
+}
+
+fn deny3(reason: DenyReason) -> Verdict {
+    deny_at(Tier::Classifier, reason)
+}
+
+fn allow_at(tier: Tier, by: Decider, why: impl Into<String>) -> Verdict {
     Verdict::Allow {
-        tier: Tier::Classifier,
+        tier,
         by,
         why: why.into(),
     }
 }
 
-fn deny3(reason: DenyReason) -> Verdict {
-    Verdict::Deny {
-        tier: Tier::Classifier,
-        reason,
+fn deny_at(tier: Tier, reason: DenyReason) -> Verdict {
+    Verdict::Deny { tier, reason }
+}
+
+/// Why a call is put to the human.
+enum Asking {
+    /// The classifier's opinion or failure (Tier 3: the classifier errored,
+    /// or auto mode is paused).
+    Classifier(String),
+    /// The policy always asks ([`Tier::AskUser`]): why.
+    Policy(String),
+}
+
+impl Asking {
+    fn tier(&self) -> Tier {
+        match self {
+            Self::Classifier(_) => Tier::Classifier,
+            Self::Policy(_) => Tier::AskUser,
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Self::Classifier(text) | Self::Policy(text) => text,
+        }
     }
 }
 
@@ -1995,6 +2068,119 @@ mod tests {
         assert!(!task.await.unwrap().is_allowed());
         // A Stop answer stops the session again.
         assert_eq!(decide(&rig, "c3", &push()).await, stopped);
+    }
+
+    fn spawn_call(
+        rig: &Rig,
+        id: &'static str,
+        name: &'static str,
+        args: Value,
+    ) -> tokio::task::JoinHandle<Verdict> {
+        let engine = Arc::clone(&rig.engine);
+        let session = rig.session.clone();
+        tokio::spawn(async move { call_as(&engine, &session, id, name, &args).await })
+    }
+
+    fn env_write() -> Value {
+        json!({"path": ".env.local", "content": "TOKEN=x\n"})
+    }
+
+    /// A protected write goes to the human with the policy's reason and never
+    /// to the classifier (which would allow it here): allow once allows it,
+    /// deny denies it, and "allow + rule" adds a literal rule for that file
+    /// after which the same write is Tier 1 without a dialog.
+    #[tokio::test]
+    async fn protected_writes_ask_the_user_and_never_the_classifier() {
+        let mut rig = rig(vec![], DEFAULT_ESCALATION_TIMEOUT);
+
+        let task = spawn_call(&rig, "w1", "write_file", env_write());
+        let request = rig.escalations.recv().await.unwrap();
+        assert_eq!(request.prompt.tool, "write_file");
+        assert_eq!(request.prompt.classifier_hint, None);
+        assert_eq!(
+            request.prompt.policy_reason.as_deref(),
+            Some("protected path: `.env.local` (secrets); the policy always asks for these")
+        );
+        assert_eq!(request.prompt.subjects, [".env.local"]);
+        request.respond.send(HumanDecision::AllowOnce).unwrap();
+        assert_eq!(
+            task.await.unwrap().summary(),
+            VerdictSummary::Allowed {
+                tier: Tier::AskUser,
+                by: Decider::Human
+            }
+        );
+
+        let task = spawn_call(&rig, "w2", "write_file", env_write());
+        let request = rig.escalations.recv().await.unwrap();
+        request.respond.send(HumanDecision::Deny).unwrap();
+        assert_eq!(
+            task.await.unwrap(),
+            Verdict::Deny {
+                tier: Tier::AskUser,
+                reason: DenyReason::Human
+            }
+        );
+
+        let task = spawn_call(&rig, "w3", "write_file", env_write());
+        let request = rig.escalations.recv().await.unwrap();
+        let rule = Rule::literal(
+            RuleKind::Allow,
+            "write_file",
+            request.prompt.subjects[0].clone(),
+            RuleOrigin::Realm,
+        )
+        .unwrap();
+        request
+            .respond
+            .send(HumanDecision::AllowAndAddRule(Box::new(rule)))
+            .unwrap();
+        assert!(task.await.unwrap().is_allowed());
+        let verdict = call(&rig, "w4", "write_file", &env_write()).await;
+        assert_eq!(
+            verdict.summary(),
+            VerdictSummary::Allowed {
+                tier: Tier::AlwaysAllow,
+                by: Decider::Policy
+            }
+        );
+        assert!(rig.escalations.try_recv().is_err(), "no dialog after the rule");
+        // The rule is that file's only.
+        let task = spawn_call(&rig, "w5", "write_file", json!({"path": ".env", "content": ""}));
+        let request = rig.escalations.recv().await.unwrap();
+        request.respond.send(HumanDecision::Deny).unwrap();
+        assert!(!task.await.unwrap().is_allowed());
+
+        assert_eq!(rig.classifier.calls(), 0);
+        assert!(
+            !drain(&mut rig.events)
+                .iter()
+                .any(|e| matches!(e, ApprovalEvent::Classifying(_))),
+            "the classifier never ran"
+        );
+        // Human answers to protected writes leave the denial counters alone.
+        assert_eq!(rig.engine.auto_state().0.consecutive, 0);
+        let records = rig.engine.ledger().unwrap().records().unwrap();
+        assert_eq!(records.len(), 4);
+    }
+
+    /// Auto mode off denies Tier 3 outright; a protected write still asks.
+    #[tokio::test]
+    async fn auto_off_still_asks_for_protected_writes() {
+        let mut rig = rig(vec![], DEFAULT_ESCALATION_TIMEOUT);
+        rig.engine.set_enabled(false);
+        let task = spawn_call(&rig, "w1", "write_file", env_write());
+        let request = rig.escalations.recv().await.unwrap();
+        request.respond.send(HumanDecision::AllowOnce).unwrap();
+        assert!(task.await.unwrap().is_allowed());
+        assert_eq!(rig.classifier.calls(), 0);
+        // The human's answer does not turn auto mode back on.
+        assert!(matches!(
+            rig.engine.auto_state().1,
+            AutoModeState::Paused {
+                cause: PauseCause::UserDisabled
+            }
+        ));
     }
 
     #[tokio::test]

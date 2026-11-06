@@ -3268,6 +3268,7 @@ mod tests {
             tool: t.into(),
             args_preview: "{}".into(),
             hint: None,
+            reason: None,
         };
         app.update(Msg::Escalation(prompt("a"), EscalationId(1)));
         app.update(Msg::Escalation(prompt("b"), EscalationId(2)));
@@ -3299,6 +3300,7 @@ mod tests {
             tool: "shell".into(),
             args_preview: "rm x".into(),
             hint: Some("deletes".into()),
+            reason: None,
         };
         app.update(Msg::Escalation(p.clone(), EscalationId(7)));
         app.update(Msg::Escalation(p.clone(), EscalationId(8)));
@@ -3677,6 +3679,7 @@ mod tests {
             tool: "shell".into(),
             args_preview: "{}".into(),
             hint: None,
+            reason: None,
         }
     }
 

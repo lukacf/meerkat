@@ -42,6 +42,9 @@ pub struct EscalationPrompt {
     pub subjects: Vec<String>,
     /// The classifier's opinion, if it produced one.
     pub classifier_hint: Option<String>,
+    /// Why the policy itself asks, without the classifier (a protected
+    /// path: [`super::policy::Tier::AskUser`]).
+    pub policy_reason: Option<String>,
 }
 
 /// An escalation delivered to the UI: the prompt and the responder.
@@ -121,6 +124,7 @@ mod tests {
             args_preview: "{}".into(),
             subjects: vec!["{}".into()],
             classifier_hint: None,
+            policy_reason: None,
         }
     }
 

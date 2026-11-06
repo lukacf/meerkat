@@ -22,10 +22,11 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks fourteen runs over fixed domains: the four of the recovery part
-\* below, and the ten of the changes part (0.9.9: admit, commit, update,
+\* checks fifteen runs over fixed domains: the four of the recovery part
+\* below, the ten of the changes part (0.9.9: admit, commit, update,
 \* removal, archive, preparation, prepverdicts, placement, unlist and
-\* recovered), which its own section describes.
+\* recovered) and the doors run of the doors part (0.9.11: no external work
+\* reaches an identity entry), which their own sections describe.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -1732,4 +1733,141 @@ AuditWitnessRecoveredArchiveEnds ==
 
 NotAuditWitnessRecoveredRemovalEnds == [][~AuditWitnessRecoveredRemovalEnds]_vars
 NotAuditWitnessRecoveredArchiveEnds == [][~AuditWitnessRecoveredArchiveEnds]_vars
+
+(***************************************************************************)
+(* The doors part (0.9.11): the doors run.                                 *)
+(***************************************************************************)
+
+\* External work never reaches an identity entry, or a name reserved
+\* unreadable: the entry's host delivers to it through its own door, as
+\* internal work, and an external sender is refused as an identity member
+\* (ResolveSubmitWorkRejectionIdentityMember and its unreadable-name twin).
+\* Member 1 recovered externally addressable and bound to its session, its
+\* Declared entry row replayed or not; member 2 recovered externally
+\* addressable or not, bound to its session or not, its peer registered or
+\* not; the scan of either member's created entry row, Present (a Created
+\* entry of a seated local member, or the reservation of a name a Declared
+\* entry holds) or Unreadable (the name reserved); and work of either origin
+\* to either member under either runtime and fence token, with no expected
+\* session: the four admissions and the rejections of a running mob. The
+\* work arms change nothing, so the run counts the arms that answer every
+\* piece of work in every state (ENABLED form).
+
+DoorsIds == {Id1, Id2}
+DoorsRids == {Rid1, Rid2}
+DoorsFences == {1, 2}
+DoorsOrigins == {"External", "Internal"}
+\* No guard of the work arms reads the work id or its attribution.
+DoorsWork == "workid_1"
+DoorsAttribution == "Conversational"
+
+D1Recover == RecoverRosterMemberRunning(Id1, Rid1, 1, 0, AuditProfile, AuditMode, TRUE)
+D1Bind == RecoverMemberSessionBindingFreshRunning(Id1, Rid1, Sess1, None)
+D1Declared == RecoverIdentityEntrySeatedRunning(Id1, Rid1, "Declared")
+D2Recover ==
+    \E addressable \in BOOLEAN :
+        RecoverRosterMemberRunning(Id2, Rid2, 2, 0, AuditProfile, AuditMode, addressable)
+D2Bind == RecoverMemberSessionBindingFreshRunning(Id2, Rid2, Sess2, None)
+D2Peer == RegisterMemberPeerRunning(Id2, Rid2, 0, 2, E2Inproc)
+DScan == \E id \in DoorsIds, presence \in {"Present", "Unreadable"} : RecoverArm(id, presence, None)
+
+\* Every arm that answers a piece of work in a running mob: the admissions
+\* (1-4), the refusals of a member that is not there, not live, not current
+\* or retiring (5-8), the identity member refusals (9-10) and the
+\* addressability refusals (11-12).
+DoorsVerdicts(id, rid, ft, origin) ==
+    << ENABLED SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningInternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningInternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
+       ENABLED ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, None, origin),
+       ENABLED ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, None, origin) >>
+DoorsArm(id, rid, ft, origin) ==
+    \/ SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningInternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningInternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
+    \/ ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, None, origin)
+    \/ ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, None, origin)
+
+DoorsNext ==
+    \/ D1Recover
+    \/ D1Bind
+    \/ D1Declared
+    \/ D2Recover
+    \/ D2Bind
+    \/ D2Peer
+    \/ DScan
+    \/ \E id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, origin \in DoorsOrigins :
+           DoorsArm(id, rid, ft, origin)
+
+DoorsSpec == Init /\ [][DoorsNext]_vars
+
+\* An identity entry of either origin, or a name reserved unreadable.
+DoorsEntry(id) == id \in DOMAIN identity_entry_origins \/ id \in identity_entry_unreadable
+
+\* No external work is admitted to an identity entry or to a name reserved
+\* unreadable, by its session or by its peer.
+AuditDoorsNoExternalEntryAdmission ==
+    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences :
+        DoorsEntry(id) =>
+            /\ ~ENABLED SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, "External", DoorsAttribution)
+            /\ ~ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, "External", DoorsAttribution)
+
+\* At most one arm answers every piece of work: no admission and no two
+\* refusals overlap. (Some work answers no arm here: external work to a
+\* member bound to no session and no peer, which the shell never submits
+\* through these arms.)
+AuditDoorsAtMostOne ==
+    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, origin \in DoorsOrigins :
+        Cardinality({i \in 1..12 : DoorsVerdicts(id, rid, ft, origin)[i]}) <= 1
+
+\* External work to an identity entry, or to a name reserved unreadable, is
+\* answered by exactly one of the identity member refusals whenever no
+\* refusal of a member that is not there, not live, not current or retiring
+\* answers it.
+AuditDoorsEntryExactlyOne ==
+    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences :
+        LET v == DoorsVerdicts(id, rid, ft, "External") IN
+            DoorsEntry(id) =>
+                Cardinality({i \in 9..10 : v[i]}) = IF v[5] \/ v[6] \/ v[7] \/ v[8] THEN 0 ELSE 1
+
+\* Witnesses of the doors run. The refusals of an unreadable name, of a
+\* member that is not externally addressable and of a peer-only member
+\* answer exactly the work their guards name: the coverage check, which
+\* requires each to fire in this run, is their witness.
+\* External work to an externally addressable worker is admitted.
+AuditWitnessDoorsExternalWorkerAdmitted ==
+    /\ ~DoorsEntry(Id2)
+    /\ SubmitWorkRunningExternal(Id2, Rid2, 2, None, DoorsWork, "External", DoorsAttribution)
+\* Internal work to a Declared entry is admitted (its host's own door).
+AuditWitnessDoorsInternalEntryAdmitted ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ SubmitWorkRunningInternal(Id1, Rid1, 1, None, DoorsWork, "Internal", DoorsAttribution)
+\* External work to a Declared entry whose runtime is externally
+\* addressable is refused as an identity member.
+AuditWitnessDoorsExternalEntryRefused ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ ResolveSubmitWorkRejectionIdentityMember(Id1, Rid1, 1, None, "External")
+\* External work to a Created entry is refused as an identity member.
+AuditWitnessDoorsExternalCreatedRefused ==
+    /\ Created(Id2)
+    /\ ResolveSubmitWorkRejectionIdentityMember(Id2, Rid2, 2, None, "External")
+
+NotAuditWitnessDoorsExternalWorkerAdmitted == [][~AuditWitnessDoorsExternalWorkerAdmitted]_vars
+NotAuditWitnessDoorsInternalEntryAdmitted == [][~AuditWitnessDoorsInternalEntryAdmitted]_vars
+NotAuditWitnessDoorsExternalEntryRefused == [][~AuditWitnessDoorsExternalEntryRefused]_vars
+NotAuditWitnessDoorsExternalCreatedRefused == [][~AuditWitnessDoorsExternalCreatedRefused]_vars
 ====

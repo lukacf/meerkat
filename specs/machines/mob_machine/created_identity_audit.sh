@@ -2,7 +2,7 @@
 # TLC audit of MobMachine created identity entries.
 #
 # usage: created_identity_audit.sh [--mutants]
-#                                  [--part recovery|changes|<run>[,<run>...]]
+#                                  [--part recovery|changes|doors|<run>[,<run>...]]
 #                                  [extra tlc args...]
 #
 # Derives each run's TLC config from the generated ci.cfg next to this script
@@ -10,9 +10,9 @@
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
 # member_residency_audit that leaves out the two counters no guard reads
 # (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks fourteen runs of
+# model reads neither anywhere else. It checks fifteen runs of
 # created_identity_audit.tla, each over its whole space with TLC coverage, in
-# two parts (every part by default; --part <run>,<run>... checks those runs,
+# three parts (every part by default; --part <run>,<run>... checks those runs,
 # as a CI shard does). Its recovery part (--part recovery):
 #
 # - scan: member 1 recovered and bound, its Declared entry row replayed or
@@ -142,12 +142,29 @@
 #   (AuditArchivedNeverSeated), and the boot plan's seal, a stop and a
 #   resume keep its standing and its name (AuditArchivedKeepsItsName).
 #
+# Its doors part (--part doors, 0.9.11):
+#
+# - doors: member 1 recovered externally addressable and bound, its
+#   Declared entry row replayed or not; member 2 recovered externally
+#   addressable or not, bound to its session or not, its peer registered or
+#   not; the scan of either member's created entry row (Present or
+#   Unreadable); and work of either origin to either member under either
+#   runtime and fence token: no external work is admitted to an identity
+#   entry or to a name reserved unreadable, by its session or its peer
+#   (AuditDoorsNoExternalEntryAdmission), at most one arm answers every
+#   piece of work (AuditDoorsAtMostOne), and external work to an entry or a
+#   reserved name is refused as an identity member whenever no refusal of a
+#   member that is not there, not live, not current or retiring answers it
+#   (AuditDoorsEntryExactlyOne). Internal work to an entry, the host's own
+#   door, is admitted as to any member.
+#
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
 # worker_reconcile_spares_entries and destroyed_mob_holds_no_member_lifecycle),
-# and the scan run its AuditScanUnseatedCauses (the scan records a Created
+# the scan run its AuditScanUnseatedCauses (the scan records a Created
 # entry unseated only owed its seat, awaiting its host's preparation or
-# archived), in its witness and mutant runs too.
+# archived), and the doors run its AuditDoorsNoExternalEntryAdmission and
+# AuditDoorsAtMostOne, in their witness and mutant runs too.
 #
 # Each run must finish without an error, reach at least its floor of distinct
 # states and fire every action of its covered list (TLC coverage; an arm a
@@ -187,18 +204,19 @@ part_of() {
   case "$1" in
     scan|reseat|names|placed) echo recovery ;;
     admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered) echo changes ;;
+    doors) echo doors ;;
     *) return 1 ;;
   esac
 }
-# A part is all, recovery, changes, or a comma-separated list of runs (a CI
-# shard names the runs it checks).
+# A part is all, recovery, changes, doors, or a comma-separated list of runs
+# (a CI shard names the runs it checks).
 case "${run_part}" in
-  all|recovery|changes) ;;
+  all|recovery|changes|doors) ;;
   *)
     IFS=, read -r -a listed_runs <<< "${run_part}"
     for listed_run in "${listed_runs[@]}"; do
       if ! part_of "${listed_run}" > /dev/null; then
-        echo "error: unknown part '${listed_run}' (recovery, changes or runs)" >&2
+        echo "error: unknown part '${listed_run}' (recovery, changes, doors or runs)" >&2
         exit 2
       fi
     done
@@ -226,6 +244,7 @@ prepverdicts_states=294
 placement_states=105
 unlist_states=336
 recovered_states=180
+doors_states=unmeasured
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies
@@ -597,6 +616,30 @@ recovered_covered_actions=(
   ObserveMemberRetirementArchivedLiveStopped
 )
 
+# The doors run's work arms change nothing: each fires into known states,
+# so its coverage counts the successor states it generated. The refusals
+# of a member that is not live or retiring answer no work here (no member
+# retires), and the scan of a row reserves member 1's Declared name only
+# through the Unreadable arm.
+doors_covered_actions=(
+  RecoverRosterMemberRunning
+  RecoverMemberSessionBindingFreshRunning
+  RecoverIdentityEntrySeatedRunning
+  RegisterMemberPeerRunning
+  RecoverCreatedIdentityEntrySeatedRunning
+  RecoverCreatedIdentityEntryUnreadableRunning
+  SubmitWorkRunningExternal
+  SubmitWorkRunningExternalPeerOnly
+  SubmitWorkRunningInternal
+  SubmitWorkRunningInternalPeerOnly
+  ResolveSubmitWorkRejectionMemberNotFound
+  ResolveSubmitWorkRejectionStaleFenceToken
+  ResolveSubmitWorkRejectionIdentityMember
+  ResolveSubmitWorkRejectionIdentityMemberUnreadableName
+  ResolveSubmitWorkRejectionNotExternallyAddressable
+  ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable
+)
+
 # A covered arm a run fires only through a named wrapper whose conjunct
 # restricts its exploration: TLC's coverage names such an action after the
 # wrapper (an action whose body is a conjunction is named after its
@@ -820,6 +863,18 @@ write_cfg() {
       run_invariants="
   AuditRecoverExactlyOne"
       ;;
+    doors)
+      spec="DoorsSpec"
+      run_properties=""
+      run_invariants="
+  AuditDoorsEntryExactlyOne"
+      # The admission and overlap invariants hold in every state, so its
+      # mutant runs check them too: the admission first, which an entry's
+      # admitted external work breaks before the overlap it also makes.
+      run_safety="
+  AuditDoorsNoExternalEntryAdmission
+  AuditDoorsAtMostOne"
+      ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -968,7 +1023,7 @@ check_space() {
   done
 }
 
-for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered; do
+for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered doors; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -1021,7 +1076,9 @@ for witness in \
   "unlist:Action property:UnlistMarksSeated" "unlist:Action property:UnlistRemovesUnseated" \
   "unlist:Action property:UnlistDefersLadder" "unlist:Action property:UnlistEndsAtTerminal" \
   "unlist:Action property:UnlistedNameRefused" "unlist:Action property:UnlistLeavesCreated" \
-  "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds"; do
+  "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds" \
+  "doors:Action property:DoorsExternalWorkerAdmitted" "doors:Action property:DoorsInternalEntryAdmitted" \
+  "doors:Action property:DoorsExternalEntryRefused" "doors:Action property:DoorsExternalCreatedRefused"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1667,6 +1724,30 @@ PY
   mutate_unreached recovered recovered_removal_unmarked RecoveredRemovalEnds <<'PY'
 keep_var("RecoverCreatedIdentityEntryRemovingRunning", "identity_entry_removing")
 keep_var("RecoverCreatedIdentityEntryRemovingStopped", "identity_entry_removing")
+PY
+
+  # External work reaches an identity entry by its session (the external
+  # admission's not_an_identity_entry guard dropped).
+  mutate doors external_admits_entry "Invariant AuditDoorsNoExternalEntryAdmission" <<'PY'
+drop_guard("SubmitWorkRunningExternal", "DOMAIN identity_entry_origins")
+PY
+
+  # External work reaches a name reserved unreadable by its peer (the
+  # peer-only external admission's name_readable guard dropped).
+  mutate doors peer_admits_unreadable "Invariant AuditDoorsNoExternalEntryAdmission" <<'PY'
+drop_guard("SubmitWorkRunningExternalPeerOnly", "identity_entry_unreadable")
+PY
+
+  # The identity member refusal answers a worker's external work too (its
+  # identity_entry guard dropped), beside the admission.
+  mutate doors identity_member_answers_worker "Invariant AuditDoorsAtMostOne" <<'PY'
+drop_guard("ResolveSubmitWorkRejectionIdentityMember", "DOMAIN identity_entry_origins")
+PY
+
+  # External work to an entry is answered by no arm (the identity member
+  # refusal never enabled), as before the fix it was admitted.
+  mutate doors entry_refusal_unanswered "Invariant AuditDoorsEntryExactlyOne" <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionIdentityMember", '(origin = "External")', "FALSE")
 PY
 fi
 echo "created identity audit passed"

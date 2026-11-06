@@ -1604,14 +1604,16 @@ struct ReadinessAnswer {
 
 /// Start or join the readiness check and bound it by `budget`. On expiry
 /// the hold is dropped; the shared check is cancelled once nobody holds it.
+/// The caller owns the agents private to `private_owner_key`.
 async fn readiness_within_budget(
     controller: &crate::console_voice::ConsoleVoiceController,
     principal: &str,
+    private_owner_key: Option<&str>,
     identity: &str,
     budget: Duration,
 ) -> ReadinessAnswer {
     let started = std::time::Instant::now();
-    let flight = match controller.readiness_flight(principal, identity) {
+    let flight = match controller.readiness_flight(principal, private_owner_key, identity) {
         Ok(flight) => flight,
         Err(failure) => {
             return ReadinessAnswer {
@@ -1769,9 +1771,14 @@ mod voice_readiness_budget_tests {
     async fn an_expired_budget_names_the_active_stage_answers_typed_and_cancels_the_check() {
         let host = ParkedReadyHost::new(VoiceReadinessStage::DurableSource);
         let controller = host.controller();
-        let answer =
-            readiness_within_budget(&controller, "alice", "agent-a", Duration::from_millis(50))
-                .await;
+        let answer = readiness_within_budget(
+            &controller,
+            "alice",
+            None,
+            "agent-a",
+            Duration::from_millis(50),
+        )
+        .await;
         assert!(
             matches!(answer.outcome, ReadinessOutcome::TimedOut),
             "{answer:?}"
@@ -1813,8 +1820,14 @@ mod voice_readiness_budget_tests {
         let host = ParkedReadyHost::new(VoiceReadinessStage::Credential);
         host.release.add_permits(1);
         let controller = host.controller();
-        let answer =
-            readiness_within_budget(&controller, "alice", "agent-a", Duration::from_secs(5)).await;
+        let answer = readiness_within_budget(
+            &controller,
+            "alice",
+            None,
+            "agent-a",
+            Duration::from_secs(5),
+        )
+        .await;
         assert!(
             matches!(&answer.outcome, ReadinessOutcome::Answered(Ok(report)) if report.available),
             "{answer:?}"
@@ -1944,6 +1957,7 @@ async fn handle_console_voice_rpc_inner(
         let answer = readiness_within_budget(
             controller,
             principal,
+            auth.audience.private_owner_key(),
             &parsed.identity,
             VOICE_READINESS_SERVER_BUDGET,
         )
@@ -2042,6 +2056,7 @@ async fn handle_console_voice_rpc_inner(
         VOICE_OPEN_METHOD => match controller
             .open_while_authenticated(
                 principal,
+                auth.audience.private_owner_key(),
                 parsed,
                 auth.verification
                     .clone()

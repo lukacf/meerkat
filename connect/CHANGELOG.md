@@ -255,3 +255,23 @@ there are no Connect releases numbered 0.9.7 to 0.9.9.
   family. When the session starts, it runs on the account's route for the
   protocol the account's model list gives the model, on the same account,
   which can differ from the route chosen in setup.
+
+- Under contention, a first submission, a setup helper's or an original's,
+  can be refused while its input is bound for native admission: when it
+  meets another submission still in flight in the same namespace, or when a
+  setup helper's wait budget runs out. The refusal is retryable and nothing
+  runs; a retry after the other submission settles succeeds.
+
+- A Find whose contributing original has an input that is neither admitted
+  nor awaiting admission (for example one whose admission failed or that
+  was withdrawn) can be refused as not allowed by policy (`access_denied`)
+  at its work step, although no policy refused it. This is not fixed in
+  this release.
+
+- Under contention, binding an original's or a setup helper's input for
+  native admission can wait longer than 2 s for the source's shared state,
+  for another write to the same source, or for a recovery round.
+
+- A send refused at its entry checks can leave an internal pending attempt
+  until the next send of the same input or a restart; nothing is admitted
+  without passing the checks again.

@@ -218,3 +218,61 @@ async fn a_settle_stopped_at_its_fence_window_names_its_token_attempts_and_last_
     );
     assert!(realm.realm_poisoned().is_none());
 }
+
+// Unrun until the candidate's validation. A batch stopped at its fence window
+// is what the reopen loads: here the store applied the batch, then answered
+// its first attempt `Indeterminate`, failed every head read and answered every
+// retry `Unavailable`, so the writer could not tell it landed. The settle
+// stops at the deadline with the outcome unknown and the runtime's scope is
+// poisoned; a new process, once the old lease ran out, loads the batch the
+// store holds. The writer never rolled anything back and never wrote it again.
+#[tokio::test(start_paused = true)]
+async fn the_reopen_loads_a_batch_stopped_at_its_fence_window_that_landed() {
+    let host = fast_host();
+    let opened = open(&host).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1000;
+        faults.indeterminate_after_apply = 1;
+        faults.load_head_unavailable = 1000;
+        faults.landed_retry_unavailable = 1000;
+    }
+    let runtime = LogicalRuntimeId::new("landed");
+    let written = opened
+        .1
+        .persist_input_state(
+            &runtime,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await;
+    assert!(
+        matches!(
+            written,
+            Err(RuntimeStoreError::UnsettledAtFenceWindow { .. })
+        ),
+        "{written:?}"
+    );
+    assert_eq!(host.commit_count(), 1, "the batch landed once");
+    assert!(matches!(
+        opened.1.load_input_states(&runtime).await,
+        Err(RuntimeStoreError::ScopeRefused { .. })
+    ));
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 0;
+        faults.load_head_unavailable = 0;
+        faults.landed_retry_unavailable = 0;
+    }
+    let reopened = reopen(&host, opened).await;
+    assert_eq!(
+        reopened
+            .1
+            .load_input_states(&runtime)
+            .await
+            .expect("the reopened realm serves the runtime")
+            .len(),
+        1,
+        "the reopen loads the batch that landed"
+    );
+    assert_eq!(host.commit_count(), 1, "nothing was written again");
+}

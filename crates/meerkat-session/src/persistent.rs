@@ -171,6 +171,33 @@ fn refusal_or_internal_error(
     }
 }
 
+/// The error a failed WholeBlob checkpoint write (a round commit or a closing
+/// save) answers. A batch the host store left unsettled when its writer's
+/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) may or
+/// may not have landed, so the live actor and the store can no longer be
+/// proved to be one image: the write answers the teardown class, which the
+/// checkpoint returns at once, and the actor is reloaded from what the store
+/// holds (what a reopen of the realm loads). Such a write is never taken for
+/// one the stopped writer refused before it changed anything: it is not
+/// waited on and not written again. Any other failure keeps its internal
+/// error.
+fn whole_blob_checkpoint_write_error(
+    session_id: &SessionId,
+    error: RuntimeStoreError,
+) -> AgentError {
+    match error {
+        error @ RuntimeStoreError::UnsettledAtFenceWindow { .. } => {
+            AgentError::session_durable_projection_authority_unknown(format!(
+                "session {session_id}: its checkpoint may or may not have landed ({error}); \
+                 live actor reload required"
+            ))
+        }
+        other => AgentError::InternalError(format!(
+            "failed to write WholeBlob provisional checkpoint for session {session_id}: {other}"
+        )),
+    }
+}
+
 /// Map a failed read of a HeadCanonical session's boundary authority: a
 /// store refusal until the realm is reopened keeps its typed store error
 /// ([`refusal_or_internal_error`]).
@@ -2651,12 +2678,7 @@ impl StoreCheckpointer {
             .runtime_store
             .write_prepared_whole_blob_provisional_tail(&runtime_id, prepared)
             .await
-            .map_err(|error| {
-                AgentError::InternalError(format!(
-                    "failed to write WholeBlob provisional checkpoint for session {}: {error}",
-                    session.id()
-                ))
-            })?;
+            .map_err(|error| whole_blob_checkpoint_write_error(session.id(), error))?;
         if stored_authority != expected_authority {
             return Err(AgentError::InternalError(format!(
                 "WholeBlob provisional checkpoint store acknowledged a different candidate for session {}",
@@ -3438,15 +3460,17 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
     /// bounded, for the writer's re-acquire and is written again, once, when
     /// that restored the writer. When the writer stays stopped through the
     /// whole wait, a round commit of the runtime's run on this actor
-    /// suspends the run there, as at a dispatch: nothing of the round was
-    /// written, so the run resumes from its last round commit and does the
-    /// round again, as after a crash. A closing save comes after the run's
-    /// terminal (its cursor is gone by then), so a closing save still refused
-    /// after its one wait returns its refusal, and the runtime ends the turn
-    /// with the teardown class (its terminal is already recorded). A round
-    /// commit of a run the runtime did not dispatch here also returns its
-    /// refusal after the wait, and a refusal of the teardown class is
-    /// returned at once.
+    /// suspends the run there, as at a dispatch: the run resumes from its last
+    /// committed round and does the round again, as after a crash. A closing
+    /// save comes after the run's terminal (its cursor is gone by then), so a
+    /// closing save still refused after its one wait returns its refusal, and
+    /// the runtime ends the turn with the teardown class (its terminal is
+    /// already recorded). A round commit of a run the runtime did not dispatch
+    /// here also returns its refusal after the wait, and a refusal of the
+    /// teardown class is returned at once: among them a write whose batch the
+    /// host store left unsettled when the writer's fence window closed, which
+    /// may or may not have landed, so it is neither waited on nor written
+    /// again.
     async fn checkpoint_run(
         &self,
         session: &mut Session,
@@ -3797,11 +3821,12 @@ impl StoreCheckpointer {
         ))
     }
 
-    /// The retryable refusal a direct turn answers when its round commit was
-    /// refused (`error`) while the store's writer was stopped, the writer
+    /// The retryable refusal a direct turn answers when its round commit
+    /// failed (`error`) while the store's writer was stopped, the writer
     /// stayed stopped through the commit's whole wait with no other writer
-    /// found (a store fence gap), and its run was suspended there: the round
-    /// was not written, and nothing proves another owner.
+    /// found (a store fence gap), and its run was suspended there: nothing
+    /// proves another owner. It says the commit failed, not that nothing was
+    /// written: a commit whose retry budget ran out may still have landed.
     fn commit_fence_gap_refusal(
         &self,
         window: meerkat_core::host_store::SelfFenceWindow,
@@ -3810,7 +3835,7 @@ impl StoreCheckpointer {
         AgentError::StoreError(format!(
             "{}: this writer's self-fence window stayed closed through its round commit's wait \
              ({:?} since its last acquire or renew started, window {:?}, renew failed: {}) and no \
-             other writer was found; the round was not written ({error}), and the turn can be \
+             other writer was found; the round commit failed ({error}), and the turn can be \
              retried once the store's fence is back",
             self.session_label(),
             window.elapsed,

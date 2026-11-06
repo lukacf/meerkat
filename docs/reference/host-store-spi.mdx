@@ -171,7 +171,9 @@ keeps its fence. While renews fail, the retry budget is therefore cut at the
 self-fence window (20 s at the default timing). A batch sent before the
 deadline can still reach your store's commit point after the lease ended,
 since Core sets no deadline on a commit: refusing it there with `FencedOut`
-(obligation 5) is what keeps it out of the realm.
+(obligation 5) is what keeps it out of the realm. No bound on the writer's
+side closes that case, a stricter one included (stopping at the first failed
+renew): obligation 5 at commit does.
 
 A commit that does not settle within its budget, or ends in another error,
 fails the call that made it with a write error, and every scope the batch

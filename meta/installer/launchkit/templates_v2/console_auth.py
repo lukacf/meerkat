@@ -1610,6 +1610,10 @@ class ConsoleFront:
             return refusal("invalid_binding", 401)
         if self.controller_review_factory is None:
             return refusal("unsupported_presenter", 501)
+        if not login.person:
+            # The review asks for a decision, and an account people share
+            # decides nothing.
+            return refusal("approver_unauthenticated", 403)
         if login.controller_review_failure:
             return refusal(login.controller_review_failure, 409)
         owner = login.controller_review
@@ -1693,6 +1697,7 @@ class ConsoleFront:
                 code = "unavailable"
             if status is None:
                 status = (400 if code in {"invalid_message", "invalid_answer"} else
+                          403 if code == "approver_unauthenticated" else
                           409 if code in {"busy", "stale_prompt", "invalid_binding", "binding_retired", "stop_unavailable"} else
                           501 if code == "unsupported_presenter" else 503)
             return JSONResponse({"error": {"code": code}}, status_code=status, headers=headers)
@@ -1738,6 +1743,10 @@ class ConsoleFront:
             # No await between this actual-login check and bridge reservation.
             if not self._disclosure_current(request, login):
                 return refusal("invalid_binding", 401)
+            if suffix == "/answer" and not login.person:
+                # Every setup prompt asks for a decision or a credential, and
+                # an account people share decides nothing.
+                return refusal("approver_unauthenticated")
             if self.connect_factory is None:
                 return refusal("unsupported_presenter")
             if suffix == "/initialize":
@@ -1896,6 +1905,12 @@ class ConsoleFront:
             return error(501, "This application has not declared frontend management support.")
         if request.url.query:
             return error(400, "Frontend management does not accept query parameters.")
+        if operation in ("prepare", "submit") and (login is None or not login.person):
+            # A proposal exists to be approved, and only a person approves:
+            # an account people share decides nothing. Reads stay open.
+            return JSONResponse({"detail": "Approving frontend changes needs your own named account. "
+                                 "A shared Console account approves nothing.", "code": "approver_unauthenticated"},
+                                status_code=403, headers={"Cache-Control": "no-store"})
         try:
             host = self.frontend_host()
             _frontend_json(host)

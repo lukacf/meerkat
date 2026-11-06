@@ -17,7 +17,7 @@ import pytest
 from launchkit.templates_v2 import console_auth as console_module
 from launchkit.templates_v2.console_auth import ConsoleFront
 from test_application_callback_bridge import load_package
-from test_console_auth import FIELDS, login, metadata
+from test_console_auth import FIELDS, login, metadata, named
 
 PATH = "/console/forge/frontends"
 HOST = {"protocol": 1, "host_id": "forge:" + "1" * 64,
@@ -46,8 +46,10 @@ class Owner:
 async def boundary(tmp_path, owner=None, host=None):
     metadata(tmp_path)
     native = []
+    # Approving a frontend change needs a person: the installation's own
+    # account as a named account.
     front = ConsoleFront(tmp_path, 8855, "owner", "local-password-123",
-        transport=httpx.MockTransport(lambda request: native.append(request) or httpx.Response(200, json={"native": True})))
+        **named(lambda request: native.append(request) or httpx.Response(200, json={"native": True})))
     if owner is not None:
         front.frontend_management = owner
         front.frontend_host = lambda: deepcopy(HOST if host is None else host)

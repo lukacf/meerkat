@@ -11638,6 +11638,10 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberBuildPreparation {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginMemberRotation {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
@@ -12019,6 +12023,7 @@ pub enum Input {
     ClassifyPeerNotice(inputs::ClassifyPeerNotice),
     CommitDormantSeat(inputs::CommitDormantSeat),
     ResolveMemberHostPreparation(inputs::ResolveMemberHostPreparation),
+    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
     BeginMemberRotation(inputs::BeginMemberRotation),
     CommitMemberRotation(inputs::CommitMemberRotation),
     ClassifyMemberRelease(inputs::ClassifyMemberRelease),
@@ -12354,6 +12359,7 @@ impl Input {
             Self::ClassifyPeerNotice(_) => InputKind::ClassifyPeerNotice,
             Self::CommitDormantSeat(_) => InputKind::CommitDormantSeat,
             Self::ResolveMemberHostPreparation(_) => InputKind::ResolveMemberHostPreparation,
+            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
             Self::BeginMemberRotation(_) => InputKind::BeginMemberRotation,
             Self::CommitMemberRotation(_) => InputKind::CommitMemberRotation,
             Self::ClassifyMemberRelease(_) => InputKind::ClassifyMemberRelease,
@@ -12606,6 +12612,7 @@ pub enum InputKind {
     ClassifyPeerNotice,
     CommitDormantSeat,
     ResolveMemberHostPreparation,
+    ResolveMemberBuildPreparation,
     BeginMemberRotation,
     CommitMemberRotation,
     ClassifyMemberRelease,
@@ -14466,6 +14473,10 @@ pub mod effects {
         pub verdict: MemberWakeFeedbackVerdict,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberBuildPreparationRetryArmed {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberWakesAbandoned {
         pub cause: MemberWakeAbandonCause,
     }
@@ -14823,6 +14834,7 @@ pub enum Effect {
     BootMaterializationPlanned(effects::BootMaterializationPlanned),
     MemberWakeClassified(effects::MemberWakeClassified),
     MemberWakeFeedbackResolved(effects::MemberWakeFeedbackResolved),
+    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
     MemberWakesAbandoned(effects::MemberWakesAbandoned),
     RotationSessionsAbandoned(effects::RotationSessionsAbandoned),
     CloseMemberPeerIngress(effects::CloseMemberPeerIngress),
@@ -15019,6 +15031,7 @@ pub enum EffectKind {
     BootMaterializationPlanned,
     MemberWakeClassified,
     MemberWakeFeedbackResolved,
+    MemberBuildPreparationRetryArmed,
     MemberWakesAbandoned,
     RotationSessionsAbandoned,
     CloseMemberPeerIngress,
@@ -16664,6 +16677,9 @@ pub enum TransitionId {
     ResolveMemberHostPreparationRunning,
     ResolveMemberHostPreparationStopped,
     ResolveMemberHostPreparationCompleted,
+    ResolveMemberBuildPreparationRunning,
+    ResolveMemberBuildPreparationStopped,
+    ResolveMemberBuildPreparationCompleted,
     BeginMemberRotationRunning,
     CommitMemberRotationLiveRunning,
     CommitMemberRotationLiveStopped,
@@ -16671,6 +16687,7 @@ pub enum TransitionId {
     CommitMemberRotationRetiredStopped,
     ResolveMemberRevivalBoundRunning,
     ResolveMemberRevivalRetryableRunning,
+    ResolveMemberRevivalRetryableBuildPreparationRunning,
     AbandonMemberWakeDormantRunning,
     AbandonMemberWakeBrokenRunning,
     ResolveMemberRevivalBoundStaleRunning,

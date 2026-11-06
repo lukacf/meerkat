@@ -2142,6 +2142,10 @@ macro_rules! mob_catalog_machine_dsl {
             // The host carried out an identity's pending preparation on an
             // identity already seated on that session.
             ResolveMemberHostPreparation { agent_identity: AgentIdentity },
+            // The build preparation the host asked to retry for a member
+            // (BuildPreparationRetry) is retried: Core's retry timer at each
+            // backoff step, or the host's door after a wake refused for it.
+            ResolveMemberBuildPreparation { agent_identity: AgentIdentity },
             // A rotation. FreshSession (reset, delete): the exact Retiring
             // incarnation will be re-seated Dormant on a NEW session in its
             // terminal step. A network-comms member has no endpoint before
@@ -2861,6 +2865,12 @@ macro_rules! mob_catalog_machine_dsl {
             BootMaterializationPlanned { agent_identity: AgentIdentity, verdict: Enum<BootMaterializationKind>, attempt: Option<u64> },
             MemberWakeClassified { agent_identity: AgentIdentity, cause: Enum<MemberWakeCause>, verdict: Enum<MemberWakeVerdictKind>, refusal: Option<Enum<MemberWakeRefusalKind>>, attempt: Option<u64>, session_id: Option<SessionId> },
             MemberWakeFeedbackResolved { agent_identity: AgentIdentity, attempt: u64, verdict: Enum<MemberWakeFeedbackVerdict> },
+            // A wake's build preparation the host asked to retry was
+            // recorded (BuildPreparationRetry): the owner arms the member's
+            // retry timer, which sends ResolveMemberBuildPreparation at the
+            // next backoff step. Only the step that records the cause emits
+            // it.
+            MemberBuildPreparationRetryArmed { agent_identity: AgentIdentity },
             // Every Waking member was moved to Dormant by a mob-wide stop,
             // completion or destroy admission: every open attempt is closed.
             MemberWakesAbandoned { cause: Enum<MemberWakeAbandonCause> },
@@ -4458,6 +4468,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RuntimeBindingRefusalStale => local seam SurfaceResultAlignment,
         disposition OwedMemberWakesRecorded => local seam OwnerRealizationOnly,
         disposition OwedEdgeRepairsRecorded => local seam OwnerRealizationOnly,
+        disposition MemberBuildPreparationRetryArmed => local seam OwnerRealizationOnly,
         disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
         disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
         disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
@@ -5578,6 +5589,15 @@ macro_rules! mob_catalog_machine_dsl {
         invariant archived_session_record_is_unseated {
             for_all(id in self.identity_entry_archived_sessions.keys(),
                 self.identity_to_runtime.contains_key(id) == false)
+        }
+
+        // A build preparation the host asked to retry (BuildPreparationRetry)
+        // belongs to a seated member: the wake feedback of its member records
+        // it, and every step that ends the member ends it.
+        invariant build_preparation_retry_belongs_to_a_member {
+            for_all(id in self.member_host_preparation_causes.keys(),
+                self.member_host_preparation_causes.get_cloned(id) != Some(HostPreparationCause::BuildPreparationRetry)
+                || self.identity_to_runtime.contains_key(id) == true)
         }
 
         // A role hold (RoleMigrationUndeclared) belongs to an identity entry:
@@ -11317,6 +11337,11 @@ macro_rules! mob_catalog_machine_dsl {
                 // side effect again after terminal completion.
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
@@ -11490,6 +11515,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.pending_session_ingress_detach_runtime_ids.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.member_definition_wiring_exempt.remove(agent_identity);
@@ -14912,6 +14942,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -15297,6 +15332,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -15923,6 +15963,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -16024,6 +16069,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -16119,6 +16169,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -16213,6 +16268,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -16323,6 +16383,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -16437,6 +16502,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -28397,6 +28467,22 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // The build preparation the host asked to retry is retried: Core's
+        // retry timer at its backoff step, or the host's door after a wake
+        // refused for it. The cause ends, so the member's next wake asks the
+        // host's build preparer again. Total: an identity with no such cause
+        // is a no-op, and no other host preparation cause ends here.
+        transition ResolveMemberBuildPreparation {
+            per_phase [Running, Stopped, Completed]
+            on input ResolveMemberBuildPreparation { agent_identity }
+            update {
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
+            }
+            to Running
+        }
+
         // A rotation (reset, delete) of the exact Retiring incarnation: its
         // archive terminal is CommitMemberRotation, which seats the next
         // incarnation Dormant on the recorded NEW session and endpoint.
@@ -29013,13 +29099,20 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         // A retryable wake failure (an unavailable durable resume gate, a held
-        // hosting claim, the wake bound expiring, a retryable build
-        // preparation refusal): Waking -> Dormant, not Broken. A boot
-        // obligation stays owed, so the owner's timer wakes the member again.
+        // hosting claim, the wake bound expiring): Waking -> Dormant, not
+        // Broken. A boot obligation stays owed, so the owner's timer wakes the
+        // member again. A build preparation the host asked to retry ends here
+        // too when a host preparation is owed already (which a wake attempt
+        // never opens beside: every cause refuses the member's wakes);
+        // otherwise its own arm records it.
         transition ResolveMemberRevivalRetryableRunning {
             on signal ResolveMemberRevivalRetryable { agent_identity, attempt, kind }
             guard { self.lifecycle_phase == Phase::Running }
             guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "no_build_preparation_to_record" {
+                kind != MemberWakeRetryableKind::BuildPreparationRefused
+                || self.member_host_preparation_causes.contains_key(agent_identity) == true
+            }
             update {
                 self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
                 self.member_wake_attempts.remove(agent_identity);
@@ -29033,6 +29126,36 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+        }
+
+        // The host's build preparer asked to retry the member's build
+        // preparation (BuildPreparationRefused): Waking -> Dormant, as any
+        // retryable failure, and the member owes its host the preparation it
+        // asked to retry (BuildPreparationRetry). Like every host preparation
+        // cause it refuses the member's wakes, whatever their cause, so no wake
+        // asks the preparer again until the retry ends it
+        // (ResolveMemberBuildPreparation). This step arms Core's retry timer.
+        transition ResolveMemberRevivalRetryableBuildPreparationRunning {
+            on signal ResolveMemberRevivalRetryable { agent_identity, attempt, kind }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "attempt_open" { self.member_wake_attempts.get_copied(agent_identity) == Some(attempt) }
+            guard "build_preparation_refused" { kind == MemberWakeRetryableKind::BuildPreparationRefused }
+            guard "no_host_preparation_owed" { self.member_host_preparation_causes.contains_key(agent_identity) == false }
+            update {
+                self.member_materialization.insert(agent_identity, MemberMaterializationPhase::Dormant);
+                self.member_wake_attempts.remove(agent_identity);
+                self.member_wake_bound.remove(agent_identity);
+                self.member_materialization_epoch.remove(agent_identity);
+                // A Dormant member requests no runtime binding: the
+                // rolled-back provision's binding ladder goes with it.
+                self.member_startup_binding_requested.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_runtime_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_startup_ready.remove(self.identity_to_runtime.get_cloned(agent_identity).get("value"));
+                self.member_host_preparation_causes.insert(agent_identity, HostPreparationCause::BuildPreparationRetry);
+            }
+            to Running
+            emit MemberWakeFeedbackResolved { agent_identity: agent_identity, attempt: attempt, verdict: MemberWakeFeedbackVerdict::Applied }
+            emit MemberBuildPreparationRetryArmed { agent_identity: agent_identity }
         }
 
         // A shell path that ends a wake without a resolution: NotCurrent,
@@ -35571,6 +35694,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -35688,6 +35816,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.runtime_retire_refusal_reasons.remove(agent_runtime_id);
                 self.runtime_retire_pending_sessions.remove(agent_runtime_id);
                 self.identity_to_runtime.remove(agent_identity);
+                // A build preparation the host asked to retry goes with the
+                // member.
+                if self.member_host_preparation_causes.get_cloned(agent_identity) == Some(HostPreparationCause::BuildPreparationRetry) {
+                    self.member_host_preparation_causes.remove(agent_identity);
+                }
                 self.member_custody_unrestored.remove(agent_identity);
                 self.member_custody_unrestored_causes.remove(agent_identity);
                 self.identity_entry_origins.remove(agent_identity);
@@ -39496,8 +39629,10 @@ pub enum HostPreparationCause {
     /// A role move the host has not declared (the declared apply's
     /// RoleMigrationHeld verdict).
     RoleMigrationUndeclared,
-    /// A build preparation the host asked to retry. No transition records it
-    /// yet.
+    /// A build preparation the host asked to retry: recorded by the wake's
+    /// retryable feedback (BuildPreparationRefused), ended by
+    /// ResolveMemberBuildPreparation (Core's retry timer, or the host's
+    /// door).
     BuildPreparationRetry,
 }
 

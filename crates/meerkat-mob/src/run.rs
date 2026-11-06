@@ -677,6 +677,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
             | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
             | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberBuildPreparation { .. }
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
@@ -1984,6 +1985,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
             | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
             | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberBuildPreparation { .. }
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }

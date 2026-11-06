@@ -798,9 +798,9 @@ fi
 # finish, and a replay that keeps the edges a same-session terminal records
 # again, with the ASSUME over the wake refusal helper. It runs with TLC
 # coverage and requires every listed arm to fire and a floor of distinct
-# states per run, and requires its forty-four witnesses reached. Its
+# states per run, and requires its forty-eight witnesses reached. Its
 # --mutants mode (run by hand, outside the shards' budget) refuses
-# sixty-eight seeded defects, one per residency invariant and property (a
+# seventy-two seeded defects, one per residency invariant and property (a
 # same-session start or replay that records no started role, and a terminal
 # that keeps it, among them). The lane runs it
 # in two parts: its whole-space runs in shard audits-g (--part spaces) and

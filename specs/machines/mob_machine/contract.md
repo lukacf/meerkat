@@ -378,6 +378,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
 - `ConcludeObjective`(member_id: AgentIdentity, objective_id: String, outcome: String)
+- `ResolveMemberBuildPreparation`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -861,6 +862,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BootMaterializationPlanned`(agent_identity: AgentIdentity, verdict: BootMaterializationKind, attempt: Option<u64>)
 - `MemberWakeClassified`(agent_identity: AgentIdentity, cause: MemberWakeCause, verdict: MemberWakeVerdictKind, refusal: Option<MemberWakeRefusalKind>, attempt: Option<u64>, session_id: Option<SessionId>)
 - `MemberWakeFeedbackResolved`(agent_identity: AgentIdentity, attempt: u64, verdict: MemberWakeFeedbackVerdict)
+- `MemberBuildPreparationRetryArmed`(agent_identity: AgentIdentity)
 - `MemberWakesAbandoned`(cause: MemberWakeAbandonCause)
 - `RotationSessionsAbandoned`(rotations: Map<AgentIdentity, SessionId>)
 - `CloseMemberPeerIngress`(reason: MemberWakeRefusalKind)
@@ -1099,6 +1101,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `marked_entry_has_no_spawn_in_flight`
 - `held_creation_entry_was_never_created`
 - `archived_session_record_is_unseated`
+- `build_preparation_retry_belongs_to_a_member`
 - `role_hold_belongs_to_an_entry`
 - `placed_entry_custody_is_hosted_on_first_use`
 - `worker_reconcile_spares_entries`
@@ -16245,6 +16248,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveMemberHostPreparation`(agent_identity)
 - To: `Completed`
 
+### `ResolveMemberBuildPreparationRunning`
+- From: `Running`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Running`
+
+### `ResolveMemberBuildPreparationStopped`
+- From: `Stopped`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Stopped`
+
+### `ResolveMemberBuildPreparationCompleted`
+- From: `Completed`
+- On: `ResolveMemberBuildPreparation`(agent_identity)
+- To: `Completed`
+
 ### `BeginMemberRotationRunning`
 - From: `Running`
 - On: `BeginMemberRotation`(agent_identity, agent_runtime_id, fence_token, generation, session_id, peer_endpoint, session_archived, target, profile_name)
@@ -16428,7 +16446,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ResolveMemberRevivalRetryable`(agent_identity, attempt, kind)
 - Guards:
   - `attempt_open`
+  - `no_build_preparation_to_record`
 - Emits: `MemberWakeFeedbackResolved`
+- To: `Running`
+
+### `ResolveMemberRevivalRetryableBuildPreparationRunning`
+- From: `Running`
+- On: `ResolveMemberRevivalRetryable`(agent_identity, attempt, kind)
+- Guards:
+  - `attempt_open`
+  - `build_preparation_refused`
+  - `no_host_preparation_owed`
+- Emits: `MemberWakeFeedbackResolved`, `MemberBuildPreparationRetryArmed`
 - To: `Running`
 
 ### `AbandonMemberWakeDormantRunning`

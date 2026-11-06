@@ -78,10 +78,10 @@ pub use console_ingress::{
     validate_console_token_under_session_fences,
 };
 pub(crate) use console_ingress::{
-    ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
-    console_member_access_attributes, fold_console_member_attributes,
-    render_console_rest_json_route, resolve_authorized_console_caller_from_token,
-    session_fence_first_accepted_iat,
+    ConsoleCallerVerification, ConsoleLoginKind, ConsoleSignOutError, ConsoleSignedOut,
+    ResolvedConsoleCaller, authorize_console_rest_json_route, console_member_access_attributes,
+    fold_console_member_attributes, render_console_rest_json_route,
+    resolve_authorized_console_caller_from_token, session_fence_first_accepted_iat,
 };
 pub use event_transport::normalize_event_line;
 pub(crate) use gating::is_legacy_sequential_pending_id;

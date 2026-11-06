@@ -1625,6 +1625,7 @@ pub(crate) fn resolve_authorized_console_caller_from_token_at(
     let fence_revision = fences.revision();
     let VerifiedConsoleToken {
         caller,
+        login: _,
         expires_at_epoch_seconds,
         issued_at_epoch_seconds: _,
         accepted_from_epoch_seconds,
@@ -1738,12 +1739,12 @@ impl ConsoleCallerVerification {
     /// retained token must still pass the acceptance a request goes
     /// through (signature, issuer, audience, time, the allowlist and
     /// provider policy of the decisions it was accepted with, and its
-    /// principal's session fence as the record holds it now) and name the
-    /// same principal, provider classification and issuer, and for a
-    /// Console human also the same subject and login association. It does
-    /// not observe a replaced login, nor verifier, JWKS, allowlist or
-    /// provider decisions made after the token was accepted; a session fence
-    /// set after it is observed.
+    /// principal's and its login's session fences as the record holds them
+    /// now) and name the same principal, provider classification and
+    /// issuer, and for a Console human also the same subject and login
+    /// association. It does not observe a replaced login, nor verifier,
+    /// JWKS, allowlist or provider decisions made after the token was
+    /// accepted; a session fence set after it is observed.
     pub(crate) fn current_at(&self, now: SystemTime) -> Option<CurrentConsoleCaller> {
         let retained = &*self.retained;
         let verified =
@@ -1765,6 +1766,72 @@ impl ConsoleCallerVerification {
         admit_console_token_at(&retained.decisions, &retained.fences, &retained.token, now)
             .is_some_and(|verified| verified.caller == retained.caller)
     }
+
+    /// Sign the caller out of the login its token belongs to, with the
+    /// verifier's clock read as `now`: the issuer's `sid` when the token
+    /// carries one, else the token alone. The caller must still be current
+    /// by the rule of [`Self::current_at`]. From then on the Console refuses
+    /// every token of that login issued before the later of `now` and the
+    /// token's own `iat`, plus the verifier's clock leeway, so the token
+    /// that signed out is always refused; a token the issuer signs into the
+    /// same login later (a sign-in again) is accepted. The caller's other
+    /// logins, and its principal's fence, are untouched.
+    pub(crate) fn sign_out_at(
+        &self,
+        now: SystemTime,
+    ) -> Result<ConsoleSignedOut, ConsoleSignOutError> {
+        let retained = &*self.retained;
+        let verified =
+            admit_console_token_at(&retained.decisions, &retained.fences, &retained.token, now)
+                .filter(|verified| verified.caller == retained.caller)
+                .ok_or(ConsoleSignOutError::NotCurrent)?;
+        let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let not_before = verified
+            .issued_at_epoch_seconds
+            .map_or(now, |issued_at| issued_at.max(now));
+        // A login that is one token refuses nothing more once that token
+        // expired; a `sid` login may get tokens for as long as the issuer's
+        // own login lasts.
+        let token_refused_from = match verified.login.kind {
+            ConsoleLoginKind::Session => None,
+            ConsoleLoginKind::Token => verified.refused_from_epoch_seconds,
+        };
+        let not_before_epoch_seconds = retained
+            .fences
+            .sign_out_login(
+                &verified.caller.principal,
+                &verified.login.key,
+                not_before,
+                token_refused_from,
+            )
+            .map_err(ConsoleSignOutError::Fences)?;
+        Ok(ConsoleSignedOut {
+            login: verified.login.kind,
+            not_before_epoch_seconds,
+        })
+    }
+}
+
+/// A login [`ConsoleCallerVerification::sign_out_at`] signed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConsoleSignedOut {
+    /// What the login was: the issuer's `sid`, or the token alone.
+    pub(crate) login: ConsoleLoginKind,
+    /// The login's fence, in seconds since the epoch: its tokens issued
+    /// before this instant plus the verifier's clock leeway are refused.
+    pub(crate) not_before_epoch_seconds: u64,
+}
+
+/// Why a sign-out was refused, or took effect without its durability
+/// confirmed
+/// ([`ConsoleSessionFencesError::DurabilityUnconfirmed`](crate::auth::session_fence::ConsoleSessionFencesError::DurabilityUnconfirmed)).
+#[derive(Debug)]
+pub(crate) enum ConsoleSignOutError {
+    /// The caller's token no longer passes the Console's acceptance: its
+    /// login already ended.
+    NotCurrent,
+    /// The session fence record refused the sign-out or did not confirm it.
+    Fences(crate::auth::session_fence::ConsoleSessionFencesError),
 }
 
 impl std::fmt::Debug for ConsoleCallerVerification {
@@ -2120,7 +2187,7 @@ fn resolve_console_auth_from_token(
 /// The session fence check of the REST routes' query-parameter token: when
 /// the request resolved through a token (no explicit caller, on a console
 /// that requires sign-in), that token must also pass its principal's session
-/// fence, read from the record as it is now.
+/// fence and its login's, read from the record as it is now.
 fn check_query_token_session_fence(
     decisions: &RuntimeDecisionState,
     fences: &ConsoleSessionFences,
@@ -2134,10 +2201,7 @@ fn check_query_token_session_fence(
         return Ok(());
     };
     let verified = verify_console_token_at(decisions, token, SystemTime::now())?;
-    if session_fence_admits(
-        fences.not_before(&verified.caller.principal),
-        verified.issued_at_epoch_seconds,
-    ) {
+    if passes_session_fences(fences, &verified) {
         Ok(())
     } else {
         Err(ConsoleAuthResolutionError::SessionRevoked)
@@ -2177,11 +2241,12 @@ fn console_token_accepted_from_epoch_seconds(nbf: Option<u64>) -> u64 {
 }
 
 /// Whether a token issued at `issued_at` (its `iat`, seconds since the
-/// epoch) passes its principal's session fence `not_before`. With no fence
-/// every token passes. Under a fence a token passes only when it says it was
-/// issued at least the verifier's clock leeway after the fence: an issuer
-/// whose clock runs up to that much ahead cannot mint a token before the
-/// fence that passes it. A token without `iat` never passes a fence.
+/// epoch) passes a session fence `not_before`: its principal's, or its
+/// login's. With no fence every token passes. Under a fence a token passes
+/// only when it says it was issued at least the verifier's clock leeway
+/// after the fence: an issuer whose clock runs up to that much ahead cannot
+/// mint a token before the fence that passes it. A token without `iat`
+/// never passes a fence.
 fn session_fence_admits(not_before: Option<u64>, issued_at: Option<u64>) -> bool {
     match not_before {
         None => true,
@@ -2220,9 +2285,11 @@ struct ConsoleTokenHuman {
 /// What one verification of a Console token found.
 struct VerifiedConsoleToken {
     caller: ConsoleTokenCaller,
+    /// The login the token belongs to, which its login's fence is read for.
+    login: ConsoleLogin,
     expires_at_epoch_seconds: Option<u64>,
-    /// The token's `iat`, which its principal's session fence is compared
-    /// with.
+    /// The token's `iat`, which its principal's and its login's session
+    /// fences are compared with.
     issued_at_epoch_seconds: Option<u64>,
     /// The first whole second since the epoch the verifier accepts the
     /// token in on time (from its `nbf`).
@@ -2243,13 +2310,59 @@ impl VerifiedConsoleToken {
     }
 }
 
+/// The login a Console token belongs to: the issuer's signed `sid` when the
+/// token carries a non-blank one, every token the issuer signs into that
+/// login, else the token alone. The session fence record keys it by `key`,
+/// a digest that names neither the `sid` nor the token.
+#[derive(Clone)]
+struct ConsoleLogin {
+    key: String,
+    kind: ConsoleLoginKind,
+}
+
+/// What a Console login is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsoleLoginKind {
+    /// The issuer's login association (`sid`).
+    Session,
+    /// A token without `sid`: a login of its own.
+    Token,
+}
+
+impl ConsoleLogin {
+    /// The login of `token`, verified against `issuer`, whose signed `sid`
+    /// is `session_id`.
+    fn of(issuer: &str, session_id: Option<&str>, token: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let (kind, login) = match session_id.filter(|sid| !sid.trim().is_empty()) {
+            Some(sid) => (
+                ConsoleLoginKind::Session,
+                serde_json::json!(["session", issuer, sid]),
+            ),
+            None => (
+                ConsoleLoginKind::Token,
+                serde_json::json!(["token", issuer, token]),
+            ),
+        };
+        let digest = Sha256::digest(
+            serde_json::json!(["meta-console-login-v1", login])
+                .to_string()
+                .as_bytes(),
+        );
+        Self {
+            key: format!("console-login:v1:{digest:x}"),
+            kind,
+        }
+    }
+}
+
 /// The Console's acceptance of a token, with its clock read as `now`: the
 /// token verifies, the Console's route policy (allowlist and provider
 /// policy) admits the caller it names, and the token passes that caller's
-/// session fence, read from the record as it is now. A token caller is
-/// accepted here at its request, and every time it is verified again while
-/// it acts. An accepted token without `exp` lists its principal as
-/// non-expiring in the record.
+/// session fence and its login's, read from the record as it is now. A
+/// token caller is accepted here at its request, and every time it is
+/// verified again while it acts. An accepted token without `exp` lists its
+/// principal as non-expiring in the record.
 fn accept_console_token_at(
     decisions: &RuntimeDecisionState,
     fences: &ConsoleSessionFences,
@@ -2279,11 +2392,20 @@ fn admit_console_token_at(
         &verified.access_request(),
     )
     .ok()?;
-    session_fence_admits(
-        fences.not_before(&verified.caller.principal),
-        verified.issued_at_epoch_seconds,
-    )
-    .then_some(verified)
+    passes_session_fences(fences, &verified).then_some(verified)
+}
+
+/// Whether a verified token passes the Console's session fence record as
+/// it is now: its principal's fence and the fence of its login, each by the
+/// rule of [`session_fence_admits`].
+fn passes_session_fences(fences: &ConsoleSessionFences, verified: &VerifiedConsoleToken) -> bool {
+    let principal = verified.caller.principal.as_str();
+    let issued_at = verified.issued_at_epoch_seconds;
+    session_fence_admits(fences.not_before(principal), issued_at)
+        && session_fence_admits(
+            fences.login_not_before(principal, &verified.login.key),
+            issued_at,
+        )
 }
 
 /// Verify a Console token against the trusted OIDC configuration, with the
@@ -2358,6 +2480,8 @@ fn verify_console_token_at(
                 _ => AuthProvider::GenericOidc,
             }
         };
+    // The login is every caller's, a human's or not: a sign-out ends it.
+    let login = ConsoleLogin::of(&discovery.issuer, claims.session_id.as_deref(), token);
     // Only a verified human `sub`, taken from the accepted claims (never
     // from the email-first access principal above), under a nonempty
     // verified issuer, is a Console human; a service identity never is,
@@ -2383,6 +2507,7 @@ fn verify_console_token_at(
             issuer: discovery.issuer,
             human,
         },
+        login,
         expires_at_epoch_seconds: claims.expires_at_epoch_seconds,
         issued_at_epoch_seconds: claims.issued_at_epoch_seconds,
         accepted_from_epoch_seconds: console_token_accepted_from_epoch_seconds(
@@ -2407,7 +2532,8 @@ enum ConsoleAuthResolutionError {
     MissingTokenIdentity,
     Hs256NotAllowed,
     EmailNotVerified,
-    /// The token was issued before its principal's session fence.
+    /// The token was issued before its principal's session fence, or before
+    /// its login's.
     SessionRevoked,
 }
 

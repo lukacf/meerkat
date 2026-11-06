@@ -75,6 +75,13 @@ pub const CONSOLE_REVOKE_SESSIONS_METHOD: &str = "meta/console/revoke_sessions";
 /// accepted, and the caller scope a client sends back with a change. Served
 /// on the Console route only; the stdin host is not a Console caller.
 pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
+/// Sign the calling request's caller out of one Console login: the login its
+/// token belongs to (the issuer's `sid`, or the token alone without one).
+/// The Console refuses every token of that login issued before the
+/// sign-out, on every route, and ends the streams and voice sessions such
+/// tokens opened; the caller's other logins and its schedules are untouched.
+/// Served on the Console route only.
+pub const CONSOLE_SIGN_OUT_METHOD: &str = "meta/console/sign_out";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";
@@ -534,6 +541,27 @@ pub(crate) fn console_session_fence_json(
         "accepts_tokens_issued_from": crate::runtime::session_fence_first_accepted_iat(
             fence.not_before_epoch_seconds,
         ),
+    })
+}
+
+/// The answer to [`CONSOLE_SIGN_OUT_METHOD`]: what the login was
+/// (`session`, the issuer's `sid`; `token`, a token without one) and, for a
+/// `session` login, the earliest `iat` a token of it is accepted with from
+/// now on (a sign-in again). A `token` login is no other token, so it has
+/// none.
+pub(crate) fn console_sign_out_json(signed_out: &crate::runtime::ConsoleSignedOut) -> Value {
+    let (login, accepts_tokens_issued_from) = match signed_out.login {
+        crate::runtime::ConsoleLoginKind::Session => (
+            "session",
+            Some(crate::runtime::session_fence_first_accepted_iat(
+                signed_out.not_before_epoch_seconds,
+            )),
+        ),
+        crate::runtime::ConsoleLoginKind::Token => ("token", None),
+    };
+    serde_json::json!({
+        "login": login,
+        "accepts_tokens_issued_from": accepts_tokens_issued_from,
     })
 }
 
@@ -2059,6 +2087,7 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/access/groups/set",
     "meta/access/groups/delete",
     CONSOLE_REVOKE_SESSIONS_METHOD,
+    CONSOLE_SIGN_OUT_METHOD,
     "meta/blob/upload",
     "meta/cancel_flow",
     "jobs/cancel",
@@ -2292,6 +2321,12 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
             "{method} is refused: this gateway is a candidate launch, which writes no session \
              fence; revoke the sessions on the authoritative launch, whose fence record this \
              launch's Console reads"
+        )
+    } else if method == CONSOLE_SIGN_OUT_METHOD {
+        format!(
+            "{method} is refused: this gateway is a candidate launch, which writes no session \
+             fence; sign out on the authoritative launch, whose fence record this launch's \
+             Console reads"
         )
     } else {
         format!(

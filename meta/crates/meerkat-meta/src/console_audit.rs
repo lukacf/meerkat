@@ -754,4 +754,34 @@ mod tests {
         assert_eq!(failed.outcome, ConsoleAuditOutcome::Failed);
         assert!(failed.receipt.is_empty());
     }
+
+    /// A checked access edit carries its fields in its `checked_v1`
+    /// envelope: the row keeps the identifiers there and the revision the
+    /// edit expected, never the owner instance or the configuration.
+    #[test]
+    fn a_checked_access_edit_keeps_the_identifiers_of_its_envelope() {
+        let target = audit_target(&json!({
+            "checked_v1": {
+                "owner_instance": "0123abcd",
+                "expected_revision": 4,
+                "rule": { "id": "ops-view", "subjects": ["svc:robot"] },
+            }
+        }));
+        assert_eq!(
+            Value::Object(target),
+            json!({ "expected_revision": 4, "rule_id": "ops-view" })
+        );
+        let target = audit_target(&json!({
+            "checked_v1": {
+                "owner_instance": "0123abcd",
+                "expected_revision": 5,
+                "name": "ops",
+                "group": { "members": ["svc:robot"] },
+            }
+        }));
+        assert_eq!(
+            Value::Object(target),
+            json!({ "expected_revision": 5, "name": "ops" })
+        );
+    }
 }

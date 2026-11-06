@@ -2234,6 +2234,10 @@ struct MockSessionService {
     /// failure). Lets tests model provider-specific failure prose such as the
     /// rpc-gateway's "callback transport closed".
     create_fail_details: RwLock<HashMap<SessionId, String>>,
+    /// Optional session error per failing session (presence implies
+    /// failure), built anew for each refused attempt: a typed refusal with
+    /// its structured data, say.
+    create_fail_errors: RwLock<HashMap<SessionId, fn() -> SessionError>>,
     /// Timestamps of every refused create_session attempt, per session, so
     /// retry-schedule tests can assert real attempt spacing.
     create_fail_attempts: RwLock<HashMap<SessionId, Vec<std::time::Instant>>>,
@@ -2644,6 +2648,7 @@ impl MockSessionService {
             resume_verdict_divergence_sessions: RwLock::new(HashSet::new()),
             create_fail_sessions: RwLock::new(HashSet::new()),
             create_fail_details: RwLock::new(HashMap::new()),
+            create_fail_errors: RwLock::new(HashMap::new()),
             create_fail_attempts: RwLock::new(HashMap::new()),
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
@@ -3203,6 +3208,23 @@ impl MockSessionService {
             .insert(session_id.clone(), detail.to_string());
     }
 
+    /// Make any (re-)materialization of `session_id` via create_session fail
+    /// with the session error `make` builds.
+    async fn set_create_session_failure_error(
+        &self,
+        session_id: &SessionId,
+        make: fn() -> SessionError,
+    ) {
+        self.create_fail_sessions
+            .write()
+            .await
+            .insert(session_id.clone());
+        self.create_fail_errors
+            .write()
+            .await
+            .insert(session_id.clone(), make);
+    }
+
     /// Timestamps of every refused create_session attempt for `session_id`,
     /// in attempt order.
     async fn create_fail_attempt_instants(
@@ -3234,6 +3256,7 @@ impl MockSessionService {
     async fn clear_create_session_failure(&self, session_id: &SessionId) {
         self.create_fail_sessions.write().await.remove(session_id);
         self.create_fail_details.write().await.remove(session_id);
+        self.create_fail_errors.write().await.remove(session_id);
     }
 
     async fn clear_archive_failure(&self, session_id: &SessionId) {
@@ -4313,6 +4336,15 @@ impl MockSessionService {
                 .push(std::time::Instant::now());
             self.create_session_in_flight
                 .fetch_sub(1, Ordering::Relaxed);
+            if let Some(make) = self
+                .create_fail_errors
+                .read()
+                .await
+                .get(&session_id)
+                .copied()
+            {
+                return Err(make());
+            }
             let detail = self
                 .create_fail_details
                 .read()
@@ -80798,6 +80830,115 @@ async fn test_revival_failure_is_typed_terminal_without_retry_loop() {
             .await
             .expect("has_live_session"),
         "no shell retry may re-materialize a broken member's session"
+    );
+}
+
+/// A session builder's typed refusal of a member's build, with structured
+/// data of its own kind (as a host's session builder mints one).
+fn host_build_refusal() -> SessionError {
+    SessionError::FailedWithData {
+        message: "the host refused the member's build".to_string(),
+        data: serde_json::json!({
+            "kind": "host_build_refused",
+            "reason": "the member's tools are not published",
+        }),
+    }
+}
+
+/// The provider-auth failure of [`provider_auth_build_refusal`].
+fn provider_auth_build_refusal_failure() -> meerkat_core::service::SessionProviderAuthFailure {
+    meerkat_core::service::SessionProviderAuthFailure {
+        kind: meerkat_core::AuthErrorKind::MissingSecret,
+        provider: meerkat_core::Provider::OpenAI,
+        realm_id: None,
+        binding_id: None,
+    }
+}
+
+/// A member build refused by provider authentication, as meerkat carries
+/// it across the session builder: typed, with its secret-free data.
+fn provider_auth_build_refusal() -> SessionError {
+    SessionError::provider_auth_failure(provider_auth_build_refusal_failure())
+}
+
+/// The structured data a member's restore failure keeps of the failure that
+/// broke it, read through meerkat-mob's shared failure wrappers.
+fn restore_failure_cause_data(error: &MobError) -> Option<serde_json::Value> {
+    match error {
+        // RED: no restore failure keeps its cause's structured data yet.
+        MobError::SharedLifecycleFailure(inner) | MobError::SharedRetirementFailure(inner) => {
+            restore_failure_cause_data(inner)
+        }
+        _ => None,
+    }
+}
+
+/// A member's revival (its live session was discarded) whose build fails
+/// with structured data (a session builder's typed refusal): the restore
+/// failure the revival answers keeps that data beside its reason
+/// (`MemberRestoreFailed`'s `cause_data`), and so does the refusal of a
+/// member handle for the Broken member afterwards, minted from its record.
+///
+/// RED before the restore failure kept it: the revival flattened the
+/// build's error into the reason.
+#[tokio::test]
+async fn a_revival_whose_build_fails_with_structured_data_keeps_it_on_the_restore_failure() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .expect("inline worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let (handle, service) = create_test_mob(definition).await;
+    let member = AgentIdentity::from("w-1");
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    service
+        .set_create_session_failure_error(&bridge_session_id, host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+
+    let error = handle
+        .member(&member)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect_err("the revival fails");
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "the revival answers the member's restore failure: {error:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&error),
+        expected,
+        "the revival's restore failure keeps the build's structured data"
+    );
+
+    let refused = match handle.member(&member).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the refusal minted from the member's record keeps the same data"
     );
 }
 

@@ -71,21 +71,6 @@ sqlite-store = ["dep:rusqlite", "dep:meerkat-sqlite", "dep:meerkat-store", "meer
 test-support = []
 
 [dev-dependencies]
-# Path-only self-dependency (no version, stripped at publish): this crate's
-# own integration tests need the test-support hooks without relying on
-# feature unification from sibling crates in the same build graph.
-#
-# `sqlite-store` is listed for the same reason. The release-boundary corpora
-# (`recovery_contract`, `pre_ledger_realm_bridge`) are gated on it, and without
-# this a package-scoped `-p meerkat-runtime` lane compiles those files away to
-# nothing and reports success over zero tests. Storage evidence must not depend
-# on which sibling crates happen to share the build graph.
-#
-# `live` is listed for the same reason: the live-context mirror and live
-# execution authority are compiled only with `live`, and their unit tests
-# must run in a package-scoped lane too, not only when a sibling crate
-# (meerkat-rpc, meerkat-session/live) happens to enable it.
-meerkat-runtime = { path = ".", features = ["test-support", "sqlite-store", "live", "local-authorization"] }
 meerkat-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
@@ -100,10 +85,17 @@ meerkat-comms = { workspace = true }
 meerkat-sqlite = { workspace = true, features = ["test-support"] }
 rusqlite = { workspace = true }
 
-# The feature set this crate's own tests need. The published package
-# has no self dev-dependency to turn them on, so its README.md prints the
-# command with these features, and the standalone test lane
-# (scripts/published_crates_standalone.py) reads them from here.
+# The feature set this crate's own tests need. No dev-dependency turns
+# them on: the workspace's test builds pass them (scripts/core-workspace-args.mjs
+# --tests, the CI planner and the Bazel generator read them from here), the
+# published package's README.md prints the command with them, and the
+# standalone test lane (scripts/published_crates_standalone.py) reads them
+# from here too.
+#
+# `sqlite-store` gates the release-boundary corpora (`recovery_contract`,
+# `pre_ledger_realm_bridge`), and `live` the live-context mirror and the live
+# execution authority with their unit tests: without them a package-scoped
+# test run compiles those away and passes over fewer tests.
 [package.metadata.meerkat.standalone-tests]
 features = ["test-support", "sqlite-store", "live", "local-authorization"]
 # The README's command sets this thread stack, the workspace's

@@ -1815,3 +1815,235 @@ async fn a_write_at_a_stale_revision_is_a_conflict() -> TestResult {
     fixture.stop().await;
     Ok(())
 }
+
+/// The Console router over `fixture`, signing callers in with the console
+/// test issuer's tokens and checking their sessions against `fences`.
+fn signed_in_router(
+    fixture: &Fixture,
+    fences: crate::auth::session_fence::ConsoleSessionFences,
+) -> axum::Router {
+    let mut state = super::console_human_admission_tests::state();
+    state.runtime = Some(fixture.runtime.clone());
+    state.console_aggregator = Some(fixture.aggregator.clone());
+    state.console_events = Some(fixture.events.clone());
+    state.session_fences = fences;
+    console_json_router_with_state(state)
+}
+
+/// `body` posted to `path` on `router` with `token` as its bearer: the
+/// status and the JSON answer.
+async fn post_as(
+    router: &axum::Router,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("console request"),
+        )
+        .await
+        .expect("console response");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("console body");
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// A Console change may carry the caller scope its client believes it acts
+/// as (`expected_caller_scope`, the `caller_scope` of `meta/console/whoami`).
+/// A change made for another caller is refused as `caller_changed`, and
+/// nothing is sent or written; the caller's own scope passes and is no
+/// parameter of the change itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_with_other_expected_scope_is_refused() -> TestResult {
+    use super::console_token_lapse_tests::{console_rpc_as, human_claims, now_seconds, token};
+    let fixture = delivering_fixture("console-caller-changed").await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let router = signed_in_router(&fixture, fences);
+    let expiry = now_seconds() + 3600;
+    let bob = token(human_claims(), Some(expiry));
+    let robot = token(json!({ "email": "svc:robot" }), Some(expiry));
+    let scope_of = |answer: &Value| {
+        answer["result"]["caller_scope"]
+            .as_str()
+            .map(str::to_string)
+    };
+    let own =
+        scope_of(&console_rpc_as(&router, Some(&bob), "meta/console/whoami", json!({})).await)
+            .ok_or("the caller's scope")?;
+    let other =
+        scope_of(&console_rpc_as(&router, Some(&robot), "meta/console/whoami", json!({})).await)
+            .ok_or("another caller's scope")?;
+    assert_ne!(own, other);
+    let send = |key: &str, scope: &str| {
+        json!({
+            "identity": "alpha",
+            "content": "Status, please.",
+            "origin": "console",
+            "idempotency_key": key,
+            "expected_caller_scope": scope,
+        })
+    };
+
+    let refused = console_rpc_as(
+        &router,
+        Some(&bob),
+        "meta/console/send",
+        send("changed-rpc-send", &other),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("caller_changed"),
+        "{refused:#?}"
+    );
+    assert!(
+        sends_under(&fixture, "alpha", "changed-rpc-send")
+            .await
+            .is_empty(),
+        "nothing was sent"
+    );
+    let sent = console_rpc_as(
+        &router,
+        Some(&bob),
+        "meta/console/send",
+        send("own-rpc-send", &own),
+    )
+    .await;
+    assert!(sent["error"].is_null(), "{sent:#?}");
+
+    let (status, refused) = post_as(
+        &router,
+        "/console/send",
+        &bob,
+        send("changed-rest-send", &other),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused:#?}");
+    assert_eq!(refused["error"], json!("caller_changed"), "{refused:#?}");
+    assert!(
+        sends_under(&fixture, "alpha", "changed-rest-send")
+            .await
+            .is_empty(),
+        "nothing was sent"
+    );
+    let (status, sent) = post_as(&router, "/console/send", &bob, send("own-rest-send", &own)).await;
+    assert_eq!(status, StatusCode::OK, "{sent:#?}");
+
+    let mut params = create_params("alpha");
+    params["expected_caller_scope"] = json!(own);
+    let created = console_rpc_as(&router, Some(&bob), "meta/schedule/create", params).await;
+    assert!(created["error"].is_null(), "{created:#?}");
+    let schedule_id = created["result"]["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+    let refused = console_rpc_as(
+        &router,
+        Some(&bob),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": "Changed for another caller.",
+            "expected_caller_scope": other,
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("caller_changed"),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.content,
+        "Post the morning summary.",
+        "the schedule is as it was"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A schedule change that waited before it writes checks again that its
+/// caller's login is current: once the caller's Console sessions were
+/// revoked meanwhile, the change is refused as `caller_not_current` and the
+/// schedule stays as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutation_rechecks_caller_after_await() -> TestResult {
+    use super::console_human_admission_tests::BOB;
+    use super::console_token_lapse_tests::{console_rpc_as, human_claims, now_seconds, token};
+    let fixture = delivering_fixture("console-caller-not-current").await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let router = signed_in_router(&fixture, fences.clone());
+    let bob = token(human_claims(), Some(now_seconds() + 3600));
+    let created = console_rpc_as(
+        &router,
+        Some(&bob),
+        "meta/schedule/create",
+        create_params("alpha"),
+    )
+    .await;
+    assert!(created["error"].is_null(), "{created:#?}");
+    let schedule_id = created["result"]["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+
+    let hold = crate::console_schedules::ScheduleWriteHold::default();
+    fixture
+        .runtime
+        .console_schedules()
+        .attached()
+        .ok_or("the schedules are attached")?
+        .hold_writes(hold.clone());
+    let update = tokio::spawn({
+        let router = router.clone();
+        let bob = bob.clone();
+        let schedule_id = schedule_id.clone();
+        async move {
+            console_rpc_as(
+                &router,
+                Some(&bob),
+                "meta/schedule/update",
+                json!({
+                    "identity": "alpha",
+                    "schedule_id": schedule_id,
+                    "content": "Changed after the login ended.",
+                }),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached())
+        .await
+        .map_err(|_| "the update reached the hold")?;
+    fences.revoke_sessions(BOB, std::time::SystemTime::now() + Duration::from_secs(5))?;
+    hold.release();
+    let answer = tokio::time::timeout(Duration::from_secs(30), update).await??;
+    assert_eq!(
+        answer["error"]["data"]["kind"],
+        json!("caller_not_current"),
+        "{answer:#?}"
+    );
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.content,
+        "Post the morning summary.",
+        "nothing was written"
+    );
+    fixture.stop().await;
+    Ok(())
+}

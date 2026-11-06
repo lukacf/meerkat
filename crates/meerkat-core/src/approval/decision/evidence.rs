@@ -7,14 +7,17 @@
 //! [`DecisionEvidence`], and the machine binds the decision to the digest of
 //! that evidence.
 
+use std::fmt;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ApproverId, DecisionContractError, DecisionIngress, DecisionPrincipalKey, DecisionReference,
-    PresentationRecord, Sha256Digest,
+    ApproverId, DecisionContractError, DecisionId, DecisionIngress, DecisionPrincipalKey,
+    DecisionReference, PresentationRecord, Sha256Digest,
 };
 use crate::approval::ApprovalAssurance;
-use crate::approval::consent::AuthenticatedApprover;
+use crate::approval::consent::{AuthenticatedApprover, ConsentEligibility};
 use crate::{PrincipalKind, PrincipalRef, SessionId};
 
 /// Largest decision reason or review feedback, in bytes.
@@ -221,6 +224,62 @@ impl AttestedDecision {
             approve: self.approve,
             reason: self.reason.clone(),
         }
+    }
+}
+
+/// One authenticated human decision event on one durable decision, bound by
+/// the trusted host adapter that authenticated it: the decision it decides,
+/// the [`AttestedDecision`] it carries, and the eligibility owner's evidence
+/// that the decider may act for the decision's approver id, current as of
+/// that owner's publication. Not `Deserialize`: a transport builds it only
+/// after authenticating the actual event, never from a request body, and a
+/// host-only dispatch entry is the only way it reaches the decision owner.
+#[derive(Clone)]
+pub struct AuthenticatedDecisionEvent {
+    decision_id: DecisionId,
+    decision: AttestedDecision,
+    eligibility: Arc<dyn ConsentEligibility>,
+}
+
+impl AuthenticatedDecisionEvent {
+    /// The event deciding `decision_id` with `decision`. `eligibility` is
+    /// checked again when the decision commits.
+    #[must_use]
+    pub fn new(
+        decision_id: DecisionId,
+        decision: AttestedDecision,
+        eligibility: Arc<dyn ConsentEligibility>,
+    ) -> Self {
+        Self {
+            decision_id,
+            decision,
+            eligibility,
+        }
+    }
+
+    #[must_use]
+    pub fn decision_id(&self) -> &DecisionId {
+        &self.decision_id
+    }
+
+    #[must_use]
+    pub fn decision(&self) -> &AttestedDecision {
+        &self.decision
+    }
+
+    /// The evidence that the decider may act for the approver id.
+    #[must_use]
+    pub fn eligibility(&self) -> &dyn ConsentEligibility {
+        self.eligibility.as_ref()
+    }
+}
+
+impl fmt::Debug for AuthenticatedDecisionEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedDecisionEvent")
+            .field("decision_id", &self.decision_id)
+            .field("decision", &self.decision)
+            .finish_non_exhaustive()
     }
 }
 

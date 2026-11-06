@@ -730,6 +730,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
     let class = claim.entry.class;
     let delivery_contract = claim.entry.delivery_contract;
     let sender_authentication = claim.entry.sender_authentication;
+    let governed_send_origin = claim.entry.governed_send_origin.clone();
     let candidate = classified_entry_to_interaction(claim.entry);
     meerkat_core::PeerIngressQueueClaim::from_comms_queue(
         claim.claim_id,
@@ -740,6 +741,7 @@ pub(crate) fn test_peer_ingress_queue_claim(
         claim.lease,
     )
     .with_sender_authentication(sender_authentication)
+    .with_governed_send_origin(governed_send_origin)
 }
 
 #[cfg(test)]
@@ -1164,6 +1166,16 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
+        self.send_with_governed_origin(cmd, None).await
+    }
+
+    /// An in-process delivery `cmd` makes carries `governed_origin` to its
+    /// receiver's queue unchanged; a delivery over a socket carries none.
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
         match cmd {
             CommsCommand::Input {
                 body,
@@ -1244,6 +1256,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         in_reply_to: in_reply_to.map(|delivery| delivery.0),
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerMessageSent {
@@ -1270,6 +1283,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         expected_recipient,
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerMessageSent {
@@ -1281,6 +1295,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     &to,
                     crate::types::MessageKind::Lifecycle { kind, params },
                     None,
+                    governed_origin,
                 )
                 .await
                 .map(|outcome| SendReceipt::PeerLifecycleSent {
@@ -1309,6 +1324,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     objective_id,
                     None,
                     None,
+                    governed_origin,
                 )
                 .await
             }
@@ -1424,6 +1440,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             objective_id,
                         },
                         content_taint,
+                        governed_origin,
                     )
                     .await?;
 
@@ -1517,6 +1534,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         objective_id,
                         None,
                         None,
+                        None,
                     )
                     .await?;
                 let event_stream = self
@@ -1598,6 +1616,7 @@ impl CoreCommsRuntime for CommsRuntime {
         let delivery_contract = claim.entry.delivery_contract;
         let raw_item_id = claim.entry.raw_item_id;
         let sender_authentication = claim.entry.sender_authentication;
+        let governed_send_origin = claim.entry.governed_send_origin.clone();
         let candidate = classified_entry_to_interaction(claim.entry);
         Ok(Some(
             meerkat_core::PeerIngressQueueClaim::from_comms_queue(
@@ -1608,7 +1627,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 candidate,
                 claim.lease,
             )
-            .with_sender_authentication(sender_authentication),
+            .with_sender_authentication(sender_authentication)
+            .with_governed_send_origin(governed_send_origin),
         ))
     }
 
@@ -3142,8 +3162,9 @@ impl CommsRuntime {
         route: &PeerRoute,
         kind: crate::types::MessageKind,
         content_taint: Option<meerkat_core::comms::SendTaintOverride>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<crate::router::SendOutcome, SendError> {
-        self.send_peer_command_with_id(route, Uuid::new_v4(), kind, content_taint)
+        self.send_peer_command_with_id(route, Uuid::new_v4(), kind, content_taint, governed_origin)
             .await
     }
 
@@ -3156,17 +3177,27 @@ impl CommsRuntime {
     /// `content_taint` is the per-send tri-state taint override, resolved
     /// against the runtime-level declaration at the router's single outbound
     /// choke point ([`crate::router::Router::send_with_id`]).
+    ///
+    /// `governed_origin`, when governed work sends, rides with an in-process
+    /// delivery to the receiver's queue unchanged.
     async fn send_peer_command_with_id(
         &self,
         route: &PeerRoute,
         envelope_id: Uuid,
         kind: crate::types::MessageKind,
         content_taint: Option<meerkat_core::comms::SendTaintOverride>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<crate::router::SendOutcome, SendError> {
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
         let result = self
             .router
-            .send_with_id(route.peer_id, envelope_id, kind, content_taint)
+            .send_with_id_and_origin(
+                route.peer_id,
+                envelope_id,
+                kind,
+                content_taint,
+                governed_origin,
+            )
             .await;
         match result {
             Ok(outcome) => Ok(outcome),
@@ -3290,6 +3321,7 @@ impl CommsRuntime {
         objective_id: Option<meerkat_core::interaction::ObjectiveId>,
         reply_endpoint: Option<meerkat_core::comms::PeerAddress>,
         send_deadline: Option<Instant>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<SendReceipt, SendError> {
         if reply_endpoint
             .as_ref()
@@ -3343,6 +3375,7 @@ impl CommsRuntime {
                 objective_id,
             },
             content_taint,
+            governed_origin,
         );
         let send_result = if let Some(deadline) = send_deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3444,6 +3477,7 @@ impl CommsRuntime {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -3473,6 +3507,7 @@ impl CommsRuntime {
             None,
             None,
             Some(deadline),
+            None,
         )
         .await
     }
@@ -3504,6 +3539,7 @@ impl CommsRuntime {
             None,
             Some(reply_endpoint),
             None,
+            None,
         )
         .await
     }
@@ -3532,6 +3568,7 @@ impl CommsRuntime {
             None,
             Some(reply_endpoint),
             Some(deadline),
+            None,
         )
         .await
     }
@@ -3617,6 +3654,7 @@ impl CommsRuntime {
                 false,
                 None,
                 reply_endpoint,
+                None,
                 None,
             )
             .await
@@ -12519,5 +12557,228 @@ mod tests {
             !CoreCommsRuntime::has_bridge_reply_waiter(sender.as_ref(), &interaction_id),
             "take must consume the tombstone"
         );
+    }
+
+    /// The facts a native runtime would mint, opaque to this crate.
+    #[cfg(feature = "workspace-tests")]
+    fn runtime_minted_origin() -> meerkat_core::GovernedSendOrigin {
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"))
+    }
+
+    /// The kinds of delivery the in-process lane carries.
+    #[cfg(feature = "workspace-tests")]
+    #[derive(Debug, Clone, Copy)]
+    enum CarriedKind {
+        Message,
+        FencedMessage,
+        Request,
+        Response,
+    }
+
+    /// A sender and a receiver that trust each other, and the command of
+    /// `kind` from the sender to the receiver, with the authority each side
+    /// needs for it: a request needs the sender's request authority, and a
+    /// response answers a request the receiver sent the sender.
+    #[cfg(feature = "workspace-tests")]
+    async fn carried_kind_pair(
+        kind: CarriedKind,
+    ) -> (Arc<CommsRuntime>, Arc<CommsRuntime>, CommsCommand) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("origin-carriage-sender-{suffix}");
+        let receiver_name = format!("origin-carriage-receiver-{suffix}");
+        let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).expect("sender runtime"));
+        let receiver =
+            Arc::new(CommsRuntime::inproc_only(&receiver_name).expect("receiver runtime"));
+        let to = peer_route(&receiver_name, receiver.public_key());
+        let command = match kind {
+            CarriedKind::Message => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                CommsCommand::PeerMessage {
+                    to,
+                    body: "governed message".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    objective_id: None,
+                    in_reply_to: None,
+                }
+            }
+            CarriedKind::FencedMessage => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                CommsCommand::IncarnationFencedPeerMessage {
+                    to,
+                    body: "governed fenced message".to_string(),
+                    blocks: None,
+                    content_taint: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    objective_id: None,
+                    expected_recipient: meerkat_core::comms::PeerRecipientIncarnation {
+                        mob_id: "mob".to_string(),
+                        agent_identity: "worker".to_string(),
+                        host_id: "host".to_string(),
+                        binding_generation: 2,
+                        member_session_id: "session".to_string(),
+                        generation: 3,
+                        fence_token: 5,
+                    },
+                }
+            }
+            CarriedKind::Request => {
+                let _finalizer = install_test_peer_ingress_runtime(receiver.as_ref());
+                install_test_peer_request_response_authority(&sender);
+                CommsCommand::PeerRequest {
+                    objective_id: None,
+                    content_taint: None,
+                    to,
+                    intent: "review".to_string(),
+                    params: serde_json::json!({"path": "README.md"}),
+                    blocks: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    stream: InputStreamMode::None,
+                }
+            }
+            CarriedKind::Response => {
+                let responder = Arc::new(TestPeerInteractionHandle::default());
+                sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+                    responder.clone(),
+                    Arc::new(TestInteractionStreamHandle::default()),
+                ));
+                let requester = Arc::new(TestPeerInteractionHandle::default());
+                receiver.install_peer_request_response_authority(
+                    PeerRequestResponseAuthority::new(
+                        requester.clone(),
+                        Arc::new(TestInteractionStreamHandle::default()),
+                    ),
+                );
+                let interaction_id = Uuid::new_v4();
+                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+                meerkat_core::handles::PeerInteractionHandle::request_received(
+                    responder.as_ref(),
+                    corr_id,
+                    meerkat_core::types::HandlingMode::Queue,
+                    receiver.public_key().to_peer_id(),
+                )
+                .expect("the responder's machine records the inbound request");
+                meerkat_core::handles::PeerInteractionHandle::request_sent(
+                    requester.as_ref(),
+                    corr_id,
+                    sender.public_key().to_peer_id(),
+                )
+                .expect("the requester's machine expects the response");
+                CommsCommand::PeerResponse {
+                    objective_id: None,
+                    content_taint: None,
+                    to,
+                    in_reply_to: InteractionId(interaction_id),
+                    status: meerkat_core::ResponseStatus::Completed,
+                    result: serde_json::json!({"ok": true}),
+                    blocks: None,
+                    handling_mode: None,
+                }
+            }
+        };
+        add_trusted_peer_with_generated_authority(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await;
+        add_trusted_peer_with_generated_authority(
+            receiver.as_ref(),
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await;
+        (sender, receiver, command)
+    }
+
+    /// The receiver's next queue claim, if one is queued.
+    #[cfg(feature = "workspace-tests")]
+    async fn try_claim_queued(
+        receiver: &CommsRuntime,
+    ) -> Option<meerkat_core::PeerIngressQueueClaim> {
+        CoreCommsRuntime::claim_classified_inbox_interaction(receiver)
+            .await
+            .expect("claim surface")
+    }
+
+    /// The in-process lane carries the governed origin a send was made with
+    /// to the receiver's queue claim unchanged, beside the in-process sender
+    /// authentication, for every kind it carries: a message, an
+    /// incarnation-fenced message, a request and a response. A send made
+    /// without one leaves the claim without one.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn every_kind_the_in_process_lane_carries_keeps_its_governed_origin() {
+        for kind in [
+            CarriedKind::Message,
+            CarriedKind::FencedMessage,
+            CarriedKind::Request,
+            CarriedKind::Response,
+        ] {
+            for carried in [Some(runtime_minted_origin()), None] {
+                let (sender, receiver, command) = carried_kind_pair(kind).await;
+                let sent = carried.clone();
+                // A message, fenced message or request waits on the
+                // receiver's drain, which this row replaces: the send is
+                // aborted once the receiver's claim was read.
+                let mut send = tokio::spawn(async move {
+                    CoreCommsRuntime::send_with_governed_origin(sender.as_ref(), command, sent)
+                        .await
+                });
+                // The claim the send's envelope makes. A send that ends
+                // without one (refused before it enqueues) fails the row at
+                // once with its own result, and a send that stays pending
+                // without enqueueing fails it at the bound.
+                let claim = timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let Some(claim) = try_claim_queued(receiver.as_ref()).await {
+                            break claim;
+                        }
+                        if send.is_finished() {
+                            // The envelope is queued before the send ends, so
+                            // a claim it made is visible by now.
+                            if let Some(claim) = try_claim_queued(receiver.as_ref()).await {
+                                break claim;
+                            }
+                            let result = (&mut send).await;
+                            panic!(
+                                "{kind:?}: the send ended before the receiver held a claim: \
+                                 {result:?}"
+                            );
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{kind:?}: no claim and the send still pending after 30 s")
+                });
+                assert_eq!(
+                    claim.sender_authentication(),
+                    meerkat_core::PeerIngressSenderAuthentication::InProcess,
+                    "{kind:?}"
+                );
+                match (&carried, claim.governed_send_origin()) {
+                    (Some(sent), Some(received)) => assert!(
+                        Arc::ptr_eq(sent.__runtime_facts(), received.__runtime_facts()),
+                        "{kind:?}: the receiver's claim holds the sender's own origin"
+                    ),
+                    (None, None) => {}
+                    (sent, received) => {
+                        panic!("{kind:?}: carried {sent:?}, received {received:?}")
+                    }
+                }
+                drop(claim);
+                send.abort();
+                let _ = send.await;
+            }
+        }
     }
 }

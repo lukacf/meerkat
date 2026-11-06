@@ -2,14 +2,42 @@
 //!
 //! Connect to MCP servers and route tool calls.
 
-// Without `workspace-tests` (the published package: `cargo package` strips
-// the self dev-dependency that enables it) the unit tests that need the
-// workspace compile out, and the test helpers only they use go unused. The
-// workspace build turns the feature on and keeps both lints.
+// Without `workspace-tests` (the published package, whose test command
+// leaves it off) the unit tests that need the workspace compile out, and
+// the test helpers only they use go unused. The workspace's test builds
+// turn the feature on and keep both lints.
 #![cfg_attr(
     all(test, not(feature = "workspace-tests")),
     allow(dead_code, unused_imports)
 )]
+
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-mcp`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(test, not(feature = "workspace-tests")))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-mcp: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-mcp --features workspace-tests` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
 
 mod adapter;
 pub mod apps;

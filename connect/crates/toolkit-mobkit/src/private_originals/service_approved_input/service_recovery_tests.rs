@@ -744,7 +744,7 @@ async fn operator_recovery_requires_actual_verified_human_admin_member_and_same_
         controller.join_authorization_publication(fixture.source.authorization_publication()).unwrap();
         let decisions = meerkat_mobkit::console_auth_config::parse_console_auth_config(&serde_json::json!({
             "provider":"jwt", "shared_secret":std::str::from_utf8(KEY).unwrap(), "issuer":ISSUER,
-            "audience":AUDIENCE, "email_allowlist":[EMAIL],
+            "audience":AUDIENCE, "email_allowlist":[EMAIL], "accounts":"personal",
         })).unwrap();
         let runtime = fixture.native_for_console_mut(); runtime.set_access_controller(controller.clone());
         let resolver = runtime.console_viewer_resolver(&decisions);

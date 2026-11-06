@@ -7,13 +7,12 @@
 //! rows.
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use super::{
     ApproverId, DecisionId, DecisionKind, DecisionNotice, DecisionPhase, DecisionPrincipalKey,
@@ -156,21 +155,22 @@ pub fn decision_is_due(row: &StoredDecision, now_ms: u64) -> bool {
     expires && row.descriptor.deadline_at_ms <= now_ms
 }
 
-/// The executor role of one decision store, held while this value lives.
+/// The executor role of one decision kind of a store, held while this value
+/// lives.
 ///
-/// One executor at a time executes the approved decisions of a store and
-/// settles their permits ([`DecisionStore::claim_executor`]). The claim ends
-/// when this value drops, or when its process ends. The next executor
-/// settles first each execution permit the store records as outstanding,
-/// from its own record of the operation, which reports every commit that
-/// can still land under it.
+/// One executor at a time executes the approved decisions of each kind of a
+/// store and settles their permits ([`DecisionStore::claim_executor_kind`]).
+/// The claim ends when this value drops, or when its process ends. The next
+/// executor of the kind settles first each execution permit of the kind the
+/// store records as outstanding, from its own record of the operation, which
+/// reports every commit that can still land under it.
 pub struct DecisionExecutorClaim {
     _held: Box<dyn Any + Send + Sync>,
 }
 
 impl DecisionExecutorClaim {
     /// A claim that lasts as long as `held`: the store's exclusive hold on
-    /// the role (an open locked file, or a process-local flag that `held`
+    /// the role (open locked files, or a process-local entry that `held`
     /// clears when it drops).
     #[must_use]
     pub fn new(held: impl Any + Send + Sync) -> Self {
@@ -261,14 +261,40 @@ pub trait DecisionStore: Send + Sync {
     /// Whether rows survive a restart.
     fn is_persistent(&self) -> bool;
 
-    /// Claim the executor role of this store. At most one claim of a store
-    /// is live at a time, in this process or any other; the claim ends when
-    /// the returned value drops or its process ends. The default refuses: a
-    /// store that cannot keep the role exclusive has no executor.
+    /// Claim the executor role of the decisions of `kind` in this store. At
+    /// most one claim of a kind is live at a time, in this process or any
+    /// other, and none beside a claim of the whole store
+    /// ([`Self::claim_executor`]); claims of different kinds are
+    /// independent. The claim ends when the returned value drops or its
+    /// process ends. The default refuses: a store that cannot keep the role
+    /// exclusive has no executor.
     ///
     /// # Errors
-    /// [`ApprovalStoreError::Contended`] while another claim is live; other
-    /// store failures.
+    /// [`ApprovalStoreError::Contended`] while another claim of the kind, or
+    /// of the whole store, is live; other store failures.
+    fn claim_executor_kind(
+        &self,
+        _kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        Err(ApprovalStoreError::NotCommitted(
+            "this decision store keeps no executor claim".to_owned(),
+        ))
+    }
+
+    /// Claim the executor role of the whole store, as an executor of 0.9.10
+    /// does: live only while no other claim of the store is, and while it
+    /// lives no claim of a kind can be taken
+    /// ([`Self::claim_executor_kind`]), in this process or any other. The
+    /// claim ends when the returned value drops or its process ends. The
+    /// default refuses.
+    ///
+    /// # Errors
+    /// [`ApprovalStoreError::Contended`] while another claim of the store,
+    /// of the whole store or of a kind, is live; other store failures.
+    #[deprecated(
+        since = "0.9.11",
+        note = "an executor claims each decision kind it executes with `claim_executor_kind`"
+    )]
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
         Err(ApprovalStoreError::NotCommitted(
             "this decision store keeps no executor claim".to_owned(),
@@ -278,20 +304,39 @@ pub trait DecisionStore: Send + Sync {
 
 /// In-memory decision store for tests and process-local hosts. A write holds
 /// the map's lock for that write alone: no owner holds it across calls. Its
-/// executor claim is held in the store itself, so it is exclusive among the
-/// owners that share the store.
+/// executor claims are held in the store itself, so they are exclusive among
+/// the owners that share the store.
 #[derive(Debug, Default)]
 pub struct InMemoryDecisionStore {
     rows: RwLock<BTreeMap<String, StoredDecision>>,
-    executor_claimed: Arc<AtomicBool>,
+    executor_claims: Arc<Mutex<ExecutorClaims>>,
 }
 
-/// The in-memory store's executor claim: clears the store's flag on drop.
-struct InMemoryExecutorClaim(Arc<AtomicBool>);
+/// The executor claims live on an in-memory store.
+#[derive(Debug, Default)]
+struct ExecutorClaims {
+    /// A claim of the whole store is live.
+    whole_store: bool,
+    /// The kinds a claim is live for.
+    kinds: BTreeSet<DecisionKind>,
+}
+
+/// One executor claim of an in-memory store: ends it on drop.
+struct InMemoryExecutorClaim {
+    claims: Arc<Mutex<ExecutorClaims>>,
+    /// The kind claimed, or `None` for the whole store.
+    kind: Option<DecisionKind>,
+}
 
 impl Drop for InMemoryExecutorClaim {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        let mut claims = self.claims.lock();
+        match self.kind.take() {
+            Some(kind) => {
+                claims.kinds.remove(&kind);
+            }
+            None => claims.whole_store = false,
+        }
     }
 }
 
@@ -394,12 +439,29 @@ impl DecisionStore for InMemoryDecisionStore {
         false
     }
 
+    fn claim_executor_kind(
+        &self,
+        kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        let mut claims = self.executor_claims.lock();
+        if claims.whole_store || !claims.kinds.insert(kind.clone()) {
+            return Err(ApprovalStoreError::Contended);
+        }
+        Ok(DecisionExecutorClaim::new(InMemoryExecutorClaim {
+            claims: Arc::clone(&self.executor_claims),
+            kind: Some(kind.clone()),
+        }))
+    }
+
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
-        self.executor_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| ApprovalStoreError::Contended)?;
-        Ok(DecisionExecutorClaim::new(InMemoryExecutorClaim(
-            Arc::clone(&self.executor_claimed),
-        )))
+        let mut claims = self.executor_claims.lock();
+        if claims.whole_store || !claims.kinds.is_empty() {
+            return Err(ApprovalStoreError::Contended);
+        }
+        claims.whole_store = true;
+        Ok(DecisionExecutorClaim::new(InMemoryExecutorClaim {
+            claims: Arc::clone(&self.executor_claims),
+            kind: None,
+        }))
     }
 }

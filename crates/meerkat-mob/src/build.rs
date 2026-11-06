@@ -1091,8 +1091,8 @@ fn durable_identity_from_member_segment(member: &str) -> Option<(String, bool)> 
 }
 
 fn decoded_member_segment(member: &str) -> Option<String> {
-    if let Some(encoded) = member.strip_prefix("mk--") {
-        decode_legacy_member_alias_segment(encoded)
+    if member.starts_with(crate::ids::ENCODED_MEMBER_ID_MARKER) {
+        crate::ids::decode_member_id(member)
     } else {
         Some(member.to_string())
     }
@@ -1131,38 +1131,8 @@ pub(crate) fn stored_member_role_name(metadata: &SessionMetadata) -> Option<&str
 
 pub(crate) fn legacy_raw_alias_comms_name(current: &str) -> Option<String> {
     let (mob_id, role, member) = split_member_comms_name(current)?;
-    let legacy_member = member
-        .strip_prefix("mk--")
-        .and_then(decode_legacy_member_alias_segment)?;
+    let legacy_member = crate::ids::decode_member_id(member)?;
     Some(format!("{mob_id}/{role}/{legacy_member}"))
-}
-
-fn decode_legacy_member_alias_segment(encoded: &str) -> Option<String> {
-    let mut decoded = String::with_capacity(encoded.len());
-    let mut chars = encoded.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '_' {
-            decoded.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '_' => decoded.push('_'),
-            'c' => decoded.push(':'),
-            'x' => {
-                let mut hex = String::new();
-                loop {
-                    match chars.next()? {
-                        '_' => break,
-                        digit => hex.push(digit),
-                    }
-                }
-                let code = u32::from_str_radix(&hex, 16).ok()?;
-                decoded.push(char::from_u32(code)?);
-            }
-            _ => return None,
-        }
-    }
-    Some(decoded)
 }
 
 /// Apply a member's optional application consequence-policy choice to its

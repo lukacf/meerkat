@@ -574,10 +574,10 @@ pub(super) mod legacy_observation_hold {
 
     /// The observation the adoption uses: `observed`, or a stale one while a
     /// forced count for `identity` remains.
-    pub(crate) fn observed(
+    pub(crate) fn observed<T>(
         identity: &AgentIdentity,
-        observed: Option<(Generation, bool)>,
-    ) -> Option<(Generation, bool)> {
+        observed: Option<(Generation, T)>,
+    ) -> Option<(Generation, T)> {
         let mut stale = STALE.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(position) = stale
             .iter()
@@ -587,6 +587,35 @@ pub(super) mod legacy_observation_hold {
         };
         stale[position].1 -= 1;
         observed.and_then(|(generation, legacy)| generation.next().map(|next| (next, legacy)))
+    }
+
+    static NO_INTENT_ROW: Mutex<Vec<(AgentIdentity, usize)>> = Mutex::new(Vec::new());
+
+    /// Answer the next `count` observations of `identity` without a host's
+    /// intent row, as a member binding history read before the host
+    /// adopted the identity answers them.
+    pub(crate) fn force_no_intent_row(identity: &AgentIdentity, count: usize) {
+        NO_INTENT_ROW
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((identity.clone(), count));
+    }
+
+    /// The observation the adoption uses: `observed`, without its intent
+    /// row while a forced count for `identity` remains.
+    pub(crate) fn intent_row_observed(
+        identity: &AgentIdentity,
+        mut observed: crate::runtime::identity_entry::LegacyMemberObservation,
+    ) -> crate::runtime::identity_entry::LegacyMemberObservation {
+        let mut held = NO_INTENT_ROW.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(position) = held
+            .iter()
+            .position(|(identity_held, count)| identity_held == identity && *count > 0)
+        {
+            held[position].1 -= 1;
+            observed.intent_row = false;
+        }
+        observed
     }
 }
 
@@ -6721,7 +6750,7 @@ impl MobHandle {
     /// real process exit still destroys its process-global inproc registry,
     /// so same-process cold-restart fixtures must establish that boundary
     /// explicitly instead of racing the last `Arc` drop.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn retire_supervisor_transport_for_process_exit_test(&self) {
         self.supervisor_bridge.shutdown().await;
     }
@@ -10651,9 +10680,6 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
-        // An observation whose incarnation moved before MobMachine decided
-        // is observed again, a bounded number of times.
-        const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
         // The scope and the lane first: nothing is answered, not even from
         // the entry, to a caller the adoption is refused to.
         self.admit_control_scope_for(
@@ -10675,24 +10701,78 @@ impl MobHandle {
         if already_an_entry {
             return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
         }
+        // The host names the identity: its member is observed as listed.
+        let (_, verdict) = self
+            .adopt_observed_legacy_member(identity, true, None)
+            .await?;
+        super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine answered the adoption of member '{identity}' with no answer: \
+                 {verdict:?}"
+            ))
+        })
+    }
+
+    /// The legacy adoption's observation and MobMachine's decision for an
+    /// admitted caller: the binding of the identity's current incarnation,
+    /// read from the member binding history with the intent rows in one
+    /// store read, is observed
+    /// ([`super::identity_entry::LegacyMemberObservation`]: its legacy marks,
+    /// whether a host's intent row names it, and `listed`, whether the
+    /// roster or the host names the identity), and MobMachine decides the
+    /// verdict from that observation. The first observation is read from
+    /// `history` when the caller read that history already (a complete
+    /// roster's pass over its unlisted members reads it once for all of
+    /// them), and from a fresh read otherwise. An observation whose
+    /// incarnation moved before MobMachine decided is observed again from a
+    /// fresh read, a bounded number of times. The answer is MobMachine's
+    /// verdict, with the generation of the incarnation it decided on.
+    pub(super) async fn adopt_observed_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+        listed: bool,
+        history: Option<&super::MemberBindingHistory>,
+    ) -> Result<
+        (
+            crate::ids::Generation,
+            mob_dsl::LegacyIdentityEntryAdoptionKind,
+        ),
+        MobError,
+    > {
+        const LEGACY_ADOPTION_OBSERVATIONS: usize = 3;
         let store = self
             .identity_member
             .as_ref()
             .ok_or(crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)?;
+        let mut first = history;
         for _ in 0..LEGACY_ADOPTION_OBSERVATIONS {
-            let history = self
-                .member_binding_fold
-                .read(store.as_ref(), self.mob_id())
-                .await?;
+            let read;
+            let history = match first.take() {
+                Some(history) => history,
+                None => {
+                    read = self
+                        .member_binding_fold
+                        .read(store.as_ref(), self.mob_id())
+                        .await?;
+                    &read
+                }
+            };
             let observation = history.last_binding(identity).map(|binding| {
                 (
                     binding.generation(),
-                    super::identity_entry::legacy_roster_member(binding),
+                    super::identity_entry::LegacyMemberObservation::of(binding, listed),
                 )
             });
             #[cfg(test)]
             let observation = legacy_observation_hold::observed(identity, observation);
-            let (generation, legacy_roster_member) = match observation {
+            #[cfg(test)]
+            let observation = observation.map(|(generation, legacy)| {
+                (
+                    generation,
+                    legacy_observation_hold::intent_row_observed(identity, legacy),
+                )
+            });
+            let (generation, observation) = match observation {
                 Some(observation) => observation,
                 // No incarnation of the identity since the latest mob reset
                 // in the history while MobMachine seats one: the history has
@@ -10705,18 +10785,21 @@ impl MobHandle {
                     continue;
                 }
                 // No member holds the identity: MobMachine answers so.
-                None => (crate::ids::Generation::INITIAL, false),
+                None => (
+                    crate::ids::Generation::INITIAL,
+                    super::identity_entry::LegacyMemberObservation::absent(listed),
+                ),
             };
             let verdict = self
                 .send_actor_command(|reply_tx| MobCommand::AdoptLegacyIdentityEntry {
                     agent_identity: identity.clone(),
                     generation,
-                    legacy_roster_member,
+                    observation,
                     reply_tx,
                 })
                 .await??;
-            if let Some(answer) = super::identity_entry::legacy_adoption_answer(verdict) {
-                return Ok(answer);
+            if super::identity_entry::legacy_adoption_answer(verdict).is_some() {
+                return Ok((generation, verdict));
             }
         }
         Err(MobError::LifecycleOperationPending {

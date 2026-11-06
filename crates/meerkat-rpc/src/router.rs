@@ -1655,10 +1655,18 @@ impl RoutedRpcResponse {
 /// [`MethodRouter::dispatch_with_consent_event`].
 pub const CONSENT_DECIDE_METHOD: &str = "approval/consent_decide";
 
+/// The host-only durable decision method, reachable only through
+/// [`MethodRouter::dispatch_with_decision_event`].
+pub const DECISION_DECIDE_METHOD: &str = "decision/decide";
+
 #[derive(Clone)]
 pub struct MethodRouter {
     #[cfg(feature = "local-authorization")]
     governed_connection: Option<Arc<crate::governed_jsonl::GovernedConnection>>,
+    /// The operator of this router's stdio connection, who decides durable
+    /// decisions on it. `None` everywhere else (TCP, plain dispatch).
+    #[cfg(all(unix, feature = "local-authorization"))]
+    decision_operator: Option<Arc<handlers::decision::operator::DecisionOperator>>,
     runtime: Arc<SessionRuntime>,
     /// The callback route owned by this router's connection. `None` falls
     /// back to the runtime's process-default route.
@@ -1754,6 +1762,8 @@ impl MethodRouter {
         Ok(Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -1823,6 +1833,27 @@ impl MethodRouter {
     pub(crate) fn close_governed_connection(&self) {
         if let Some(connection) = &self.governed_connection {
             connection.close();
+        }
+    }
+
+    /// Give this router's stdio connection its operator for durable
+    /// decisions: `decision/list` presents the decisions of each page the
+    /// operator acts for, and `decision/decide` decides as the operator.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn with_decision_operator(
+        mut self,
+        operator: Arc<handlers::decision::operator::DecisionOperator>,
+    ) -> Self {
+        self.decision_operator = Some(operator);
+        self
+    }
+
+    /// The connection this router serves closed: no decide on it is
+    /// eligible any more.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    pub(crate) fn close_decision_operator(&self) {
+        if let Some(operator) = &self.decision_operator {
+            operator.close();
         }
     }
 
@@ -2311,6 +2342,8 @@ impl MethodRouter {
         Self {
             #[cfg(feature = "local-authorization")]
             governed_connection: None,
+            #[cfg(all(unix, feature = "local-authorization"))]
+            decision_operator: None,
             runtime,
             config_store,
             notification_sink,
@@ -2542,6 +2575,49 @@ impl MethodRouter {
             );
         }
         handlers::approval::handle_consent_decide(
+            id,
+            request.params.as_deref(),
+            self.runtime.clone(),
+            event,
+        )
+    }
+
+    /// Dispatch one durable decision whose human event the embedding host's
+    /// trusted transport adapter authenticated.
+    ///
+    /// This is the only entry to [`DECISION_DECIDE_METHOD`]: plain dispatch
+    /// has no route for it, so caller JSON or a request context can never
+    /// decide a durable decision. The request names the decision, the
+    /// answer, the presented digest and the reason, and must equal what the
+    /// event binds; the event alone supplies who decided, how the decider
+    /// was authenticated and the evidence that they may act for the
+    /// decision's approver id.
+    pub async fn dispatch_with_decision_event(
+        &self,
+        request: RpcRequest,
+        event: meerkat_core::approval::decision::AuthenticatedDecisionEvent,
+    ) -> RpcResponse {
+        let id = request.id.clone();
+        // The same envelope check as plain dispatch, before any handler.
+        if !request.has_supported_version() {
+            return RpcResponse::error(
+                id,
+                error::INVALID_REQUEST,
+                format!(
+                    "Unsupported JSON-RPC version: expected \"{}\", got \"{}\"",
+                    crate::protocol::JSONRPC_VERSION,
+                    request.jsonrpc
+                ),
+            );
+        }
+        if request.method != DECISION_DECIDE_METHOD {
+            return RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("an authenticated decision event only decides {DECISION_DECIDE_METHOD}"),
+            );
+        }
+        handlers::decision::handle_decide_event(
             id,
             request.params.as_deref(),
             self.runtime.clone(),
@@ -3406,6 +3482,32 @@ impl MethodRouter {
                 routed_arm(|| handlers::tool_grants::handle_audit(id, params, self.runtime.clone()))
                     .await
             }
+            "decision/list" => routed_arm(|| self.handle_decision_list(id, params)).await,
+            "decision/get" => {
+                routed_arm(|| handlers::decision::handle_get(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/rendering" => {
+                routed_arm(|| {
+                    handlers::decision::handle_rendering(id, params, self.runtime.clone())
+                })
+                .await
+            }
+            "decision/present" => {
+                routed_arm(|| handlers::decision::handle_present(id, params, self.runtime.clone()))
+                    .await
+            }
+            "decision/withdraw" => {
+                routed_arm(|| handlers::decision::handle_withdraw(id, params, self.runtime.clone()))
+                    .await
+            }
+            // Only a stdio connection with an operator routes a decide; it
+            // builds the authenticated event itself. Everywhere else the
+            // method is not found, as in plain dispatch.
+            #[cfg(all(unix, feature = "local-authorization"))]
+            DECISION_DECIDE_METHOD if self.decision_operator.is_some() => {
+                routed_arm(|| self.handle_operator_decision_decide(id, params)).await
+            }
             // Compose the realm chain so an inherited (ancestor-realm) self-hosted
             // alias / per-provider default is listed identically to the other
             // surfaces and matches what a session build resolves.
@@ -3759,6 +3861,42 @@ impl MethodRouter {
     /// Access the underlying session runtime.
     pub fn runtime(&self) -> &SessionRuntime {
         &self.runtime
+    }
+
+    /// `decision/list`: on a stdio connection with an operator, the page is
+    /// presented to the operator before it is answered; elsewhere it is the
+    /// plain read.
+    async fn handle_decision_list(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(operator) = &self.decision_operator {
+            return operator.handle_list(id, params, &self.runtime).await;
+        }
+        handlers::decision::handle_list(id, params, self.runtime.clone()).await
+    }
+
+    /// `decision/decide` by the operator of this router's stdio connection.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    async fn handle_operator_decision_decide(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        match &self.decision_operator {
+            Some(operator) => {
+                operator
+                    .handle_decide(id, params, self.runtime.clone())
+                    .await
+            }
+            None => RpcResponse::error(
+                id,
+                error::METHOD_NOT_FOUND,
+                format!("Method not found: {DECISION_DECIDE_METHOD}"),
+            ),
+        }
     }
 
     async fn handle_tools_register(
@@ -19920,6 +20058,97 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         assert_eq!(kept["config"]["confinement"], section);
     }
 
+    /// The approver ids the stdio operator decides for
+    /// (`[governance.decisions] operator_approver_ids`) are approver
+    /// authority, administered by the host in the realm document with the
+    /// rest of `[governance]`: a config write that adds, changes or removes
+    /// them is the caller's error carrying governance's typed refusal, and
+    /// writes nothing. A write that keeps them commits.
+    #[tokio::test]
+    async fn config_writes_cannot_administer_the_operators_approver_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let unstated = "max_tokens = 4096\n";
+        tokio::fs::write(&path, unstated).await.unwrap();
+        let (router, _notif_rx) = test_router_with_config_store(Arc::new(
+            meerkat_core::FileConfigStore::new(path.clone(), meerkat_models::canonical()),
+        ))
+        .await;
+        let refusal = |response: &RpcResponse| {
+            (
+                error_code(response),
+                response.error.as_ref().and_then(|error| error.data.clone()),
+            )
+        };
+        let governance_refusal = (
+            error::INVALID_PARAMS,
+            Some(serde_json::json!({ "type": "governance_administration_required" })),
+        );
+        let listing = |ids: serde_json::Value| serde_json::json!({ "governance": { "decisions": { "operator_approver_ids": ids } } });
+
+        let added = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners"])) }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refusal(&added), governance_refusal);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), unstated);
+
+        let stated = "max_tokens = 4096\n\n[governance.decisions]\noperator_approver_ids = [\"operator\", \"team:owners\"]\n";
+        tokio::fs::write(&path, stated).await.unwrap();
+        let current = router
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let section = result_value(&current)["config"]["governance"].clone();
+        assert_eq!(
+            section["decisions"]["operator_approver_ids"],
+            serde_json::json!(["operator", "team:owners"]),
+            "{section}"
+        );
+        let mut omitted = result_value(&current)["config"].clone();
+        omitted.as_object_mut().unwrap().remove("governance");
+        let mut widened = result_value(&current)["config"].clone();
+        widened["governance"]["decisions"]["operator_approver_ids"] =
+            serde_json::json!(["operator", "team:owners", "team:admins"]);
+        for (method, params) in [
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!(["operator", "team:owners", "team:admins"])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": listing(serde_json::json!([])) }),
+            ),
+            (
+                "config/patch",
+                serde_json::json!({ "patch": { "governance": null } }),
+            ),
+            ("config/set", serde_json::json!({ "config": omitted })),
+            ("config/set", serde_json::json!({ "config": widened })),
+        ] {
+            let refused = router
+                .dispatch(make_request(method, params.clone()))
+                .await
+                .unwrap();
+            assert_eq!(refusal(&refused), governance_refusal, "{method} {params}");
+            assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), stated);
+        }
+
+        let kept = router
+            .dispatch(make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 2048 } }),
+            ))
+            .await
+            .unwrap();
+        let kept = result_value(&kept);
+        assert_eq!(kept["config"]["max_tokens"], 2048);
+        assert_eq!(kept["config"]["governance"], section);
+    }
+
     /// A credential command runs as the host, outside its confinement: a
     /// JSON-RPC config write that adds one, or changes what it runs, is the
     /// caller's error carrying confinement's typed refusal and naming the
@@ -20772,6 +21001,9 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             live_webrtc_enabled: cfg!(feature = "live-webrtc"),
             // The plain router never emits consent notices.
             consent_enabled: false,
+            // Nor decision notices: only a stdio connection's operator
+            // receives them.
+            decision_notices_enabled: false,
         };
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {

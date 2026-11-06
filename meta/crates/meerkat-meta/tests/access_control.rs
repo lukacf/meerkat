@@ -43,10 +43,12 @@ restart_policy = "always"
     .to_string()
 }
 
+/// A development issuer: the console verifies HS256 tokens (see
+/// `person_token`) only from one.
 fn trusted_oidc() -> TrustedOidcRuntimeConfig {
     TrustedOidcRuntimeConfig {
         discovery_json:
-            r#"{"issuer":"https://trusted.meta.local","jwks_uri":"https://trusted.meta.local/.well-known/jwks.json"}"#
+            r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
                 .to_string(),
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
             .to_string(),
@@ -723,7 +725,7 @@ fn person_token(subject: &str) -> String {
     jsonwebtoken::encode(
         &jwt_header,
         &json!({
-            "iss": "https://trusted.meta.local",
+            "iss": "https://trusted.meta.localhost",
             "aud": "meerkat-console",
             "sub": subject,
             "email": subject,

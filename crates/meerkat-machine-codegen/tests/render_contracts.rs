@@ -891,10 +891,22 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         "RecoverIdentityEntryAdoptingMarkedRunning",
         "RecoverIdentityEntryAdoptingStaleRunning",
     ];
+    // The refusals of external work to an identity entry (0.9.11) follow
+    // them, last.
+    let identity_member_refusal_arms = [
+        "ResolveSubmitWorkRejectionIdentityMember",
+        "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
+    ];
+    let refusals_start = variants.len() - identity_member_refusal_arms.len();
     assert_eq!(
-        variants[variants.len() - host_adoption_arms.len()..].to_vec(),
+        variants[refusals_start - host_adoption_arms.len()..refusals_start].to_vec(),
         host_adoption_arms.to_vec(),
-        "the host adoption's arms are the last TransitionId variants"
+        "the host adoption's arms follow every variant before them"
+    );
+    assert_eq!(
+        variants[refusals_start..].to_vec(),
+        identity_member_refusal_arms.to_vec(),
+        "the identity member refusals of external work are the last TransitionId variants"
     );
     assert!(
         index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,

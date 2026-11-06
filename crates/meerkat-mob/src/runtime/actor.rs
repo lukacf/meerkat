@@ -18504,6 +18504,11 @@ impl MobActor {
             Some((mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable, _, _)) => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
             }
+            Some((mob_dsl::SubmitWorkRejectReasonKind::IdentityMember, _, _)) => {
+                MobError::IdentityMember {
+                    member_id: agent_identity.clone(),
+                }
+            }
             Some((mob_dsl::SubmitWorkRejectReasonKind::StaleSessionBinding, _, _)) => {
                 let parse = |session: &mob_dsl::SessionId| SessionId::parse(&session.0).ok();
                 let actual_session = authority

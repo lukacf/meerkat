@@ -181,6 +181,13 @@ name.
   agent calls: the agent mob tools of `meerkat-mob-mcp` (`mob_retire_member`,
   `mob_wire`, `mob_unwire` and the others) use it. The host acts on its own
   entries.
+- External work does not reach an entry, nor a member whose name is reserved
+  unreadable: a member send from outside the mob (`MemberHandle::send`, a
+  submit of `WorkOrigin::External`) addressed to one is refused
+  `MobError::IdentityMember` before anything is submitted, whatever its
+  profile's `external_addressable` says (0.9.11). The host delivers to its
+  entries through its own door, as internal work (`submit_work_with_mode`
+  with `WorkOrigin::Internal`), which MobMachine admits as for any member.
 - A respawn of an entry's member rotates it onto its own session (see
   [Respawn, rotation and scoped release](#respawn-rotation-and-scoped-release)):
   the identity stays seated and an entry throughout, and a rotation

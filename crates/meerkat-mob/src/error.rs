@@ -683,11 +683,12 @@ pub enum MobError {
 
     /// The member is an identity entry (see
     /// [`crate::runtime::IdentityEntryRead`]): a spawn without entry custody
-    /// cannot take its name, and the agent lane does not act on it as a
-    /// member. Its host acts on it.
+    /// cannot take its name, the agent lane does not act on it as a member,
+    /// and external work does not reach it. Its host acts on it, and
+    /// delivers to it through its own door, as internal work.
     #[error(
         "member '{member_id}' is an identity entry: a spawn without entry custody cannot take its \
-         name, and the agent lane does not act on it"
+         name, the agent lane does not act on it, and external work does not reach it"
     )]
     IdentityMember { member_id: AgentIdentity },
 

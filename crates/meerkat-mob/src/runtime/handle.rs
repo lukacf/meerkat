@@ -16214,6 +16214,9 @@ impl MobHandle {
             mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable => {
                 MobError::NotExternallyAddressable(agent_identity.clone())
             }
+            mob_dsl::SubmitWorkRejectReasonKind::IdentityMember => MobError::IdentityMember {
+                member_id: agent_identity.clone(),
+            },
             mob_dsl::SubmitWorkRejectReasonKind::StaleFenceToken => MobError::StaleFenceToken {
                 runtime_id: declared_runtime_id,
                 expected: declared_fence_token,
@@ -16273,6 +16276,11 @@ impl MobHandle {
                     }
                     mob_dsl::SubmitWorkRejectReasonKind::NotExternallyAddressable => {
                         MobError::NotExternallyAddressable(runtime_id.identity.clone())
+                    }
+                    mob_dsl::SubmitWorkRejectReasonKind::IdentityMember => {
+                        MobError::IdentityMember {
+                            member_id: runtime_id.identity.clone(),
+                        }
                     }
                     mob_dsl::SubmitWorkRejectReasonKind::StaleFenceToken => {
                         match (expected_fence_token, actual_fence_token) {

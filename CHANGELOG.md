@@ -144,6 +144,18 @@ them.
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine refuses external work to an identity entry, and to a name
+  reserved unreadable, as an identity member (see Changed).
+  `SubmitWorkRejectReasonKind` (meerkat-machine-schema, meerkat-mob and the
+  kernel `generated::mob`) gains `IdentityMember`, and the kernel
+  `generated::mob::TransitionId` gains
+  `ResolveSubmitWorkRejectionIdentityMember` and
+  `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`. Every new
+  variant is appended last, so no existing variant's implicit discriminant
+  moves. Every enum named here is exhaustive, so a downstream exhaustive
+  match needs the new arms, or a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
@@ -200,6 +212,16 @@ them.
   additive.
 
 ### Changed
+
+- `meerkat-mob`: external work (a member send from outside the mob,
+  `MemberHandle::send`, or a submit of `WorkOrigin::External`) addressed to
+  an identity entry, or to a member whose name is reserved unreadable, is
+  refused `MobError::IdentityMember` (structured kind `identity_member`)
+  before anything is submitted, whatever its profile's
+  `external_addressable` says, where MobMachine admitted it to an entry
+  whose runtime is externally addressable. The entry's host delivers to it
+  through its own door, as internal work, which MobMachine admits as for
+  any member. Behaviour-only: the signatures keep their shape.
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
   composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a

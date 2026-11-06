@@ -9256,6 +9256,8 @@ pub enum SubmitWorkRejectReasonKind {
     NotExternallyAddressable,
     #[serde(rename = "StaleSessionBinding")]
     StaleSessionBinding,
+    #[serde(rename = "IdentityMember")]
+    IdentityMember,
 }
 impl SubmitWorkRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
@@ -9265,6 +9267,7 @@ impl SubmitWorkRejectReasonKind {
             Self::StaleFenceToken => "StaleFenceToken",
             Self::NotExternallyAddressable => "NotExternallyAddressable",
             Self::StaleSessionBinding => "StaleSessionBinding",
+            Self::IdentityMember => "IdentityMember",
         }
     }
 }
@@ -9277,6 +9280,7 @@ impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
             "StaleFenceToken" => Ok(Self::StaleFenceToken),
             "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
             "StaleSessionBinding" => Ok(Self::StaleSessionBinding),
+            "IdentityMember" => Ok(Self::IdentityMember),
             other => Err(format!(
                 "invalid SubmitWorkRejectReasonKind value `{other}`"
             )),
@@ -17114,6 +17118,8 @@ pub enum TransitionId {
     TakeOverIdentityEntryMobNotRunningDestroyed,
     RecoverIdentityEntryAdoptingMarkedRunning,
     RecoverIdentityEntryAdoptingStaleRunning,
+    ResolveSubmitWorkRejectionIdentityMember,
+    ResolveSubmitWorkRejectionIdentityMemberUnreadableName,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

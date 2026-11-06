@@ -60904,6 +60904,7 @@ function isMetaTarget(target) {
 }
 
 // src/lib/workgraph-actions.ts
+var WORKGRAPH_UNOBSERVED_REVISION_MESSAGE = "The console did not show the version this would change, so nothing was changed. It has been read again: check it, then try again.";
 var WORKGRAPH_CONFLICT_CODE = -32042;
 function workGraphConflictRefreshRequest(params) {
   const itemId2 = typeof params.id === "string" && params.id.trim() ? params.id : null;
@@ -60915,38 +60916,6 @@ function workGraphConflictRefreshRequest(params) {
     return { command: CONSOLE_COMMAND_NAMES2.workgraphGoalStatus, params: { binding_id: bindingId } };
   }
   return null;
-}
-function asRecord2(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-function revisionOfItem(result) {
-  const item = asRecord2(asRecord2(result)?.item);
-  return typeof item?.revision === "number" ? item.revision : void 0;
-}
-async function resolveWorkGraphItemRevision(run, itemId2) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGet, { id: itemId2 });
-  const revision = revisionOfItem(result);
-  if (revision === void 0) {
-    throw new Error("could not resolve the current revision of work item ".concat(itemId2));
-  }
-  return revision;
-}
-async function resolveWorkGraphGoalItemRevision(run, bindingId) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGoalStatus, { binding_id: bindingId });
-  const revision = revisionOfItem(result);
-  if (revision === void 0) {
-    throw new Error("could not resolve the goal item revision for binding ".concat(bindingId));
-  }
-  return revision;
-}
-async function resolveWorkGraphBindingRevision(run, bindingId) {
-  const result = await run(CONSOLE_COMMAND_NAMES2.workgraphGoalStatus, { binding_id: bindingId });
-  const machineState = asRecord2(asRecord2(asRecord2(result)?.attention)?.machine_state);
-  const revision = typeof machineState?.revision === "number" ? machineState.revision : void 0;
-  if (revision === void 0) {
-    throw new Error("could not resolve the machine revision of attention binding ".concat(bindingId));
-  }
-  return revision;
 }
 function workGraphClaimOwnerId(subject, fallback) {
   const trimmed = typeof subject === "string" ? subject.trim() : "";
@@ -62260,11 +62229,24 @@ function parseScheduleTrigger(value) {
   }
   return null;
 }
+function parseFormerSenders(value, hidden) {
+  if (hidden || !Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const former = record7(entry);
+    if (!former) return [];
+    return [{
+      sender: nonEmptyString3(former.sender),
+      definedAt: nonEmptyString3(former.defined_at_utc),
+      replacedAt: nonEmptyString3(former.replaced_at_utc)
+    }];
+  });
+}
 function parseConsoleSchedule(value) {
   const item = record7(value);
   const scheduleId = nonEmptyString3(item?.schedule_id);
   const identity = nonEmptyString3(item?.identity);
   if (!item || !scheduleId || !identity || typeof item.content !== "string") return null;
+  const senderHidden = item.sender_hidden === true;
   return {
     scheduleId,
     identity,
@@ -62273,8 +62255,9 @@ function parseConsoleSchedule(value) {
     trigger: parseScheduleTrigger(item.trigger),
     phase: nonEmptyString3(item.phase) ?? "unknown",
     revision: wholeNumber(item.revision),
-    sender: item.sender_hidden === true ? null : nonEmptyString3(item.sender),
-    senderHidden: item.sender_hidden === true,
+    sender: senderHidden ? null : nonEmptyString3(item.sender),
+    senderHidden,
+    senderHistory: parseFormerSenders(item.sender_history, senderHidden),
     definedAt: nonEmptyString3(item.defined_at_utc),
     createdAt: nonEmptyString3(item.created_at_utc),
     updatedAt: nonEmptyString3(item.updated_at_utc),
@@ -62351,6 +62334,19 @@ function describeScheduleSender(sender, agentName = () => void 0) {
     if (words2) return "the ".concat(words2, " console identity");
   }
   return raw;
+}
+function describeLatestTakeover(history, agentName = () => void 0, format2 = formatScheduleTime) {
+  const latest = history[history.length - 1];
+  if (!latest) return null;
+  const when = latest.replacedAt ? " on ".concat(format2(latest.replacedAt)) : "";
+  return "Taken over from ".concat(describeScheduleSender(latest.sender, agentName)).concat(when);
+}
+function describeFormerSender(former, agentName = () => void 0, format2 = formatScheduleTime) {
+  const until = former.replacedAt ? " until ".concat(format2(former.replacedAt)) : "";
+  return "Sent as ".concat(describeScheduleSender(former.sender, agentName)).concat(until);
+}
+function describeScheduleSenderHistory(history, agentName = () => void 0, format2 = formatScheduleTime) {
+  return history.map((former) => describeFormerSender(former, agentName, format2)).join("\n");
 }
 var UNIT_SECONDS = {
   minutes: 60,
@@ -62481,12 +62477,36 @@ function scheduleUpdateParams(schedule, draft, now3) {
     if ("error" in timing2) return timing2;
     params.trigger = timing2.trigger;
   }
-  return { params };
+  return { params: { ...params, ...observedRevision(schedule) } };
+}
+function scheduleResumeParams(schedule) {
+  return { schedule_id: schedule.scheduleId, ...observedRevision(schedule) };
+}
+function observedRevision(schedule) {
+  return schedule.revision === null ? {} : { expected_revision: schedule.revision };
+}
+function scheduleTakeover(error48) {
+  const rpc2 = rpcErrorOf(error48);
+  if (rpc2?.kind !== "sender_takeover_required") return null;
+  const data = record7(error48.rpcError?.data);
+  return { sender: nonEmptyString3(data?.sender) };
+}
+function scheduleTakeoverParams(params) {
+  return { ...params, take_over_sender: true };
+}
+function describeScheduleTakeover(takeover, command, agentName = () => void 0) {
+  const who = describeScheduleSender(takeover.sender, agentName);
+  const change = command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Resuming it" : "Saving your change";
+  return "This schedule sends as ".concat(who, ". ").concat(change, " makes you its sender: it sends as you from then on.");
+}
+function scheduleTakeoverConfirmLabel(command) {
+  return command === CONSOLE_SCHEDULE_COMMANDS.resume ? "Take over and resume" : "Take over and save";
 }
 function rpcErrorOf(error48) {
   const rpc2 = record7(error48?.rpcError);
   if (!rpc2) return null;
-  return { code: rpc2.code, message: rpc2.message, kind: nonEmptyString3(record7(rpc2.data)?.kind) };
+  const data = record7(rpc2.data);
+  return { code: rpc2.code, message: rpc2.message, kind: nonEmptyString3(data?.kind), action: nonEmptyString3(data?.action) };
 }
 function scheduleErrorMessage(error48, command) {
   const rpc2 = rpcErrorOf(error48);
@@ -62494,13 +62514,16 @@ function scheduleErrorMessage(error48, command) {
     case "read_only":
       return "This console is read-only, so schedules cannot be changed.";
     case "access_denied":
-      return command === CONSOLE_SCHEDULE_COMMANDS.list ? "You may not view this agent's schedules." : "You may not message this agent, so you cannot change its schedules.";
+      if (command === CONSOLE_SCHEDULE_COMMANDS.list) return "You may not view this agent's schedules.";
+      return rpc2.action === "schedule.manage" ? "You may not change this agent's schedules." : "You may not message this agent, so you cannot change its schedules.";
     case "candidate_launch":
       return "This console runs a candidate launch, which changes no schedules.";
     case "schedule_not_found":
       return "This schedule no longer exists.";
     case "schedule_revision_conflict":
       return "This schedule changed meanwhile, so nothing was changed. Check it and try again.";
+    case "sender_takeover_required":
+      return "This schedule sends as someone else, so nothing was changed. Take it over to change it.";
     case "unknown_identity":
       return "The console does not know this agent.";
     case "not_addressable":
@@ -67465,6 +67488,7 @@ var import_react63 = __toESM(require("react"));
 var ACCESS_ACTION_WORDS = {
   "agent.view": "View agents",
   "agent.send": "Message agents",
+  "schedule.manage": "Change agents' schedules",
   "agent.memory.read": "Read agent memory",
   "agent.memory.write": "Write agent memory",
   "agent.memory.delete": "Delete agent memory",
@@ -67507,6 +67531,7 @@ var FAMILY_WORDS = {
   "mob.memory": "team memory",
   memory: "memory",
   "memory.quarantine": "quarantine",
+  schedule: "schedule",
   gating: "approval",
   workgraph: "work item",
   runtime: "routing and wiring",
@@ -67534,7 +67559,7 @@ function isKnownAccessAction(action) {
 // src/panels/access-model.ts
 var ACCESS_FAMILIES = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
-  { id: "message", label: "Message", actions: ["agent.send"] },
+  { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
   { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
   {
@@ -75888,6 +75913,7 @@ function ScheduleForm({
   onCancel,
   formatTime: formatTime2 = formatScheduleTime,
   lead,
+  notice,
   className
 }) {
   return /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(
@@ -76057,6 +76083,7 @@ function ScheduleForm({
           agentName || identity,
           " as you, through the same checks as a message you send now."
         ] }),
+        notice,
         error48 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedule-form-error", children: error48 }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "cc-btn-row console-schedules__actions", children: [
           /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("button", { type: "submit", className: "cc-btn cc-btn--primary", "data-testid": "schedule-form-save", disabled: busy, children: saving ? "Saving..." : schedule ? "Save" : "Create schedule" }),
@@ -76072,6 +76099,41 @@ function ScheduleForm({
           )
         ] })
       ]
+    }
+  );
+}
+function ScheduleTakeoverNotice({
+  pending,
+  busy,
+  onConfirm,
+  onCancel,
+  agentName,
+  testId,
+  confirmTestId,
+  cancelTestId
+}) {
+  return /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+    Notice,
+    {
+      tone: "warn",
+      role: "alert",
+      className: "console-schedules__takeover",
+      testId,
+      action: /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("span", { className: "cc-btn-row", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+          "button",
+          {
+            type: "button",
+            className: "cc-btn cc-btn--sm cc-btn--primary",
+            "data-testid": confirmTestId,
+            disabled: busy,
+            onClick: onConfirm,
+            children: scheduleTakeoverConfirmLabel(pending.command)
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("button", { type: "button", className: "cc-btn cc-btn--sm cc-btn--ghost", "data-testid": cancelTestId, onClick: onCancel, children: "Keep its sender" })
+      ] }),
+      children: describeScheduleTakeover(pending.takeover, pending.command, agentName)
     }
   );
 }
@@ -76128,6 +76190,7 @@ function SchedulesSection({
   const senderLabel = (sender) => directory.lookup(sender)?.label;
   const [confirmingDelete, setConfirmingDelete] = import_react82.default.useState(null);
   const [form, setForm] = import_react82.default.useState(null);
+  const [takeover, setTakeover] = import_react82.default.useState(null);
   const [stripRef, stripWidth] = useMeasuredWidth3(480);
   const runRef = import_react82.default.useRef(run);
   runRef.current = run;
@@ -76170,6 +76233,7 @@ function SchedulesSection({
     if (!editing.canChange) {
       setForm(null);
       setConfirmingDelete(null);
+      setTakeover(null);
     }
   }, [editing.canChange]);
   const nowMs = now3().getTime();
@@ -76183,13 +76247,19 @@ function SchedulesSection({
   async function write(command, params, key) {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(command, params);
       done = true;
     } catch (error48) {
       if (alive.current) {
-        setActionError(scheduleErrorMessage(error48, command));
+        const asked = scheduleTakeover(error48);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          setActionError(scheduleErrorMessage(error48, command));
+        }
         if (scheduleIsGone(error48)) {
           setForm(null);
           setConfirmingDelete(null);
@@ -76200,14 +76270,23 @@ function SchedulesSection({
     await load();
     return done;
   }
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { command, params, key } = takeover;
+    void write(command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setForm(null);
+    });
+  }
   function openNew() {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({ schedule: null, draft: emptyScheduleDraft(now3(), timezone ?? viewerTimeZone()), error: null });
   }
   function openEdit(schedule) {
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setForm({
       schedule,
       draft: scheduleDraftFromSchedule(schedule, now3(), timezone ?? viewerTimeZone()),
@@ -76215,9 +76294,11 @@ function SchedulesSection({
     });
   }
   function change(patch2) {
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setForm((current) => current ? { ...current, draft: { ...current.draft, ...patch2 }, error: null } : current);
   }
   function toggleWeekday(day) {
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setForm((current) => current ? { ...current, draft: toggleDraftWeekday(current.draft, day), error: null } : current);
   }
   function submit(event) {
@@ -76235,7 +76316,8 @@ function SchedulesSection({
   }
   function runAction(schedule, command) {
     if (busy) return;
-    void write(command, { schedule_id: schedule.scheduleId }, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume ? scheduleResumeParams(schedule) : { schedule_id: schedule.scheduleId };
+    void write(command, params, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setForm((current) => current?.schedule?.scheduleId === schedule.scheduleId ? null : current);
@@ -76244,6 +76326,20 @@ function SchedulesSection({
   }
   const headingId = "schedules-heading:".concat(identity);
   const agentName = directory.lookup(identity)?.label;
+  const takeoverInForm = Boolean(form && editing.canChange && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update);
+  const takeoverNotice = takeover ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+    ScheduleTakeoverNotice,
+    {
+      pending: takeover,
+      busy: busy !== null,
+      onConfirm: confirmTakeover,
+      onCancel: () => setTakeover(null),
+      agentName: senderLabel,
+      testId: "schedules-takeover:".concat(identity),
+      confirmTestId: "schedules-takeover-confirm:".concat(identity),
+      cancelTestId: "schedules-takeover-cancel:".concat(identity)
+    }
+  ) : null;
   return /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(
     "section",
     {
@@ -76279,6 +76375,7 @@ function SchedulesSection({
         editing.note ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("p", { className: "console-schedules__note", "data-testid": "schedules-note:".concat(identity), children: editing.note }) : null,
         loadError ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedules-load-error:".concat(identity), children: loadError }) : null,
         actionError ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(Notice, { tone: "crit", role: "alert", className: "console-schedules__error", testId: "schedules-error:".concat(identity), children: actionError }) : null,
+        takeover && !takeoverInForm ? takeoverNotice : null,
         schedules.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "console-schedules__glance", ref: stripRef, children: [
           /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("p", { className: "console-schedules__next", "data-testid": "schedules-next:".concat(identity), children: next ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)(import_jsx_runtime109.Fragment, { children: [
             /* @__PURE__ */ (0, import_jsx_runtime109.jsx)("span", { className: "console-schedules__next-label", children: "Next" }),
@@ -76316,8 +76413,12 @@ function SchedulesSection({
             onChange: change,
             onToggleWeekday: toggleWeekday,
             onSubmit: submit,
-            onCancel: () => setForm(null),
-            formatTime: formatTime2
+            onCancel: () => {
+              setForm(null);
+              setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
+            },
+            formatTime: formatTime2,
+            notice: takeoverInForm ? takeoverNotice : null
           }
         ) : null,
         status === "loading" && schedules.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(LoadingState, { label: "Loading schedules", rows: 2 }) : null,
@@ -76356,6 +76457,15 @@ function SchedulesSection({
           children: "Sends as ".concat(describeScheduleSender(schedule.sender, senderLabel))
         }
       ),
+      schedule.senderHistory.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
+        "p",
+        {
+          className: "console-schedules__meta",
+          "data-testid": "schedule-sender-history:".concat(id),
+          title: describeScheduleSenderHistory(schedule.senderHistory, senderLabel, formatTime2),
+          children: describeLatestTakeover(schedule.senderHistory, senderLabel, formatTime2)
+        }
+      ) : null,
       editing.canChange ? /* @__PURE__ */ (0, import_jsx_runtime109.jsxs)("div", { className: "cc-btn-row console-schedules__actions", children: [
         /* @__PURE__ */ (0, import_jsx_runtime109.jsx)(
           "button",
@@ -76821,6 +76931,7 @@ function SchedulesPanel({
   const [drawer, setDrawer] = import_react84.default.useState(null);
   const [busy, setBusy] = import_react84.default.useState(null);
   const [actionError, setActionError] = import_react84.default.useState(null);
+  const [takeover, setTakeover] = import_react84.default.useState(null);
   const [confirmingDelete, setConfirmingDelete] = import_react84.default.useState(null);
   const [phaseFilter, setPhaseFilter] = import_react84.default.useState("all");
   const [drawerFocus, setDrawerFocus] = import_react84.default.useState(true);
@@ -76936,15 +77047,21 @@ function SchedulesPanel({
   async function write(identity, command, params, key) {
     setBusy(key);
     setActionError(null);
+    setTakeover(null);
     let done = false;
     try {
       await runRef.current(identity, command, params);
       done = true;
     } catch (error48) {
       if (alive.current) {
-        const message = scheduleErrorMessage(error48, command);
-        setActionError(message);
-        setDrawer((current) => current?.kind === "form" ? { ...current, error: message } : current);
+        const asked = scheduleTakeover(error48);
+        if (asked) {
+          setTakeover({ identity, command, params, key, takeover: asked });
+        } else {
+          const message = scheduleErrorMessage(error48, command);
+          setActionError(message);
+          setDrawer((current) => current?.kind === "form" ? { ...current, error: message } : current);
+        }
         if (scheduleIsGone(error48)) {
           setConfirmingDelete(null);
           setDrawer(null);
@@ -76955,10 +77072,18 @@ function SchedulesPanel({
     await load([identity], true);
     return done;
   }
+  function confirmTakeover() {
+    if (!takeover || busy) return;
+    const { identity, command, params, key } = takeover;
+    void write(identity, command, scheduleTakeoverParams(params), key).then((done) => {
+      if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.update) setDrawer(null);
+    });
+  }
   function openNew(preferred, takeFocus = true) {
     setDrawerFocus(takeFocus);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     const identity = preferred && changeable.includes(preferred) ? preferred : changeable[0];
     if (!identity) return;
     setDrawer({
@@ -76973,6 +77098,7 @@ function SchedulesPanel({
     setDrawerFocus(true);
     setActionError(null);
     setConfirmingDelete(null);
+    setTakeover(null);
     setDrawer({
       kind: "form",
       identity: schedule.identity,
@@ -76987,6 +77113,7 @@ function SchedulesPanel({
     setDrawer({ kind: "detail", identity: schedule.identity, scheduleId: schedule.scheduleId });
   }
   function patchForm(patch2) {
+    if (patch2.draft) setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
     setDrawer((current) => current?.kind === "form" ? { ...current, ...patch2 } : current);
   }
   function submit(event) {
@@ -77006,7 +77133,8 @@ function SchedulesPanel({
   }
   function runAction(schedule, command) {
     if (busy) return;
-    void write(schedule.identity, command, { schedule_id: schedule.scheduleId }, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
+    const params = command === CONSOLE_SCHEDULE_COMMANDS.resume ? scheduleResumeParams(schedule) : { schedule_id: schedule.scheduleId };
+    void write(schedule.identity, command, params, "".concat(schedule.scheduleId, ":").concat(command)).then((done) => {
       if (done && alive.current && command === CONSOLE_SCHEDULE_COMMANDS.delete) {
         setConfirmingDelete(null);
         setDrawer(
@@ -77341,6 +77469,24 @@ function SchedulesPanel({
       id
     );
   }
+  const takeoverInForm = drawer?.kind === "form" && takeover?.command === CONSOLE_SCHEDULE_COMMANDS.update;
+  const takeoverNotice = takeover ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(
+    ScheduleTakeoverNotice,
+    {
+      pending: takeover,
+      busy: busy !== null,
+      onConfirm: confirmTakeover,
+      onCancel: () => setTakeover(null),
+      agentName: (raw) => directory.lookup(raw)?.label,
+      testId: "schedules-takeover",
+      confirmTestId: "schedules-takeover-confirm",
+      cancelTestId: "schedules-takeover-cancel"
+    }
+  ) : null;
+  const closeForm = () => {
+    setDrawer(null);
+    setTakeover((current) => current?.command === CONSOLE_SCHEDULE_COMMANDS.update ? null : current);
+  };
   let drawerNode = null;
   if (drawer?.kind === "form") {
     const form = drawer;
@@ -77368,7 +77514,7 @@ function SchedulesPanel({
           "For ",
           /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(AgentName, { id: form.identity })
         ] }),
-        onClose: () => setDrawer(null),
+        onClose: closeForm,
         autoFocus: drawerFocus,
         testId: "schedules-drawer",
         closeTestId: "schedules-drawer-close",
@@ -77385,9 +77531,10 @@ function SchedulesPanel({
             onChange: (patch2) => patchForm({ draft: { ...form.draft, ...patch2 }, error: null }),
             onToggleWeekday: (day) => patchForm({ draft: toggleDraftWeekday(form.draft, day), error: null }),
             onSubmit: submit,
-            onCancel: () => setDrawer(null),
+            onCancel: closeForm,
             formatTime: formatTime2,
             lead: agentChoice,
+            notice: takeoverInForm ? takeoverNotice : null,
             className: "schedules__form"
           }
         )
@@ -77435,7 +77582,8 @@ function SchedulesPanel({
               index3 === 0 && !isPaused ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(Countdown, { to: t, now: now3 ? nowMs : void 0 }) : null
             ] }, t)) }) : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__caption", children: isPaused ? "Paused: nothing runs until it is resumed." : "No run in the next 7 days." }) }),
             /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Message", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("blockquote", { className: "schedules__message", children: schedule.content }) }),
-            schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Sends as", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__detail-text", title: schedule.sender || void 0, children: describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label) }) })
+            schedule.senderHidden ? null : /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Sends as", children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("p", { className: "schedules__detail-text", title: schedule.sender || void 0, children: describeScheduleSender(schedule.sender, (raw) => directory.lookup(raw)?.label) }) }),
+            schedule.senderHistory.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(DrawerSection, { label: "Earlier senders", count: schedule.senderHistory.length, children: /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("ol", { className: "schedules__runs", "data-testid": "schedules-sender-history:".concat(schedule.scheduleId), children: schedule.senderHistory.map((former, index3) => /* @__PURE__ */ (0, import_jsx_runtime111.jsx)("li", { title: former.sender || void 0, children: describeFormerSender(former, (raw) => directory.lookup(raw)?.label, formatTime2) }, "".concat(index3, ":").concat(former.replacedAt ?? ""))) }) }) : null
           ]
         }
       );
@@ -77485,6 +77633,7 @@ function SchedulesPanel({
         }
       ),
       actionError && drawer?.kind !== "form" ? /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(Notice, { tone: "crit", className: "schedules__notice", testId: "schedules-action-error", children: actionError }) : null,
+      takeover && !takeoverInForm ? takeoverNotice : null,
       /* @__PURE__ */ (0, import_jsx_runtime111.jsx)(
         DrawerLayout,
         {
@@ -89489,7 +89638,7 @@ function saveConsoleComposerDraft(storage2, namespace, destination, draft, compo
 var import_react100 = __toESM(require("react"));
 
 // ../sdk/typescript/src/live.ts
-function asRecord3(value, context) {
+function asRecord2(value, context) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError("".concat(context, " must be an object"));
   }
@@ -89531,7 +89680,7 @@ function parseExecutionMode(raw, context) {
   return mode;
 }
 function parsePendingLiveChannelHandle(raw) {
-  const d2 = asRecord3(raw, "pending live channel handle");
+  const d2 = asRecord2(raw, "pending live channel handle");
   assertExactKeys(
     d2,
     [
@@ -89564,7 +89713,7 @@ function parsePendingLiveChannelHandle(raw) {
   };
 }
 function parseActiveLiveChannelHandle(raw) {
-  const d2 = asRecord3(raw, "active live channel handle");
+  const d2 = asRecord2(raw, "active live channel handle");
   assertExactKeys(
     d2,
     ["channel_id", "target_identity", "execution_mode", "activation_receipt"],
@@ -89584,7 +89733,7 @@ function parseActiveLiveChannelHandle(raw) {
   };
 }
 function parseLivePlaybackOwnerReadiness(raw) {
-  const d2 = asRecord3(raw, "playback owner readiness");
+  const d2 = asRecord2(raw, "playback owner readiness");
   assertExactKeys(d2, ["channel_id", "readiness_receipt"], "playback owner readiness");
   return {
     channelId: requireString(d2.channel_id, "playback owner readiness.channel_id"),
@@ -89595,7 +89744,7 @@ function parseLivePlaybackOwnerReadiness(raw) {
   };
 }
 function parseExperimentalLiveChannelStatus(raw) {
-  const d2 = asRecord3(raw, "experimental live channel status");
+  const d2 = asRecord2(raw, "experimental live channel status");
   const phase2 = requireString(d2.phase, "experimental live channel status.phase");
   if (phase2 === "pending" || phase2 === "revoked" || phase2 === "closed") {
     assertExactKeys(d2, ["phase"], "experimental live channel status");
@@ -89608,7 +89757,7 @@ function parseExperimentalLiveChannelStatus(raw) {
   throw new TypeError("experimental live channel status.phase is unknown");
 }
 function parseTransport(raw) {
-  const d2 = asRecord3(raw, "transport");
+  const d2 = asRecord2(raw, "transport");
   const kind = requireString(d2.transport, "transport.transport");
   if (kind === "websocket") {
     assertExactKeys(d2, ["transport", "url", "token"], "websocket transport");
@@ -89635,7 +89784,7 @@ function parseTransport(raw) {
   throw new TypeError("unknown live transport ".concat(kind));
 }
 function parseCapabilities(raw) {
-  const d2 = asRecord3(raw, "capabilities");
+  const d2 = asRecord2(raw, "capabilities");
   const keys2 = [
     "audio_in",
     "audio_out",
@@ -89661,7 +89810,7 @@ function parseCapabilities(raw) {
   };
 }
 function parseContinuity(raw) {
-  const d2 = asRecord3(raw, "continuity");
+  const d2 = asRecord2(raw, "continuity");
   const mode = requireString(d2.mode, "continuity.mode");
   if (mode === "fresh" || mode === "transcript_only" || mode === "degraded") {
     assertExactKeys(d2, ["mode"], "continuity");
@@ -94625,28 +94774,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         setActionError(message);
         echoResultToCard(void 0, message);
         if (cardIdentity && jsonRpcErrorCode(err) === WORKGRAPH_CONFLICT_CODE) {
-          const refresh = workGraphConflictRefreshRequest(params);
-          if (refresh) {
-            try {
-              const fresh = await executeHeadlessCommand(
-                refresh.command,
-                controlWorkbenchTarget("workgraph"),
-                refresh.params
-              );
-              appendFrame(
-                cardIdentity,
-                buildWorkGraphOperatorResultFrame({
-                  method: consoleCommandMethod2(refresh.command),
-                  params: refresh.params,
-                  result: fresh,
-                  identity: cardIdentity,
-                  refresh: true
-                })
-              );
-              forceRender();
-            } catch {
-            }
-          }
+          await rereadWorkGraphCard(params, cardIdentity);
         }
       }
       if (workGraphPanelDockedRef.current) {
@@ -94657,29 +94785,50 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [baseUrl, refreshWorkGraphData]
   );
-  const runWorkGraphQuery = import_react102.default.useCallback(
-    (command, params) => executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params),
+  async function rereadWorkGraphCard(params, cardIdentity) {
+    const refresh = workGraphConflictRefreshRequest(params);
+    if (!refresh) return;
+    try {
+      const fresh = await executeHeadlessCommand(
+        refresh.command,
+        controlWorkbenchTarget("workgraph"),
+        refresh.params
+      );
+      appendFrame(
+        cardIdentity,
+        buildWorkGraphOperatorResultFrame({
+          method: consoleCommandMethod2(refresh.command),
+          params: refresh.params,
+          result: fresh,
+          identity: cardIdentity,
+          refresh: true
+        })
+      );
+      forceRender();
+    } catch {
+    }
+  }
+  const holdUnobservedWorkGraphAction = import_react102.default.useCallback(
+    async (entity, cardIdentity) => {
+      setActionError(WORKGRAPH_UNOBSERVED_REVISION_MESSAGE);
+      if (cardIdentity) await rereadWorkGraphCard(entity, cardIdentity);
+      if (workGraphPanelDockedRef.current) {
+        await refreshWorkGraphData().catch(() => {
+        });
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseUrl]
+    [baseUrl, refreshWorkGraphData]
   );
   const makeWorkGraphOperatorHandlers = import_react102.default.useCallback(
     (cardIdentity) => {
-      const dispatch2 = (resolveRevision, send) => {
-        void (async () => {
-          let expectedRevision;
-          try {
-            expectedRevision = await resolveRevision();
-          } catch (err) {
-            setActionError(errorMessage(err));
-            return;
-          }
-          await send(expectedRevision);
-        })();
+      const dispatch2 = (revision, entity, send) => {
+        void (revision === void 0 ? holdUnobservedWorkGraphAction(entity, cardIdentity) : send(revision));
       };
-      const revisionOr = (revision, resolve) => revision !== void 0 ? () => Promise.resolve(revision) : resolve;
       return {
         onClaim: ({ itemId: itemId2, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
+          revision,
+          { id: itemId2 },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClaim, {
             id: itemId2,
             expected_revision: expectedRevision,
@@ -94690,42 +94839,48 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           }, cardIdentity)
         ),
         onClose: ({ itemId: itemId2, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2)),
+          revision,
+          { id: itemId2 },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphClose, {
             id: itemId2,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onGoalConfirm: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalConfirm, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onGoalRequestClose: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphGoalRequestClose, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionPause: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionPause, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionResume: ({ bindingId, revision }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionResume, {
             binding_id: bindingId,
             expected_revision: expectedRevision
           }, cardIdentity)
         ),
         onAttentionReassign: ({ bindingId, revision, identity }) => dispatch2(
-          revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+          revision,
+          { binding_id: bindingId },
           (expectedRevision) => runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphAttentionReassign, {
             binding_id: bindingId,
             expected_revision: expectedRevision,
@@ -94735,7 +94890,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject]
+    [runWorkGraphCommand, holdUnobservedWorkGraphAction, experience?.access?.subject]
   );
   const workGraphCardActions = import_react102.default.useCallback(
     (cardIdentity) => {
@@ -95590,21 +95745,14 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             onClaim: workGraphPanelHandlers.onClaim,
             onClose: workGraphPanelHandlers.onClose,
             onRelease: ({ itemId: itemId2, revision }) => {
-              void (async () => {
-                let expectedRevision = revision;
-                if (expectedRevision === void 0) {
-                  try {
-                    expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId2);
-                  } catch (err) {
-                    setActionError(errorMessage(err));
-                    return;
-                  }
-                }
-                await runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphRelease, {
-                  id: itemId2,
-                  expected_revision: expectedRevision
-                });
-              })();
+              if (revision === void 0) {
+                void holdUnobservedWorkGraphAction({ id: itemId2 });
+                return;
+              }
+              void runWorkGraphCommand(CONSOLE_COMMAND_NAMES2.workgraphRelease, {
+                id: itemId2,
+                expected_revision: revision
+              });
             },
             onGoalConfirm: workGraphPanelHandlers.onGoalConfirm,
             onGoalRequestClose: workGraphPanelHandlers.onGoalRequestClose,

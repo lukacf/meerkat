@@ -35,6 +35,17 @@ them.
 
 ## [Unreleased]
 
+### Fixed
+
+- `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
+  waiting for is now cancelled at the server. A tool call whose future is
+  dropped (its caller's deadline expired, or the call was cancelled) sends
+  `notifications/cancelled` for that request id, once; a call that completes
+  sends nothing. A resource read past its deadline is cancelled the same
+  way; before, its timer could end the wait without telling the server. The
+  caller is never held while the notice is sent. A session that ends with
+  calls in flight is unchanged.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

@@ -178,6 +178,43 @@ impl MeerkatMachine {
         }))
     }
 
+    /// Observe the governed submission made under the submitter's raw key
+    /// `raw_key` and authority `association` on `session_id`, by that key:
+    /// Core qualifies the key under the association exactly as governed
+    /// admission did, and reads the input admitted under it, live or from
+    /// the store, as [`Self::input_terminal_receipt_observation`] reads it.
+    ///
+    /// The key, not an input id, names the submission: governed admission
+    /// deduplicates a repeated submission onto the input first admitted under
+    /// the key before writing any row, so the input found here is the
+    /// canonical one and may differ from the one a caller submitted (a read by
+    /// that id misses).
+    ///
+    /// The association is the caller's own; a governed submission's receipt
+    /// names it by its digest
+    /// ([`meerkat_authorization_contracts::work_association::InputAuthorityAssociation::digest`]:
+    /// SHA-256 over its canonical V1 bytes, text `v1:<hex>`), which a caller
+    /// checks before it reads, refusing an unknown version as unresolved.
+    ///
+    /// `Ok(None)` is a successful read that found no input under the key on
+    /// this runtime's store. It is absence only for this read: whether it is
+    /// final depends on the caller's own proof (the same store, its old
+    /// writers fenced, no queued owner that may submit again). A missing
+    /// session, a store not ready, a corrupt or repair-blocked row fail
+    /// typed, as for [`Self::input_terminal_receipt_observation`]; none of
+    /// them is absence.
+    pub async fn governed_input_by_key(
+        &self,
+        session_id: &SessionId,
+        raw_key: &str,
+        association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+    ) -> Result<Option<Sourced<InputTerminalReceiptObservation>>, RuntimeDriverError> {
+        let qualified = crate::input_authority::qualify_idempotency_key(association, raw_key)?;
+        // RED skeleton: the read does not run yet.
+        let _ = (session_id, qualified);
+        Ok(None)
+    }
+
     /// The shared receipt read of [`Self::input_terminal_receipt`] and
     /// [`Self::input_terminal_receipt_observation`]: resolution, batch load
     /// and validation, then `release`.

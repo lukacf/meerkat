@@ -1057,7 +1057,11 @@ async fn bind_governed_peer_ingress(
         event_key,
         handed.clone(),
     ) {
-        Ok(request) => request,
+        Ok(request) => match bound {
+            // The binder's one wait ends within the bound on the whole bind.
+            Some(limit) => request.with_wait_bound(limit),
+            None => request,
+        },
         Err(detail) => {
             return GovernedPeerBind::Refused(GovernedPeerRefusal::HostBindingMalformed(detail));
         }

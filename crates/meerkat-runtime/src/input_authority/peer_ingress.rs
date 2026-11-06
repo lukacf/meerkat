@@ -131,6 +131,9 @@ pub struct PeerIngressBindRequest {
     /// (to `event_key`) and its trusted ingress observation; Core refuses any
     /// other change.
     pub input: Input,
+    /// The delivery's one wait, for a binder that can wait out a "not now"
+    /// inside its bind ([`Self::not_now_waiter`]).
+    waiter: PeerIngressWaiter,
 }
 
 impl PeerIngressBindRequest {
@@ -151,7 +154,66 @@ impl PeerIngressBindRequest {
             event_key,
             delivery_work,
             input,
+            waiter: PeerIngressWaiter::within(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND),
         })
+    }
+
+    /// Clamp the delivery's one wait to `bound` (a supervisor delivery's
+    /// bound on the whole bind).
+    pub(crate) fn with_wait_bound(mut self, bound: std::time::Duration) -> Self {
+        self.waiter = PeerIngressWaiter::within(
+            bound.min(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND),
+        );
+        self
+    }
+
+    /// The delivery's one wait: a binder whose decision answered "not now"
+    /// (a held source, a held turn boundary) awaits
+    /// [`PeerIngressWaiter::wait_until_clear`] and decides again, whole,
+    /// inside the same bind call, so the delivery is offered once. The
+    /// binder holds nothing across the wait: no protected section, guard or
+    /// lock; its decision after the wait reads every fact again. It answers
+    /// [`PeerIngressBindRefusal::NotReady`] only once the wait did not
+    /// settle.
+    #[must_use]
+    pub fn not_now_waiter(&self) -> PeerIngressWaiter {
+        self.waiter.clone()
+    }
+}
+
+/// One delivery's wait for its binder's "not now": a single deadline from
+/// the request (Core's owner-change bound, or less), shared by every clone.
+#[derive(Debug, Clone)]
+pub struct PeerIngressWaiter {
+    deadline: crate::tokio::time::Instant,
+}
+
+impl PeerIngressWaiter {
+    fn within(bound: std::time::Duration) -> Self {
+        Self {
+            deadline: crate::tokio::time::Instant::now() + bound,
+        }
+    }
+
+    /// The delivery's deadline.
+    #[must_use]
+    pub fn deadline(&self) -> crate::tokio::time::Instant {
+        self.deadline
+    }
+
+    /// Wait for `until` within the delivery's one deadline, outside every
+    /// protected section. Settled: decide again. Not settled: answer
+    /// `NotReady`.
+    pub async fn wait_until_clear(
+        &self,
+        until: meerkat_core::authorization::NotNowWait,
+    ) -> meerkat_core::authorization::OwnerChangeWait {
+        meerkat_core::protected_section::assert_may_wait("peer_ingress.not_now_waiter");
+        // RED skeleton: the wait does not run yet.
+        drop(until);
+        meerkat_core::authorization::OwnerChangeWait::NotSettled {
+            waited: std::time::Duration::ZERO,
+        }
     }
 }
 

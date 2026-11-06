@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
+- Forge: a single shared console account
+  (`{"authentication":"local-password"}`) no longer approves frontend
+  changes, answers the controller review or answers setup prompts: each is
+  refused with 403 `approver_unauthenticated`. Reads stay open. Named
+  accounts (`{"authentication":"local-accounts"}`) sign each person in as
+  themselves.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -51,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An open console refuses requests addressed to a host it does not serve,
   so a page that rebinds its own name to the console's address cannot
   drive it.
+
+- Forge: logout also ends the login in the console
+  (`meta/console/sign_out`), so tokens minted for it stop working there;
+  when the console does not confirm, the front still ends its own session
+  and says so. Failed sign-ins are limited per account and per client
+  address, so one person's mistakes no longer lock out the others, and
+  login forms and sessions are bounded per address and per account.
 
 ### Upgrade
 
@@ -73,6 +87,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
+- Forge: an application built with one shared console account keeps it.
+  To approve in its console, declare named accounts
+  (`{"authentication":"local-accounts"}`, the same two private fields,
+  which stay the installation's own account), build it again, and add an
+  account for each further person with `.venv/bin/python setup.py` on the
+  deployment computer.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -87,6 +108,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
+- Forge: named console accounts (`{"authentication":"local-accounts"}`).
+  The installation's own account comes from the same two private fields;
+  further accounts, one per person, are kept on the deployment computer as
+  password hashes and managed with the application's setup. At sign-in an
+  empty account name is the installation's own account. Each person is
+  their own principal in the console, its access rules and its records.
+
+### Fixed
+
+- Forge: the controller review is open to every console administrator and
+  stays open after the person who opened it signs out.
+- Forge: `config/access.toml` may list further admins after the
+  installation's own account. Forge keeps managing an installation after
+  the console's Access panel rewrites that file, as long as access stays
+  enabled and the installation's own account stays an admin.
 
 ## [0.9.10] - 2026-11-04
 

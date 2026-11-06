@@ -75,9 +75,6 @@ pub(crate) struct CoreTestMembers {
     /// each with the generation it was recorded for: a later incarnation is
     /// not Broken.
     broken: Mutex<BTreeMap<AgentIdentity, (u64, CoreBrokenMember)>>,
-    /// The host preparation Core holds an identity's entry for
-    /// ([`Self::hold_host_preparation`]).
-    host_preparation: Mutex<BTreeMap<AgentIdentity, meerkat_mob::HostPreparationCause>>,
     /// The runtime mode Core runs an identity's member in
     /// ([`Self::set_runtime_mode`]); Core's default mode otherwise.
     runtime_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
@@ -511,28 +508,6 @@ impl CoreTestMembers {
             .insert(identity.clone(), (member.generation, broken));
     }
 
-    /// Core holds `identity`'s entry for its host's preparation, with
-    /// `cause`, until [`Self::release_host_preparation`]: Core refuses its
-    /// member's wakes meanwhile.
-    pub(crate) fn hold_host_preparation(
-        &self,
-        identity: &AgentIdentity,
-        cause: meerkat_mob::HostPreparationCause,
-    ) {
-        self.host_preparation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(identity.clone(), cause);
-    }
-
-    /// Core no longer holds `identity`'s entry for its host's preparation.
-    pub(crate) fn release_host_preparation(&self, identity: &AgentIdentity) {
-        self.host_preparation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(identity);
-    }
-
     /// Core runs `identity`'s member in `mode` from now on (Core's default
     /// mode until then).
     pub(crate) fn set_runtime_mode(
@@ -550,10 +525,9 @@ impl CoreTestMembers {
     /// answers it: an identity entry when `entry` (the double holds the
     /// identity declared), no entry otherwise; its live member, with the
     /// runtime mode Core runs it in, retiring once its retirement started,
-    /// and Broken while Core holds that incarnation Broken; the host
-    /// preparation its entry owes; and, for an entry no member holds, the
-    /// session its last member was bound to, which Core's retirement
-    /// archived.
+    /// and Broken while Core holds that incarnation Broken; and, for an entry
+    /// no member holds, the session its last member was bound to, which
+    /// Core's retirement archived. The double holds no host preparation.
     pub(crate) fn identity_entry(
         &self,
         identity: &AgentIdentity,
@@ -605,14 +579,6 @@ impl CoreTestMembers {
                 }
             }
             Some(_) | None => {}
-        }
-        if let Some(cause) = self
-            .host_preparation
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(identity)
-        {
-            read = read.with_host_preparation(*cause);
         }
         read
     }

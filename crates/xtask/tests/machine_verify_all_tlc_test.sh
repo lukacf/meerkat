@@ -304,8 +304,9 @@ fi
 # negation (refused while held, released then runs, a run that finishes while
 # held then a refusal, the retired drain refused). It explores the MobStop
 # and ToolsNotPublished reasons, and a second run registers, holds and
-# releases every reason (a mob member's HostPreparation among them) with no
-# input and no run, the reasons being alike in every other arm. 12 steps
+# releases every reason (a mob member's HostPreparation and a host's
+# HostRecovery among them) with no input and no run, the reasons being alike
+# in every other arm. 12 steps
 # reach every witness; deeper bounds run by hand.
 run_start_hold_audit="${workspace_root}/specs/machines/meerkat_machine/run_start_hold_audit.sh"
 if [[ ! -x "${run_start_hold_audit}" ]]; then
@@ -315,6 +316,37 @@ fi
 if run_part audits-q; then
   echo "running bounded run-start hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+fi
+
+# A host's settle of the run its session retained (SettleRetainedRun: the run
+# a restart left open and the registration marked resumable, settled without
+# resuming it and without a model request) is model-checked by a hand-written
+# audit over the same generated model: one session restarted with every
+# subset of the host's HostRecovery and a mob Stop's MobStop held, its kept
+# run marked, an input staged and bound to it and an input queued behind it,
+# then every settle arm with the observation of no run, the kept run or
+# another run, the attachment, the start and resume of the kept run or the
+# start of a new one, the runtime's settlement of the kept run as cancelled or
+# as a refused resume, a stop of it, the abandonment of an input, the holds
+# and releases, and the start of an unregister, under every generated
+# invariant plus five action properties (a settle changes nothing but the
+# stop it records; an accepted settle records the stop of exactly the marked
+# run, only with no run current; a refused settle records nothing; a run whose
+# settle was accepted never resumes, and is never settled as a refused
+# resume). It requires seven witnesses reached and refuses five seeded
+# defects (--mutants): an accept of a run other than the marked one, an
+# accept that records no stop, a busy settle that records the stop, a resume
+# that ignores the stop, and a settlement of a stopped run as a refused
+# resume. 10 steps reach every witness and mutant. It runs in shard
+# audits-r, the lightest; not yet measured on a hosted runner.
+retained_run_settle_audit="${workspace_root}/specs/machines/meerkat_machine/retained_run_settle_audit.sh"
+if [[ ! -x "${retained_run_settle_audit}" ]]; then
+  echo "error: retained-run settle audit runner is missing from workspace runfiles: ${retained_run_settle_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded retained-run settle TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${retained_run_settle_audit}" "${RETAINED_RUN_SETTLE_AUDIT_MAX_STEPS:-10}" --mutants
 fi
 
 # Keeping queued inputs across a graceful stop: an unregister records the
@@ -1300,7 +1332,8 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s;
+# 248-375 s, plus the retained-run settle audit with --mutants (0.9.11, not
+# yet measured on a hosted runner);
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

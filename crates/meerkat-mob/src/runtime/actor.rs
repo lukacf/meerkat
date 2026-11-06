@@ -3237,6 +3237,10 @@ struct AutonomousDispatchMaterial {
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
+    /// The original requester of host human input: stamped onto the admitted
+    /// runtime turn. The inbox event carries none, so inbox delivery refuses
+    /// one.
+    requester: Option<meerkat_core::PrincipalRef>,
 }
 
 /// One member turn admission owned by that member's admission lane.
@@ -3971,6 +3975,7 @@ impl DetachedMemberReadinessContext {
             llm_identity_applied_tx,
             ack_mode,
             content_attribution,
+            requester,
         } = material;
         let render_metadata = turn_metadata
             .as_ref()
@@ -3994,6 +3999,7 @@ impl DetachedMemberReadinessContext {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -4010,6 +4016,13 @@ impl DetachedMemberReadinessContext {
             } else {
                 self.provisioner.admit_turn(&member_ref, req).await
             };
+        }
+        // The inbox event carries no requester: only host human input, which
+        // always takes the runtime turn above, may carry one.
+        if requester.is_some() {
+            return Err(MobError::Internal(format!(
+                "autonomous inbox delivery for '{agent_identity}' cannot carry a requester"
+            )));
         }
         let injector = self
             .provisioner
@@ -4336,6 +4349,9 @@ struct SubmitWorkDispatchRequest {
     llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     ack_mode: crate::mob_machine::SubmitWorkAckMode,
     content_attribution: crate::mob_machine::WorkContentAttribution,
+    /// The original requester of host human input (validated before
+    /// admission), stamped onto the member runtime's admitted input.
+    requester: Option<meerkat_core::PrincipalRef>,
     operation_id: Option<meerkat_core::ops::OperationId>,
     /// Present only for a placed TurnCompleted dispatch. Its durable Record
     /// already exists; dispatch may realize but must never mint custody.
@@ -4391,9 +4407,17 @@ fn submit_work_runtime_semantics(
     handling_mode: meerkat_core::types::HandlingMode,
     turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     external_delivery_identity: Option<&crate::store::MobExternalDeliveryIdentity>,
+    requester: Option<meerkat_core::PrincipalRef>,
 ) -> meerkat_core::service::StartTurnRuntimeSemantics {
     let semantics =
         meerkat_core::service::StartTurnRuntimeSemantics::new(handling_mode, None, turn_metadata);
+    // A delivery path that cannot carry the requester onto an admitted
+    // runtime input refuses it (the provisioner's placed and direct-session
+    // paths); none drops it.
+    let semantics = match requester {
+        Some(requester) => semantics.with_requester(requester),
+        None => semantics,
+    };
     match external_delivery_identity {
         Some(identity) => {
             semantics.with_input_identity(meerkat_core::service::StartTurnInputIdentity {
@@ -61305,6 +61329,7 @@ impl MobActor {
             llm_identity_applied_tx,
             mut ack_mode,
             content_attribution,
+            requester,
             governed_input,
         } = *payload;
         let dsl_expected_session_id = expected_session_id
@@ -61448,6 +61473,7 @@ impl MobActor {
                             llm_identity_applied_tx,
                             ack_mode,
                             content_attribution,
+                            requester,
                             governed_input,
                         }),
                     });
@@ -61594,6 +61620,26 @@ impl MobActor {
                 return Err(MobError::Internal(
                     "governed input requires a tracked ingress admission".to_string(),
                 ));
+            }
+        }
+        // The original requester rides only host human input, which always
+        // becomes a runtime input of a local session-backed member (see
+        // `validate_member_turn_carriers`), and only as a qualified
+        // principal. Any other work that carries one is refused here, before
+        // MobMachine emits an ingress effect, rather than delivered without
+        // it.
+        if let Some(requester) = requester.as_ref() {
+            if content_attribution != crate::mob_machine::WorkContentAttribution::HostHuman {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "a requester rides only host human input".to_string(),
+                });
+            }
+            if requester.validate_qualified().is_err() {
+                return Err(MobError::UnsupportedForMode {
+                    mode: entry.runtime_mode,
+                    reason: "a requester must be a qualified principal".to_string(),
+                });
             }
         }
         validate_member_turn_carriers(
@@ -61890,6 +61936,7 @@ impl MobActor {
                     llm_identity_applied_tx,
                     ack_mode,
                     content_attribution,
+                    requester,
                     operation_id: None,
                     placed_completion_obligation: placed_completion_obligation.clone(),
                     placed_completion_context,
@@ -62489,6 +62536,7 @@ impl MobActor {
             llm_identity_applied_tx,
             ack_mode,
             content_attribution,
+            requester,
             operation_id,
             placed_completion_obligation,
             placed_completion_context,
@@ -62648,6 +62696,12 @@ impl MobActor {
                     "admitted governed input resolved to a non-local member".to_string(),
                 ));
             }
+            // A governed input's requester is its own association's.
+            if requester.is_some() {
+                return Err(MobError::Internal(
+                    "admitted governed input carried a second requester".to_string(),
+                ));
+            }
             return Ok(SubmitWorkDispatchCompletion::AwaitGovernedAdmission {
                 agent_identity: entry.agent_identity.clone(),
                 readiness,
@@ -62675,6 +62729,7 @@ impl MobActor {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -62750,6 +62805,7 @@ impl MobActor {
                     llm_identity_applied_tx,
                     ack_mode,
                     content_attribution,
+                    requester,
                 }),
             })
         } else {
@@ -62803,6 +62859,7 @@ impl MobActor {
                     handling_mode,
                     turn_metadata,
                     external_delivery_identity.as_ref(),
+                    requester,
                 ),
             };
             lower_work_content_attribution(&mut req, content_attribution);
@@ -68353,6 +68410,7 @@ mod routed_effect_containment_tests {
                 llm_identity_applied_tx: None,
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                requester: None,
                 governed_input: None,
                 expected_session_id: None,
             })

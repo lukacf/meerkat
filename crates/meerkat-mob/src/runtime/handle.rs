@@ -4023,6 +4023,7 @@ fn submit_work_payload(
         llm_identity_applied_tx,
         ack_mode,
         content_attribution,
+        requester: spec.requester,
         governed_input: None,
     }))
 }
@@ -13156,6 +13157,9 @@ impl MobHandle {
             llm_identity_applied_tx: None,
             ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
             content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+            // A governed input's requester is its own association's; the
+            // member's native admission alone reads it.
+            requester: None,
             // Governed input is bound to the session read above: the
             // admission refuses it if the member's binding moved since.
             expected_session_id: Some(session_id.clone()),

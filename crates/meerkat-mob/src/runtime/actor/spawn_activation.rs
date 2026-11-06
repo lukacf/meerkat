@@ -2969,6 +2969,8 @@ impl MobActor {
                     llm_identity_applied_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                     content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                    // Mob-internal kickoff has no original requester.
+                    requester: None,
                     operation_id: Some(operation_id.clone()),
                     placed_completion_obligation: None,
                     placed_completion_context: None,

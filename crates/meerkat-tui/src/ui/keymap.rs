@@ -71,6 +71,10 @@ pub enum Action {
     ScrollTop,
     /// Jump to the bottom and follow new output.
     ScrollBottom,
+    /// Focus the previous (older) helper header (Ctrl+Up; the newest first).
+    HelperPrev,
+    /// Focus the next (newer) helper header (Ctrl+Down; the newest first).
+    HelperNext,
     /// Edit the input.
     Edit(EditAction),
     /// Unbound key.
@@ -111,6 +115,8 @@ pub fn map_key(key: &KeyEvent, input_empty: bool) -> Action {
         KeyCode::Right if ctrl || alt => Action::Edit(EditAction::WordRight),
         KeyCode::Left => Action::Edit(EditAction::Left),
         KeyCode::Right => Action::Edit(EditAction::Right),
+        KeyCode::Up if ctrl => Action::HelperPrev,
+        KeyCode::Down if ctrl => Action::HelperNext,
         KeyCode::Up if shift => Action::ScrollUp(LINE_SCROLL),
         KeyCode::Down if shift => Action::ScrollDown(LINE_SCROLL),
         KeyCode::Up => Action::Edit(EditAction::Up),
@@ -208,6 +214,18 @@ mod tests {
         assert_eq!(
             map_key(&k(KeyCode::Char('X'), KeyModifiers::SHIFT), false),
             Action::Edit(EditAction::Insert('X'))
+        );
+        assert_eq!(
+            map_key(&k(KeyCode::Up, KeyModifiers::CONTROL), false),
+            Action::HelperPrev
+        );
+        assert_eq!(
+            map_key(&k(KeyCode::Down, KeyModifiers::CONTROL), true),
+            Action::HelperNext
+        );
+        assert_eq!(
+            map_key(&k(KeyCode::Down, KeyModifiers::NONE), true),
+            Action::Edit(EditAction::Down)
         );
     }
 }

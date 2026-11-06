@@ -10,7 +10,10 @@ use ratatui::widgets::{Block as BorderBlock, Borders, Paragraph};
 
 use super::markdown::{display_width, render_markdown, sanitize, truncate_to_width, wrap_text};
 use super::modal::draw_modal;
-use super::transcript::{Block, DiffView, NoticeLevel, ToolState, args_preview, result_line_count};
+use super::transcript::{
+    Block, DiffView, HelperFold, HelperState, NoticeLevel, ToolState, args_preview,
+    result_line_count,
+};
 use super::{App, HistorySearch, StatusInfo};
 
 /// Maximum visible input lines.
@@ -18,9 +21,9 @@ pub const MAX_INPUT_LINES: usize = 6;
 /// Maximum diff lines shown under a tool block.
 const MAX_DIFF_LINES: usize = 40;
 /// Braille spinner frames.
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+pub(crate) const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Milliseconds per spinner frame.
-const SPINNER_FRAME_MS: u128 = 80;
+pub(crate) const SPINNER_FRAME_MS: u128 = 80;
 /// Status-bar segment separator.
 const SEP: &str = " │ ";
 
@@ -63,6 +66,17 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let total = app.transcript.ensure_layout(area.width);
     let start = app.scroll.window(total, height);
     let mut lines = app.transcript.visible_lines(start, height);
+    let rows = app.transcript.visible_blocks(start, height);
+    // The focused helper's header (its first line) is drawn reversed.
+    if let Some(focus) = app.helper_focus()
+        && let Some(first) = app.transcript.first_line_of(focus)
+        && let Some(i) = first.checked_sub(start)
+        && rows.get(i) == Some(&focus)
+        && let Some(line) = lines.get_mut(i)
+    {
+        let focused = std::mem::take(line).patch_style(Modifier::REVERSED);
+        *line = focused;
+    }
     if let Some(sel) = app.selection() {
         lines = lines
             .into_iter()
@@ -70,7 +84,6 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .map(|(i, line)| sel.highlight(start + i, line))
             .collect();
     }
-    let rows = app.transcript.visible_blocks(start, height);
     app.set_transcript_rows(area, start, rows);
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -356,6 +369,9 @@ pub fn status_bar(status: &StatusInfo, now: Instant) -> Line<'static> {
             Style::default().fg(Color::Magenta),
         ));
     }
+    if status.helpers > 0 || status.helper_headers {
+        segs.push(Span::raw("ctrl+↓ helpers"));
+    }
     let mut spans = Vec::with_capacity(segs.len() * 2 + 1);
     spans.push(Span::raw(" "));
     for (i, seg) in segs.into_iter().enumerate() {
@@ -529,9 +545,37 @@ pub fn block_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             };
             prefixed(text, w, "", "", style, &mut out);
         }
+        Block::Helper(fold) => out.push(helper_header(fold, w)),
     }
     out.push(Line::default());
     out
+}
+
+/// A helper's one-line header: `▸ [scout · model] ⠋ running · 4 tool calls ·
+/// grep "fn resolve"` (`▾` when expanded), cut to the width.
+fn helper_header(fold: &HelperFold, w: usize) -> Line<'static> {
+    let indent = "  ".repeat(fold.depth.saturating_sub(1));
+    let marker = if fold.expanded { "▾" } else { "▸" };
+    let head = format!("{indent}{marker} {} ", sanitize(&fold.tag()));
+    let status = sanitize(&fold.status_text());
+    let status_style = match fold.state {
+        HelperState::Running => Style::default().fg(Color::Yellow),
+        HelperState::Done => Style::default().fg(Color::Green),
+        HelperState::Failed => Style::default().fg(Color::Red),
+        HelperState::Cancelled => Style::default().fg(Color::Yellow),
+        HelperState::Unmeasured => Style::default().add_modifier(Modifier::DIM),
+    };
+    let head = truncate_to_width(&head, w);
+    let rest = w.saturating_sub(display_width(&head));
+    Line::from(vec![
+        Span::styled(
+            head,
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(truncate_to_width(&status, rest), status_style),
+    ])
 }
 
 /// The hint after a tool header with output: `▸ 12 lines` / `▸ +3 -1` when

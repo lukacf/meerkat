@@ -32,7 +32,10 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 
-pub use commands::{AutoCommand, Command, CommandError, ModelCommand, RuleEffect, RulesCommand};
+pub use commands::{
+    AutoCommand, Command, CommandError, HelperTarget, HelpersCommand, ModelCommand, RuleEffect,
+    RulesCommand,
+};
 pub use compaction::{
     COMPACT_NOW, CompactFailure, CompactMode, CompactionGauge, CompactionPolicy, CompactionTrigger,
 };
@@ -47,7 +50,10 @@ pub use modal::{
 pub use runtime::{TerminalGuard, UiChannels, UiError, install_panic_hook, run_ui};
 pub use search::{HistorySearch, SearchOutcome};
 pub use selection::{CellPos, SelectMode, Selection};
-pub use transcript::{Block, BlockId, DiffView, NoticeLevel, QueuedLabel, ToolState, Transcript};
+pub use transcript::{
+    Block, BlockId, DiffView, HelperFold, HelperLast, HelperState, HelperView, NoticeLevel,
+    QueuedLabel, ToolState, Transcript,
+};
 
 /// Window in which a second Ctrl-C on an idle, empty prompt quits.
 pub const DOUBLE_CTRL_C_WINDOW: Duration = Duration::from_millis(1500);
@@ -414,6 +420,9 @@ pub struct StatusInfo {
     pub queued: usize,
     /// Number of helpers running now.
     pub helpers: usize,
+    /// Whether the transcript has helper headers (the status bar names the
+    /// key that focuses them).
+    pub helper_headers: bool,
     /// Whether the classifier is running.
     pub classifying: bool,
     /// Tokens in the last model call, `None` when unknown.
@@ -659,6 +668,8 @@ pub struct App {
     last_down: Option<LastDown>,
     /// Text to put on the system clipboard (drained by the runtime).
     clipboard: Option<QueuedCopy>,
+    /// The helper header Ctrl+Up/Down focused (Enter toggles it).
+    helper_focus: Option<BlockId>,
     dirty: bool,
 }
 
@@ -696,8 +707,141 @@ impl App {
             press: None,
             last_down: None,
             clipboard: None,
+            helper_focus: None,
             dirty: true,
         }
+    }
+
+    /// Set how helper headers start: folded (default) or expanded.
+    #[must_use]
+    pub fn with_helper_view(mut self, view: HelperView) -> Self {
+        self.transcript.set_helper_view(view);
+        self
+    }
+
+    /// The focused helper header, if it is still one on screen.
+    pub fn helper_focus(&self) -> Option<BlockId> {
+        self.helper_focus.filter(|id| {
+            matches!(self.transcript.block(*id), Some(Block::Helper(_)))
+                && !self.transcript.is_hidden(*id)
+        })
+    }
+
+    /// Ctrl+Up (`forward == false`) / Ctrl+Down: move the helper focus over
+    /// the headers on screen, starting at the newest and wrapping around.
+    fn move_helper_focus(&mut self, forward: bool) {
+        let headers: Vec<BlockId> = self.transcript.visible_helper_headers().collect();
+        let (Some(oldest), Some(newest)) = (headers.first().copied(), headers.last().copied())
+        else {
+            self.helper_focus = None;
+            return;
+        };
+        let next = match self
+            .helper_focus()
+            .and_then(|f| headers.iter().position(|h| *h == f))
+        {
+            None => newest,
+            Some(i) if forward => headers.get(i + 1).copied().unwrap_or(oldest),
+            Some(i) => i
+                .checked_sub(1)
+                .and_then(|j| headers.get(j).copied())
+                .unwrap_or(newest),
+        };
+        self.helper_focus = Some(next);
+        self.reveal_block(next);
+    }
+
+    /// Scroll so block `id`'s first line is on screen.
+    fn reveal_block(&mut self, id: BlockId) {
+        if self.transcript_area.width == 0 {
+            return;
+        }
+        let total = self.transcript.ensure_layout(self.transcript_area.width);
+        let Some(line) = self.transcript.first_line_of(id) else {
+            return;
+        };
+        let height = self.viewport_height;
+        let first = total
+            .saturating_sub(height)
+            .saturating_sub(self.scroll.offset_from_bottom);
+        if line < first {
+            self.scroll.offset_from_bottom = total.saturating_sub(height).saturating_sub(line);
+            self.scroll.follow = false;
+        } else if line >= first + height {
+            self.scroll.offset_from_bottom = total.saturating_sub(line + 1);
+            self.scroll.follow = self.scroll.offset_from_bottom == 0;
+        }
+    }
+
+    /// Expand or fold the helper header `id`; expanding stops following new
+    /// output so the header stays where it is.
+    fn toggle_helper(&mut self, id: BlockId) -> bool {
+        match self.transcript.toggle_helper(id) {
+            Some(expanded) => {
+                if expanded {
+                    self.scroll.follow = false;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `/helpers`: list, expand or fold.
+    fn helpers_command(&mut self, cmd: HelpersCommand) {
+        let (target, expand) = match cmd {
+            HelpersCommand::List => {
+                let text = self.helpers_listing();
+                self.transcript.push_notice(NoticeLevel::Info, text);
+                return;
+            }
+            HelpersCommand::Expand(target) => (target, true),
+            HelpersCommand::Fold(target) => (target, false),
+        };
+        let ids: Vec<BlockId> = match &target {
+            HelperTarget::All => self.transcript.helper_headers().map(|(id, _)| id).collect(),
+            HelperTarget::Label(label) => self.transcript.helper_header(label).into_iter().collect(),
+        };
+        if ids.is_empty() {
+            let text = match target {
+                HelperTarget::All => "no helpers yet".to_string(),
+                HelperTarget::Label(label) => format!("no helper `{label}` (try /helpers)"),
+            };
+            self.transcript.push_notice(NoticeLevel::Warn, text);
+            return;
+        }
+        for id in ids {
+            self.transcript.set_helper_expanded(id, expand);
+        }
+        if expand {
+            self.scroll.follow = false;
+        }
+    }
+
+    /// The `/helpers` listing: one line per helper header.
+    fn helpers_listing(&self) -> String {
+        use std::fmt::Write as _;
+        let mut text = String::from("helpers:");
+        let mut any = false;
+        for (_, fold) in self.transcript.helper_headers() {
+            any = true;
+            let indent = "  ".repeat(fold.depth);
+            let marker = if fold.expanded { "▾" } else { "▸" };
+            let status = fold.status_text();
+            // No spinner glyph in a static listing.
+            let status = if fold.state.is_running() {
+                status.split_once(' ').map_or(status.as_str(), |(_, rest)| rest)
+            } else {
+                status.as_str()
+            };
+            let _ = write!(text, "\n{indent}{marker} {} {status}", fold.tag());
+        }
+        if any {
+            text.push_str("\n(/helpers expand|fold <label>|all, or Ctrl+Up/Down then Enter)");
+        } else {
+            text.push_str(" none yet");
+        }
+        text
     }
 
     /// Seed the prompt history (oldest first).
@@ -1020,6 +1164,9 @@ impl App {
         let Some(id) = self.block_at_row(row) else {
             return false;
         };
+        if matches!(self.transcript.block(id), Some(Block::Helper(_))) {
+            return self.toggle_helper(id);
+        }
         match self.transcript.toggle_tool(id) {
             Some(collapsed) => {
                 if !collapsed {
@@ -1200,10 +1347,11 @@ impl App {
                     self.last_seq = 0;
                 }
                 if let StatusUpdate::Helpers(helpers) = &update {
-                    for helper in helpers {
-                        self.transcript
-                            .note_helper_model(&helper.label, &helper.model);
-                    }
+                    self.transcript.note_live_helpers(
+                        helpers
+                            .iter()
+                            .map(|h| (h.label.as_str(), h.model.as_str(), h.depth)),
+                    );
                 }
                 self.status.apply(update);
             }
@@ -1228,6 +1376,7 @@ impl App {
             }
             Msg::ResetTranscript(blocks) => {
                 self.clear_selection();
+                self.helper_focus = None;
                 self.transcript.reset(blocks);
                 self.last_seq = 0;
                 self.pending.clear_settled();
@@ -1244,11 +1393,14 @@ impl App {
             }
             Msg::CompactRebuilt(result) => self.compact_rebuilt(result),
             Msg::HelperUnmeasured(label) => {
+                self.transcript.helper_unmeasured(&label);
                 self.status.cost.mark_unmeasured(&label);
                 fx.push(Effect::CostSnapshot(self.status.cost.clone()));
             }
             Msg::Tick => {
-                dirty = self.status.running_since.is_some()
+                let helpers_spun = self.transcript.tick_helpers(now);
+                dirty = helpers_spun
+                    || self.status.running_since.is_some()
                     || self.status.classifying
                     || self.last_ctrl_c.is_some()
                     || self.quit_confirm.is_some()
@@ -1265,6 +1417,7 @@ impl App {
             }
         }
         self.status.queued = self.pending.len();
+        self.status.helper_headers = self.transcript.has_helpers();
         self.dirty |= dirty;
         fx
     }
@@ -1302,8 +1455,23 @@ impl App {
             self.last_ctrl_c = None;
         }
         let page = self.viewport_height.saturating_sub(2).max(1);
+        // Editing drops the helper focus; Enter and Esc act on it first.
+        if matches!(action, Action::Edit(_) | Action::Newline) {
+            self.helper_focus = None;
+        }
         match action {
-            Action::Submit => self.submit(now, fx),
+            Action::Submit => match self.helper_focus() {
+                Some(id) => {
+                    self.toggle_helper(id);
+                }
+                None => {
+                    self.helper_focus = None;
+                    self.submit(now, fx);
+                }
+            },
+            Action::Escape if self.helper_focus().is_some() => self.helper_focus = None,
+            Action::HelperPrev => self.move_helper_focus(false),
+            Action::HelperNext => self.move_helper_focus(true),
             Action::Newline => self.input.newline(),
             Action::CtrlC => self.ctrl_c(now, fx),
             Action::CtrlD => {
@@ -1622,6 +1790,11 @@ impl App {
         for block in blocks {
             if self.transcript.remove_block(block).is_some() {
                 self.pending.block_removed(block);
+                self.helper_focus = match self.helper_focus {
+                    Some(f) if f == block => None,
+                    Some(f) if f.0 > block.0 => Some(BlockId(f.0 - 1)),
+                    other => other,
+                };
                 if self.run_first_block > block.0 {
                     self.run_first_block -= 1;
                 }
@@ -2045,6 +2218,7 @@ impl App {
             Command::Rules(RulesCommand::Remove(n)) => fx.push(Effect::RemoveRule(n)),
             Command::Rules(RulesCommand::Trust) => fx.push(Effect::TrustRealmRules),
             Command::McpTrust => fx.push(Effect::TrustProjectMcp),
+            Command::Helpers(cmd) => self.helpers_command(cmd),
         }
     }
 
@@ -4168,5 +4342,168 @@ mod tests {
             StatusUpdate::CostTotals(SessionCost::default()),
         ));
         assert!(!footer(&app).contains('$'), "{}", footer(&app));
+    }
+
+    fn helper_msg(label: &str, event: AgentEvent) -> Msg {
+        Msg::Scoped(
+            crate::mobs::HelperTag {
+                owner: meerkat_core::SessionId::new(),
+                path: vec![label.to_string()],
+                model: "m".into(),
+            }
+            .scope(event),
+        )
+    }
+
+    /// An app with the helpers `scout` then `fork-1`, one call each.
+    fn helper_app() -> (App, BlockId, BlockId) {
+        let mut app = App::new(StatusInfo::default());
+        app.transcript.push(user("go"));
+        let mut live = Vec::new();
+        for label in ["scout", "fork-1"] {
+            live.push(crate::mobs::HelperStatus {
+                label: label.into(),
+                model: "m".into(),
+                depth: 1,
+            });
+            app.update(Msg::Status(StatusUpdate::Helpers(live.clone())));
+            app.update(helper_msg(
+                label,
+                AgentEvent::ToolCallRequested {
+                    id: "a".into(),
+                    name: "glob".into(),
+                    args: test_args(json!({"pattern": "*"})),
+                },
+            ));
+        }
+        let scout = app.transcript.helper_header("scout").unwrap();
+        let fork = app.transcript.helper_header("fork-1").unwrap();
+        (app, scout, fork)
+    }
+
+    fn ctrl_key(code: KeyCode) -> Msg {
+        Msg::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn expanded(app: &App, id: BlockId) -> bool {
+        match app.transcript.block(id) {
+            Some(Block::Helper(fold)) => fold.expanded,
+            other => panic!("not a helper header: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_down_focuses_the_newest_helper_and_ctrl_up_down_wrap() {
+        let (mut app, scout, fork) = helper_app();
+        assert!(app.status.helper_headers);
+        assert_eq!(app.helper_focus(), None);
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.helper_focus(), Some(fork));
+        // Down past the newest wraps to the oldest, up past the oldest to
+        // the newest.
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.helper_focus(), Some(scout));
+        app.update(ctrl_key(KeyCode::Up));
+        assert_eq!(app.helper_focus(), Some(fork));
+        app.update(ctrl_key(KeyCode::Up));
+        assert_eq!(app.helper_focus(), Some(scout));
+        // The first Ctrl+Up also starts at the newest.
+        let (mut app, _, fork) = helper_app();
+        app.update(ctrl_key(KeyCode::Up));
+        assert_eq!(app.helper_focus(), Some(fork));
+        // No helpers: nothing to focus.
+        let mut app = App::new(StatusInfo::default());
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.helper_focus(), None);
+        assert!(!app.status.helper_headers);
+    }
+
+    #[test]
+    fn enter_toggles_the_focused_helper_without_submitting() {
+        let (mut app, _, fork) = helper_app();
+        type_str(&mut app, "draft");
+        app.update(ctrl_key(KeyCode::Down));
+        let fx = app.update(key(KeyCode::Enter));
+        assert!(fx.is_empty(), "{fx:?}");
+        assert!(!app.is_running());
+        assert_eq!(app.input.text(), "draft");
+        assert!(expanded(&app, fork));
+        // Still focused: Enter folds it again.
+        app.update(key(KeyCode::Enter));
+        assert!(!expanded(&app, fork));
+        assert_eq!(app.helper_focus(), Some(fork));
+    }
+
+    #[test]
+    fn esc_and_editing_drop_the_helper_focus() {
+        let (mut app, _, fork) = helper_app();
+        app.update(ctrl_key(KeyCode::Down));
+        assert_eq!(app.helper_focus(), Some(fork));
+        // Esc drops the focus and does nothing else.
+        let fx = app.update(key(KeyCode::Esc));
+        assert!(fx.is_empty());
+        assert_eq!(app.helper_focus(), None);
+        // Typing drops it too (and types); Enter then submits.
+        app.update(ctrl_key(KeyCode::Down));
+        type_str(&mut app, "x");
+        assert_eq!(app.helper_focus(), None);
+        assert_eq!(app.input.text(), "x");
+        let fx = app.update(key(KeyCode::Enter));
+        assert_eq!(fx, vec![Effect::StartTurn("x".into())]);
+        assert!(!expanded(&app, fork));
+    }
+
+    #[test]
+    fn a_click_on_a_helper_header_toggles_it() {
+        let (mut app, scout, _) = helper_app();
+        draw_rows(&mut app, 0, 80, 20);
+        // Rows: user (2 lines), then scout's header.
+        assert_eq!(app.block_at_row(2), Some(scout));
+        click_at(&mut app, 2);
+        assert!(expanded(&app, scout));
+        // Later than a double click.
+        draw_rows(&mut app, 0, 80, 20);
+        let later = Instant::now() + Duration::from_secs(2);
+        app.update_at(down(2, 3), later);
+        app.update_at(up(2, 3), later);
+        assert!(!expanded(&app, scout));
+    }
+
+    #[test]
+    fn helpers_command_lists_expands_and_folds() {
+        let (mut app, scout, fork) = helper_app();
+        type_str(&mut app, "/helpers");
+        app.update(key(KeyCode::Enter));
+        let listing = match app.transcript.blocks().last() {
+            Some(Block::Notice { text, .. }) => text.clone(),
+            other => panic!("no listing: {other:?}"),
+        };
+        assert!(listing.contains("▸ [scout · m] running · 1 tool call"), "{listing}");
+        assert!(listing.contains("[fork-1 · m]"), "{listing}");
+        type_str(&mut app, "/helpers expand scout");
+        app.update(key(KeyCode::Enter));
+        assert!(expanded(&app, scout));
+        assert!(!expanded(&app, fork));
+        type_str(&mut app, "/helpers expand all");
+        app.update(key(KeyCode::Enter));
+        assert!(expanded(&app, scout) && expanded(&app, fork));
+        type_str(&mut app, "/helpers fold all");
+        app.update(key(KeyCode::Enter));
+        assert!(!expanded(&app, scout) && !expanded(&app, fork));
+        type_str(&mut app, "/helpers fold nobody");
+        app.update(key(KeyCode::Enter));
+        assert!(matches!(
+            app.transcript.blocks().last(),
+            Some(Block::Notice { level: NoticeLevel::Warn, text }) if text.contains("nobody")
+        ));
+    }
+
+    #[test]
+    fn a_reset_drops_the_helper_focus() {
+        let (mut app, _, _) = helper_app();
+        app.update(ctrl_key(KeyCode::Down));
+        app.update(Msg::ResetTranscript(Vec::new()));
+        assert_eq!(app.helper_focus(), None);
+        assert!(!app.status.helper_headers);
     }
 }

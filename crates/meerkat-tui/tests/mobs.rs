@@ -603,3 +603,95 @@ async fn a_helpers_owner_survives_a_restart_until_it_retires() {
     drop(helpers);
     rig.quit().await;
 }
+
+/// The tool definitions of `recorded` that start helpers.
+fn nesting_tools(recorded: &common::Recorded) -> Vec<&str> {
+    recorded
+        .tools
+        .iter()
+        .map(String::as_str)
+        .filter(|tool| {
+            matches!(*tool, "delegate" | "council" | "fork_off") || tool.starts_with("mob_")
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_at_the_default_depth_cannot_delegate() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        delegate("d1", "scout", "HELPER-TASK: delegate onwards"),
+        delegate("d2", "inner", "NESTED-TASK"),
+        Step::Text("HELPER-DONE: did it myself"),
+        Step::Text("parent done"),
+    ]);
+    let mut rig = Rig::start(&ws.root, &llm, Start::New).await;
+    rig.send(Effect::StartTurn("USER-ASK delegate it".into()));
+    let outcome = rig.turn_finished().await;
+    assert_eq!(outcome.result.expect("turn succeeds").text, "parent done");
+    let recorded = llm.recorded();
+    assert_eq!(
+        recorded.len(),
+        4,
+        "parent, helper ×2, parent; no nested helper"
+    );
+    // The session may delegate; its helper, at depth 1 of 1, is offered no
+    // tool that starts helpers, and its call is refused.
+    assert!(recorded[0].tools.iter().any(|t| t == "delegate"));
+    assert!(recorded[1].user().contains("HELPER-TASK"));
+    assert!(
+        nesting_tools(&recorded[1]).is_empty(),
+        "{:?}",
+        recorded[1].tools
+    );
+    assert!(recorded[1].system().contains("cannot delegate further"));
+    // Its other tools stay: only the mob category is off.
+    for tool in ["shell", "read_file"] {
+        assert!(recorded[1].tools.iter().any(|t| t == tool), "{tool}");
+    }
+    let refused = tool_result(&recorded[2].messages, "d2");
+    assert!(refused.is_error, "{}", refused.text_content());
+    assert!(
+        recorded.iter().all(|r| !r.user().contains("NESTED-TASK")),
+        "no nested helper ran"
+    );
+    let result = tool_result(&recorded[3].messages, "d1");
+    assert!(result.text_content().contains("HELPER-DONE"));
+    rig.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_helper_below_a_raised_depth_limit_delegates_once_more() {
+    let ws = Workspace::new();
+    let llm = ScriptedLlmClient::new(vec![
+        delegate("d1", "scout", "HELPER-TASK: delegate onwards"),
+        delegate("d2", "inner", "NESTED-TASK"),
+        Step::Text("NESTED-DONE"),
+        Step::Text("HELPER-DONE"),
+        Step::Text("parent done"),
+    ]);
+    let options = RigOptions {
+        args: vec!["--set".into(), "helpers.max_depth=2".into()],
+        ..RigOptions::default()
+    };
+    let mut rig = Rig::start_opts(&ws.root, &llm, Start::New, options).await;
+    rig.send(Effect::StartTurn("USER-ASK delegate it twice".into()));
+    let outcome = rig.turn_finished().await;
+    assert_eq!(outcome.result.expect("turn succeeds").text, "parent done");
+    let recorded = llm.recorded();
+    assert_eq!(recorded.len(), 5, "parent, helper, nested, helper, parent");
+    assert!(recorded[1].tools.iter().any(|t| t == "delegate"));
+    // The nested helper is at the limit: no tool that starts helpers.
+    assert!(recorded[2].user().contains("NESTED-TASK"));
+    assert!(
+        nesting_tools(&recorded[2]).is_empty(),
+        "{:?}",
+        recorded[2].tools
+    );
+    let nested = tool_result(&recorded[3].messages, "d2");
+    assert!(!nested.is_error, "{}", nested.text_content());
+    assert!(nested.text_content().contains("NESTED-DONE"));
+    let result = tool_result(&recorded[4].messages, "d1");
+    assert!(result.text_content().contains("HELPER-DONE"));
+    rig.quit().await;
+}

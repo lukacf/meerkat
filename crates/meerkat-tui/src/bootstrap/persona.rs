@@ -43,6 +43,8 @@ with a complete, self-contained answer.
 that delegated to you. If a call is blocked (`policy_denied`), do not try to \
 achieve the same effect another way: report what was blocked and why in your result.
 - Stay within the task you were given.
+- Helpers nest only as deep as the user allows: if starting another helper is \
+denied to you, you are at that limit and cannot delegate further, so do the work yourself.
 ";
 
 #[cfg(test)]
@@ -69,5 +71,6 @@ mod tests {
         assert!(CODING_PERSONA.contains("untrusted notes"));
         assert!(HELPER_PERSONA.contains("policy_denied"));
         assert!(!HELPER_PERSONA.contains("read_file"));
+        assert!(HELPER_PERSONA.contains("cannot delegate further"));
     }
 }

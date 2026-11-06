@@ -115,6 +115,10 @@ pub struct HelperHostParts {
     /// session's implicit `delegate` mob names its model's, so a helper can
     /// run on a model only an endpoint lists.
     pub profiles: ModelProfiles,
+    /// How deep helpers may nest (`[helpers] max_depth`): a helper at this
+    /// depth gets no tool that starts helpers, and a deeper spawn is
+    /// refused.
+    pub max_depth: u8,
 }
 
 #[cfg(feature = "mob")]
@@ -139,6 +143,7 @@ impl Helpers {
             workgraph,
             shell_env,
             profiles,
+            max_depth,
         } = parts;
         let (registry, updates) = HelperRegistry::persistent(&realm_root);
         let registry = Arc::new(registry);
@@ -156,6 +161,7 @@ impl Helpers {
             tools,
             shell_env,
             spawning_tx,
+            max_depth,
         );
         let state = MobMcpState::new_with_runtime_adapter(
             service as Arc<dyn meerkat_mob::MobSessionService>,

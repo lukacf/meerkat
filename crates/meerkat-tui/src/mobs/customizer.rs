@@ -17,6 +17,12 @@ use super::registry::{HelperKey, HelperRegistry, HelperTag, Owner};
 use crate::approval::{ApprovalEngine, ApprovalGate};
 use crate::bootstrap::HELPER_PERSONA;
 
+/// The mob tools that start a member or a council: denied to a helper at
+/// the configured depth limit (`[helpers] max_depth`), so helpers nest no
+/// deeper. `fork_off` is denied to every helper anyway
+/// ([`crate::session::UNGATED_SPAWN_TOOLS`]).
+pub const NESTING_TOOLS: [&str; 4] = ["delegate", "mob_create", "mob_spawn_member", "council"];
+
 /// Builds the external tools of one helper (the TUI's file tools).
 pub type HelperTools = Arc<dyn Fn() -> Arc<dyn AgentToolDispatcher> + Send + Sync>;
 
@@ -38,6 +44,8 @@ pub struct HelperCustomizer {
     /// shell's curated set), `None` when the shell runs unconfined.
     shell_env: Option<HashMap<String, String>>,
     spawning: mpsc::UnboundedSender<Spawning>,
+    /// How deep helpers may nest (`[helpers] max_depth`).
+    max_depth: u8,
 }
 
 impl std::fmt::Debug for HelperCustomizer {
@@ -48,7 +56,8 @@ impl std::fmt::Debug for HelperCustomizer {
 
 impl HelperCustomizer {
     /// A customizer gating helpers with `engine`; a helper's shell
-    /// commands get `shell_env` (see [`inherit_shell_env`]).
+    /// commands get `shell_env` (see [`inherit_shell_env`]); helpers nest
+    /// at most `max_depth` levels deep (see [`Depth`]).
     #[must_use]
     pub fn new(
         registry: Arc<HelperRegistry>,
@@ -56,6 +65,7 @@ impl HelperCustomizer {
         tools: HelperTools,
         shell_env: Option<HashMap<String, String>>,
         spawning: mpsc::UnboundedSender<Spawning>,
+        max_depth: u8,
     ) -> Self {
         Self {
             registry,
@@ -63,6 +73,7 @@ impl HelperCustomizer {
             tools,
             shell_env,
             spawning,
+            max_depth,
         }
     }
 }
@@ -86,6 +97,51 @@ fn requested_model(spec: &SpawnMemberSpec) -> Option<String> {
 fn inherit_shell_env(spec: &mut SpawnMemberSpec, shell_env: Option<&HashMap<String, String>>) {
     if spec.shell_env.is_none() {
         spec.shell_env = shell_env.cloned();
+    }
+}
+
+/// Where a helper sits against the depth limit. A helper's depth is the
+/// length of its path: the session's own helpers are at depth 1, theirs at
+/// 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// It may start helpers of its own.
+    MayNest,
+    /// It may not: its [`NESTING_TOOLS`] are denied.
+    Last,
+    /// It should not exist: its spawner should not have had the tools.
+    TooDeep,
+}
+
+impl Depth {
+    /// The [`NESTING_TOOLS`] a helper at this depth is denied.
+    fn nesting_denied(self) -> &'static [&'static str] {
+        match self {
+            Self::MayNest => &[],
+            Self::Last | Self::TooDeep => &NESTING_TOOLS,
+        }
+    }
+
+    fn of(depth: usize, max_depth: u8) -> Self {
+        match depth.cmp(&usize::from(max_depth)) {
+            std::cmp::Ordering::Less => Self::MayNest,
+            std::cmp::Ordering::Equal => Self::Last,
+            std::cmp::Ordering::Greater => Self::TooDeep,
+        }
+    }
+
+    /// Where the helper `label` at `depth` sits, refusing a `fresh` spawn
+    /// beyond the limit: a second line of defence, as its spawner was at
+    /// the limit and should not have had the tools. A member restored from
+    /// before the limit was lowered keeps running, with the tools denied.
+    fn admit(label: &str, depth: usize, max_depth: u8, fresh: bool) -> Result<Self, MobError> {
+        match Self::of(depth, max_depth) {
+            Self::TooDeep if fresh => Err(refuse(format_args!(
+                "`{label}` would be a helper {depth} levels deep, but helpers nest at most {max_depth} (tui.toml [helpers] max_depth, or --set helpers.max_depth=N); do the work without delegating"
+            ))),
+            Self::TooDeep => Ok(Self::Last),
+            depth => Ok(depth),
+        }
     }
 }
 
@@ -113,7 +169,6 @@ fn shape(
         spec.external_tools = Some(tools());
     }
     inherit_shell_env(spec, shell_env);
-    deny_ungated_tools(spec);
     spec.additional_instructions
         .get_or_insert_with(Vec::new)
         .push(HELPER_PERSONA.to_string());
@@ -126,14 +181,21 @@ fn shape(
 /// spec names: none or `Inherit` becomes the TUI's deny list, a deny list
 /// gains the names, an allow list loses them, constraints gain a deny
 /// constraint, and `ReadOnly` (which already admits no mutating tool) stays.
-fn deny_ungated_tools(spec: &mut SpawnMemberSpec) {
+/// `also` adds names to deny (a helper at the depth limit gets
+/// [`NESTING_TOOLS`]); with any, `ReadOnly` becomes a read-only constraint
+/// beside the deny constraint, so the names are denied whatever read-only
+/// admits.
+fn deny_ungated_tools(spec: &mut SpawnMemberSpec, also: &[&str]) {
     use meerkat_core::ops::{ToolAccessConstraint, ToolAccessPolicy};
-    let ToolAccessPolicy::DenyList(denied) = crate::session::tool_access_policy() else {
+    let ToolAccessPolicy::DenyList(mut denied) = crate::session::tool_access_policy() else {
         // The TUI policy is a deny list; anything else is a programming
         // error that must not widen a helper's tools.
         spec.tool_access_policy = Some(crate::session::tool_access_policy());
         return;
     };
+    for name in also {
+        denied.insert((*name).to_string());
+    }
     spec.tool_access_policy = Some(match spec.tool_access_policy.take() {
         None | Some(ToolAccessPolicy::Inherit) => ToolAccessPolicy::DenyList(denied),
         Some(ToolAccessPolicy::DenyList(mut names)) => {
@@ -146,12 +208,47 @@ fn deny_ungated_tools(spec: &mut SpawnMemberSpec) {
             names.retain(|name| !denied.contains(name.as_str()));
             ToolAccessPolicy::AllowList(names)
         }
-        Some(ToolAccessPolicy::ReadOnly) => ToolAccessPolicy::ReadOnly,
+        Some(ToolAccessPolicy::ReadOnly) if also.is_empty() => ToolAccessPolicy::ReadOnly,
+        Some(ToolAccessPolicy::ReadOnly) => ToolAccessPolicy::Constraints(vec![
+            ToolAccessConstraint::ReadOnly,
+            ToolAccessConstraint::DenyNames(denied),
+        ]),
         Some(ToolAccessPolicy::Constraints(mut constraints)) => {
             constraints.push(ToolAccessConstraint::DenyNames(denied));
             ToolAccessPolicy::Constraints(constraints)
         }
     });
+}
+
+/// Keep the mob tools out of a helper's tool list: the deny list refuses
+/// their calls, but every schema left in the list costs tokens in every
+/// call (the mob and council tools are about 25k).
+///
+/// The mob category goes off through the spec's category overrides. A
+/// member that inherits its spawner's tool filter (a `delegate` helper)
+/// without an override profile otherwise gets every category opened for
+/// that filter to narrow, which the engine does only while the spawn
+/// overrides nothing; so such a spawn names every other category open
+/// itself, exactly as the engine would have.
+fn drop_mob_tools(spec: &mut SpawnMemberSpec) {
+    use meerkat_core::ToolCategoryOverride;
+    let overrides = &mut spec.tool_category_overrides;
+    if spec.inherited_tool_filter.is_some() && spec.override_profile.is_none() {
+        for category in [
+            &mut overrides.builtins,
+            &mut overrides.shell,
+            &mut overrides.comms,
+            &mut overrides.memory,
+            &mut overrides.workgraph,
+            &mut overrides.schedule,
+            &mut overrides.image_generation,
+        ] {
+            if *category == ToolCategoryOverride::Inherit {
+                *category = ToolCategoryOverride::Enable;
+            }
+        }
+    }
+    overrides.mob = ToolCategoryOverride::Disable;
 }
 
 /// A refused helper, as the mob reports it.
@@ -167,6 +264,7 @@ impl HelperCustomizer {
         owner: &Owner,
         spec: &mut SpawnMemberSpec,
         session: Option<&SessionId>,
+        fresh: bool,
     ) -> Result<(), MobError> {
         let label = spec.identity.to_string();
         let model = requested_model(spec).unwrap_or_else(|| owner.model.clone());
@@ -177,6 +275,7 @@ impl HelperCustomizer {
             path,
             model: model.clone(),
         };
+        let depth = Depth::admit(&label, tag.path.len(), self.max_depth, fresh)?;
         // Bound durably before the member exists: a member whose owner a
         // restart would lose never runs.
         self.registry
@@ -194,6 +293,10 @@ impl HelperCustomizer {
             &self.tools,
             self.shell_env.as_ref(),
         );
+        deny_ungated_tools(spec, depth.nesting_denied());
+        if depth != Depth::MayNest {
+            drop_mob_tools(spec);
+        }
         let _ = self.spawning.send(Spawning { key, tag });
         Ok(())
     }
@@ -233,7 +336,8 @@ impl SpawnMemberCustomizer for HelperCustomizer {
                 .owner_for_spawn(&ctx.mob_id, ctx.spawner_identity.as_ref())
                 .map_err(refuse)?,
         };
-        self.admit(key, &owner, spec, None)
+        let fresh = !matches!(ctx.spawn_source, SpawnSource::Resume);
+        self.admit(key, &owner, spec, None, fresh)
     }
 
     fn customize_resume(
@@ -246,12 +350,12 @@ impl SpawnMemberCustomizer for HelperCustomizer {
         // or not that session is open; a member nobody bound is refused.
         let key = HelperKey::new(ctx.mob_id.clone(), spec.identity.clone());
         let owner = self.persisted_owner(&key)?;
-        self.admit(key, &owner, spec, Some(&durable.session_id))
+        self.admit(key, &owner, spec, Some(&durable.session_id), false)
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -265,7 +369,7 @@ mod tests {
         for policy in [None, Some(ToolAccessPolicy::Inherit)] {
             let mut spec = SpawnMemberSpec::new("delegate", "worker");
             spec.tool_access_policy = policy;
-            deny_ungated_tools(&mut spec);
+            deny_ungated_tools(&mut spec, &[]);
             assert_eq!(spec.tool_access_policy, Some(crate::session::tool_access_policy()));
         }
     }
@@ -277,7 +381,7 @@ mod tests {
         spec.tool_access_policy = Some(ToolAccessPolicy::DenyList(
             ["web_fetch"].into_iter().collect(),
         ));
-        deny_ungated_tools(&mut spec);
+        deny_ungated_tools(&mut spec, &[]);
         let Some(ToolAccessPolicy::DenyList(names)) = &spec.tool_access_policy else {
             panic!("{:?}", spec.tool_access_policy);
         };
@@ -291,7 +395,7 @@ mod tests {
         spec.tool_access_policy = Some(ToolAccessPolicy::AllowList(
             ["read_file", "fork_off"].into_iter().collect(),
         ));
-        deny_ungated_tools(&mut spec);
+        deny_ungated_tools(&mut spec, &[]);
         let Some(ToolAccessPolicy::AllowList(names)) = &spec.tool_access_policy else {
             panic!("{:?}", spec.tool_access_policy);
         };
@@ -303,14 +407,14 @@ mod tests {
         use meerkat_core::ops::{ToolAccessConstraint, ToolAccessPolicy};
         let mut spec = SpawnMemberSpec::new("delegate", "worker");
         spec.tool_access_policy = Some(ToolAccessPolicy::ReadOnly);
-        deny_ungated_tools(&mut spec);
+        deny_ungated_tools(&mut spec, &[]);
         assert_eq!(spec.tool_access_policy, Some(ToolAccessPolicy::ReadOnly));
 
         let mut spec = SpawnMemberSpec::new("delegate", "worker");
         spec.tool_access_policy = Some(ToolAccessPolicy::Constraints(vec![
             ToolAccessConstraint::ReadOnly,
         ]));
-        deny_ungated_tools(&mut spec);
+        deny_ungated_tools(&mut spec, &[]);
         let Some(ToolAccessPolicy::Constraints(constraints)) = &spec.tool_access_policy else {
             panic!("{:?}", spec.tool_access_policy);
         };
@@ -319,6 +423,82 @@ mod tests {
             &constraints[1],
             ToolAccessConstraint::DenyNames(names) if denies_fork_off(names)
         ));
+    }
+
+    fn denied_names(spec: &SpawnMemberSpec) -> meerkat_core::ToolNameSet {
+        use meerkat_core::ops::ToolAccessPolicy;
+        let Some(ToolAccessPolicy::DenyList(names)) = &spec.tool_access_policy else {
+            panic!("{:?}", spec.tool_access_policy);
+        };
+        names.clone()
+    }
+
+    #[test]
+    fn a_helper_at_the_depth_limit_is_denied_the_nesting_tools() {
+        // The session's own helpers are at depth 1; with the default limit
+        // they may not start helpers.
+        let depth = Depth::admit("scout", 1, 1, true).unwrap();
+        assert_eq!(depth, Depth::Last);
+        let mut spec = SpawnMemberSpec::new("delegate", "scout");
+        deny_ungated_tools(&mut spec, &NESTING_TOOLS);
+        let names = denied_names(&spec);
+        for name in ["delegate", "mob_create", "mob_spawn_member", "council"] {
+            assert!(names.contains(name), "{name}: {names:?}");
+        }
+        assert!(denies_fork_off(&names), "{names:?}");
+        // A read-only helper keeps read-only and loses them too.
+        let mut spec = SpawnMemberSpec::new("delegate", "scout");
+        spec.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::ReadOnly);
+        deny_ungated_tools(&mut spec, &NESTING_TOOLS);
+        let Some(meerkat_core::ops::ToolAccessPolicy::Constraints(constraints)) =
+            &spec.tool_access_policy
+        else {
+            panic!("{:?}", spec.tool_access_policy);
+        };
+        assert!(matches!(
+            constraints.as_slice(),
+            [
+                meerkat_core::ops::ToolAccessConstraint::ReadOnly,
+                meerkat_core::ops::ToolAccessConstraint::DenyNames(names),
+            ] if names.contains("delegate") && names.contains("council")
+        ));
+    }
+
+    #[test]
+    fn a_helper_at_the_depth_limit_has_the_mob_category_off() {
+        use meerkat_core::ToolCategoryOverride::{Disable, Inherit};
+        // Without an inherited filter only the mob category changes.
+        let mut spec = SpawnMemberSpec::new("delegate", "scout");
+        drop_mob_tools(&mut spec);
+        let overrides = &spec.tool_category_overrides;
+        assert_eq!(overrides.mob, Disable);
+        assert_eq!((overrides.shell, overrides.builtins), (Inherit, Inherit));
+    }
+
+    #[test]
+    fn a_helper_below_the_depth_limit_keeps_the_nesting_tools() {
+        let depth = Depth::admit("scout", 1, 2, true).unwrap();
+        assert_eq!(depth, Depth::MayNest);
+        let mut spec = SpawnMemberSpec::new("delegate", "scout");
+        deny_ungated_tools(&mut spec, &[]);
+        let names = denied_names(&spec);
+        for name in NESTING_TOOLS {
+            assert!(!names.contains(name), "{name}: {names:?}");
+        }
+        assert!(denies_fork_off(&names));
+        assert_eq!(Depth::admit("inner", 2, 2, true).unwrap(), Depth::Last);
+    }
+
+    #[test]
+    fn a_spawn_beyond_the_depth_limit_is_refused() {
+        let err = Depth::admit("inner", 2, 1, true).unwrap_err().to_string();
+        assert!(err.contains("helper refused"), "{err}");
+        assert!(err.contains("`inner`") && err.contains("helpers.max_depth"), "{err}");
+        // At 0 even the session's own helpers are refused.
+        assert!(Depth::admit("scout", 1, 0, true).is_err());
+        // A restored member from before the limit was lowered keeps running
+        // with the tools denied.
+        assert_eq!(Depth::admit("inner", 2, 1, false).unwrap(), Depth::Last);
     }
 
     #[test]

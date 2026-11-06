@@ -129,6 +129,7 @@ pub async fn run(args: Args) -> Result<(), TuiError> {
         .map(|global| History::load(global.history_file()));
     let mut app = App::new(status)
         .with_compaction_policy(template.policy)
+        .with_helper_view(runtime.ui.helpers)
         .with_history(history.entries().to_vec())
         .with_global_history(
             global_history

@@ -22,6 +22,7 @@
 use crate::approval::trust::{TrustStatus, Untrusted};
 use crate::bootstrap::confinement::ConfinementSection;
 use crate::ui::compaction::{CompactMode, CompactionPolicy};
+use crate::ui::transcript::HelperView;
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -682,6 +683,63 @@ pub struct AutoSection {
     pub classifier_tools: Option<bool>,
 }
 
+/// How deep helpers may nest when none of the layers says.
+pub const DEFAULT_HELPER_MAX_DEPTH: u8 = 1;
+
+/// Helper settings after layering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperSettings {
+    /// How many levels of helpers a session may have: at 1 (the default)
+    /// the session may spawn helpers and its helpers may not; at 2 those
+    /// helpers may spawn helpers of their own, and so on. At 0 every helper
+    /// is refused.
+    pub max_depth: u8,
+}
+
+impl Default for HelperSettings {
+    fn default() -> Self {
+        Self {
+            max_depth: DEFAULT_HELPER_MAX_DEPTH,
+        }
+    }
+}
+
+/// `[helpers]` section of a rules file. Unset fields inherit from lower
+/// layers; the project file may only lower them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelpersSection {
+    /// See [`HelperSettings::max_depth`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u8>,
+}
+
+/// `[ui]` section of a rules file: how the transcript looks. Unset fields
+/// inherit from lower layers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiSection {
+    /// See [`UiSettings::helpers`] (`"folded"` or `"expanded"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helpers: Option<HelperView>,
+}
+
+/// `[ui]` settings after layering.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UiSettings {
+    /// How helper (sub-agent) headers start: one folded line (default) or
+    /// showing the helper's work.
+    pub helpers: HelperView,
+}
+
+impl UiSettings {
+    fn apply(&mut self, section: &UiSection) {
+        if let Some(helpers) = section.helpers {
+            self.helpers = helpers;
+        }
+    }
+}
+
 /// One `[[allow]]` / `[[deny]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -843,6 +901,12 @@ pub struct RulesFile {
     /// Extra directories for the confined shell (user layers only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confinement: Option<ConfinementSection>,
+    /// Helper (sub-agent) limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helpers: Option<HelpersSection>,
+    /// Transcript display settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<UiSection>,
 }
 
 impl RulesFile {
@@ -1101,6 +1165,10 @@ pub struct Layered {
     /// realm file, the command-line overlay), in layer order; not yet
     /// validated (see [`crate::bootstrap::confinement::grants_with`]).
     pub confinement: ConfinementSection,
+    /// Merged `[helpers]` settings.
+    pub helpers: HelperSettings,
+    /// Merged `[ui]` settings.
+    pub ui: UiSettings,
     /// Non-fatal observations to show once.
     pub notices: Vec<Notice>,
 }
@@ -1162,6 +1230,8 @@ pub fn load_layered_with(
     let mut endpoints: BTreeMap<String, LayeredEndpoint> = BTreeMap::new();
     let mut pricing: BTreeMap<String, PricingSection> = BTreeMap::new();
     let mut confinement = ConfinementSection::default();
+    let mut helpers = HelperSettings::default();
+    let mut ui = UiSettings::default();
 
     let mut user_layers: Vec<(Option<PathBuf>, RuleOrigin, RulesFile)> = Vec::new();
     if let Some(global) = global_rules_file {
@@ -1237,10 +1307,23 @@ pub fn load_layered_with(
         if let Some(auto) = &file.auto {
             apply_auto(&mut settings, auto);
         }
+        if let Some(depth) = file.helpers.as_ref().and_then(|h| h.max_depth) {
+            helpers.max_depth = depth;
+        }
+        if let Some(section) = &file.ui {
+            ui.apply(section);
+        }
     }
 
     let project_path = project_rkat_dir.join(RULES_FILE_NAME);
     let project = RulesFile::load(&project_path)?;
+    // A project's display preference applies unless the command line set it.
+    if let Some(section) = &project.ui {
+        let cli_ui = cli.and_then(|c| c.ui).unwrap_or_default();
+        ui.apply(&UiSection {
+            helpers: section.helpers.filter(|_| cli_ui.helpers.is_none()),
+        });
+    }
     if !project.allow.is_empty() {
         notices.push(Notice::ProjectAllowIgnored {
             path: project_path.clone(),
@@ -1280,6 +1363,10 @@ pub fn load_layered_with(
             path: project_path.clone(),
             count: project_grants,
         });
+    }
+    // A cloned repository may keep helpers shallower, never deeper.
+    if let Some(depth) = project.helpers.as_ref().and_then(|h| h.max_depth) {
+        helpers.max_depth = helpers.max_depth.min(depth);
     }
     // Project files never define endpoints, not even new ones: a cloned
     // repository could route prompts and credentials to its own server.
@@ -1336,6 +1423,8 @@ pub fn load_layered_with(
         endpoints,
         pricing,
         confinement,
+        helpers,
+        ui,
         notices,
     })
 }
@@ -1618,6 +1707,10 @@ mod tests {
             confinement: Some(ConfinementSection {
                 extra_read: vec![PathBuf::from("/data")],
                 extra_write: vec![PathBuf::from("/scratch")],
+            }),
+            helpers: Some(HelpersSection { max_depth: Some(2) }),
+            ui: Some(UiSection {
+                helpers: Some(HelperView::Expanded),
             }),
         };
         let text = toml::to_string_pretty(&file).unwrap();
@@ -2087,6 +2180,54 @@ mod tests {
         let layered =
             load_layered_with(&realm, None, &project, RealmTrust::Owned, Some(&overlay)).unwrap();
         assert!(!layered.settings.classifier_tools);
+    }
+
+    #[test]
+    fn helper_depth_defaults_to_one_layers_and_the_project_only_lowers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (realm, project) = (tmp.path().join("realm"), tmp.path().join("p"));
+        write(&realm, "");
+        write(&project, "");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.helpers.max_depth, DEFAULT_HELPER_MAX_DEPTH);
+        assert_eq!(DEFAULT_HELPER_MAX_DEPTH, 1);
+        // The realm sets it, the command line beats the realm.
+        write(&realm, "[helpers]\nmax_depth = 3\n");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.helpers.max_depth, 3);
+        let overlay = cli("[helpers]\nmax_depth = 2\n");
+        let layered =
+            load_layered_with(&realm, None, &project, RealmTrust::Owned, Some(&overlay)).unwrap();
+        assert_eq!(layered.helpers.max_depth, 2);
+        // The project may lower it, never raise it.
+        write(&project, "[helpers]\nmax_depth = 1\n");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.helpers.max_depth, 1);
+        write(&realm, "");
+        write(&project, "[helpers]\nmax_depth = 5\n");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.helpers.max_depth, 1);
+    }
+
+    #[test]
+    fn ui_helpers_defaults_to_folded_and_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (realm, project) = (tmp.path().join("realm"), tmp.path().join("p"));
+        write(&realm, "");
+        write(&project, "");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.ui.helpers, HelperView::Folded);
+        write(&realm, "[ui]\nhelpers = \"expanded\"\n");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.ui.helpers, HelperView::Expanded);
+        // The project's preference applies unless the command line set one.
+        write(&project, "[ui]\nhelpers = \"folded\"\n");
+        let layered = load_layered_with(&realm, None, &project, RealmTrust::Owned, None).unwrap();
+        assert_eq!(layered.ui.helpers, HelperView::Folded);
+        let overlay = cli("[ui]\nhelpers = \"expanded\"\n");
+        let layered =
+            load_layered_with(&realm, None, &project, RealmTrust::Owned, Some(&overlay)).unwrap();
+        assert_eq!(layered.ui.helpers, HelperView::Expanded);
     }
 
     #[test]

@@ -513,3 +513,90 @@ fn selected_cells_render_reversed() {
     app.update(mouse(MouseEventKind::Up(MouseButton::Left), 5));
     assert_eq!(app.take_clipboard_text().as_deref(), Some("list"));
 }
+
+/// `event` of the helper `label`, as the helper follower forwards it.
+fn helper(label: &str, event: AgentEvent) -> Msg {
+    use meerkat_core::{ScopedAgentEvent, StreamScopeFrame};
+    Msg::Scoped(ScopedAgentEvent::new(
+        vec![
+            StreamScopeFrame::Primary {
+                session_id: "s".into(),
+            },
+            StreamScopeFrame::MobMember {
+                flow_run_id: String::new(),
+                agent_identity: label.into(),
+                agent_runtime_id: None,
+                fence_token: None,
+                generation: None,
+            },
+        ],
+        event,
+    ))
+}
+
+/// A transcript with a prompt and the helper `scout` (two calls).
+fn helper_app() -> App {
+    let mut app = App::new(StatusInfo::default());
+    app.transcript.note_helper_model("scout", "opus");
+    app.transcript.push(Block::User {
+        text: "find it".into(),
+    });
+    for (id, name, args) in [
+        ("a", "glob", json!({"pattern": "*.rs"})),
+        ("b", "grep", json!({"pattern": "fn resolve"})),
+    ] {
+        app.update(helper(
+            "scout",
+            AgentEvent::ToolCallRequested {
+                id: id.into(),
+                name: name.into(),
+                args: ToolCallArguments::from_value(args).unwrap(),
+            },
+        ));
+    }
+    app
+}
+
+#[test]
+fn a_folded_helper_renders_one_line() {
+    let mut app = helper_app();
+    let rows = render_sized(&mut app, Instant::now(), 70);
+    assert_eq!(rows[0], "› find it");
+    assert_eq!(rows[1], "");
+    assert_eq!(
+        rows[2],
+        "▸ [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
+    );
+    // Nothing of the helper's calls is drawn.
+    assert!(rows[3..9].iter().all(String::is_empty), "{rows:?}");
+    assert!(rows[11].ends_with("ctrl+↓ helpers"), "{:?}", rows[11]);
+}
+
+#[test]
+fn an_expanded_helper_renders_its_blocks_and_the_focus_is_reversed() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = helper_app();
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::CONTROL,
+    )));
+    app.update(Msg::Key(KeyEvent::from(KeyCode::Enter)));
+    let mut terminal = Terminal::new(TestBackend::new(70, H)).unwrap();
+    terminal
+        .draw(|f| draw_at(f, &mut app, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let rows = rows(&buffer);
+    assert_eq!(
+        rows[2],
+        "▾ [scout · opus] ⠋ running · 2 tool calls · grep \"fn resolve\""
+    );
+    assert_eq!(rows[4], "  ○ [scout · opus] glob({\"pattern\":\"*.rs\"})");
+    assert_eq!(
+        rows[6],
+        "  ○ [scout · opus] grep({\"pattern\":\"fn resolve\"})"
+    );
+    // The focused header is drawn reversed, the rest is not.
+    assert!(buffer[(0, 2)].modifier.contains(Modifier::REVERSED));
+    assert!(!buffer[(2, 4)].modifier.contains(Modifier::REVERSED));
+}

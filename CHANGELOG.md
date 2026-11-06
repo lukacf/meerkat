@@ -85,7 +85,16 @@ them.
   picker and restores it once no escalation remains, and a held Enter or
   Esc never answers, selects or closes a dialog. A prompt re-sent with the
   same text right after a failed turn (which already committed it) retries
-  that turn instead of adding the message twice. See
+  that turn instead of adding the message twice. Helpers nest at most
+  `[helpers] max_depth` levels (default 1: helpers cannot delegate); a
+  helper at the limit has no tool that starts helpers and a deeper spawn
+  is refused. Each helper shows as one live header line (state, calls,
+  last activity, tokens) that Ctrl+↑/↓ and Enter, a click or
+  `/helpers expand|fold` open to show its work (`[ui] helpers` sets the
+  default). An interrupt abandons the messages still queued for the
+  running turn before it stops the run, so none of them runs as a
+  follow-up turn after the interrupt, and every one comes back to the
+  editor with the turn reported as interrupted, not failed. See
   `crates/meerkat-tui/README.md`.
 
 - `meerkat-mob-mcp`: `MobMcpState::with_implicit_mob_customizer` takes an

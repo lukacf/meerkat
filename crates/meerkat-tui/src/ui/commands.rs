@@ -56,6 +56,26 @@ pub enum ModelCommand {
     Set(String),
 }
 
+/// Which helpers a `/helpers expand|fold` applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelperTarget {
+    /// Every helper.
+    All,
+    /// The newest helper with this label.
+    Label(String),
+}
+
+/// `/helpers` subcommands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelpersCommand {
+    /// List the helpers with their state.
+    List,
+    /// Show the helpers' nested blocks.
+    Expand(HelperTarget),
+    /// Fold the helpers to one line.
+    Fold(HelperTarget),
+}
+
 /// A parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -87,6 +107,8 @@ pub enum Command {
     /// `/mcp trust`: trust the project `.rkat/mcp.toml` as it is now; its
     /// servers start from the next session.
     McpTrust,
+    /// `/helpers [expand|fold <label>|all]`.
+    Helpers(HelpersCommand),
 }
 
 /// Slash-command parse failure.
@@ -109,6 +131,7 @@ impl fmt::Display for CommandError {
 
 const RULES_USAGE: &str = "/rules [list | add allow|deny <tool> [pattern] | rm <n> | trust]";
 const AUTO_USAGE: &str = "/auto [on | off | resume]";
+const HELPERS_USAGE: &str = "/helpers [expand <label>|all | fold <label>|all]";
 
 /// Help text shown by `/help`: every slash command and key binding.
 pub const HELP_TEXT: &str = "\
@@ -136,6 +159,9 @@ Commands:
                                  --auto-compact lets the runtime compact at 85%)
   /compact now                   rebuild the session so its next model call compacts (idle only)
   /cost                          token usage and cost per model (footer: $0.42, ~ estimate, $? unpriced)
+  /helpers                       list the helpers (sub-agents) and their state
+  /helpers expand|fold <label>|all
+                                 show a helper's work in the transcript, or fold it to one line
 Keys:
   Enter                          send; while the agent is working, queues the message
                                  and delivers it at the next step
@@ -147,6 +173,9 @@ Keys:
                                  runs or messages are queued: the turn is interrupted and
                                  undelivered messages are saved)
   Ctrl-O                         toggle the last reasoning block
+  Ctrl-T                         toggle the output of the last tool call
+  Ctrl+Up/Down                   focus a helper header (newest first); Enter expands or folds
+                                 it, Esc or typing drops the focus; a click toggles a header
   Ctrl-R                         search history (Ctrl-R again: older · Enter accept · Esc cancel)
   Ctrl-X Ctrl-S                  interrupt and send the input (sends normally when idle)
   Up/Down                        move between lines · recall prompt history
@@ -240,6 +269,18 @@ fn parse_command(name: &str, args: &[&str]) -> Result<Command, CommandError> {
             ["trust"] => Ok(Command::McpTrust),
             _ => Err(CommandError::Usage("/mcp trust")),
         },
+        "helpers" => {
+            let target = |t: &str| match t {
+                "all" => HelperTarget::All,
+                label => HelperTarget::Label(label.to_string()),
+            };
+            match args {
+                [] | ["list"] => Ok(Command::Helpers(HelpersCommand::List)),
+                ["expand", t] => Ok(Command::Helpers(HelpersCommand::Expand(target(t)))),
+                ["fold", t] => Ok(Command::Helpers(HelpersCommand::Fold(target(t)))),
+                _ => Err(CommandError::Usage(HELPERS_USAGE)),
+            }
+        }
         other => Err(CommandError::Unknown(other.to_string())),
     }
 }
@@ -423,9 +464,30 @@ mod tests {
             "switch to a model (idle only)",
             "endpoint:",
             "/model refresh",
+            "/helpers",
+            "Ctrl+Up/Down",
         ] {
             assert!(HELP_TEXT.contains(needle), "help is missing {needle}");
         }
+    }
+
+    #[test]
+    fn helpers_commands() {
+        assert_eq!(ok("/helpers"), Command::Helpers(HelpersCommand::List));
+        assert_eq!(
+            ok("/helpers expand scout"),
+            Command::Helpers(HelpersCommand::Expand(HelperTarget::Label(
+                "scout".into()
+            )))
+        );
+        assert_eq!(
+            ok("/helpers fold all"),
+            Command::Helpers(HelpersCommand::Fold(HelperTarget::All))
+        );
+        assert_eq!(
+            parse("/helpers expand"),
+            Some(Err(CommandError::Usage(HELPERS_USAGE)))
+        );
     }
 
     #[test]

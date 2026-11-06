@@ -13,17 +13,20 @@ use meerkat_core::{
     AgentEvent, HookPoint, LlmRetrySchedule, ScopedAgentEvent, StreamScopeFrame, TurnUsage,
 };
 use ratatui::text::Line;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::delivery::PendingId;
 
 use super::markdown::truncate_chars;
-use super::render::block_lines;
+use super::render::{SPINNER, SPINNER_FRAME_MS, block_lines};
 
 /// Maximum tool-result lines kept in the preview (matches the CLI stream renderer).
 pub const MAX_TOOL_RESULT_LINES: usize = 20;
 /// Maximum characters of serialized tool args shown in a header (matches the CLI).
 pub const MAX_TOOL_ARGS_PREVIEW: usize = 200;
+/// Maximum characters of a helper header's last-activity preview.
+pub const MAX_HELPER_PREVIEW: usize = 60;
 
 /// Index of a block in the transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,6 +88,141 @@ impl QueuedLabel {
             Self::Delivering => "delivering…",
             Self::Deferred => "will send after this turn",
         }
+    }
+}
+
+/// How helper headers start: folded to one line (the default) or showing the
+/// helper's nested blocks (`tui.toml` `[ui] helpers`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HelperView {
+    /// One header line per helper; open one to watch it.
+    #[default]
+    Folded,
+    /// Every helper shows its nested blocks.
+    Expanded,
+}
+
+/// Lifecycle state of a helper, as its header shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperState {
+    /// The helper is working.
+    Running,
+    /// Its run completed (or it left the running helpers).
+    Done,
+    /// Its run failed.
+    Failed,
+    /// Its run was cancelled.
+    Cancelled,
+    /// Its events could not be followed: its usage is unmeasured.
+    Unmeasured,
+}
+
+impl HelperState {
+    /// The word the header shows.
+    #[must_use]
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Unmeasured => "unmeasured",
+        }
+    }
+
+    /// Whether the helper is still working.
+    #[must_use]
+    pub fn is_running(self) -> bool {
+        self == Self::Running
+    }
+}
+
+/// What a helper did last (the running header's preview).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HelperLast {
+    /// Nothing yet.
+    #[default]
+    Nothing,
+    /// A tool call: its name and a short argument preview.
+    Tool {
+        /// Tool name.
+        name: String,
+        /// Short argument preview (the first string argument, quoted).
+        args: String,
+    },
+    /// The first line of its latest text.
+    Text(String),
+}
+
+/// A helper's header: one line standing for everything the helper did.
+///
+/// The helper's own blocks (tool calls, errors, the headers of helpers it
+/// spawned) stay in the transcript, owned by this header; the renderer skips
+/// them while the header is folded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperFold {
+    /// Member identity (`scout`, `fork-1`).
+    pub label: String,
+    /// The model it runs on, when known.
+    pub model: Option<String>,
+    /// Lifecycle state.
+    pub state: HelperState,
+    /// Tool calls requested so far.
+    pub calls: usize,
+    /// Its latest activity.
+    pub last: HelperLast,
+    /// Whether its nested blocks are shown.
+    pub expanded: bool,
+    /// Tokens (input + output) of its model calls, when any were reported.
+    pub usage: Option<u64>,
+    /// Nesting depth (1 for a helper of the session's own agent).
+    pub depth: usize,
+    /// Spinner frame of a running helper.
+    pub spin: usize,
+}
+
+impl HelperFold {
+    /// `[label · model]`, or `[label]` while the model is unknown.
+    #[must_use]
+    pub fn tag(&self) -> String {
+        match &self.model {
+            Some(model) => format!("[{} · {model}]", self.label),
+            None => format!("[{}]", self.label),
+        }
+    }
+
+    /// The header's status text after the tag: `running · 4 tool calls ·
+    /// grep "fn resolve"`, `done · 7 tool calls · 2.1k tokens`.
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        if self.state.is_running() {
+            let glyph = SPINNER.get(self.spin % SPINNER.len()).copied().unwrap_or('⠋');
+            out.push(glyph);
+            out.push(' ');
+        }
+        out.push_str(self.state.text());
+        let plural = if self.calls == 1 { "" } else { "s" };
+        let _ = write!(out, " · {} tool call{plural}", self.calls);
+        if self.state.is_running() {
+            match &self.last {
+                HelperLast::Nothing => {}
+                HelperLast::Tool { name, args } if args.is_empty() => {
+                    let _ = write!(out, " · {name}");
+                }
+                HelperLast::Tool { name, args } => {
+                    let _ = write!(out, " · {name} {args}");
+                }
+                HelperLast::Text(text) => {
+                    let _ = write!(out, " · {text}");
+                }
+            }
+        } else if let Some(tokens) = self.usage {
+            let _ = write!(out, " · {} tokens", super::render::fmt_tokens(tokens));
+        }
+        out
     }
 }
 
@@ -167,6 +305,8 @@ pub enum Block {
         /// Text.
         text: String,
     },
+    /// A helper's header (see [`HelperFold`]).
+    Helper(HelperFold),
 }
 
 /// Cached wrapped lines for one block at one width.
@@ -191,6 +331,19 @@ pub struct Transcript {
     /// The model of each helper (by label) the UI has heard of, for block
     /// labels.
     helper_models: IndexMap<String, String>,
+    /// Per block, the header of the helper it belongs to (`None`: the
+    /// session's own blocks and top-level helper headers).
+    owner: Vec<Option<BlockId>>,
+    /// The current header of each helper, by label.
+    helper_folds: IndexMap<String, BlockId>,
+    /// Helpers listed as running by the last live update.
+    live_helpers: Vec<String>,
+    /// How new helper headers start.
+    helper_view: HelperView,
+    /// The spinner clock of running helper headers.
+    helper_clock: Option<Instant>,
+    /// Number of helper headers.
+    helper_count: usize,
 }
 
 impl Transcript {
@@ -199,10 +352,218 @@ impl Transcript {
         Self::default()
     }
 
+    /// Set how new helper headers start (folded or expanded).
+    pub fn set_helper_view(&mut self, view: HelperView) {
+        self.helper_view = view;
+    }
+
     /// Remember that the helper `label` runs on `model` (its blocks name it).
     pub fn note_helper_model(&mut self, label: &str, model: &str) {
         self.helper_models
             .insert(label.to_string(), model.to_string());
+        if let Some(id) = self.helper_folds.get(label).copied()
+            && let Some(Block::Helper(fold)) = self.block(id)
+            && fold.model.as_deref() != Some(model)
+            && let Some(Block::Helper(fold)) = self.block_mut(id)
+        {
+            fold.model = Some(model.to_string());
+        }
+    }
+
+    /// The helpers running now, `(label, model, depth)`: notes their models,
+    /// gives a newly spawned top-level helper its header at once, marks a
+    /// helper that is no longer listed done, and lets a helper whose label
+    /// is spawned again after it finished get a fresh header.
+    pub fn note_live_helpers<'a>(
+        &mut self,
+        live: impl IntoIterator<Item = (&'a str, &'a str, usize)>,
+    ) {
+        let mut now_live = Vec::new();
+        for (label, model, depth) in live {
+            self.note_helper_model(label, model);
+            let fresh = !self.live_helpers.iter().any(|l| l == label);
+            if fresh
+                && let Some(id) = self.helper_folds.get(label).copied()
+                && matches!(self.block(id), Some(Block::Helper(f)) if !f.state.is_running())
+            {
+                self.helper_folds.shift_remove(label);
+            }
+            if depth == 1 {
+                self.ensure_fold(&[label]);
+            }
+            now_live.push(label.to_string());
+        }
+        let gone: Vec<BlockId> = self
+            .live_helpers
+            .iter()
+            .filter(|label| !now_live.contains(label))
+            .filter_map(|label| self.helper_folds.get(label.as_str()).copied())
+            .collect();
+        for id in gone {
+            self.update_fold(id, |fold| {
+                if fold.state.is_running() {
+                    fold.state = HelperState::Done;
+                }
+            });
+        }
+        self.live_helpers = now_live;
+    }
+
+    /// Helper `label`'s usage could not be observed: its header says so
+    /// (a header is made if it has none).
+    pub fn helper_unmeasured(&mut self, label: &str) {
+        let id = self.ensure_fold(&[label]);
+        self.update_fold(id, |fold| {
+            if matches!(fold.state, HelperState::Running | HelperState::Done) {
+                fold.state = HelperState::Unmeasured;
+            }
+        });
+    }
+
+    /// Advance the spinner of running helper headers. Returns whether any
+    /// header changed.
+    pub fn tick_helpers(&mut self, now: Instant) -> bool {
+        let Some(clock) = self.helper_clock else {
+            return false;
+        };
+        let elapsed = now.saturating_duration_since(clock).as_millis();
+        let frame = (elapsed / SPINNER_FRAME_MS) as usize % SPINNER.len();
+        let mut changed = false;
+        for i in 0..self.helper_folds.len() {
+            let Some((_, id)) = self.helper_folds.get_index(i) else {
+                continue;
+            };
+            let id = *id;
+            if matches!(self.block(id), Some(Block::Helper(f)) if f.state.is_running() && f.spin != frame)
+            {
+                self.update_fold(id, |fold| fold.spin = frame);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The helper headers, in transcript order.
+    pub fn helper_headers(&self) -> impl Iterator<Item = (BlockId, &HelperFold)> {
+        self.blocks.iter().enumerate().filter_map(|(i, b)| match b {
+            Block::Helper(fold) => Some((BlockId(i), fold)),
+            _ => None,
+        })
+    }
+
+    /// The helper headers on screen (not inside a folded helper), in
+    /// transcript order.
+    pub fn visible_helper_headers(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.helper_headers()
+            .map(|(id, _)| id)
+            .filter(|id| !self.is_hidden(*id))
+    }
+
+    /// The newest header of the helper `label`.
+    pub fn helper_header(&self, label: &str) -> Option<BlockId> {
+        self.helper_headers()
+            .filter(|(_, fold)| fold.label == label)
+            .map(|(id, _)| id)
+            .last()
+    }
+
+    /// Whether the transcript has any helper header.
+    pub fn has_helpers(&self) -> bool {
+        self.helper_count > 0
+    }
+
+    /// Expand or fold the helper header `id`. Returns the new `expanded`
+    /// state, or `None` when `id` is not a helper header.
+    pub fn toggle_helper(&mut self, id: BlockId) -> Option<bool> {
+        let expanded = match self.block(id) {
+            Some(Block::Helper(fold)) => !fold.expanded,
+            _ => return None,
+        };
+        self.set_helper_expanded(id, expanded);
+        Some(expanded)
+    }
+
+    /// Expand (`true`) or fold the helper header `id`. Returns whether `id`
+    /// is a helper header.
+    pub fn set_helper_expanded(&mut self, id: BlockId, expanded: bool) -> bool {
+        if !matches!(self.block(id), Some(Block::Helper(_))) {
+            return false;
+        }
+        self.update_fold(id, |fold| fold.expanded = expanded);
+        // Every block inside the helper appears or disappears.
+        for i in 0..self.blocks.len() {
+            if self.owned_by(BlockId(i), id)
+                && let Some(slot) = self.layout.get_mut(i)
+            {
+                *slot = None;
+            }
+        }
+        true
+    }
+
+    /// Whether `block` sits (at any depth) inside the helper header `header`.
+    fn owned_by(&self, block: BlockId, header: BlockId) -> bool {
+        let mut at = block;
+        while let Some(Some(up)) = self.owner.get(at.0) {
+            if *up == header {
+                return true;
+            }
+            at = *up;
+        }
+        false
+    }
+
+    /// Whether `block` is inside a folded helper (the renderer skips it).
+    pub fn is_hidden(&self, block: BlockId) -> bool {
+        let mut at = block;
+        while let Some(Some(up)) = self.owner.get(at.0) {
+            if matches!(self.block(*up), Some(Block::Helper(f)) if !f.expanded) {
+                return true;
+            }
+            at = *up;
+        }
+        false
+    }
+
+    /// The header of the helper `path` (outermost first), made (with the
+    /// headers of the helpers above it) when missing.
+    fn ensure_fold(&mut self, path: &[&str]) -> BlockId {
+        let Some((label, parents)) = path.split_last() else {
+            return BlockId(usize::MAX);
+        };
+        if let Some(id) = self.helper_folds.get(*label) {
+            return *id;
+        }
+        let parent = (!parents.is_empty()).then(|| self.ensure_fold(parents));
+        let id = self.push(Block::Helper(HelperFold {
+            label: (*label).to_string(),
+            model: self.helper_model(label).map(str::to_string),
+            state: HelperState::Running,
+            calls: 0,
+            last: HelperLast::Nothing,
+            expanded: self.helper_view == HelperView::Expanded,
+            usage: None,
+            depth: path.len(),
+            spin: 0,
+        }));
+        self.set_owner(id, parent);
+        self.helper_folds.insert((*label).to_string(), id);
+        if self.helper_clock.is_none() {
+            self.helper_clock = Some(Instant::now());
+        }
+        id
+    }
+
+    fn set_owner(&mut self, id: BlockId, owner: Option<BlockId>) {
+        if let Some(slot) = self.owner.get_mut(id.0) {
+            *slot = owner;
+        }
+    }
+
+    fn update_fold(&mut self, id: BlockId, f: impl FnOnce(&mut HelperFold)) {
+        if let Some(Block::Helper(fold)) = self.block_mut(id) {
+            f(fold);
+        }
     }
 
     /// The model of the helper `label`, when known.
@@ -257,15 +618,24 @@ impl Transcript {
         })
     }
 
-    /// Remove every block.
+    /// Remove every block (the helper view setting stays).
     pub fn clear(&mut self) {
+        let helper_view = self.helper_view;
         *self = Self::default();
+        self.helper_view = helper_view;
     }
 
-    /// Replace the whole transcript with `blocks` (e.g. after resuming a session).
+    /// Replace the whole transcript with `blocks` (e.g. after resuming a
+    /// session). Helper headers from history start folded and finished.
     pub fn reset(&mut self, blocks: Vec<Block>) {
         self.clear();
-        for block in blocks {
+        for mut block in blocks {
+            if let Block::Helper(fold) = &mut block {
+                fold.expanded = false;
+                if fold.state.is_running() {
+                    fold.state = HelperState::Done;
+                }
+            }
             self.push_raw(block);
         }
     }
@@ -297,13 +667,26 @@ impl Transcript {
             return None;
         }
         let block = self.blocks.remove(id.0);
+        if matches!(block, Block::Helper(_)) {
+            self.helper_count = self.helper_count.saturating_sub(1);
+        }
         if id.0 < self.layout.len() {
             self.layout.remove(id.0);
+        }
+        if id.0 < self.owner.len() {
+            self.owner.remove(id.0);
         }
         let shift = |b: BlockId| if b.0 > id.0 { BlockId(b.0 - 1) } else { b };
         self.by_tool_id.retain(|_, b| *b != id);
         for b in self.by_tool_id.values_mut() {
             *b = shift(*b);
+        }
+        self.helper_folds.retain(|_, b| *b != id);
+        for b in self.helper_folds.values_mut() {
+            *b = shift(*b);
+        }
+        for slot in &mut self.owner {
+            *slot = slot.filter(|b| *b != id).map(shift);
         }
         self.open_assistant = self.open_assistant.filter(|b| *b != id).map(shift);
         self.open_reasoning = self.open_reasoning.filter(|b| *b != id).map(shift);
@@ -347,9 +730,14 @@ impl Transcript {
         }
     }
 
-    /// The most recent tool block with output to show or hide.
+    /// The most recent tool block on screen with output to show or hide.
     pub fn last_tool_with_output(&self) -> Option<BlockId> {
-        self.blocks.iter().rposition(tool_has_output).map(BlockId)
+        self.blocks
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, b)| tool_has_output(b) && !self.is_hidden(BlockId(*i)))
+            .map(|(i, _)| BlockId(i))
     }
 
     /// Attach a diff to the tool block for `tool_use_id`. Returns whether the block was found.
@@ -364,20 +752,48 @@ impl Transcript {
         false
     }
 
-    /// Ensure every block has a layout at `width`; returns the total line count.
+    /// Ensure every block has a layout at `width`; returns the total line
+    /// count. Blocks inside a folded helper lay out to no lines.
     pub fn ensure_layout(&mut self, width: u16) -> usize {
         let mut total = 0;
-        for (block, slot) in self.blocks.iter().zip(self.layout.iter_mut()) {
-            let stale = slot.as_ref().is_none_or(|c| c.width != width);
+        for i in 0..self.blocks.len() {
+            let stale = self
+                .layout
+                .get(i)
+                .is_some_and(|slot| slot.as_ref().is_none_or(|c| c.width != width));
             if stale {
-                *slot = Some(CachedLayout {
-                    width,
-                    lines: block_lines(block, width),
-                });
+                let lines = match self.blocks.get(i) {
+                    Some(_) if self.is_hidden(BlockId(i)) => Vec::new(),
+                    Some(block) => block_lines(block, width),
+                    None => Vec::new(),
+                };
+                if let Some(slot) = self.layout.get_mut(i) {
+                    *slot = Some(CachedLayout { width, lines });
+                }
             }
-            total += slot.as_ref().map_or(0, |c| c.lines.len());
+            total += self
+                .layout
+                .get(i)
+                .and_then(Option::as_ref)
+                .map_or(0, |c| c.lines.len());
         }
         total
+    }
+
+    /// The first laid-out line of block `id`, as of the last
+    /// [`Self::ensure_layout`].
+    pub fn first_line_of(&self, id: BlockId) -> Option<usize> {
+        if id.0 >= self.layout.len() {
+            return None;
+        }
+        Some(
+            self.layout
+                .iter()
+                .take(id.0)
+                .flatten()
+                .map(|c| c.lines.len())
+                .sum(),
+        )
     }
 
     /// Lines `[start, start + len)` of the laid-out transcript. Call [`Self::ensure_layout`] first.
@@ -580,28 +996,72 @@ impl Transcript {
     }
 
     /// [`Self::apply_scoped_event`] with an explicit clock (for tests).
+    ///
+    /// The helper's blocks belong to its header (made when missing, nested
+    /// in its parent helper's), which also counts its calls, its usage and
+    /// its latest activity.
     pub fn apply_scoped_event_at(&mut self, scoped: &ScopedAgentEvent, now: Instant) {
-        let mut depth = 0usize;
-        let mut label = None;
-        for frame in &scoped.scope_path {
-            if let StreamScopeFrame::MobMember { agent_identity, .. } = frame {
-                depth += 1;
-                label = Some(agent_identity.clone());
-            }
-        }
-        let Some(label) = label else {
+        let path: Vec<&str> = scoped
+            .scope_path
+            .iter()
+            .filter_map(|frame| match frame {
+                StreamScopeFrame::MobMember { agent_identity, .. } => {
+                    Some(agent_identity.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let Some(label) = path.last().copied() else {
             return;
         };
-        let tag = self.helper_tag(&label);
+        let depth = path.len();
+        let fold = self.ensure_fold(&path);
+        let tag = self.helper_tag(label);
         let key = |id: &str| format!("{}/{id}", scoped.scope_id);
         match &scoped.event {
+            AgentEvent::RunStarted { .. } => self.update_fold(fold, |f| {
+                if matches!(
+                    f.state,
+                    HelperState::Done | HelperState::Failed | HelperState::Cancelled
+                ) {
+                    f.state = HelperState::Running;
+                }
+            }),
+            AgentEvent::RunCompleted { .. } => self.update_fold(fold, |f| {
+                if f.state.is_running() {
+                    f.state = HelperState::Done;
+                }
+            }),
+            AgentEvent::TurnCompleted {
+                usage: Some(usage), ..
+            } => {
+                let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+                self.update_fold(fold, |f| {
+                    f.usage = Some(f.usage.unwrap_or(0).saturating_add(tokens));
+                });
+            }
+            AgentEvent::TextComplete { content, .. } => {
+                if let Some(line) = content.lines().find(|l| !l.trim().is_empty()) {
+                    let line = truncate_chars(line.trim(), MAX_HELPER_PREVIEW);
+                    self.update_fold(fold, |f| f.last = HelperLast::Text(line));
+                }
+            }
             AgentEvent::ToolCallRequested { id, name, args } => {
-                self.request_tool(
+                let preview = helper_args_preview(args.as_value());
+                self.update_fold(fold, |f| {
+                    f.calls += 1;
+                    f.last = HelperLast::Tool {
+                        name: name.clone(),
+                        args: preview,
+                    };
+                });
+                let block = self.request_tool(
                     key(id),
                     format!("{tag} {name}"),
                     args.as_value().clone(),
                     depth,
                 );
+                self.set_owner(block, Some(fold));
             }
             AgentEvent::ToolExecutionStarted { id, .. } => self.start_tool(&key(id), now),
             AgentEvent::ToolExecutionCompleted {
@@ -618,10 +1078,17 @@ impl Transcript {
                 self.complete_tool(&key(id), true, *timeout_ms, Some(&text));
             }
             AgentEvent::RunFailed { error_report, .. } => {
-                self.push_notice(
+                let state = if error_report.class == meerkat_core::AgentErrorClass::Cancelled {
+                    HelperState::Cancelled
+                } else {
+                    HelperState::Failed
+                };
+                self.update_fold(fold, |f| f.state = state);
+                let notice = self.push_notice(
                     NoticeLevel::Error,
                     format!("{tag} error: {}", error_report.message),
                 );
+                self.set_owner(notice, Some(fold));
             }
             _ => {}
         }
@@ -629,8 +1096,12 @@ impl Transcript {
 
     fn push_raw(&mut self, block: Block) -> BlockId {
         let id = BlockId(self.blocks.len());
+        if matches!(block, Block::Helper(_)) {
+            self.helper_count += 1;
+        }
         self.blocks.push(block);
         self.layout.push(None);
+        self.owner.push(None);
         id
     }
 
@@ -670,7 +1141,7 @@ impl Transcript {
         self.open_reasoning = Some(id);
     }
 
-    fn request_tool(&mut self, key: String, name: String, args: Value, depth: usize) {
+    fn request_tool(&mut self, key: String, name: String, args: Value, depth: usize) -> BlockId {
         let id = self.push(Block::Tool {
             name,
             args,
@@ -681,6 +1152,7 @@ impl Transcript {
             collapsed: true,
         });
         self.by_tool_id.insert(key, id);
+        id
     }
 
     fn start_tool(&mut self, key: &str, now: Instant) {
@@ -780,6 +1252,31 @@ impl Transcript {
 pub fn args_preview(args: &Value) -> String {
     let raw = serde_json::to_string(args).unwrap_or_default();
     truncate_chars(&raw, MAX_TOOL_ARGS_PREVIEW)
+}
+
+/// A helper header's preview of a call's arguments: the first string
+/// argument, quoted and shortened (`"fn resolve"`), else the serialized
+/// arguments shortened; empty for no arguments.
+fn helper_args_preview(args: &Value) -> String {
+    /// Arguments that say most about a call, checked first (a JSON object's
+    /// own key order is not kept).
+    const TELLING: [&str; 6] = ["command", "pattern", "query", "path", "file_path", "url"];
+    let first_str = args.as_object().and_then(|map| {
+        TELLING
+            .iter()
+            .find_map(|key| map.get(*key).and_then(Value::as_str))
+            .or_else(|| map.values().find_map(Value::as_str))
+    });
+    match first_str {
+        Some(s) => {
+            let line = s.lines().next().unwrap_or_default();
+            format!("\"{}\"", truncate_chars(line, MAX_HELPER_PREVIEW))
+        }
+        None if args.as_object().is_some_and(serde_json::Map::is_empty) || args.is_null() => {
+            String::new()
+        }
+        None => truncate_chars(&serde_json::to_string(args).unwrap_or_default(), MAX_HELPER_PREVIEW),
+    }
 }
 
 /// Whether `block` is a tool block with a result preview or a diff.
@@ -1177,13 +1674,15 @@ mod tests {
             },
         );
         t.apply_scoped_event(&ev);
+        // The helper's header, then its tool block.
+        assert!(matches!(&t.blocks()[0], Block::Helper(fold) if fold.label == "helper"));
         assert!(matches!(
-            &t.blocks()[0],
+            &t.blocks()[1],
             Block::Tool { name, depth: 1, .. } if name == "[helper] glob"
         ));
         // Primary-only scope is ignored.
         t.apply_scoped_event(&ScopedAgentEvent::primary("s", text("dup")));
-        assert_eq!(t.len(), 1);
+        assert_eq!(t.len(), 2);
         // Once its model is known, a helper's blocks name it; a helper of a
         // helper nests one level deeper.
         t.note_helper_model("inner", "gpt-5.5");
@@ -1198,9 +1697,242 @@ mod tests {
         nested.scope_id = ScopedAgentEvent::scope_id_from_path(&nested.scope_path);
         t.apply_scoped_event(&nested);
         assert!(matches!(
-            &t.blocks()[1],
+            &t.blocks()[3],
             Block::Tool { name, depth: 2, .. } if name == "[inner · gpt-5.5] glob"
         ));
+    }
+
+    /// `event` of the helper `path` (outermost first).
+    fn helper_event(path: &[&str], event: AgentEvent) -> ScopedAgentEvent {
+        let mut frames = vec![StreamScopeFrame::Primary {
+            session_id: "s".into(),
+        }];
+        frames.extend(path.iter().map(|label| StreamScopeFrame::MobMember {
+            flow_run_id: String::new(),
+            agent_identity: (*label).into(),
+            agent_runtime_id: None,
+            fence_token: None,
+            generation: None,
+        }));
+        ScopedAgentEvent::new(frames, event)
+    }
+
+    fn helper_call(path: &[&str], id: &str, name: &str, args: Value) -> ScopedAgentEvent {
+        helper_event(
+            path,
+            AgentEvent::ToolCallRequested {
+                id: id.into(),
+                name: name.into(),
+                args: test_args(args),
+            },
+        )
+    }
+
+    fn fold_of(t: &Transcript, label: &str) -> HelperFold {
+        let id = t.helper_header(label).expect("helper header");
+        match t.block(id) {
+            Some(Block::Helper(fold)) => fold.clone(),
+            other => panic!("not a helper header: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn helper_events_fold_into_one_header() {
+        let mut t = Transcript::new();
+        t.note_helper_model("scout", "claude-opus-5-5");
+        t.push(Block::User { text: "go".into() });
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "read_file", json!({"path": "a.rs"})));
+        t.apply_scoped_event(&helper_call(
+            &["scout"],
+            "b",
+            "grep",
+            json!({"pattern": "fn resolve", "path": "src"}),
+        ));
+        t.apply_scoped_event(&helper_event(&["scout"], test_tool_result("b", "x\ny")));
+        // The header first, then its two tool blocks.
+        assert_eq!(t.len(), 4);
+        let fold = fold_of(&t, "scout");
+        assert_eq!(t.helper_header("scout"), Some(BlockId(1)));
+        assert_eq!(fold.calls, 2);
+        assert_eq!(fold.state, HelperState::Running);
+        assert!(!fold.expanded);
+        assert_eq!(fold.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            fold.last,
+            HelperLast::Tool {
+                name: "grep".into(),
+                args: "\"fn resolve\"".into()
+            }
+        );
+        assert_eq!(
+            fold.status_text(),
+            "⠋ running · 2 tool calls · grep \"fn resolve\""
+        );
+        // Folded: only the user block and the header lay out.
+        let folded = t.ensure_layout(80);
+        assert_eq!(folded, 2 + 2);
+        assert!(t.is_hidden(BlockId(2)) && t.is_hidden(BlockId(3)));
+        assert_eq!(t.last_tool_with_output(), None);
+        // Text replaces the preview with its first line.
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::TextComplete {
+                content: "\nFound it in resolve.rs.\nMore.".into(),
+                assistant_message_id: None,
+            },
+        ));
+        assert_eq!(
+            fold_of(&t, "scout").last,
+            HelperLast::Text("Found it in resolve.rs.".into())
+        );
+    }
+
+    #[test]
+    fn expanding_a_helper_reveals_its_blocks() {
+        let mut t = Transcript::new();
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "glob", json!({"pattern": "*"})));
+        t.apply_scoped_event(&helper_event(&["scout"], test_tool_result("a", "one")));
+        let header = t.helper_header("scout").unwrap();
+        assert_eq!(t.ensure_layout(80), 2);
+        assert_eq!(t.toggle_helper(header), Some(true));
+        assert_eq!(t.ensure_layout(80), 4);
+        assert!(!t.is_hidden(BlockId(1)));
+        assert_eq!(t.last_tool_with_output(), Some(BlockId(1)));
+        assert_eq!(t.toggle_helper(header), Some(false));
+        assert_eq!(t.ensure_layout(80), 2);
+        // Not a header.
+        assert_eq!(t.toggle_helper(BlockId(1)), None);
+        // The expanded setting starts new headers open.
+        let mut t = Transcript::new();
+        t.set_helper_view(HelperView::Expanded);
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "glob", json!({})));
+        assert!(fold_of(&t, "scout").expanded);
+        assert_eq!(t.ensure_layout(80), 4);
+    }
+
+    #[test]
+    fn a_nested_helper_folds_inside_its_parent() {
+        let mut t = Transcript::new();
+        t.apply_scoped_event(&helper_call(&["outer"], "a", "glob", json!({})));
+        t.apply_scoped_event(&helper_call(&["outer", "inner"], "b", "grep", json!({})));
+        // outer header, its tool, inner header, inner's tool.
+        assert_eq!(t.len(), 4);
+        let outer = t.helper_header("outer").unwrap();
+        let inner = t.helper_header("inner").unwrap();
+        assert_eq!(fold_of(&t, "inner").depth, 2);
+        assert!(t.is_hidden(inner));
+        assert_eq!(t.ensure_layout(80), 2);
+        // Opening the parent shows the nested helper folded.
+        t.toggle_helper(outer);
+        assert!(!t.is_hidden(inner));
+        assert!(t.is_hidden(BlockId(3)));
+        assert_eq!(t.ensure_layout(80), 6);
+        assert_eq!(t.visible_helper_headers().collect::<Vec<_>>(), vec![outer, inner]);
+        t.toggle_helper(inner);
+        assert_eq!(t.ensure_layout(80), 8);
+        // Folding the parent hides everything below it again.
+        t.toggle_helper(outer);
+        assert_eq!(t.ensure_layout(80), 2);
+        assert_eq!(t.visible_helper_headers().collect::<Vec<_>>(), vec![outer]);
+        // The parent's own call count is its own.
+        assert_eq!(fold_of(&t, "outer").calls, 1);
+        assert_eq!(fold_of(&t, "inner").calls, 1);
+    }
+
+    #[test]
+    fn helper_finished_states_and_tokens() {
+        let mut t = Transcript::new();
+        t.note_live_helpers([("scout", "m", 1)]);
+        // A newly live helper gets its header at once.
+        assert_eq!(fold_of(&t, "scout").state, HelperState::Running);
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "glob", json!({})));
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::EndTurn,
+                usage: test_usage(Usage {
+                    input_tokens: 2000,
+                    output_tokens: 100,
+                    ..Usage::default()
+                }),
+                assistant_message_id: None,
+            },
+        ));
+        t.apply_scoped_event(&helper_event(
+            &["scout"],
+            AgentEvent::RunCompleted {
+                session_id: meerkat_core::SessionId::new(),
+                identity: Default::default(),
+                result: "ok".into(),
+                structured_output: None,
+                extraction_required: false,
+                usage: Default::default(),
+                terminal_cause_kind: None,
+                assistant_message_id: None,
+            },
+        ));
+        let fold = fold_of(&t, "scout");
+        assert_eq!(fold.state, HelperState::Done);
+        assert_eq!(fold.usage, Some(2100));
+        assert_eq!(fold.status_text(), "done · 1 tool call · 2.1k tokens");
+        // Leaving the live list keeps it done; a new spawn of the label gets
+        // a fresh header.
+        t.note_live_helpers(std::iter::empty());
+        t.note_live_helpers([("scout", "m", 1)]);
+        assert_eq!(t.helper_headers().count(), 2);
+        assert_eq!(fold_of(&t, "scout").state, HelperState::Running);
+        // A failure and a cancellation.
+        let failed = |class| {
+            helper_event(
+                &["scout"],
+                AgentEvent::RunFailed {
+                    session_id: meerkat_core::SessionId::new(),
+                    identity: Default::default(),
+                    error_report: meerkat_core::AgentErrorReport {
+                        class,
+                        reason: None,
+                        message: "dead".into(),
+                    },
+                    terminal_cause_kind: None,
+                },
+            )
+        };
+        t.apply_scoped_event(&failed(meerkat_core::AgentErrorClass::Llm));
+        assert_eq!(fold_of(&t, "scout").state, HelperState::Failed);
+        assert_eq!(fold_of(&t, "scout").status_text(), "failed · 0 tool calls");
+        // The error notice belongs to the helper.
+        let last = BlockId(t.len() - 1);
+        assert!(matches!(t.block(last), Some(Block::Notice { .. })));
+        assert!(t.is_hidden(last));
+        t.apply_scoped_event(&failed(meerkat_core::AgentErrorClass::Cancelled));
+        assert_eq!(fold_of(&t, "scout").state, HelperState::Cancelled);
+        // A helper that left the live list while running is done; one whose
+        // events could not be followed is unmeasured.
+        t.note_live_helpers([("other", "m", 1)]);
+        t.note_live_helpers(std::iter::empty());
+        assert_eq!(fold_of(&t, "other").state, HelperState::Done);
+        t.helper_unmeasured("lost");
+        assert_eq!(fold_of(&t, "lost").state, HelperState::Unmeasured);
+        assert_eq!(fold_of(&t, "lost").status_text(), "unmeasured · 0 tool calls");
+    }
+
+    #[test]
+    fn running_helpers_spin_and_history_helpers_start_folded_and_finished() {
+        let mut t = Transcript::new();
+        let start = Instant::now();
+        t.apply_scoped_event(&helper_call(&["scout"], "a", "glob", json!({})));
+        let later = start + std::time::Duration::from_secs(1);
+        assert!(t.tick_helpers(later));
+        assert_ne!(fold_of(&t, "scout").spin, 0);
+        // A resumed transcript's helper headers are folded and finished.
+        let mut fold = fold_of(&t, "scout");
+        fold.expanded = true;
+        t.reset(vec![Block::Helper(fold)]);
+        let fold = fold_of(&t, "scout");
+        assert!(!fold.expanded);
+        assert_eq!(fold.state, HelperState::Done);
+        assert!(t.has_helpers());
+        assert!(!t.tick_helpers(later));
     }
 
     #[test]

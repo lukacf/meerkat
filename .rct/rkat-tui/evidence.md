@@ -653,3 +653,42 @@ The A4 regression (Tier-1 `read_file`/`memory_search` reaching the classifier) w
 - A prompt re-sent with the same text right after a failed turn was committed again (a failed run keeps its input; verified with a `RejectTools` probe): the runner now sends `(retrying the request above)` with a notice instead. Tests: `integrator::the_same_prompt_after_a_failed_turn_is_not_added_twice`, `a_different_prompt_after_a_failed_turn_is_sent_as_written`.
 - `/compact now` notice reworded to say the compaction happens at the start of the next message; the read-before-edit refusal says a restart forgets earlier reads. Mouse copy: OSC 52 only (user's choice), written after the frame, clipboard + primary, honest notice.
 - Known rare flake: `approval::engine::tests::parallel_escalations_share_one_timeout_including_the_queue` failed once while test binaries were compiling concurrently (heavy load), passed in 5×644 full runs and 6 lib runs afterwards. Hypothesis: with `start_paused`, the clock auto-advances past the escalation timeout while the ledger's `spawn_blocking` submit is still running on a starved thread. Not fixed; revisit if CI shows it.
+
+## Helper depth limit (2026-11-06)
+
+- Dogfood: helper A delegated helper B, each carrying a full context (~150-180k tokens for five trivial calls). Helpers now nest at most `[helpers] max_depth` levels (`tui.toml`/`--set helpers.max_depth=N`, default 1, a project file may only lower it). A helper's depth is its `HelperTag.path` length; at the limit the customizer denies `delegate`, `mob_create`, `mob_spawn_member`, `council` in its tool access policy (`NESTING_TOOLS`, merged by `deny_ungated_tools`), turns the member's mob tool category off so the schemas leave its tool list (~25k fixed tokens per call), and `Depth::admit` refuses a fresh spawn beyond the limit (a restored member keeps running, tools denied). The helper persona says a helper denied delegation does the work itself.
+- Tests: `mobs::customizer::tests::{a_helper_at_the_depth_limit_is_denied_the_nesting_tools, a_helper_below_the_depth_limit_keeps_the_nesting_tools, a_spawn_beyond_the_depth_limit_is_refused}`, `approval::rules::tests::helper_depth_defaults_to_one_layers_and_the_project_only_lowers_it`, `mobs::{a_helper_at_the_default_depth_cannot_delegate, a_helper_below_a_raised_depth_limit_delegates_once_more}`.
+
+## Typing during a slow tool (2026-11-06)
+
+- Dogfood report: typing while `shell sleep 10` ran "killed the run" (`InterruptedByRecovery`, the call
+  `outcome_uncertain`, the typed text not delivered). The realm's input rows show otherwise: both steers ("Test",
+  "Hepp") and the prompt ended with the TUI's own interrupt reason (`runtime_terminated: "rkat-tui: interrupted by
+  the user"`, history `queued → abandoned (TrackedCancel)`), 3.7 s after the second steer; the second run was
+  interrupted 1 s after its shell call started with no steer at all. The only producer of that reason is
+  `SessionHandle::interrupt` (`src/session/mod.rs`, `INTERRUPT_REASON`), reached from Esc / Ctrl-C /
+  Ctrl-X Ctrl-S / escalation Stop. The recovery notice is the engine closing a *cancelled* run's provisional tail
+  (`meerkat-runtime/src/runtime_loop.rs` `settle_cancelled_run_tail` → `recovery.rs` `close_interrupted_run`), not
+  a steer side effect. The engine's Steer waits for the tool: pinned by
+  `integrator::a_message_typed_while_a_slow_tool_runs_reaches_the_model_after_its_result` (real shell `sleep 2`, the
+  steer lands after the tool result in the same run, no system notice).
+- Likely trigger (UI, not changed here): Esc with only *admitted* steers is not a recall but an interrupt
+  (README "Esc limitation"), and Ctrl-C interrupts even right after a mouse selection. Suggested: Esc/Ctrl-C with
+  admitted steers or an active selection should not interrupt on the first press.
+- Real runner bugs found while reproducing (`integrator::interrupting_a_slow_tool_returns_the_messages_typed_meanwhile`,
+  failed about 1 run in 2 under parallel load before the fix):
+  - a steer admitted before the interrupt but not yet bound to the run escaped: `stop_run` leaves it queued, the
+    runtime stages it into a follow-up run, and the following `cancel_input_if_present` failed with
+    `InterruptDispatchOutcomeUnknown { reason: "executor reported the exact run non-current while machine authority
+    still binds it" }`; the follow-up turn then ran after the user's interrupt;
+  - that error aborted `SessionHandle::interrupt` (`?`), dropping the inputs it had already cancelled, so the turn read
+    `failed: rkat-tui: interrupted by the user` and only one message came back to the editor.
+  Fix: `interrupt` first abandons the outstanding inputs the runtime still holds `Queued`, then stops the run and
+  cancels the rest; a cancel that reports `InterruptDispatchOutcomeUnknown { run_id }` stops that run; up to three
+  passes retry what failed; it returns `Interrupted { cancelled, errors }` and never drops what it cancelled (the runner
+  shows leftover errors as `interrupt incomplete: …`). 12 parallel runs of the integrator suite clean afterwards.
+- Engine ask: an atomic "stop this run and abandon these queued inputs" (or a `stop_run` option that abandons the
+  steer lane), and `cancel_input_if_present` abandoning an input staged into a run the executor has not entered
+  instead of `InterruptDispatchOutcomeUnknown` (`meerkat-runtime/src/meerkat_machine/runtime_control.rs`
+  `cancel_input_if_present_owned_before`, `user_interrupt.rs:164`). The TUI's queued-first ordering narrows but
+  does not close the window between its state read and the cancel.

@@ -171,6 +171,8 @@ pub struct Runtime {
     pub mcp_servers: Vec<McpServerConfig>,
     /// Whether sessions get native semantic memory (`memory_search`).
     pub memory: bool,
+    /// The `tui.toml` `[ui]` settings.
+    pub ui: crate::approval::rules::UiSettings,
     /// Start-up notices (warnings) for the transcript.
     pub notices: Vec<String>,
 }
@@ -403,7 +405,9 @@ pub async fn bootstrap_with(
         scope.global.as_ref().map(GlobalDirs::pricing_cache),
         !args.no_pricing_fetch,
     );
+    let ui = layered.ui;
     approval_notices.extend(endpoint_notices.iter().map(ToString::to_string));
+    let helper_depth = layered.helpers.max_depth;
     let approval = approval::build(
         &scope,
         layered,
@@ -458,6 +462,7 @@ pub async fn bootstrap_with(
         &mob_tools_slot,
         workgraph,
         confinement.shell_env.clone(),
+        helper_depth,
     )?;
 
     let scope_workspace = scope.context_root.clone();
@@ -487,6 +492,7 @@ pub async fn bootstrap_with(
         },
         mcp_servers: mcp.servers,
         memory,
+        ui,
         notices,
     })
 }
@@ -545,6 +551,7 @@ fn start_helpers(
     slot: &MobToolsSlot,
     workgraph: meerkat::WorkGraphService,
     shell_env: Option<HashMap<String, String>>,
+    max_depth: u8,
 ) -> Result<Option<Arc<Helpers>>, TuiError> {
     let root = scope.project_root.clone();
     let tools: crate::mobs::customizer::HelperTools = Arc::new(move || {
@@ -560,6 +567,7 @@ fn start_helpers(
         workgraph,
         shell_env,
         profiles: model_profiles(effective),
+        max_depth,
     })?;
     *slot
         .write()
@@ -595,6 +603,7 @@ fn start_helpers(
     _slot: &MobToolsSlot,
     _workgraph: meerkat::WorkGraphService,
     _shell_env: Option<HashMap<String, String>>,
+    _max_depth: u8,
 ) -> Result<Option<Arc<Helpers>>, TuiError> {
     Ok(None)
 }

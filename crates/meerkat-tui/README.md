@@ -40,9 +40,13 @@ interrupt, a failed turn) comes back to the editor.
 *Esc limitation:* a steered message belongs to the runtime as soon as it is
 admitted, so it cannot be pulled back. Esc recalls only messages the UI still
 holds (typed right as a turn ended); with nothing to recall, Esc interrupts
-the turn. Ctrl-C interrupts too: the current run is stopped (steers that
-joined it are abandoned, not re-run), outstanding inputs are cancelled and
-running helpers are cancelled.
+the turn. Ctrl-C interrupts too: steers still waiting for a boundary are
+abandoned first, then the current run is stopped (steers that joined it are
+abandoned, not re-run, and a call in flight is cancelled and answered as
+*outcome unknown*), outstanding inputs are cancelled and running helpers are
+cancelled. Every steered message the interrupt abandoned comes back to the
+editor. Typing alone never interrupts: a message sent while a tool runs
+waits for that tool's result and joins the turn after it.
 
 **How a turn ends.** A turn ends when the runtime reports every input it
 admitted terminal, and the UI says how in typed terms: completed, failed
@@ -252,9 +256,32 @@ model and endpoint (a model only an endpoint lists included), with the
 TUI's file tools and a helper persona, does one turn and returns its final
 text. Its tool calls pass the **delegating
 session's** gate (same rules, counters and Stop; escalations name the
-helper), so delegating never unlocks an action. The transcript nests helper
-activity under `[label · model]`, the status bar counts running helpers, and
-an interrupt cancels them.
+helper), so delegating never unlocks an action. The transcript shows each
+helper as one `[label · model]` line, the status bar counts running helpers,
+and an interrupt cancels them.
+
+**Watching a helper.** A helper is folded to one header line where it was
+spawned: `▸ [scout · model] ⠋ running · 4 tool calls · grep "fn resolve"`
+while it works (its last call, or the first line of its latest text), then
+`done · 7 tool calls · 2.1k tokens` (or `failed`, `cancelled`,
+`unmeasured`). Its calls and errors, and the headers of helpers it spawned,
+stay in the transcript behind the header. Ctrl+↓/Ctrl+↑ focus a header (the
+newest first, wrapping around); Enter expands or folds the focused one, Esc
+or typing drops the focus. A click on a header toggles it too, and
+`/helpers` lists the helpers, `/helpers expand|fold <label>|all` opens or
+folds them. An open helper shows its calls indented as before (tool output
+still collapsed, Ctrl-T toggles it). `[ui] helpers = "expanded"` in
+`tui.toml` starts every helper open (default `"folded"`); a resumed session
+shows its helpers folded.
+
+Helpers nest one level deep by default, as in Claude Code: the session may
+delegate, its helpers may not, so a chain of helpers each carrying a full
+context (and the mob and council tool schemas, about 25k tokens in every
+call) never builds up. `[helpers] max_depth = N` in `tui.toml` (or
+`--set helpers.max_depth=N`; a project file may only lower it) allows N
+levels: a helper at the limit gets no `delegate`, `mob_create`,
+`mob_spawn_member` or `council` tool (left out of its tool list and denied
+by its tool access policy), and a deeper spawn is refused.
 
 `fork` hands a side quest to a child that starts with the session's own
 conversation as context: the TUI renders the committed conversation (user
@@ -341,6 +368,8 @@ are never written to a file.
 | `auto.classifier_tools` | `--set auto.classifier_tools=false` | `true` |
 | `[[allow]]` / `[[deny]]` `tool`, `arg` (glob) or `literal` | `--allow` / `--deny <tool>[=<glob>]` (repeatable) | none |
 | `endpoints.<name>.dialect`, `.base_url`, `.api_key_env`, `.priority` (an inline `.api_key` is refused at start-up) | `--endpoint-def <name>=<dialect>=<url>[,key_env=VAR]` | |
+| `helpers.max_depth` (levels of helpers; a project file may only lower it) | `--set helpers.max_depth=N` | `1` |
+| `ui.helpers` (`"folded"`/`"expanded"`: how helper headers start) | `--set ui.helpers=expanded` | `"folded"` |
 | `pricing."<model id>".input`, `.output`, `.cached_input`, `.cache_write` (USD per 1M tokens) | `--set 'pricing."<id>".input=15'` | fetched prices |
 
 Other flags: `--model`/`-m <[endpoint:]id>`, `--endpoint <name>`
@@ -505,7 +534,8 @@ took the discarded messages).
 `/help`, `/quit`, `/clear`, `/resume [ref]`,
 `/rules [list|add allow|deny <tool> [pattern]|rm <n>|trust]`,
 `/auto [on|off|resume]`, `/model [[endpoint:]id|refresh]`,
-`/remember <text>`, `/compact [now]`, `/cost`, `/mcp trust`. `/clear`, `/resume`, `/model` and `/compact now` work only while
+`/remember <text>`, `/compact [now]`, `/cost`, `/mcp trust`,
+`/helpers [expand|fold <label>|all]`. `/clear`, `/resume`, `/model` and `/compact now` work only while
 idle; the transcript is replaced only once the new session is live.
 
 Enter sends (steers while a turn runs); Alt+Enter, Shift+Enter or Ctrl-J
@@ -513,8 +543,8 @@ insert a newline; Ctrl-C interrupts (twice to quit when idle); Esc recalls
 held messages, else interrupts; ↑ on an empty editor edits the newest held
 message, else recalls prompt history; Ctrl-R searches history (workspace,
 then global); Ctrl-X Ctrl-S interrupts and sends the input; Ctrl-O toggles
-the last reasoning block; PgUp/PgDn and Shift+↑/↓ scroll; Home/End jump when
-the editor is empty.
+the last reasoning block; Ctrl+↑/↓ focus a helper header and Enter toggles
+it; PgUp/PgDn and Shift+↑/↓ scroll; Home/End jump when the editor is empty.
 
 The mouse is captured by default: the wheel scrolls and a click expands or
 collapses a tool call's output (Ctrl-T for the latest). Dragging selects text

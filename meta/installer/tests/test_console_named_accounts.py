@@ -690,3 +690,53 @@ async def test_forge_deployment_treats_named_account_packages_as_authenticated(t
     finally:
         server.close()
         await server.wait_closed()
+
+
+# Row 2: native consent reads and decisions reach the console as the
+# signed-in person, under the setup routes' rules: closed JSON, a bounded
+# body, JSON only, no query, the front's own Origin and the login's token.
+@pytest.mark.parametrize("route,payload,limit", [
+    ("read", {"approval_id": "Å" * 256}, 4 * 1024),
+    ("decide", {"approval_id": "opaque-approval", "decision": "deny", "reason": "Å" * 2048}, 32 * 1024),
+])
+async def test_consent_read_and_decide_are_forwarded(tmp_path, route, payload, limit):
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    path = "/host/toolkit/consent/" + route
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    raw += b" " * (limit - len(raw))
+    headers = {"Origin": console.origin, "Content-Type": "application/json"}
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            response = await alice.post(path, content=raw,
+                headers={**headers, "Authorization": "Bearer browser-canary"})
+            assert response.status_code == 200, response.text
+            request = native.requests[-1]
+            assert request.method == "POST" and request.url.raw_path == path.encode()
+            assert request.content == raw and request.headers["origin"] == console.origin
+            claims = bearer_claims(request, console)
+            assert claims["sub"] == ALICE and claims["sid"] == login_of(alice, console).login_scope_id
+            assert response.headers["cache-control"] == "no-store"
+            before = len(native.requests)
+            refused = [b"[]", b"null", json.dumps({**payload, "principal": OPERATOR}).encode(),
+                       json.dumps({**payload, "approval_id": "Å" * 257}).encode(),
+                       json.dumps({**payload, "approval_id": 7}).encode(), b" " * (limit + 1)]
+            if route == "decide":
+                refused += [json.dumps({**payload, "decision": "browser-approved"}).encode(),
+                            json.dumps({**payload, "reason": "x" * 4097}).encode(),
+                            json.dumps({**payload, "reason": ["opaque"]}).encode(),
+                            json.dumps({"approval_id": "opaque-approval"}).encode()]
+            for body in refused:
+                assert (await alice.post(path, content=body, headers=headers)).status_code == 400
+            assert (await alice.post(path + "?approval_id=other", content=raw, headers=headers)).status_code == 400
+            assert (await alice.post(path, content=raw, headers={**headers, "Content-Type": "text/plain"})).status_code == 400
+            assert (await alice.post(path, content=raw, headers={**headers, "Origin": "https://foreign.example"})).status_code == 403
+            assert (await alice.get(path)).status_code == 405
+            assert len(native.requests) == before
+        async with browser(app, console) as stranger:
+            assert (await stranger.post(path, content=raw, headers=headers)).status_code == 401
+            assert len(native.requests) == before
+    finally:
+        await console.close()

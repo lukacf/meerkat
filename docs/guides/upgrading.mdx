@@ -117,6 +117,9 @@ While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
 - Upgrade every process that executes decisions on one store together.
 - A host that took a second loop's start refusal as the sign of another
   executor reads `DecisionExecutorPass::unclaimed` instead.
+- Before a rollback to 0.9.10 or 0.9.9, read the CHANGELOG's upgrade note on
+  durable decisions and a rollback: those releases read a decision decided in
+  a login on 0.9.11 as torn and do not execute it.
 
 ## Upgrading to 0.9.10
 

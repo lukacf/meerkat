@@ -393,8 +393,12 @@ counts.
 | --- | --- |
 | Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
-| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
+| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. A decision whose record names its verified decider reads "Decided by" that principal, the approver label it decided as, and the assurance it was authenticated with (for example "alice@example.test (as Release manager) - person authenticated"); an older record keeps the approver label. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
+
+When the gateway keeps the gating records in its memory (`meta/gating/audit`
+reports `retention: "process"`), the Audit and Auto tabs say so: "Kept in the
+gateway's memory: decisions from before a gateway restart may be missing."
 
 Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
 R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and

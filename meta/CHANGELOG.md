@@ -120,6 +120,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   embedded runtime; a host that persists `gating_state_snapshot` itself
   leaves it off.
 
+### Fixed
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

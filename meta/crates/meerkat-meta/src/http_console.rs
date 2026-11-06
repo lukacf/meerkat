@@ -254,6 +254,35 @@ impl ConsoleHttpAuthContext {
             _ => Ok(()),
         }
     }
+
+    /// The private-owner key ([`crate::access::PRIVATE_TO_LABEL`]) of the
+    /// person this caller is on a console that requires sign-in: what the
+    /// side chats the caller forks are private to, and whom the replies to
+    /// the caller's sends are for ([`crate::console_replies`]). None for
+    /// every other caller (an open console's, a service, a token that names
+    /// no person): privacy follows the posture, and only a person owns
+    /// private things.
+    fn person_on_sign_in(&self, decisions: &RuntimeDecisionState) -> Option<String> {
+        decisions
+            .console
+            .require_app_auth
+            .then(|| self.human.as_ref().map(console_person_private_owner_key))
+            .flatten()
+    }
+
+    /// The person the replies to this caller's sends are for
+    /// ([`crate::console_replies`]): the caller, when it is a verified
+    /// person on a console that requires sign-in
+    /// ([`Self::person_on_sign_in`]), with its console principal.
+    fn reply_addressee(
+        &self,
+        decisions: &RuntimeDecisionState,
+    ) -> Option<crate::console_aggregator::ConsoleReplyAddressee> {
+        Some(crate::console_aggregator::ConsoleReplyAddressee {
+            private_owner_key: self.person_on_sign_in(decisions)?,
+            access_principal: self.principal.clone()?,
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1373,6 +1402,88 @@ fn console_whoami_rpc(
     )
 }
 
+/// `meta/console/attention` and `meta/console/attention/dismiss` on the
+/// console route: the caller's own person-addressed attention items
+/// ([`crate::console_replies`]), newest first, and the dismissal of one of
+/// them. Only a verified person holds items, read by the person's
+/// private-owner key; every other caller reads none and dismisses none, and
+/// no param names whose items are read. A console that keeps no attention
+/// list answers that the methods are not found. Dismissing is a console
+/// change: a read-only console refuses it, and the caller is checked again
+/// right before the dismissal is made.
+async fn console_attention_rpc(
+    state: &ConsoleJsonState,
+    auth: &ConsoleHttpAuthContext,
+    read_only: bool,
+    request: &JsonRpcRequest,
+) -> Value {
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let Some(attention) = state.console_attention.as_ref() else {
+        return response_value(
+            response_id,
+            None,
+            Some(JsonRpcError::new(-32601, "Method not found")),
+        );
+    };
+    let addressee = auth.human.as_ref().map(console_person_private_owner_key);
+    if request.method == crate::rpc::CONSOLE_ATTENTION_METHOD {
+        let items = match &addressee {
+            Some(addressee) => match attention.list(addressee).await {
+                Ok(items) => items,
+                Err(error) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(JsonRpcError::new(
+                            -32603,
+                            format!("the attention list could not be read: {error}"),
+                        )),
+                    );
+                }
+            },
+            None => Vec::new(),
+        };
+        return response_value(
+            response_id,
+            Some(json!({ "items": items, "retention": attention.retention() })),
+            None,
+        );
+    }
+    if read_only {
+        return console_read_only_rpc_error(response_id);
+    }
+    let Some(item_id) = request.params.get("item_id").and_then(Value::as_str) else {
+        return invalid_params(response_id, "item_id must be a string");
+    };
+    // The change checks its caller again right before it is made.
+    if let Err(refusal) =
+        ConsoleSendGovernance::for_request(state, auth).refuse_unless_caller_current()
+    {
+        return response_value(response_id, None, Some(refusal.json_rpc_error()));
+    }
+    let dismissed = match &addressee {
+        Some(addressee) => match attention.dismiss(addressee, item_id).await {
+            Ok(dismissed) => dismissed,
+            Err(error) => {
+                return response_value(
+                    response_id,
+                    None,
+                    Some(JsonRpcError::new(
+                        -32603,
+                        format!("the attention item could not be dismissed: {error}"),
+                    )),
+                );
+            }
+        },
+        None => false,
+    };
+    response_value(
+        response_id,
+        Some(json!({ "item_id": item_id, "dismissed": dismissed })),
+        None,
+    )
+}
+
 /// An opaque, stable digest of the caller the Console resolved for a
 /// request, from its send scope: the verified human (issuer and subject),
 /// the principal with its trust source, or the open Console's one anonymous
@@ -1451,11 +1562,37 @@ pub async fn console_rpc_handler(
     // A console change is recorded in the console audit log once its answer
     // is known, a refusal included (`crate::console_audit`).
     let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
+    let request_method = parsed_request.method.clone();
     let response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
+    let response = advertise_console_attention(response, &request_method, &state);
     if let Some(intent) = audited {
         intent.record(&auth_context, &response).await;
     }
     (StatusCode::OK, Json::<Value>(response))
+}
+
+/// `meta/capabilities` on the console route lists the attention methods
+/// where the console keeps an attention list ([`crate::console_replies`]):
+/// the read always, the dismissal on a console that takes changes.
+fn advertise_console_attention(
+    mut response: Value,
+    method: &str,
+    state: &ConsoleJsonState,
+) -> Value {
+    if method != "meta/capabilities" || state.console_attention.is_none() {
+        return response;
+    }
+    if let Some(methods) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("methods"))
+        .and_then(Value::as_array_mut)
+    {
+        methods.push(json!(crate::rpc::CONSOLE_ATTENTION_METHOD));
+        if !state.decisions.console.read_only {
+            methods.push(json!(crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD));
+        }
+    }
+    response
 }
 
 /// The answer of one authenticated `POST /console/rpc` request.
@@ -1511,6 +1648,12 @@ async fn console_rpc_answer(
     }
     if matches!(
         request_method.as_str(),
+        crate::rpc::CONSOLE_ATTENTION_METHOD | crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD
+    ) {
+        return console_attention_rpc(state, auth_context, read_only, &parsed_request).await;
+    }
+    if matches!(
+        request_method.as_str(),
         crate::console_voice::VOICE_OPEN_METHOD
             | crate::console_voice::VOICE_READINESS_METHOD
             | crate::console_voice::VOICE_CLOSE_METHOD
@@ -1550,6 +1693,7 @@ async fn console_rpc_answer(
             state.access.as_ref(),
             Some(&auth_context.audience),
             &auth_context.send_scope(),
+            auth_context.reply_addressee(&state.decisions).as_ref(),
         ))
         .await;
     };
@@ -2977,6 +3121,12 @@ pub(crate) struct ConsoleSendGovernance {
     /// none, and the side chat stays shared (an open console, a service or
     /// a token that names no person).
     pub(crate) side_chat_owner: Option<String>,
+    /// The person the replies to this send are for
+    /// ([`crate::console_replies`]): the sender, when the sender is a
+    /// verified person on a console that requires sign-in (a schedule's
+    /// fire: the schedule's sender, by the same rule); none for every other
+    /// send, which no reply reaches privately.
+    pub(crate) reply_addressee: Option<crate::console_aggregator::ConsoleReplyAddressee>,
 }
 
 impl ConsoleSendGovernance {
@@ -2991,17 +3141,8 @@ impl ConsoleSendGovernance {
                 .is_some_and(MobRuntime::native_work_governed),
             access: state.access.clone(),
             verification: auth_context.verification.clone(),
-            side_chat_owner: state
-                .decisions
-                .console
-                .require_app_auth
-                .then(|| {
-                    auth_context
-                        .human
-                        .as_ref()
-                        .map(console_person_private_owner_key)
-                })
-                .flatten(),
+            side_chat_owner: auth_context.person_on_sign_in(&state.decisions),
+            reply_addressee: auth_context.reply_addressee(&state.decisions),
         }
     }
 
@@ -3244,7 +3385,12 @@ async fn console_send_member_lane(
     governance
         .refuse_unless_caller_current()
         .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
-    Ok(Box::pin(aggregator.send_scoped(request, &governance.scope)).await?)
+    Ok(Box::pin(aggregator.send_scoped(
+        request,
+        &governance.scope,
+        governance.reply_addressee.as_ref(),
+    ))
+    .await?)
 }
 
 #[cfg(test)]
@@ -3427,6 +3573,7 @@ async fn console_send_identity_first_governed(
         request.clone(),
         session_id.as_deref(),
         &governance.scope,
+        governance.reply_addressee.as_ref(),
     ))
     .await?
     {
@@ -4283,6 +4430,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/reset_all"
             | "meta/console/send"
             | "meta/console/recover_send"
+            | crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD
             | crate::console_voice::VOICE_OPEN_METHOD
             | "meta/blob/upload"
             | "meta/ensure_member"
@@ -7970,6 +8118,7 @@ async fn console_rpc_multipart_answer(
             state.access.as_ref(),
             Some(&auth_context.audience),
             &auth_context.send_scope(),
+            auth_context.reply_addressee(&state.decisions).as_ref(),
         ))
         .await
     } else {
@@ -10273,6 +10422,7 @@ async fn handle_console_aggregator_rpc(
     access: Option<&AccessController>,
     access_view: Option<&AccessView>,
     send_scope: &ConsoleSendScope,
+    reply_addressee: Option<&crate::console_aggregator::ConsoleReplyAddressee>,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
@@ -10485,7 +10635,8 @@ async fn handle_console_aggregator_rpc(
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
-            match Box::pin(aggregator.send_scoped(send_request, send_scope)).await {
+            match Box::pin(aggregator.send_scoped(send_request, send_scope, reply_addressee)).await
+            {
                 Ok(accepted) => response_value(
                     response_id,
                     Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
@@ -18906,6 +19057,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(served["error"]["code"], json!(-32601), "{served:#?}");
@@ -18918,6 +19070,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = capabilities["result"]["methods"]
@@ -18995,6 +19148,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
         };
         let caps = call("meta/capabilities", json!({})).await;
@@ -19029,6 +19183,7 @@ comms = true
                 Some(&restricted),
                 Some(&restricted_view),
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(denied["error"]["data"]["kind"], "access_denied", "{denied}");
@@ -19553,6 +19708,7 @@ comms = true
             Some(controller),
             Some(&view),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
     }
@@ -19939,6 +20095,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -19978,7 +20135,7 @@ comms = true
             skill_refs: Vec::new(),
         };
         let accepted = match aggregator
-            .reserve_identity_first_interaction_scoped(request, None, &owner)
+            .reserve_identity_first_interaction_scoped(request, None, &owner, None)
             .await
             .expect("reservation")
         {
@@ -19997,6 +20154,7 @@ comms = true
                     None,
                     None,
                     &scope,
+                    None,
                 )
                 .await
             }
@@ -20069,6 +20227,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = response["result"]["methods"]
@@ -20113,6 +20272,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20247,6 +20407,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20280,6 +20441,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(
@@ -20499,6 +20661,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(
@@ -24602,6 +24765,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -24624,6 +24788,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
         assert_eq!(
@@ -28030,6 +28195,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -34341,6 +34507,7 @@ comms = true
                         Some(&self.controller),
                         Some(&view),
                         &ConsoleSendScope::Anonymous,
+                        None,
                     ))
                     .await;
                     (answer, "/result/identities", "identity")

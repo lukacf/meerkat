@@ -1133,6 +1133,7 @@ async fn console_human_redispatch_into_a_moved_session_fails_and_delivers_nothin
             request.clone(),
             Some(h.session_id.to_string().as_str()),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
         .unwrap()

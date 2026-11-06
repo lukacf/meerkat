@@ -688,6 +688,22 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             sender.principal(),
             private_owner_key.as_deref(),
         );
+        // A fire is its sender's send: on a console that requires sign-in,
+        // the replies to it are for the person who defined it, as they are
+        // for that person's live sends.
+        let reply_addressee = match (
+            self.decisions.console.require_app_auth,
+            private_owner_key,
+            sender.principal(),
+        ) {
+            (true, Some(private_owner_key), Some(principal)) => {
+                Some(crate::console_aggregator::ConsoleReplyAddressee {
+                    private_owner_key,
+                    access_principal: principal.to_string(),
+                })
+            }
+            _ => None,
+        };
         let governance = ConsoleSendGovernance {
             ingress: self.governed_ingress.current(),
             human: None,
@@ -696,6 +712,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             access: self.access.clone(),
             verification: None,
             side_chat_owner: None,
+            reply_addressee,
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),

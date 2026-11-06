@@ -409,6 +409,17 @@ async fn person_addressed_item_visible_only_to_addressee() -> TestResult {
          her: {receipt:?}"
     );
 
+    let capabilities =
+        console_rpc_as(&fixture.app, Some(&alice), "meta/capabilities", json!({})).await;
+    let methods = capabilities["result"]["methods"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        methods.contains(&json!("meta/console/attention"))
+            && methods.contains(&json!("meta/console/attention/dismiss")),
+        "the console lists its attention methods: {methods:?}"
+    );
     let items = attention(&fixture.app, &alice).await;
     let items = items.expect("Alice reads her attention list");
     assert_eq!(items.len(), 1, "Alice's list holds the reply: {items:#?}");

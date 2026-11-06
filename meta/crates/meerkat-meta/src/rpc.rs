@@ -79,6 +79,13 @@ pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
 /// how it ended, read a page at a time after a cursor. Served on the Console
 /// route only, under the `audit.view` access action.
 pub const CONSOLE_AUDIT_METHOD: &str = "meta/console/audit";
+/// The caller's own person-addressed attention items, newest first: replies
+/// meant for the caller that no private thread of theirs took. Served on the
+/// Console route only; a caller who is not a verified person reads none.
+pub const CONSOLE_ATTENTION_METHOD: &str = "meta/console/attention";
+/// Dismiss one of the caller's own attention items. Served on the Console
+/// route only.
+pub const CONSOLE_ATTENTION_DISMISS_METHOD: &str = "meta/console/attention/dismiss";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";

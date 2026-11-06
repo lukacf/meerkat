@@ -67,7 +67,7 @@ mod records;
 mod roster_pass_tests;
 #[cfg(test)]
 mod seat_tests;
-use build_preparation::{admission_build_preparation_retry_of, build_preparation_retry_of};
+use build_preparation::{admission_door_refusal_of, door_refusal_of};
 pub(crate) use declare::HostedIdentities;
 pub(crate) use records::host_pending_members_before_build;
 
@@ -3544,12 +3544,6 @@ pub struct IdentityRuntime {
     /// (`SessionBridge::members_holding_run_starts_for_published_tools`, the
     /// typed wake refusal). A publication that succeeds clears it.
     customizer_failures: std::sync::RwLock<BTreeMap<AgentIdentity, CustomizerToolsPending>>,
-    /// The member ids Meta handed the mob as host-pending before it was
-    /// built (`MobBuilder::with_host_pending_members`): Core refuses their
-    /// wakes until the declaration that carries each one's first-boot row
-    /// out ends its mark. Each leaves this set once Core names its row
-    /// carried out.
-    host_pending_seeded: StdMutex<BTreeSet<meerkat_mob::AgentIdentity>>,
     /// The bootstrap entry an explicit materialization or warm replaced when
     /// it marked the identity warming, by identity: a refusal that clears
     /// on its own puts it back exactly.
@@ -4394,7 +4388,6 @@ impl IdentityRuntime {
             customizer: RwLock::new(None),
             customizer_tools: RwLock::new(None),
             customizer_failures: std::sync::RwLock::new(BTreeMap::new()),
-            host_pending_seeded: StdMutex::new(BTreeSet::new()),
             bootstrap_warming_replaced: StdMutex::new(BTreeMap::new()),
             member_build_preparer: StdRwLock::new(None),
             candidate_launch: AtomicBool::new(false),
@@ -7670,15 +7663,18 @@ impl IdentityRuntime {
     }
 
     /// Make a send or dispatch target a member of Core's mob before its
-    /// admission, when Core does not hold it yet, its pending first-boot
-    /// row is still to carry out, its role migration is held, or Core still
-    /// keeps the host preparation Meta asked for at start: the identity is
-    /// declared again in Core's mob ([`Self::declare_identity_locked`]), and
-    /// Core seats it (on its archived session, or its first-boot row's) or
-    /// answers why not, typed. The delivery goes to Core, whose dispatch
-    /// materializes a Dormant member before it delivers, so the seat
-    /// materializes nothing. An identity Core holds, with nothing owed,
-    /// takes no Core step at all.
+    /// admission, when Core does not hold it yet, Meta's own first-boot
+    /// records still hold its row (or cannot be read), or its role migration
+    /// is held: the identity is declared again in Core's mob
+    /// ([`Self::declare_identity_locked`]), and Core seats it (on its
+    /// archived session, or its first-boot row's) or answers why not, typed.
+    /// The delivery goes to Core, whose dispatch materializes a Dormant
+    /// member before it delivers, so the seat materializes nothing. An
+    /// identity Core holds, with nothing owed in Meta's records and nothing
+    /// held, takes no Core step at all. A host preparation Core keeps that
+    /// Meta's records do not name is Core's to name: the delivery's wake is
+    /// refused typed, and the door answers that refusal
+    /// ([`Self::door_retries`]).
     ///
     /// A target seated here had no managed edges while it was not a member:
     /// its own edges are reconciled after the seat, bounded (see
@@ -7694,7 +7690,6 @@ impl IdentityRuntime {
             && !self.has_pending_first_boot_row(identity)
             && !self.first_boot_unread()
             && !self.held_for_role_migration(identity).await
-            && !self.host_pending_seeded_contains(identity)
         {
             return Ok(());
         }
@@ -9089,8 +9084,8 @@ impl IdentityRuntime {
     ///   wake): Core's own restore builds it on its durable session, or
     ///   answers typed (a session Core cannot resume is Broken through its
     ///   machine; a refused wake keeps its kind). One attempt, and the door's
-    ///   one retry of a wake Core refused for the build preparation the host
-    ///   asked to retry, after the door retries the preparation; no loop.
+    ///   one retry of a wake Core refused for a cause the door ends
+    ///   ([`Self::door_retries`]); no loop.
     ///   A member the seat built (its archived session's revival, as after a
     ///   respawn's own retirement, or a declared role migration's restamp) is
     ///   live already: Core answers the wake so, and builds nothing again.
@@ -9187,9 +9182,9 @@ impl IdentityRuntime {
             ));
         }
         // Core's wake (cause Operator): Core materializes the member through
-        // its own restore, or answers typed. A wake refused for the build
-        // preparation the host asked to retry is retried once, after the
-        // door retries the preparation.
+        // its own restore, or answers typed. A wake refused for a cause the
+        // door ends (a build preparation retry, a first-boot row's host
+        // preparation) is retried once, after the door's step.
         let mut door_retried = false;
         let binding = loop {
             match bridge.ensure_member_live(identity).await {
@@ -9204,11 +9199,7 @@ impl IdentityRuntime {
                 }
                 Err(error) => {
                     if self
-                        .door_retries_build_preparation(
-                            identity,
-                            &mut door_retried,
-                            build_preparation_retry_of(&error),
-                        )
+                        .door_retries(identity, &mut door_retried, door_refusal_of(&error))
                         .await?
                     {
                         continue;
@@ -10600,18 +10591,18 @@ impl IdentityRuntime {
         // below, and the wake decides the member's session (a seat's first
         // wake creates it, a missing one moves to its successor): Core wakes
         // it first, so the binding read below is the woken member's. A wake
-        // refused for the build preparation the host asked to retry is
-        // retried once, after the door retries the preparation.
+        // refused for a cause the door ends is retried once, after the
+        // door's step ([`Self::door_retries`]).
         if let Some(bridge) = self.bridge.as_ref() {
             let mut door_retried = false;
             loop {
                 let woken = bridge.wake_for_governed_input(identity).await;
                 if let Err(error) = &woken
                     && self
-                        .door_retries_build_preparation(
+                        .door_retries(
                             identity,
                             &mut door_retried,
-                            admission_build_preparation_retry_of(error),
+                            admission_door_refusal_of(error),
                         )
                         .await?
                 {
@@ -11522,7 +11513,7 @@ impl IdentityRuntime {
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure (same
                     // rule as the other lanes); and the door's one retry of a
-                    // build preparation Core refused the delivery's wake for.
+                    // wake Core refused for a cause the door ends.
                     let mut reload_attempted = false;
                     let mut door_retried = false;
                     loop {
@@ -11531,10 +11522,10 @@ impl IdentityRuntime {
                             .await;
                         if let Err(error) = &attempt
                             && self
-                                .door_retries_build_preparation(
+                                .door_retries(
                                     identity,
                                     &mut door_retried,
-                                    admission_build_preparation_retry_of(error),
+                                    admission_door_refusal_of(error),
                                 )
                                 .await?
                         {
@@ -11585,8 +11576,8 @@ impl IdentityRuntime {
                     // One automatic non-destructive reload on a typed
                     // reload-required refusal, then the typed failure. Never a
                     // loop: a second refusal after a reload is an operator
-                    // matter. The door's one retry of a build preparation
-                    // Core refused the delivery's wake for, likewise.
+                    // matter. The door's one retry of a wake Core refused for
+                    // a cause the door ends, likewise.
                     let mut reload_attempted = false;
                     let mut door_retried = false;
                     loop {
@@ -11630,11 +11621,7 @@ impl IdentityRuntime {
                         };
                         if let Err(error) = &attempt
                             && self
-                                .door_retries_build_preparation(
-                                    identity,
-                                    &mut door_retried,
-                                    build_preparation_retry_of(error),
-                                )
+                                .door_retries(identity, &mut door_retried, door_refusal_of(error))
                                 .await?
                         {
                             continue;
@@ -11719,8 +11706,8 @@ impl IdentityRuntime {
                     // ADMITTED. Bounded; still under the lock. One automatic
                     // non-destructive reload on a typed reload-required
                     // refusal, then the typed failure (same rule as the
-                    // ingress lane), and the door's one retry of a build
-                    // preparation Core refused the delivery's wake for.
+                    // ingress lane), and the door's one retry of a wake Core
+                    // refused for a cause the door ends.
                     let mut reload_attempted = false;
                     let mut door_retried = false;
                     let receipt = loop {
@@ -11736,10 +11723,10 @@ impl IdentityRuntime {
                             .await;
                         if let Err(error) = &attempt
                             && self
-                                .door_retries_build_preparation(
+                                .door_retries(
                                     identity,
                                     &mut door_retried,
-                                    admission_build_preparation_retry_of(error),
+                                    admission_door_refusal_of(error),
                                 )
                                 .await?
                         {
@@ -12738,8 +12725,8 @@ impl IdentityRuntime {
             // meerkat's typed pre-admission refusal of the tracked admission
             // (the member's ACTUAL runtime mode) sends the dispatch down the
             // ingress lane below: nothing was delivered by the refused attempt.
-            // A wake Core refused for the build preparation the host asked to
-            // retry is retried once, after the door retries the preparation.
+            // A wake Core refused for a cause the door ends is retried once,
+            // after the door's step ([`Self::door_retries`]).
             let tracked_attempt = if ticketed {
                 let mut door_retried = false;
                 let attempt = loop {
@@ -12748,10 +12735,10 @@ impl IdentityRuntime {
                         .await;
                     if let Err(error) = &attempt
                         && self
-                            .door_retries_build_preparation(
+                            .door_retries(
                                 identity,
                                 &mut door_retried,
-                                admission_build_preparation_retry_of(error),
+                                admission_door_refusal_of(error),
                             )
                             .await?
                     {
@@ -12829,11 +12816,7 @@ impl IdentityRuntime {
                     let attempt = bridge.deliver_admitted(rid, delivery.clone()).await;
                     if let Err(error) = &attempt
                         && self
-                            .door_retries_build_preparation(
-                                identity,
-                                &mut door_retried,
-                                build_preparation_retry_of(error),
-                            )
+                            .door_retries(identity, &mut door_retried, door_refusal_of(error))
                             .await?
                     {
                         continue;

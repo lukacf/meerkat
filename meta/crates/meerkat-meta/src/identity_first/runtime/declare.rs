@@ -1511,41 +1511,6 @@ impl IdentityRuntime {
         self.entries.write().await.remove(identity);
     }
 
-    /// Record the member ids Meta handed the mob as host-pending before it
-    /// was built (`host_pending_members_before_build`): each keeps its mark
-    /// in Core until the declaration that carries its first-boot row out
-    /// ends it.
-    pub(crate) fn seed_host_pending(
-        &self,
-        members: impl IntoIterator<Item = meerkat_mob::AgentIdentity>,
-    ) {
-        self.host_pending_seeded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(members);
-    }
-
-    /// Whether Core still keeps the host preparation Meta asked for at
-    /// start for `identity` ([`Self::seed_host_pending`]).
-    pub(super) fn host_pending_seeded_contains(&self, identity: &AgentIdentity) -> bool {
-        self.host_pending_seeded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&crate::member_comms_id::roster_member_id_for_identity(
-                identity.as_str(),
-            ))
-    }
-
-    /// Core ended `identity`'s host preparation.
-    pub(super) fn forget_seeded_host_preparation(&self, identity: &AgentIdentity) {
-        self.host_pending_seeded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&crate::member_comms_id::roster_member_id_for_identity(
-                identity.as_str(),
-            ));
-    }
-
     /// The rows of the first-boot manifest still to carry out, by identity.
     pub(super) fn pending_first_boot_rows_snapshot(&self) -> BTreeMap<AgentIdentity, FirstBootRow> {
         match &*self
@@ -1873,7 +1838,6 @@ impl IdentityRuntime {
         // first-boot preparation in the step that carried them out.
         for identity in &answer.first_boot_requests_carried_out {
             self.settle_first_boot_row_in_memory(identity);
-            self.forget_seeded_host_preparation(identity);
             settled = true;
         }
         let mut bound = Vec::new();

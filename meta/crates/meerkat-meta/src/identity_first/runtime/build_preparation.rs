@@ -7,7 +7,8 @@
 //! and a build preparation the host asked to retry is Core's typed cause
 //! (`MemberWakeRefusal::BuildPreparationRetry`); Meta keeps only its
 //! customizer's last failure text, for the status and the typed answer to a
-//! refused delivery.
+//! refused delivery. The door's one retry of a wake Core refused for a cause
+//! the host ends ([`IdentityRuntime::door_retries`]) lives here too.
 
 use std::sync::Arc;
 
@@ -237,39 +238,66 @@ impl IdentityRuntime {
         }
     }
 
-    /// The door's one retry of a wake Core refused for the build preparation
-    /// the member's host asked to retry (`refused`, the member a
-    /// `BuildPreparationRetry` refusal names): the host retries the
-    /// preparation (`resolve_member_build_preparation`), so Core's next wake
-    /// of the member asks the preparer again. `Ok(true)` when the door
-    /// retried it: the caller wakes, or delivers, once more, and a second
-    /// refusal surfaces typed (`retried` is then set). Any other refusal is
-    /// not the door's: `Ok(false)`. A healthy wake asks Core for nothing.
-    pub(crate) async fn door_retries_build_preparation(
+    /// The door's one retry of a wake (a delivery's, a materialization's)
+    /// that Core refused for a cause the host ends itself; `refused` names
+    /// the member and Core's refusal:
+    /// - a build preparation the host asked to retry
+    ///   (`BuildPreparationRetry`): the host retries the preparation
+    ///   (`resolve_member_build_preparation`), so Core's next wake of the
+    ///   member asks the preparer again;
+    /// - a host preparation Core keeps for the identity
+    ///   (`HostPreparationPending`): the identity is declared again
+    ///   ([`Self::declare_identity_locked`]; the caller holds its lifecycle
+    ///   lock), the host's answer to that preparation. The door declares
+    ///   first an identity whose row Meta's own first-boot records hold, so
+    ///   this is a preparation those records do not name.
+    ///
+    /// `Ok(true)` when the door took its step: the caller wakes, or delivers,
+    /// once more, and a second refusal surfaces typed (`retried` is then
+    /// set). Any other refusal is not the door's: `Ok(false)`. A healthy wake
+    /// asks Core for nothing.
+    pub(crate) async fn door_retries(
         &self,
         identity: &AgentIdentity,
         retried: &mut bool,
-        refused: Option<&meerkat_mob::AgentIdentity>,
+        refused: Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)>,
     ) -> Result<bool, IdentityRuntimeError> {
-        let Some(member) = refused else {
+        let Some((member, refusal)) = refused else {
             return Ok(false);
         };
         if *retried {
             return Ok(false);
         }
-        *retried = true;
-        self.core_bridge(identity)?
-            .resolve_member_build_preparation(member)
-            .await
-            .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
-                identity: identity.clone(),
-                session_id: None,
-                detail: format!(
-                    "Core refused the member's wake for the build preparation its host asked to \
-                     retry, and the retry was not asked: {error}"
-                ),
-            })?;
-        Ok(true)
+        match refusal {
+            meerkat_mob::MemberWakeRefusal::BuildPreparationRetry => {
+                *retried = true;
+                self.core_bridge(identity)?
+                    .resolve_member_build_preparation(member)
+                    .await
+                    .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
+                        identity: identity.clone(),
+                        session_id: None,
+                        detail: format!(
+                            "Core refused the member's wake for the build preparation its host \
+                             asked to retry, and the retry was not asked: {error}"
+                        ),
+                    })?;
+                Ok(true)
+            }
+            meerkat_mob::MemberWakeRefusal::HostPreparationPending => {
+                *retried = true;
+                let spec = self
+                    .entries
+                    .read()
+                    .await
+                    .get(identity)
+                    .map(|entry| entry.spec.clone())
+                    .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
+                self.declare_identity_locked(&spec, None).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// The error a delivery to `identity` reports for its admission's bridge
@@ -354,32 +382,38 @@ impl IdentityRuntime {
     }
 }
 
-/// The member a wake refusal names when Core refused it for the build
-/// preparation the member's host asked to retry
-/// (`MemberWakeRefusal::BuildPreparationRetry`); `None` for any other error.
-pub(crate) fn build_preparation_retry_of(
+/// The member and Core's refusal when Core refused a wake for a cause the
+/// door can take a step for ([`IdentityRuntime::door_retries`]): a build
+/// preparation the host asked to retry (`BuildPreparationRetry`), or the
+/// host preparation Core keeps (`HostPreparationPending`). `None` for any
+/// other error.
+pub(crate) fn door_refusal_of(
     error: &BridgeError,
-) -> Option<&meerkat_mob::AgentIdentity> {
+) -> Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)> {
     match error {
         BridgeError::MemberWakeRefused {
             identity,
-            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+            refusal:
+                refusal @ (meerkat_mob::MemberWakeRefusal::BuildPreparationRetry
+                | meerkat_mob::MemberWakeRefusal::HostPreparationPending),
             ..
-        } => Some(identity),
+        } => Some((identity, *refusal)),
         _ => None,
     }
 }
 
-/// [`build_preparation_retry_of`] for an admission's error.
-pub(crate) fn admission_build_preparation_retry_of(
+/// [`door_refusal_of`] for an admission's error.
+pub(crate) fn admission_door_refusal_of(
     error: &BridgeAdmissionError,
-) -> Option<&meerkat_mob::AgentIdentity> {
+) -> Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)> {
     match error {
         BridgeAdmissionError::MemberWakeRefused {
             identity,
-            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+            refusal:
+                refusal @ (meerkat_mob::MemberWakeRefusal::BuildPreparationRetry
+                | meerkat_mob::MemberWakeRefusal::HostPreparationPending),
             ..
-        } => Some(identity),
+        } => Some((identity, *refusal)),
         _ => None,
     }
 }

@@ -19093,7 +19093,6 @@ external_addressable = true
     // pass's declaration of it: the mob materializes none of them at start,
     // and refuses their wakes retryable until the declaration that carries
     // the row out ends the mark.
-    let mut host_pending_seeded = Vec::new();
     let mob_spec = match (boot_roster.as_deref(), launch_mob_id.as_deref()) {
         (Some(roster), Some(_)) => {
             let first_boot = persistent_state
@@ -19104,7 +19103,6 @@ external_addressable = true
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec.with_host_pending_members(host_pending)
         }
         _ => mob_spec,
@@ -19677,9 +19675,6 @@ external_addressable = true
         member_build_wiring
             .bind(&irt, runtime.mob_runtime().session_service().cloned())
             .await;
-        // The declaration that carries an identity's first-boot row out ends
-        // the host-pending mark seeded for it before the mob build.
-        irt.seed_host_pending(std::mem::take(&mut host_pending_seeded));
 
         init_progress.enter(InitPhase::Roster);
         if shutdown_requested.load(Ordering::Acquire) {

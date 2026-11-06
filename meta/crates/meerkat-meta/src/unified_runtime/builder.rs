@@ -2123,9 +2123,8 @@ impl UnifiedRuntimeBuilder {
         // Each identity with a pending first-boot row waits for the roster
         // pass's declaration of it: the mob materializes none of them at
         // start, and refuses their wakes retryable until the declaration
-        // that carries the row out ends the mark. The identity runtime keeps
-        // the seeded set.
-        let mut host_pending_seeded = Vec::new();
+        // that carries the row out ends the mark. The mark is Core's: the
+        // identity runtime's door answers Core's typed refusal.
         if let (Some(roster), Some(_)) = (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
         {
             let first_boot = match self.host_store.as_ref() {
@@ -2144,7 +2143,6 @@ impl UnifiedRuntimeBuilder {
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec = mob_spec.with_host_pending_members(host_pending);
         }
         // The identity runtime keeps its identity records (each build's tool
@@ -2290,7 +2288,6 @@ impl UnifiedRuntimeBuilder {
                 .set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
                 .await;
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
-            identity_runtime.seed_host_pending(host_pending_seeded);
             // A candidate launch's mob build held every stored member's run
             // starts, and it releases none of them.
             if !runtime.mob_runtime.speaks_for_composition() {

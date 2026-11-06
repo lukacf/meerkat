@@ -2996,7 +2996,6 @@ async fn an_archived_first_boot_session_revived_dormant_ends_its_host_preparatio
     });
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -3383,7 +3382,6 @@ async fn a_declared_migration_over_a_done_first_boot_row_ends_its_host_preparati
     bind_live(&core.core, &alice, &previous, 0, Some(session.clone())).expect("Core holds alice");
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -4540,7 +4538,6 @@ async fn a_seeded_identity_core_already_holds_has_its_host_preparation_ended() {
     .expect("Core holds alice");
     lock(&core.host_pending).insert(alice.clone());
     let runtime = runtime_over(Some(state_dir.path()), &core);
-    runtime.seed_host_pending([member_id(&alice)]);
 
     let outcomes = roster_pass(&runtime, &[spec(&alice)], None).await;
 
@@ -4592,7 +4589,6 @@ async fn a_delivery_to_a_seeded_identity_ends_its_host_preparation_first() {
     .expect("the manifest writes");
     runtime.set_first_boot_state_dir(Some(state_dir.path().to_path_buf()));
     lock(&core.host_pending).insert(alice.clone());
-    runtime.seed_host_pending([member_id(&alice)]);
 
     runtime
         .send(&alice, &text("hello"))

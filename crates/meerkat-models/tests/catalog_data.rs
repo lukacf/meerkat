@@ -9,7 +9,7 @@
 
 use meerkat_core::Provider;
 use meerkat_core::model_profile::capabilities::{
-    AnthropicDisabledThinking, EffortLevel, ThinkingSupport,
+    AnthropicDisabledThinking, BetaFeature, EffortLevel, ThinkingSupport,
 };
 use meerkat_core::model_profile::catalog::{
     ImageGenerationModelRoute, ImageGenerationSizeParameter, ModelTier,
@@ -499,6 +499,115 @@ fn anthropic_disabled_thinking_rows_follow_the_per_model_thinking_table() {
     );
     for caps in all_capabilities().filter(|caps| caps.provider != Provider::Anthropic) {
         assert_eq!(caps.anthropic_disabled_thinking, Refused, "{}", caps.id);
+    }
+}
+
+/// When `thinking` is omitted, per the "Default" column of the per-model
+/// table "Thinking support, defaults, and rejected configurations by model"
+/// (https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OmittedThinking {
+    /// "Always on": thinking cannot be turned off.
+    AlwaysOn,
+    /// "On": the model thinks by default.
+    On,
+    /// "Off": the model answers without thinking.
+    Off,
+}
+
+/// The thinking-binding beta (`thinking.block_binding`) sits on exactly the
+/// catalogued models that check replayed thinking blocks against their
+/// request prefix (the preserved-thinking page's supported models: Claude
+/// Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5;
+/// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+/// The client names adaptive beside the control when `thinking` is omitted,
+/// so every such row must be documented thinking-on by default ("Omit the
+/// `thinking` parameter and the request runs with adaptive thinking",
+/// https://platform.claude.com/docs/en/api/errors) and accept adaptive, and no
+/// row whose default is no thinking (Opus 4.8, Opus 4.7, Sonnet 4.6; Opus 4.6
+/// is not a catalog row) may carry it.
+#[test]
+fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
+    use OmittedThinking::{AlwaysOn, Off, On};
+    const PREFIX_CHECKED: &[&str] = &[
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+    let omitted = [
+        ("claude-fable-5-1", AlwaysOn),
+        ("claude-fable-5", AlwaysOn),
+        ("claude-opus-5-5", AlwaysOn),
+        ("claude-opus-5", On),
+        ("claude-opus-4-8", Off),
+        ("claude-opus-4-7", Off),
+        ("claude-sonnet-5-5", On),
+        ("claude-sonnet-5", On),
+        ("claude-sonnet-4-6", Off),
+        ("claude-sonnet-4-5", Off),
+        ("claude-haiku-5-5", On),
+        ("claude-haiku-4-5-20251001", Off),
+        ("claude-haiku-4-5", Off),
+        ("claude-opus-4-5", Off),
+    ];
+    let anthropic: HashSet<&str> = all_capabilities()
+        .filter(|caps| caps.provider == Provider::Anthropic)
+        .map(|caps| caps.id)
+        .collect();
+    assert_eq!(
+        anthropic,
+        omitted.iter().map(|(id, _)| *id).collect::<HashSet<_>>(),
+        "every Anthropic row records its omitted-thinking default here"
+    );
+    let binding = |id: &str| {
+        capabilities_for(Provider::Anthropic, id)
+            .map(|caps| {
+                caps.beta_headers
+                    .iter()
+                    .filter(|header| header.feature == BetaFeature::ThinkingBindingControls)
+                    .map(|header| header.header_value)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    for (id, default) in omitted {
+        let caps = capabilities_for(Provider::Anthropic, id).unwrap_or_else(|| panic!("{id} row"));
+        let expected: &[&str] = if PREFIX_CHECKED.contains(&id) {
+            &["thinking-binding-controls-2026-08-01"]
+        } else {
+            &[]
+        };
+        assert_eq!(binding(id), expected, "{id}");
+        if !expected.is_empty() {
+            assert_ne!(default, Off, "{id}: a binding row thinks by default");
+            assert!(
+                caps.accepts_anthropic_thinking(
+                    &meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive
+                ),
+                "{id}: a binding row accepts the adaptive type the client names"
+            );
+        }
+    }
+    // The models the review names as default-off; Opus 4.6 has no row today.
+    for id in [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ] {
+        assert!(binding(id).is_empty(), "{id} thinks only when configured");
+    }
+    for caps in all_capabilities().filter(|caps| caps.provider != Provider::Anthropic) {
+        assert!(
+            !caps
+                .beta_headers
+                .iter()
+                .any(|header| header.feature == BetaFeature::ThinkingBindingControls),
+            "{}",
+            caps.id
+        );
     }
 }
 

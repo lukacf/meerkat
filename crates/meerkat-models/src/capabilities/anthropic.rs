@@ -32,13 +32,42 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
     header_value: "interleaved-thinking-2025-05-14",
 };
 
+/// Thinking-block binding controls: `thinking.block_binding` and the
+/// `input_transformations` report.
+/// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+const BETA_THINKING_BINDING_CONTROLS: BetaHeader = BetaHeader {
+    feature: BetaFeature::ThinkingBindingControls,
+    header_name: "anthropic-beta",
+    header_value: "thinking-binding-controls-2026-08-01",
+};
+
 /// Headers advertised for models with adaptive thinking + compaction
-/// (Fable 5.1, Opus 5.5, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 5.5,
-/// Sonnet 5, Sonnet 4.6, Haiku 5.5).
+/// (Fable 5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5, Sonnet 4.6).
 const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
     BETA_INTERLEAVED_THINKING,
+];
+
+/// [`ADAPTIVE_COMPACTION_BETAS`] plus the thinking-binding controls, for the
+/// catalogued models that check replayed thinking blocks against their
+/// request prefix (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5; Mythos 5.1 is
+/// not a catalog row). Each of them thinks by default when `thinking` is
+/// omitted: Fable 5.1 and Opus 5.5 "Always on", Sonnet 5.5 and Haiku 5.5
+/// "On" in the per-model table, and "Omit the `thinking` parameter and the
+/// request runs with adaptive thinking"; the client names that default beside
+/// the control. A model whose default is no thinking never carries this set.
+/// Sources:
+///   https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+///   (featureMetadata.supportedModels)
+///   https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+///   (Thinking support, defaults, and rejected configurations by model)
+///   https://platform.claude.com/docs/en/api/errors (Thinking cannot be disabled)
+const PRESERVED_THINKING_BETAS: &[BetaHeader] = &[
+    BETA_COMPACTION,
+    BETA_STRUCTURED_OUTPUT,
+    BETA_INTERLEAVED_THINKING,
+    BETA_THINKING_BINDING_CONTROLS,
 ];
 
 /// Headers advertised for models with interleaved thinking but no compaction
@@ -155,7 +184,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(300),
         stream_inactivity_timeout_secs: None,
         supports_forced_tool_choice: true,
@@ -300,7 +329,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(300),
         stream_inactivity_timeout_secs: None,
         // Live probe 2026-10-01: tool_choice any/tool answers 400 "not
@@ -551,7 +580,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(120),
         stream_inactivity_timeout_secs: None,
         // Forced `tool_choice` (`any`/`tool`) returns 400 on Sonnet 5.5,
@@ -842,7 +871,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(120),
         stream_inactivity_timeout_secs: None,
         supports_forced_tool_choice: true,

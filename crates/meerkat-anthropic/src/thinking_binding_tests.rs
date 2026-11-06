@@ -274,15 +274,21 @@ fn stream_reply(body: &Value, betas: &[String], dropped: &[String]) -> Response 
                "usage": {"output_tokens": 7}}),
         json!({"type": "message_stop"}),
     ];
-    let stream: String = events
-        .iter()
-        .map(|event| {
-            format!(
-                "event: {}\ndata: {event}\n\n",
-                event["type"].as_str().unwrap_or_default()
-            )
-        })
-        .collect();
+    event_stream(&events)
+}
+
+/// `events` as a `text/event-stream` response, one `event:`/`data:` pair
+/// each.
+fn event_stream(events: &[Value]) -> Response {
+    use std::fmt::Write;
+    let mut stream = String::new();
+    for event in events {
+        let _ = write!(
+            stream,
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap_or_default()
+        );
+    }
     ([("content-type", "text/event-stream")], stream).into_response()
 }
 
@@ -619,4 +625,78 @@ async fn reported_thinking_drops_are_logged() {
             && line.contains("prefix_binding_mismatch")),
         "a warning names the dropped block and its reason: {lines:#?}"
     );
+}
+
+async fn fixed_stream(State(events): State<Arc<Vec<Value>>>) -> Response {
+    event_stream(&events)
+}
+
+/// After a mid-stream server-side fallback the final `message_delta`
+/// carries the report again, with the serving model's entries; a report
+/// there (beside its delta or inside it) is logged too, and an empty report
+/// on `message_start` logs nothing.
+#[tokio::test]
+async fn a_report_on_the_final_message_delta_is_logged() {
+    let entries = json!([{
+        "type": "thinking_dropped",
+        "path": "messages.1.content.0",
+        "reason": "model_binding_mismatch"
+    }]);
+    for message_delta in [
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+               "usage": {"output_tokens": 3}, "input_transformations": entries}),
+        json!({"type": "message_delta",
+               "delta": {"stop_reason": "end_turn", "input_transformations": entries},
+               "usage": {"output_tokens": 3}}),
+    ] {
+        let logged = Logged::default();
+        let _subscriber = tracing::subscriber::set_default(logged.clone());
+        let events = Arc::new(vec![
+            json!({"type": "message_start", "message": {
+                "usage": {"input_tokens": 5, "output_tokens": 0},
+                "input_transformations": []
+            }}),
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "42."}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            message_delta.clone(),
+            json!({"type": "message_stop"}),
+        ]);
+        let app = Router::new()
+            .route("/v1/messages", post(fixed_stream))
+            .with_state(events);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(format!("http://{addr}"))
+            .build()
+            .unwrap();
+        let turn = run(
+            &client,
+            &LlmRequest::new("claude-opus-5-5", vec![first_question()]),
+        )
+        .await;
+        server.abort();
+        assert!(turn.succeeded(), "{message_delta}: {turn:?}");
+        let warnings: Vec<String> = logged
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("WARN"))
+            .cloned()
+            .collect();
+        assert_eq!(warnings.len(), 1, "{message_delta}: {warnings:#?}");
+        assert!(
+            warnings[0].contains("message_delta")
+                && warnings[0].contains("messages.1.content.0")
+                && warnings[0].contains("model_binding_mismatch"),
+            "{message_delta}: {warnings:#?}"
+        );
+    }
 }

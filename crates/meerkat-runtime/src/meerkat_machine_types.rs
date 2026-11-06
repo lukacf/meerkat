@@ -1373,6 +1373,11 @@ meerkat_machine_runtime_internal_inputs!(
         HoldInputController,
         ReleaseInputController,
     ],
+    // A host's settle of the run its session retained, applied directly by
+    // `MeerkatMachine::settle_retained_run`.
+    RunExecutionLifecycle => [
+        SettleRetainedRun,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

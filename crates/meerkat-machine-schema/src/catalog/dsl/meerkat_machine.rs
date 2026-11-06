@@ -2532,6 +2532,10 @@ pub enum RunStartHoldReason {
     /// A mob member whose host preparation is owed (a role move its mob
     /// holds) starts no run until its mob releases it.
     HostPreparation,
+    /// The session's host holds it while it recovers it (for example while
+    /// it settles a run a crash left open, `SettleRetainedRun`). No mob or
+    /// Meta code stages or releases this reason; only its host does.
+    HostRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -2897,6 +2901,20 @@ pub enum EmptyResumeRetirementVerdict {
     #[default]
     Retire,
     KeepServing,
+}
+
+/// The verdict for a host's settle of the run its session retained
+/// (`SettleRetainedRun`): accepted (no run is current and the observed run is
+/// the one marked resumable, so its stop is recorded and the runtime settles
+/// it), busy (a run is current, the registration cannot settle the run it
+/// retained now, or the observed run is not the marked one), or not retained
+/// (no run is current and none is marked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RetainedRunSettleVerdict {
+    Accepted,
+    Busy,
+    #[default]
+    NotRetained,
 }
 
 /// What an unregister does with inputs still queued behind the session's
@@ -7377,6 +7395,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // boundary applies the gated names a live grant opens.
             ReplaceToolGrantGate { gated: Set<ToolName> },
             ApplyToolGrantOpenSet { open: Set<ToolName> },
+            // A host settles the run its session retained, without resuming
+            // it: the machine decides, and an accepted settle records the
+            // run's stop, which the runtime then settles. `run_id` is the run
+            // the caller observed marked resumable, under the same mutation
+            // gate as this input (none when none is marked).
+            SettleRetainedRun { run_id: Option<RunId> },
         }
 
         surface_only [
@@ -8754,6 +8778,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // runtime plans again, and the input may stage, or the run it is
             // bound to resume.
             InputControllerReleased,
+            // The verdict for a host's settle of the run its session
+            // retained: `run_id` is the run an accepted settle settles, the
+            // current run (if any) of a busy one, and none otherwise.
+            RetainedRunSettleResolved { verdict: Enum<RetainedRunSettleVerdict>, run_id: Option<RunId> },
         }
 
         // =====================================================================
@@ -9036,6 +9064,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         // The runtime loop that releases a kept input's controller hold
         // reads the wake from its own transition and plans again.
         disposition InputControllerReleased => local seam SurfaceResultAlignment,
+        // The host's settle verb answers the verdict of its own transition.
+        disposition RetainedRunSettleResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Helpers
@@ -11862,6 +11892,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
                     self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
+                }
                 self.current_session_llm_identity = None;
                 self.current_session_capability_surface = None;
                 self.current_session_capability_surface_status =
@@ -11901,6 +11934,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
                     self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
                 }
             }
             to Idle
@@ -12049,6 +12085,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
                     self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
                 }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
+                }
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-admitted for resume" }
@@ -12090,6 +12129,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 if initial_run_start_holds.contains(RunStartHoldReason::HostPreparation) {
                     self.run_start_holds.insert(RunStartHoldReason::HostPreparation);
+                }
+                if initial_run_start_holds.contains(RunStartHoldReason::HostRecovery) {
+                    self.run_start_holds.insert(RunStartHoldReason::HostRecovery);
                 }
                 self.registration_phase = RegistrationPhase::Queuing;
                 self.runtime_stop_deferred = false;
@@ -40372,6 +40414,131 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit InputControllerReleased
+        }
+
+        // A host settles the run its session retained, without resuming it
+        // and without a model request: the run a restart (a crash, a power
+        // cut, or a graceful stop that kept it) left open, which the
+        // registration marked resumable and which has not begun again.
+        // `run_id` is the run the caller observed marked, under the same
+        // mutation gate as this input. The machine owns the verdict, one arm
+        // per case, total over every phase:
+        //
+        // - Accepted: no run is current, the observed run is the marked one,
+        //   and the registration is not draining. The run's stop is
+        //   recorded on it, as `StopCurrentRunForRunResumable` records it:
+        //   the run never resumes (`ResumeRun` refuses it), and the runtime
+        //   settles it at its loop's next lap, ahead of any run-start hold or
+        //   resumed-run admission, its bound inputs abandoned as `Cancelled`
+        //   (`SettleResumableRun` refuses to settle it as a refused resume).
+        //   Accepting it again while its stop stands changes nothing more:
+        //   the settle is idempotent per run.
+        // - Busy: a run is current (the marked run resumed, or another run
+        //   started), the registration cannot settle the run it marked now
+        //   (it drains for its unregister, whose next registration finds the
+        //   run open again, or it is initializing, running without a current
+        //   run, retired or stopped), or the observed run is not the marked
+        //   one. Nothing changes: a run that is executing is never stopped
+        //   here.
+        // - NotRetained: no run is current and none is marked, or the
+        //   runtime is destroyed. Nothing changes.
+        transition SettleRetainedRunAccepted {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_retained" { self.resumable_run_id == run_id }
+            guard "registration_not_draining" {
+                self.registration_phase != RegistrationPhase::Draining
+            }
+            update {
+                self.run_stop_requested = run_id;
+            }
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Accepted,
+                run_id: run_id
+            }
+        }
+
+        transition SettleRetainedRunBusyRunCurrent {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "run_current" { self.current_run_id != None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: self.current_run_id
+            }
+        }
+
+        transition SettleRetainedRunBusyDraining {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_retained" { self.resumable_run_id == run_id }
+            guard "registration_draining" {
+                self.registration_phase == RegistrationPhase::Draining
+            }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunBusyStaleRun {
+            per_phase [Idle, Attached]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            guard "observed_run_not_retained" { self.resumable_run_id != run_id }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunBusyNotServing {
+            per_phase [Initializing, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "run_retained" { self.resumable_run_id != None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::Busy,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunNotRetained {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input SettleRetainedRun { run_id }
+            guard "no_current_run" { self.current_run_id == None }
+            guard "no_run_retained" { self.resumable_run_id == None }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::NotRetained,
+                run_id: None
+            }
+        }
+
+        transition SettleRetainedRunInert {
+            per_phase [Destroyed]
+            on input SettleRetainedRun { run_id }
+            update {}
+            to Idle
+            emit RetainedRunSettleResolved {
+                verdict: RetainedRunSettleVerdict::NotRetained,
+                run_id: None
+            }
         }
     }
         }

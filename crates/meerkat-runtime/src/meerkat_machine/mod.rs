@@ -2508,8 +2508,7 @@ impl RunStartHoldReason {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
             Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
-            // RED stub: the host's hold shares the tools hold's reason.
-            Self::HostRecovery => dsl::RunStartHoldReason::ToolsNotPublished,
+            Self::HostRecovery => dsl::RunStartHoldReason::HostRecovery,
         }
     }
 }

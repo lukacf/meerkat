@@ -2033,12 +2033,21 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
             NamedTypeBinding::string_enum(
                 "RunStartHoldReason",
-                &["MobStop", "ToolsNotPublished", "HostPreparation"],
+                &[
+                    "MobStop",
+                    "ToolsNotPublished",
+                    "HostPreparation",
+                    "HostRecovery",
+                ],
             ),
             NamedTypeBinding::string_enum("SessionResidencyOwner", &["Session", "Composition"]),
             NamedTypeBinding::string_enum(
                 "EmptyResumeRetirementVerdict",
                 &["Retire", "KeepServing"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RetainedRunSettleVerdict",
+                &["Accepted", "Busy", "NotRetained"],
             ),
             NamedTypeBinding::string_enum(
                 "InputPhase",
@@ -3522,6 +3531,10 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // A host's settle of the run its session retained, applied directly
+        // by `MeerkatMachine::settle_retained_run`, which answers the
+        // machine's verdict.
+        SettleRetainedRun,
     ]
 );
 

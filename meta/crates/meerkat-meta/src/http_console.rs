@@ -3185,6 +3185,10 @@ mod console_schedule_tests;
 mod console_actor_tests;
 
 #[cfg(test)]
+#[path = "console_approver_tests.rs"]
+mod console_approver_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -10384,6 +10388,67 @@ fn resolve_gating_decider(
     Ok(ConsoleGatingDecider::Explicit(trimmed.to_string()))
 }
 
+/// Test hook: holds a Console gating decide right before it takes the
+/// gating owner, until the test releases it.
+#[cfg(test)]
+pub(crate) mod gating_decide_holds {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use tokio::sync::Semaphore;
+
+    static HOLDS: Mutex<BTreeMap<String, GatingDecideHold>> = Mutex::new(BTreeMap::new());
+
+    /// A hold on the next decide of one pending id.
+    #[derive(Clone)]
+    pub(crate) struct GatingDecideHold {
+        reached: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    impl GatingDecideHold {
+        /// Hold the next decide of `pending_id`.
+        pub(crate) fn install(pending_id: &str) -> Self {
+            let hold = Self {
+                reached: Arc::new(Semaphore::new(0)),
+                release: Arc::new(Semaphore::new(0)),
+            };
+            HOLDS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(pending_id.to_string(), hold.clone());
+            hold
+        }
+
+        /// Wait until a decide reached the hold.
+        pub(crate) async fn reached(&self) {
+            if let Ok(permit) = self.reached.acquire().await {
+                permit.forget();
+            }
+        }
+
+        /// Let the held decide go on.
+        pub(crate) fn release(&self) {
+            self.release.add_permits(1);
+        }
+    }
+
+    /// Wait at the hold on `pending_id`, when one is installed. A hold
+    /// holds one decide.
+    pub(crate) async fn pass(pending_id: &str) {
+        let hold = HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pending_id);
+        if let Some(hold) = hold {
+            hold.reached.add_permits(1);
+            if let Ok(permit) = hold.release.acquire().await {
+                permit.forget();
+            }
+        }
+    }
+}
+
 #[allow(clippy::large_futures, clippy::too_many_arguments)]
 #[cfg(test)]
 async fn handle_console_runtime_rpc(
@@ -12930,6 +12995,8 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .get("reason")
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
+            #[cfg(test)]
+            gating_decide_holds::pass(pending_id).await;
             let mut owner = module_runtime.lock().await;
             let (decided, notices) = match decider {
                 ConsoleGatingDecider::Principal(decider) => {

@@ -101565,7 +101565,7 @@ fn placement_fixture_uses_local_mob_authority_types() {
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
         ],
-        "shared unit fixtures must not import the separately compiled self-dev-dependency",
+        "shared unit fixtures must use this crate's own types, not a separately compiled copy",
     );
 }
 /// A turn-driven placed spawn with an initial message settles its activation

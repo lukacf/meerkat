@@ -29,6 +29,41 @@ planner; without `--run` it prints the commands instead of running them.
 Avoid raw `cargo` for normal repo work. When you need targeted Cargo commands,
 use `./scripts/repo-cargo` so output roots and multi-agent work stay isolated.
 
+A crate's own tests build with its test features: the features its
+`[package.metadata.meerkat.standalone-tests]` lists, plus `workspace-tests`
+when it declares that feature. No dev-dependency turns them on, so a test
+command passes them. `node scripts/core-workspace-args.mjs --tests -p <crate>`
+prints a crate's selection with them, and `--tests` alone prints Core's
+whole-workspace selection with every member's. Run tests in that form:
+
+```bash
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-mob)
+```
+
+The Make targets, the CI lanes and the Cargo aliases pass them already. In
+this repository a test build without them fails to compile, naming the exact
+command to run, instead of leaving the crate's workspace-only tests out. Only
+code generation trips that check, so `cargo check`, clippy and an editor's
+check run are unaffected. The check sits in the crate's lib test, so a run
+narrowed to an integration target (`--test <target>`) is not stopped: without
+the flags it compiles the tests they gate out without a word. Pass them there
+too, plus any feature the target's own `#![cfg(feature = ...)]` names
+(meerkat-core's `wholeblob_compaction_media_guard` needs `test-support`; a
+second `--features` adds it):
+
+```bash
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs --tests -p meerkat-runtime) --test pre_ledger_realm_bridge
+```
+
+For rust-analyzer, set `rust-analyzer.cargo.features` to `"all"`: without
+features it treats the code the test features gate as inactive, and its Run
+test lens stops on the check. A package-qualified feature list does not work
+there, because Cargo refuses a feature of a package the command does not
+select and rust-analyzer's runnables select one package. `"all"` also turns
+on every other feature (the live, realtime and GPT Live ones, and the
+products'), so the editor's check compiles more than a default build does;
+it is still the one global value that works.
+
 ## BuildBuddy Opt-In
 
 Set `MEERKAT_BUILDBUDDY=1` to route the same Make lanes through the BuildBuddy

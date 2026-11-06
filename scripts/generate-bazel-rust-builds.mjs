@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
+import { testFeaturesOf } from "./ci-products.mjs";
 import { namesRepoScripts } from "./rust-source-text.mjs";
 import { testSourcePaths as sharedTestSourcePaths } from "./rust-test-selector.mjs";
 
@@ -218,6 +219,16 @@ function closeFeatureUnion(features, add) {
   }
 }
 
+// Each crate's own test features (scripts/ci-products.mjs testFeaturesOf:
+// its [package.metadata.meerkat.standalone-tests] features, and
+// `workspace-tests` when it declares that feature) join its union as a
+// consumer's request does: every Cargo test build of the crate passes them
+// (no dev-dependency turns them on), so its Bazel test targets build with
+// them, and its other targets with the union, as before.
+for (const pkg of localPackages.values()) {
+  for (const feature of testFeaturesOf(pkg)) addFeature(pkg, feature);
+}
+
 closeFeatureUnion(activeFeatures, addFeature);
 
 // The one list of test-only Cargo features: fixture hooks, fault seams,
@@ -293,18 +304,18 @@ function isPublishable(pkg) {
 
 // Workspace-only unit tests. A published crate whose unit tests need a
 // crate its package cannot depend on (a cyclic or unpublished dev-dependency)
-// gates those test modules on its own `workspace-tests` feature, which only a
-// path-only self dev-dependency enables: `cargo package` strips that edge, so
-// the published package compiles them out, while the workspace and this graph
-// (whose union follows every dev edge) compile them in. Fail generation when a
-// crate declares the feature but the union does not carry it: its Bazel test
-// targets would otherwise drop those tests without a word.
+// gates those test modules on its own `workspace-tests` feature, which only
+// the workspace's test builds pass: the published package compiles them out,
+// while the workspace and this graph (whose union holds every crate's test
+// features, above) compile them in. Fail generation when a crate declares the
+// feature but the union does not carry it: its Bazel test targets would
+// otherwise drop those tests without a word.
 const WORKSPACE_TESTS_FEATURE = "workspace-tests";
 for (const pkg of localPackages.values()) {
   if (!Object.hasOwn(pkg.features ?? {}, WORKSPACE_TESTS_FEATURE)) continue;
   if (!activeFeatures.get(pkg.id).has(WORKSPACE_TESTS_FEATURE)) {
     throw new Error(
-      `${pkg.name} declares ${WORKSPACE_TESTS_FEATURE}, but no path-only self dev-dependency enables it; `
+      `${pkg.name} declares ${WORKSPACE_TESTS_FEATURE}, but its feature union does not carry it; `
         + "its workspace-only tests would compile out of every Bazel test target",
     );
   }
@@ -330,6 +341,7 @@ function addProductionFeature(pkg, feature) {
 for (const pkg of localPackages.values()) {
   for (const feature of defaultFeatures(pkg)) addProductionFeature(pkg, feature);
   for (const feature of requiredTargetFeatures.get(pkg.id)) addProductionFeature(pkg, feature);
+  for (const feature of testFeaturesOf(pkg)) addProductionFeature(pkg, feature);
 }
 closeFeatureUnion(productionActiveFeatures, addProductionFeature);
 

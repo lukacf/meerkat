@@ -1150,4 +1150,57 @@ tier = \"r2\"\n";
         assert_eq!(records[0].outcome, crate::AdministrationOutcome::Committed);
         assert_eq!(runtime.get().await.unwrap().generation, 1);
     }
+
+    /// A config write's record names the realm its store's metadata names,
+    /// as a realm id: a store that names a valid realm id names it, and a
+    /// store that names none or an invalid one names no realm.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_record_names_the_store_realm_as_a_realm_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let entry = StatingAdmission {
+            recorder: Arc::clone(&recorder),
+            login: "login-1",
+        };
+        let cases = [
+            (
+                Some("team"),
+                json!({ "kind": "config_patch", "realm": "team", "generation": 1 }),
+            ),
+            (
+                Some("not a realm"),
+                json!({ "kind": "config_patch", "generation": 1 }),
+            ),
+            (None, json!({ "kind": "config_patch", "generation": 1 })),
+        ];
+        for (index, (named, expected)) in cases.into_iter().enumerate() {
+            let runtime = ConfigRuntime::new(
+                Arc::new(crate::config_store::TaggedConfigStore::new(
+                    Arc::new(crate::config_store::FileConfigStore::new(
+                        temp.path().join(format!("config-{index}.toml")),
+                        *crate::model_profile::test_catalog::TEST_CATALOG,
+                    )),
+                    ConfigStoreMetadata {
+                        realm_id: named.map(str::to_owned),
+                        instance_id: None,
+                        backend: None,
+                        resolved_paths: None,
+                    },
+                )),
+                temp.path().join(format!("config_state-{index}.json")),
+            );
+            runtime
+                .patch_entered(ConfigDelta(json!({ "max_tokens": 512 })), Some(0), &entry)
+                .await
+                .expect("admitted write");
+            let records = recorder.take();
+            assert_eq!(records.len(), 1, "one record per admission");
+            assert_eq!(
+                serde_json::to_value(&records[0].change).unwrap(),
+                expected,
+                "the store names {named:?}"
+            );
+        }
+    }
 }

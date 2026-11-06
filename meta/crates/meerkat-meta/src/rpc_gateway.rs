@@ -19444,6 +19444,7 @@ external_addressable = true
                                 mob: mob_definition.id.to_string(),
                                 roster: steward_roster_slot.clone(),
                             })),
+                            private_members: Some(runtime.mob_runtime().private_member_source()),
                             steward_gating: Some(Arc::new(GatewayMemoryGatingBridge {
                                 runtime: steward_late_runtime.clone(),
                             })),

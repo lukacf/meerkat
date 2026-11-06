@@ -456,7 +456,10 @@ as they were.
   `unknown_identity` from `POST /console/send`). This holds with or
   without an access configuration. Its header says who can see it:
   **Private: only you and access admins can see it.**, or, to an access
-  admin, that it is private to the person who opened it.
+  admin, that it is private to the person who opened it. The members a
+  private side chat creates (a helper or member its turn spawns, a
+  `fork_off` child, a helper forked from it) are private to the same person
+  too, after the side chat is closed as well.
 - On a console without sign-in, a side chat stays shared, and so does one
   opened by a caller who is not a signed-in person (a service token) or
   before side chats were private. A shared side chat's audience is exactly
@@ -466,8 +469,9 @@ as they were.
   grants nothing (see [Side chats](/concepts/access-control#side-chats)).
   Its header says it is shared.
 - A side chat's memory is its own: its `memory` tool writes to the side
-  chat's identity, never to the agent it was forked from, and the memory
-  distiller never reads a private side chat's conversation.
+  chat's identity, never to the agent it was forked from. The memory
+  distiller never reads a private side chat's conversation, and the memory
+  steward never dreams over its memory or promotes any of it.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,

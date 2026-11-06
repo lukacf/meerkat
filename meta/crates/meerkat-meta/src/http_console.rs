@@ -14942,6 +14942,14 @@ async fn handle_console_runtime_rpc_with_visibility(
             } else {
                 crate::member_comms_id::mob_member_id(&source)
             };
+            // A helper forked from a member private to a person holds that
+            // person's conversation in its first prompt: the spawn customizer
+            // gives it the source's owner, read here from the roster.
+            runtime
+                .private_owners()
+                .await
+                .record_roster_member(&handle, &source_member_id)
+                .await;
             let fork_result = match authority_target {
                 Err(error) => Err(error.to_string()),
                 Ok(Some(target)) => {
@@ -17053,7 +17061,14 @@ pub(crate) async fn prime_access_cache_from_handle(handle: &MobHandle, access: &
         None,
     )
     .await;
-    record_live_and_registered_attributes(access, members, &registered, &roster_identities, "");
+    record_live_and_registered_attributes(
+        access,
+        members,
+        &registered,
+        &roster_identities,
+        &BTreeMap::new(),
+        "",
+    );
 }
 
 fn namespace_console_identity(identity: &str, namespace: &str) -> String {
@@ -17116,11 +17131,13 @@ async fn prime_access_cache_from_runtime_in_namespace(
             .await,
         );
     }
+    let private_owners = runtime.private_owners().await.memory_owners();
     record_live_and_registered_attributes(
         access,
         members,
         &registered,
         &roster_identities,
+        &private_owners,
         namespace,
     )
 }
@@ -17224,19 +17241,33 @@ fn record_live_and_registered_attributes(
     members: Vec<AgentResourceAttributes>,
     registered: &BTreeMap<String, BTreeMap<String, String>>,
     roster_identities: &BTreeSet<String>,
+    private_owners: &BTreeMap<String, String>,
     namespace: &str,
 ) -> BTreeSet<String> {
     let final_by_identity = crate::runtime::fold_console_member_attributes(members);
-    for (identity, spawn_labels) in registered {
-        if final_by_identity.contains_key(identity) || roster_identities.contains(identity) {
-            continue;
+    // An identity no live member names keeps what the spawn registry
+    // recorded for it and, for a member private to a person whose rows have
+    // ended (a closed side chat, a retired helper of one), its private owner
+    // ([`crate::private_owners::PrivateOwners`]): it stays private after it
+    // left the roster, after a restart too.
+    let ended: BTreeSet<&String> = registered
+        .keys()
+        .chain(private_owners.keys())
+        .filter(|identity| {
+            !final_by_identity.contains_key(*identity) && !roster_identities.contains(*identity)
+        })
+        .collect();
+    for identity in ended {
+        let mut labels = registered.get(identity).cloned().unwrap_or_default();
+        if let Some(owner) = private_owners.get(identity) {
+            labels.insert(crate::access::PRIVATE_TO_LABEL.to_string(), owner.clone());
         }
         access.record_agent_attributes(namespace_console_attributes(
             AgentResourceAttributes {
                 identity: identity.clone(),
                 agent_id: None,
-                role: spawn_labels.get("role").cloned(),
-                labels: spawn_labels.clone(),
+                role: labels.get("role").cloned(),
+                labels,
             },
             namespace,
         ));

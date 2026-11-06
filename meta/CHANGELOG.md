@@ -36,11 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
-- `console.private_to` is a reserved label: member creation
-  (`meta/ensure_member`, `mob/spawn_member`, `UnifiedRuntime::spawn` and
-  `spawn_many`) refuses it as invalid params, and a member that carries it
-  from anywhere but a console side chat fork has no private owner (every
-  projection drops it).
+- The labels only Meta writes are reserved: `side_chat_of`,
+  `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
+  Member creation (`meta/ensure_member`, `mob/spawn_member`,
+  `UnifiedRuntime::spawn` and `spawn_many`) refuses each of them as invalid
+  params naming the label, and an agent's spawn tools refuse them as invalid
+  arguments. A fork's child no longer inherits a side chat's lineage labels
+  from its source.
 - A console member hidden from the caller by its private owner answers as
   an unknown member on every console surface: `-32001`
   `unknown identity: <id>` with no data, `404` `unknown_identity` from
@@ -155,10 +157,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - On a console with sign-in, a side chat is private to the person who
   opened it; access admins can also see it. It holds with or without an
-  access configuration, on every surface that shows an agent. Its memory
-  stays its own: the memory distiller never reads a private side chat.
-  Side chats opened before this release keep their audience, and consoles
-  without sign-in keep side chats shared.
+  access configuration, on every surface that shows an agent. The members
+  a private side chat creates (a member its turn spawns, a `fork_off`
+  child, a helper forked from it) are private to the same person too, by
+  the private owner Meta writes on them, so they stay private after the
+  side chat is closed and after a restart. Its memory stays its own: the
+  memory distiller never reads a private member's conversation, and the
+  memory steward never dreams over a private member's memory, proposals or
+  exit interview. Side chats opened before this release keep their
+  audience, and consoles without sign-in keep side chats shared.
+- A private owner on a member's own roster labels names its owner whatever
+  made the member (Meta, or a host that declares it); it no longer counts
+  only on a verified side chat.
 
 - The stock gateways keep the gating owner's state (pending approvals and
   the gating audit) in the realm's metadata store across restarts.

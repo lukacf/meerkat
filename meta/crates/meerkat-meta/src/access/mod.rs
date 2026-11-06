@@ -27,9 +27,10 @@
 //!    else any matching `allow` rule allows, else the check denies.
 //!
 //! One rule holds before all of these and needs no configuration: an agent
-//! private to one person ([`PRIVATE_TO_LABEL`], a side chat opened on a
-//! console with sign-in) is denied for every agent action to everyone but
-//! that person and the `admins`, with the config disabled or enabled, and
+//! private to one person ([`PRIVATE_TO_LABEL`]: a side chat opened on a
+//! console with sign-in, and the members its own turn creates or forks) is
+//! denied for every agent action to everyone but that person and the
+//! `admins`, with the config disabled or enabled, and
 //! [`AccessView::hides_agent`] says so, so the console answers as for an
 //! unknown agent.
 //!

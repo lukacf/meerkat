@@ -2560,6 +2560,7 @@ impl UnifiedRuntimeBuilder {
                     persistent_state,
                     transcript_store,
                     event_sink: Some(runtime.memory_event_sink()),
+                    private_members: Some(runtime.mob_runtime.private_member_source()),
                     ..Default::default()
                 },
                 self.provider_auth_persistence.clone(),

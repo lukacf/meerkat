@@ -711,6 +711,17 @@ pub trait MobPurposeSource: Send + Sync {
     fn mob_contexts(&self) -> Vec<MobContext>;
 }
 
+/// The members private to a person, by the identity their memory scope
+/// names them by: a console side chat a signed-in person opened, and the
+/// members its own turn created or forked (their roster labels carry
+/// [`crate::access::PRIVATE_TO_LABEL`]). Their memory is theirs alone, so a
+/// dream covers none of it, as the Distiller distills none of their
+/// transcripts.
+#[async_trait]
+pub trait PrivateMemberSource: Send + Sync {
+    async fn private_identities(&self) -> BTreeSet<String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobContext {
     pub mob: String,
@@ -727,7 +738,7 @@ pub struct MobContext {
 /// (operator/realm scopes, identities outside every roster, and mob scopes
 /// with no [`MobContext`]).
 #[derive(Debug, Clone)]
-enum DreamPartition {
+enum DreamSlice {
     Realm,
     Mob {
         context: MobContext,
@@ -739,16 +750,37 @@ enum DreamPartition {
     },
 }
 
+/// One dream run's slice of the realm, less the memory of every member
+/// private to a person ([`PrivateMemberSource`]), which no run covers: its
+/// identity scope, the proposals it authored and its exit interview.
+#[derive(Debug, Clone)]
+struct DreamPartition {
+    slice: DreamSlice,
+    /// The identities of the members private to a person, as their memory
+    /// scopes name them.
+    private: Arc<BTreeSet<String>>,
+}
+
 impl DreamPartition {
+    fn new(slice: DreamSlice) -> Self {
+        Self {
+            slice,
+            private: Arc::default(),
+        }
+    }
+
     fn covers(&self, scope: &MemoryScope) -> bool {
-        match self {
-            Self::Realm => true,
-            Self::Mob { context, members } => match scope {
+        if self.private_scope(scope) {
+            return false;
+        }
+        match &self.slice {
+            DreamSlice::Realm => true,
+            DreamSlice::Mob { context, members } => match scope {
                 MemoryScope::Mob { mob, .. } => mob == &context.mob,
                 MemoryScope::Identity { identity, .. } => members.contains(identity),
                 MemoryScope::Operator { .. } | MemoryScope::Realm { .. } => false,
             },
-            Self::RealmRemainder {
+            DreamSlice::RealmRemainder {
                 covered_mobs,
                 covered_identities,
             } => match scope {
@@ -761,34 +793,48 @@ impl DreamPartition {
 
     /// Route a bare identity (harvest/ledger rows carry no scope).
     fn covers_identity(&self, identity: &str) -> bool {
-        match self {
-            Self::Realm => true,
-            Self::Mob { members, .. } => members.contains(identity),
-            Self::RealmRemainder {
+        if self.private.contains(identity) {
+            return false;
+        }
+        match &self.slice {
+            DreamSlice::Realm => true,
+            DreamSlice::Mob { members, .. } => members.contains(identity),
+            DreamSlice::RealmRemainder {
                 covered_identities, ..
             } => !covered_identities.contains(identity),
         }
     }
 
+    /// Whether `scope` is the identity scope of a member private to a
+    /// person.
+    fn private_scope(&self, scope: &MemoryScope) -> bool {
+        matches!(scope, MemoryScope::Identity { identity, .. } if self.private.contains(identity))
+    }
+
+    /// Whether `author` is a member private to a person.
+    fn private_author(&self, author: &MemoryAuthor) -> bool {
+        matches!(author, MemoryAuthor::Agent { identity } if self.private.contains(identity))
+    }
+
     /// Operator-candidate routing and operator/realm-level review belong to
     /// the whole-realm views, never a single mob's dream.
     fn covers_operator_review(&self) -> bool {
-        !matches!(self, Self::Mob { .. })
+        !matches!(self.slice, DreamSlice::Mob { .. })
     }
 
     fn run_id_suffix(&self) -> String {
-        match self {
-            Self::Realm => String::new(),
-            Self::Mob { context, .. } => format!("-mob-{}", context.mob),
-            Self::RealmRemainder { .. } => "-remainder".to_string(),
+        match &self.slice {
+            DreamSlice::Realm => String::new(),
+            DreamSlice::Mob { context, .. } => format!("-mob-{}", context.mob),
+            DreamSlice::RealmRemainder { .. } => "-remainder".to_string(),
         }
     }
 
     fn label(&self) -> String {
-        match self {
-            Self::Realm => "realm".to_string(),
-            Self::Mob { context, .. } => format!("mob '{}'", context.mob),
-            Self::RealmRemainder { .. } => "realm remainder".to_string(),
+        match &self.slice {
+            DreamSlice::Realm => "realm".to_string(),
+            DreamSlice::Mob { context, .. } => format!("mob '{}'", context.mob),
+            DreamSlice::RealmRemainder { .. } => "realm remainder".to_string(),
         }
     }
 }
@@ -1093,6 +1139,9 @@ pub struct StewardEngine {
     conflicts: Option<Arc<dyn MemoryConflictBridge>>,
     events: Option<Arc<dyn MemoryEventSink>>,
     mob_context: Option<Arc<dyn MobPurposeSource>>,
+    /// The members private to a person, by memory identity, beyond those
+    /// the mob context's roster labels name (see [`PrivateMemberSource`]).
+    private_members: Option<Arc<dyn PrivateMemberSource>>,
     budget: BackgroundBudget,
     realm: String,
     /// §7.2 P4: operator-scope routing is active (`operator_scope =
@@ -1133,6 +1182,7 @@ impl StewardEngine {
             conflicts: None,
             events: None,
             mob_context: None,
+            private_members: None,
             budget,
             realm: realm.into(),
             operator_routing: false,
@@ -1171,6 +1221,47 @@ impl StewardEngine {
         self
     }
 
+    /// The members private to a person this engine dreams over none of, by
+    /// memory identity, beyond those its mob context names.
+    pub fn with_private_members(mut self, source: Arc<dyn PrivateMemberSource>) -> Self {
+        self.private_members = Some(source);
+        self
+    }
+
+    /// Every identity a dream keeps out, as its memory scope names it: the
+    /// members private to a person that the private member source knows,
+    /// those the mob context's roster labels mark private
+    /// ([`crate::access::PRIVATE_TO_LABEL`]), and the retired ones the store
+    /// recorded as private.
+    async fn private_identities(&self) -> Result<Arc<BTreeSet<String>>, AgentMemoryError> {
+        let mut private = BTreeSet::new();
+        if let Some(source) = self.private_members.as_ref() {
+            private.extend(source.private_identities().await);
+        }
+        if let Some(source) = self.mob_context.as_ref() {
+            for context in source.mob_contexts() {
+                private.extend(
+                    context
+                        .member_labels
+                        .into_iter()
+                        .filter(|(_, labels)| crate::access::private_owner(labels).is_some())
+                        .map(|(identity, _)| identity),
+                );
+            }
+        }
+        private.extend(self.store.private_retired_identities(&self.realm).await?);
+        Ok(Arc::new(private))
+    }
+
+    /// Whether `session_key` is the session of a member private to a
+    /// person, as the transcript source tells.
+    async fn private_session(&self, session_key: &str) -> Result<bool, StewardError> {
+        self.transcripts
+            .private_to_a_person(session_key)
+            .await
+            .map_err(|error| StewardError::Store(error.to_string()))
+    }
+
     /// Activate §7.2 operator-scope routing (P4, `operator_scope =
     /// "provisional"`): the op mapper accepts operator-scope creates, and
     /// held operator-scope proposals become acceptable on this and every
@@ -1202,7 +1293,9 @@ impl StewardEngine {
 
     /// Retire/delete hook (§8.5 exit interviews): record the identity for
     /// the next dream's harvest sub-phase. Best-effort; rotation never
-    /// fails on this.
+    /// fails on this. A member private to a person (its session says so) is
+    /// recorded as private instead: it gets no exit interview, and no later
+    /// dream reads its memory.
     pub async fn note_identity_retired(
         &self,
         identity: &str,
@@ -1210,8 +1303,7 @@ impl StewardEngine {
         cause: &str,
     ) {
         if let Err(err) = self
-            .store
-            .record_pending_harvest(&self.realm, identity, session_key, cause)
+            .record_retirement(identity, session_key, cause, now_ms())
             .await
         {
             tracing::warn!(
@@ -1235,11 +1327,35 @@ impl StewardEngine {
         cause: &str,
         retired_at_ms: u64,
     ) -> Result<(), AgentMemoryError> {
-        self.store
-            .record_pending_harvest_at(&self.realm, identity, session_key, cause, retired_at_ms)
+        self.record_retirement(identity, session_key, cause, retired_at_ms)
             .await?;
         self.signals.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The retirement's row: private when its session belongs to a member
+    /// private to a person, else a pending exit interview. A session whose
+    /// privacy cannot be read queues the interview, whose harvest asks again.
+    async fn record_retirement(
+        &self,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        let private = match session_key {
+            Some(session_key) => self.private_session(session_key).await.unwrap_or(false),
+            None => false,
+        };
+        if private {
+            self.store
+                .record_private_retirement(&self.realm, identity, session_key, cause, retired_at_ms)
+                .await
+        } else {
+            self.store
+                .record_pending_harvest_at(&self.realm, identity, session_key, cause, retired_at_ms)
+                .await
+        }
     }
 
     fn mint_run_id(&self) -> String {
@@ -1333,7 +1449,20 @@ impl StewardEngine {
         // §8.5 per-mob granularity: each partition run takes its OWN budget
         // permit (a per-mob dream is a real LLM run and counts against
         // runs_per_day); the sequence stops when the budget says stop.
-        let partitions = self.dream_partitions();
+        // No partition covers a member private to a person; a dream that
+        // cannot tell which members those are does not run.
+        let private = match self.private_identities().await {
+            Ok(private) => private,
+            Err(error) => {
+                return DreamOutcome::Skipped {
+                    reason: format!("the members private to a person are unknown: {error}"),
+                };
+            }
+        };
+        let mut partitions = self.dream_partitions();
+        for partition in &mut partitions {
+            partition.private = Arc::clone(&private);
+        }
         let multi = partitions.len() > 1;
         let mut last_completed: Option<DreamRun> = None;
         for (index, partition) in partitions.iter().enumerate() {
@@ -1403,7 +1532,7 @@ impl StewardEngine {
     /// single-mob-host case) and the whole-realm dream is used unchanged.
     fn dream_partitions(&self) -> Vec<DreamPartition> {
         if !self.config.per_mob {
-            return vec![DreamPartition::Realm];
+            return vec![DreamPartition::new(DreamSlice::Realm)];
         }
         let contexts = self
             .mob_context
@@ -1411,7 +1540,7 @@ impl StewardEngine {
             .map(|source| source.mob_contexts())
             .unwrap_or_default();
         if contexts.len() < 2 {
-            return vec![DreamPartition::Realm];
+            return vec![DreamPartition::new(DreamSlice::Realm)];
         }
         let covered_mobs: BTreeSet<String> =
             contexts.iter().map(|context| context.mob.clone()).collect();
@@ -1432,13 +1561,13 @@ impl StewardEngine {
                     .iter()
                     .map(|(identity, _)| identity.clone())
                     .collect();
-                DreamPartition::Mob { context, members }
+                DreamPartition::new(DreamSlice::Mob { context, members })
             })
             .collect();
-        partitions.push(DreamPartition::RealmRemainder {
+        partitions.push(DreamPartition::new(DreamSlice::RealmRemainder {
             covered_mobs,
             covered_identities,
-        });
+        }));
         partitions
     }
 
@@ -1589,7 +1718,7 @@ impl StewardEngine {
         started_at_ms: u64,
         run: &mut DreamRun,
     ) -> Result<(), StewardError> {
-        if !matches!(partition, DreamPartition::Realm) {
+        if !matches!(partition.slice, DreamSlice::Realm) {
             run.phases
                 .push(("partition".to_string(), partition.label()));
         }
@@ -1614,7 +1743,9 @@ impl StewardEngine {
         let signals_text = self.render_signals(&signals);
 
         // Gather (bounded agentic rounds).
-        let gathered = self.gather_rounds(&orient.text, &signals_text, run).await?;
+        let gathered = self
+            .gather_rounds(&orient.text, &signals_text, partition, run)
+            .await?;
 
         // Usage audit (§9.2).
         let usage = self.usage_audit(&signals, run).await?;
@@ -1753,7 +1884,8 @@ impl StewardEngine {
         }
 
         // Harvests (exit interviews).
-        self.harvest_phase(&mob_context_text, run_id, run).await?;
+        self.harvest_phase(&mob_context_text, partition, run_id, run)
+            .await?;
 
         // Rank (§8.3): the working-set ordering, one final batch. Ids the
         // consolidate group created are mapped, then the candidate set is
@@ -1926,7 +2058,9 @@ impl StewardEngine {
             .store
             .pending_proposals(&self.realm, MAX_PROPOSALS_PER_DREAM)
             .await?;
-        proposals.retain(|proposal| partition.covers(&proposal.scope));
+        proposals.retain(|proposal| {
+            partition.covers(&proposal.scope) && !partition.private_author(&proposal.author)
+        });
         let mut quarantine = self
             .store
             .quarantined_records(&self.realm, MAX_QUARANTINE_PER_DREAM)
@@ -1989,6 +2123,7 @@ impl StewardEngine {
                     .iter()
                     .filter(|record| {
                         matches!(record.scope, MemoryScope::Identity { .. })
+                            && !partition.private_scope(&record.scope)
                             && record.status == RecordStatus::Active
                             && record
                                 .tags
@@ -2193,9 +2328,9 @@ impl StewardEngine {
     /// per-mob granularity); the remainder sees none (its scopes belong to
     /// no mob); the whole-realm dream keeps the historical all-mobs render.
     fn render_mob_context_for(&self, partition: &DreamPartition) -> String {
-        match partition {
-            DreamPartition::Realm => self.render_mob_context(),
-            DreamPartition::Mob { context, .. } => {
+        match &partition.slice {
+            DreamSlice::Realm => self.render_mob_context(),
+            DreamSlice::Mob { context, .. } => {
                 let mut out = String::new();
                 out.push_str(&format!("mob '{}' (realm '{}')\n", context.mob, self.realm));
                 match &context.purpose {
@@ -2217,7 +2352,7 @@ impl StewardEngine {
                 }
                 out
             }
-            DreamPartition::RealmRemainder { .. } => format!(
+            DreamSlice::RealmRemainder { .. } => format!(
                 "(realm-remainder dream for realm '{}': operator/realm scopes and \
                  unrostered identities — no single mob context; judge promotions \
                  conservatively)",
@@ -2266,6 +2401,7 @@ impl StewardEngine {
         &self,
         overview: &str,
         signals: &str,
+        partition: &DreamPartition,
         run: &mut DreamRun,
     ) -> Result<String, StewardError> {
         let template = self.profile.phase_template("gather")?;
@@ -2303,7 +2439,7 @@ impl StewardEngine {
             }
             for request in reply.requests.into_iter().take(take) {
                 budget -= 1;
-                let fulfilled = self.fulfill_request(request).await;
+                let fulfilled = self.fulfill_request(request, partition).await;
                 match fulfilled {
                     Ok(text) => {
                         if gathered.len() + text.len() > MAX_GATHERED_TOTAL_BYTES {
@@ -2328,7 +2464,13 @@ impl StewardEngine {
         Ok(gathered)
     }
 
-    async fn fulfill_request(&self, request: GatherRequest) -> Result<String, String> {
+    /// One evidence request. A record of a member private to a person, and
+    /// the transcript of one, are never read: the request is unfulfillable.
+    async fn fulfill_request(
+        &self,
+        request: GatherRequest,
+        partition: &DreamPartition,
+    ) -> Result<String, String> {
         match request {
             GatherRequest::RecordBody { id } => {
                 let records = self
@@ -2336,7 +2478,11 @@ impl StewardEngine {
                     .records_by_ids(&self.realm, std::slice::from_ref(&id))
                     .await
                     .map_err(|err| err.to_string())?;
-                let Some(record) = records.into_iter().next() else {
+                let Some(record) = records
+                    .into_iter()
+                    .next()
+                    .filter(|record| !partition.private_scope(&record.scope))
+                else {
                     return Err(format!("record '{id}' not found"));
                 };
                 let quarantined = matches!(record.status, RecordStatus::Quarantined { .. });
@@ -2356,6 +2502,13 @@ impl StewardEngine {
                 ))
             }
             GatherRequest::Evidence { session_id, range } => {
+                if self
+                    .private_session(&session_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("session '{session_id}' not found"));
+                }
                 let from = range.map(|(start, _)| start).unwrap_or(0);
                 let slice = self
                     .transcripts
@@ -3584,6 +3737,7 @@ impl StewardEngine {
     async fn harvest_phase(
         &self,
         mob_context_text: &str,
+        partition: &DreamPartition,
         run_id: &str,
         run: &mut DreamRun,
     ) -> Result<(), StewardError> {
@@ -3597,6 +3751,49 @@ impl StewardEngine {
         }
         let template = self.profile.phase_template("harvest")?;
         for harvest in harvests {
+            // A member private to a person has no exit interview: its
+            // memory is its own, never promoted, and no later dream reads it.
+            let private = if partition.private.contains(&harvest.identity) {
+                Ok(true)
+            } else {
+                match harvest.session_key.as_deref() {
+                    Some(session_key) => self.private_session(session_key).await,
+                    None => Ok(false),
+                }
+            };
+            match private {
+                Ok(false) => {}
+                Ok(true) => {
+                    match self
+                        .store
+                        .record_private_retirement(
+                            &self.realm,
+                            &harvest.identity,
+                            harvest.session_key.as_deref(),
+                            &harvest.cause,
+                            harvest.retired_at_ms,
+                        )
+                        .await
+                    {
+                        Ok(()) => run.phases.push((
+                            format!("harvest:{}", harvest.identity),
+                            "private to a person, not harvested".to_string(),
+                        )),
+                        Err(err) => run.skips.push(format!(
+                            "harvest of '{}' held: recording it private failed: {err}",
+                            harvest.identity
+                        )),
+                    }
+                    continue;
+                }
+                Err(err) => {
+                    run.skips.push(format!(
+                        "harvest of '{}' held: whether it is private is unknown: {err}",
+                        harvest.identity
+                    ));
+                    continue;
+                }
+            }
             let outcome = self
                 .harvest_identity(&template, mob_context_text, &harvest, run_id, run)
                 .await;
@@ -4548,13 +4745,24 @@ mod tests {
 
     struct ScriptedTranscripts {
         sessions: StdMutex<HashMap<String, Vec<String>>>,
+        /// Sessions of members private to a person.
+        private: StdMutex<HashSet<String>>,
     }
 
     impl ScriptedTranscripts {
         fn new() -> Self {
             Self {
                 sessions: StdMutex::new(HashMap::new()),
+                private: StdMutex::new(HashSet::new()),
             }
+        }
+
+        /// Mark `session` as the session of a member private to a person.
+        fn mark_private(&self, session: &str) {
+            self.private
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session.to_string());
         }
 
         fn insert(&self, session: &str, messages: Vec<&str>) {
@@ -4599,6 +4807,17 @@ mod tests {
                     })
                     .collect(),
             }))
+        }
+
+        async fn private_to_a_person(
+            &self,
+            session_key: &str,
+        ) -> Result<bool, crate::memory::distiller::DistillerError> {
+            Ok(self
+                .private
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(session_key))
         }
     }
 
@@ -7620,6 +7839,152 @@ mod tests {
         assert_eq!(harvests[0].cause, "delete");
     }
 
+    /// One mob whose roster holds a shared member and a member private to a
+    /// person (a private console side chat).
+    struct PrivateRosterSource;
+
+    impl MobPurposeSource for PrivateRosterSource {
+        fn mob_contexts(&self) -> Vec<MobContext> {
+            vec![MobContext {
+                mob: "mob:main".to_string(),
+                purpose: Some("run the team".to_string()),
+                member_labels: vec![
+                    ("identity:worker".to_string(), BTreeMap::new()),
+                    (
+                        "identity:alice-side".to_string(),
+                        BTreeMap::from([(
+                            crate::access::PRIVATE_TO_LABEL.to_string(),
+                            "console-caller:v1:aa".to_string(),
+                        )]),
+                    ),
+                ],
+            }]
+        }
+    }
+
+    /// A member private to a person (`console.private_to`) feeds no dream,
+    /// as the Distiller distills none of it: its identity scope and its
+    /// proposals reach no phase's prompt, and its exit interview is skipped,
+    /// promotes nothing and is remembered, so the dreams after it left the
+    /// roster keep its scope out too. A shared member's memory is dreamed as
+    /// before.
+    #[tokio::test]
+    async fn steward_skips_private_side_chats() {
+        let fixture = build_fixture(Vec::new(), Vec::new());
+        let engine = Arc::new(
+            StewardEngine::new(
+                StewardProfile::embedded_default(),
+                StewardConfig {
+                    enabled: true,
+                    min_signals: 1,
+                    ..StewardConfig::default()
+                },
+                Arc::new(ScriptedHandle {
+                    client: fixture.llm.clone(),
+                }),
+                fixture.store.clone(),
+                fixture.transcripts.clone(),
+                REALM,
+            )
+            .with_mob_context(Arc::new(PrivateRosterSource)),
+        );
+        for (identity, title, body) in [
+            (
+                "identity:worker",
+                "Shared release note",
+                "SHARED-RELEASE-DETAIL",
+            ),
+            (
+                "identity:alice-side",
+                "Alice salary note",
+                "PRIVATE-LIVE-DETAIL",
+            ),
+            (
+                "identity:closed-side",
+                "Closed side chat note",
+                "PRIVATE-CLOSED-DETAIL",
+            ),
+        ] {
+            fixture
+                .store
+                .remember_authored(
+                    &identity_scope(identity),
+                    new_record(title, body),
+                    MemoryAuthor::Operator,
+                )
+                .await
+                .expect("seed identity record");
+        }
+        fixture
+            .store
+            .propose(
+                &mob_scope(),
+                new_record("Alice private proposal", "PRIVATE-PROPOSAL-DETAIL"),
+                MemoryAuthor::Agent {
+                    identity: "identity:alice-side".to_string(),
+                },
+            )
+            .await
+            .expect("propose");
+        // A private side chat that was closed: off the roster, its session
+        // the store's record that it was private.
+        fixture
+            .transcripts
+            .insert("sess-closed", vec!["PRIVATE-TRANSCRIPT-DETAIL"]);
+        fixture.transcripts.mark_private("sess-closed");
+        engine
+            .note_identity_retired("identity:closed-side", Some("sess-closed"), "retire")
+            .await;
+
+        let outcome = engine.dream_now().await;
+        assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+        let prompts = fixture.llm.prompts().join("\n");
+        assert!(
+            prompts.contains("Shared release note"),
+            "a shared member's memory is dreamed"
+        );
+        for private in [
+            "Alice salary note",
+            "PRIVATE-LIVE-DETAIL",
+            "Alice private proposal",
+            "PRIVATE-PROPOSAL-DETAIL",
+            "Closed side chat note",
+            "PRIVATE-CLOSED-DETAIL",
+            "PRIVATE-TRANSCRIPT-DETAIL",
+        ] {
+            assert!(!prompts.contains(private), "no prompt holds {private}");
+        }
+        assert!(
+            fixture
+                .store
+                .pending_harvests(REALM, 8)
+                .await
+                .expect("harvests")
+                .is_empty(),
+            "the private exit interview is settled"
+        );
+        let mob_records = fixture
+            .store
+            .manifest(&[mob_scope()], ManifestTier::Full)
+            .await
+            .expect("mob manifest");
+        assert!(
+            mob_records.is_empty(),
+            "nothing of theirs reaches mob scope: {mob_records:?}"
+        );
+
+        // A later dream keeps the closed side chat's scope out too.
+        let before = fixture.llm.prompts().len();
+        engine.note_session_completed();
+        let outcome = engine.dream_now().await;
+        assert!(matches!(outcome, DreamOutcome::Completed(_)), "{outcome:?}");
+        let later = fixture.llm.prompts()[before..].join("\n");
+        assert!(later.contains("Shared release note"), "a later dream ran");
+        for private in ["Closed side chat note", "PRIVATE-CLOSED-DETAIL"] {
+            assert!(!later.contains(private), "no later prompt holds {private}");
+        }
+    }
+
     // -- §7.2 P4 operator-scope routing --------------------------------------
 
     fn operator_scope() -> MemoryScope {
@@ -7851,20 +8216,20 @@ mod tests {
 
     #[test]
     fn dream_partition_covers_routes_scopes() {
-        let mob_a = DreamPartition::Mob {
+        let mob_a = DreamPartition::new(DreamSlice::Mob {
             context: MobContext {
                 mob: "alpha".to_string(),
                 purpose: Some("alpha things".to_string()),
                 member_labels: vec![("a1".to_string(), BTreeMap::new())],
             },
             members: ["a1".to_string()].into_iter().collect(),
-        };
-        let remainder = DreamPartition::RealmRemainder {
+        });
+        let remainder = DreamPartition::new(DreamSlice::RealmRemainder {
             covered_mobs: ["alpha".to_string(), "beta".to_string()]
                 .into_iter()
                 .collect(),
             covered_identities: ["a1".to_string(), "b1".to_string()].into_iter().collect(),
-        };
+        });
         let scope = |k: &str| -> MemoryScope {
             match k {
                 "mob-a" => MemoryScope::Mob {
@@ -7904,7 +8269,7 @@ mod tests {
         // Operator/promotion review is never a single mob's job.
         assert!(!mob_a.covers_operator_review());
         assert!(remainder.covers_operator_review());
-        assert!(DreamPartition::Realm.covers_operator_review());
+        assert!(DreamPartition::new(DreamSlice::Realm).covers_operator_review());
     }
 
     struct TwoMobSource;

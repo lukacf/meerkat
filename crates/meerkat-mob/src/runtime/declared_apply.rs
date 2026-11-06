@@ -486,13 +486,6 @@ pub enum DeclaredEntryOutcome {
     /// that is busy, or whose spawn, wake or retirement is in flight, or a
     /// store that cannot serve now): nothing of it was done.
     Deferred { reason: MobError },
-    /// The identity's verdict seats, rotates or migrates its member, and its
-    /// declaration carried the identity's lifecycle facts only
-    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
-    /// first-boot request that the seat or the fresh life would carry out is
-    /// not carried out. Its declaration was decided as any other's. The host
-    /// declares the identity again with its composed build.
-    BuildRequired,
     /// Refused, typed: nothing of it was written.
     Refused { refusal: DeclaredEntryRefusal },
     /// Left as it is, for a typed note: a quiet steady state, not a refusal,
@@ -501,6 +494,13 @@ pub enum DeclaredEntryOutcome {
     /// Realizing the identity's verdict failed, typed: an apply runs it
     /// again only once the cause is fixed.
     Failed { error: MobError },
+    /// The identity's verdict seats, rotates or migrates its member, and its
+    /// declaration carried the identity's lifecycle facts only
+    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
+    /// first-boot request that the seat or the fresh life would carry out is
+    /// not carried out. Its declaration was decided as any other's. The host
+    /// declares the identity again with its composed build.
+    BuildRequired,
 }
 
 /// Why the declared apply left a listed identity as it is
@@ -1287,10 +1287,15 @@ impl super::MobHandle {
         // entry and retires it, or retires one placed or bound to no session
         // at its incarnation without its adoption, or answers a retiring one
         // not adoptable; a member with one mark, or one an intent row names,
-        // is a host's own and left as it is.
+        // is a host's own and left as it is. Each candidate is first observed
+        // in the history the pass read: one read for the whole pass, and a
+        // fresh one only after a stale answer.
         if complete {
             for identity in self.unlisted_legacy_candidates(history.as_ref(), &listed) {
-                let answer = match self.adopt_observed_legacy_member(&identity, false).await {
+                let answer = match self
+                    .adopt_observed_legacy_member(&identity, false, history.as_ref())
+                    .await
+                {
                     Ok((
                         generation,
                         _,

@@ -318,14 +318,19 @@ let runtime = UnifiedRuntime::builder()
 A provider serves one build: a second build over it refuses. Run one Meta
 process per realm; several replicas need several realms.
 
-**Readiness.** A batch that fails poisons the scopes it touched, and a lost
-fence poisons the whole realm; either refuses until the process opens the
-realm again, so the host restarts it. Poll `provider.readiness()` from your
-readiness probe: `is_ready()` is false while the realm or a scope is
-poisoned, and after a start that found restored members without their comms
-identity on this host (`comms_identity_degraded`) or members Core restored
-broken (`broken_members`): those members serve nothing until they are
-repaired.
+**Readiness.** A lost fence poisons the whole realm: every call refuses
+until the process opens the realm again, so the host restarts it. A batch
+that fails poisons only the scopes it touched: they refuse until the realm
+is opened again, and the realm keeps serving every other member and
+document. Poll `provider.readiness()` from your readiness probe:
+`is_ready()` is false while the realm is poisoned, and after a start that
+found restored members without their comms identity on this host
+(`comms_identity_degraded`) or members Core restored broken
+(`broken_members`): those members serve nothing until they are repaired. A
+poisoned scope alone leaves `is_ready()` true: `scope_poisoned` says one
+exists and `poisoned_scopes` names each with its cause (a session's runtime
+scope is `rt:<runtime id>`). Alert on it, and restart at a planned point,
+after a drain, to recover those members and documents.
 
 **Restart wait.** The SPI has no fence release: after a stop, the next open
 waits at most the lease the host declared in its `FenceTiming` (30 seconds by

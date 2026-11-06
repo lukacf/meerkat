@@ -15515,20 +15515,27 @@ pub use crate::gateway_mcp_composition::{
 pub const HOST_APP_ROUTES_PREFIX: &str = "/host";
 
 /// Nest the host's read-only routes, if any, under [`HOST_APP_ROUTES_PREFIX`],
-/// under the app's `request_bound`.
+/// under the app's `request_bound`. On an open Console (`posture`) they
+/// answer, like the Console's own routes, only requests addressed to a host
+/// the listener serves.
 fn mount_host_app_routes(
     app: axum::Router,
     host: Option<&Arc<dyn GatewayHostComposition>>,
     viewer: crate::http_console::ConsoleViewerResolver,
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
+    posture: crate::gateway_composition::ConsoleAuthPosture,
 ) -> Result<axum::Router, GatewayHostError> {
     let Some(host) = host else {
         return Ok(app);
     };
+    let open = posture == crate::gateway_composition::ConsoleAuthPosture::Open;
     Ok(
         match host.host_app_routes_with_send_precheck(viewer, send_precheck)? {
-            Some(routes) => app.nest(HOST_APP_ROUTES_PREFIX, request_bound.apply(routes)),
+            Some(routes) => app.nest(
+                HOST_APP_ROUTES_PREFIX,
+                crate::http_console::served_hosts_only(request_bound.apply(routes), open),
+            ),
             None => app,
         },
     )
@@ -15545,12 +15552,14 @@ fn gateway_console_app(
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
 ) -> Result<axum::Router, GatewayHostError> {
+    let posture = crate::gateway_composition::ConsoleAuthPosture::of(&decisions);
     mount_host_app_routes(
         runtime.reference_app_router_under(decisions, request_bound),
         host,
         viewer,
         send_precheck,
         request_bound,
+        posture,
     )
 }
 
@@ -20075,6 +20084,17 @@ external_addressable = true
              runtime_options.console_require_app_auth = false for an explicitly open local console"
         );
     }
+    if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
+        == crate::gateway_composition::ConsoleAuthPosture::Open
+        && crate::parse_jwks_json(&decision_state.trusted_oidc.jwks_json).is_ok()
+    {
+        tracing::warn!(
+            "runtime_options.console_require_app_auth = false overrides the trusted issuer of \
+             runtime_options.auth_config: the console admits callers without a token as one \
+             anonymous caller, and identifies a caller that volunteers a verified token only \
+             where an access controller is configured"
+        );
+    }
     let viewer_resolver = runtime.console_viewer_resolver(&decision_state);
     let send_precheck = runtime.console_send_precheck(&decision_state);
     let request_bound = crate::unified_runtime::http::ReferenceAppRequestBound::default();
@@ -23003,6 +23023,7 @@ mod prepared_application_tests {
 #[cfg(test)]
 mod host_app_routes_tests {
     use super::*;
+    use crate::gateway_composition::ConsoleAuthPosture;
     use axum::body::Body;
     use axum::http::{HeaderMap, Request, StatusCode, Uri};
     use tower::ServiceExt as _;
@@ -23191,6 +23212,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23206,6 +23228,7 @@ mod host_app_routes_tests {
             resolver(),
             crate::http_console::ConsoleSendPrecheck::new(read_only, None, None),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23224,6 +23247,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
 
@@ -23248,12 +23272,14 @@ mod host_app_routes_tests {
         // refusal of an unauthenticated request.
         let mut decisions = minimal_decision_state();
         decisions.console.require_app_auth = true;
+        let posture = ConsoleAuthPosture::of(&decisions);
         let app = mount_host_app_routes(
             console_app(),
             Some(&host),
             crate::http_console::ConsoleViewerResolver::new(decisions, None),
             precheck(),
             &request_bound(),
+            posture,
         )
         .expect("the host's routes mount");
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::UNAUTHORIZED);
@@ -23267,6 +23293,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23278,6 +23305,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23291,7 +23319,8 @@ mod host_app_routes_tests {
                 Some(&host),
                 resolver(),
                 precheck(),
-                &request_bound()
+                &request_bound(),
+                ConsoleAuthPosture::Open,
             )
             .err(),
             Some(GatewayHostError::Denied)
@@ -23423,6 +23452,75 @@ mod host_app_routes_tests {
         assert_eq!(held.peak(), LIMIT);
         server.abort();
         runtime.shutdown().await;
+    }
+
+    /// On an open Console the host's routes answer, like the Console's own
+    /// routes, only a request addressed to a host the gateway's listener
+    /// serves: a page that rebinds its own name to the listener's address
+    /// reads none of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::expect_used)]
+    async fn open_console_host_routes_refuse_a_foreign_host() {
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = \"gateway-host-routes\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("definition");
+        let runtime = crate::unified_runtime::UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let decisions = RuntimeDecisionState::local_console(
+            ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let host: Arc<dyn GatewayHostComposition> = Arc::new(RouteHost { routes: Ok(true) });
+        let app = gateway_console_app(
+            &runtime,
+            decisions.clone(),
+            Some(&host),
+            runtime.console_viewer_resolver(&decisions),
+            runtime.console_send_precheck(&decisions),
+            &request_bound(),
+        )
+        .expect("console app");
+        let binding = crate::gateway_composition::GatewayHttpBinding::bind_loopback()
+            .await
+            .expect("loopback listener");
+        let base = binding.http_base_url();
+        let port = binding.port();
+        let server = binding.serve(app);
+        let client = reqwest::Client::new();
+        let mut answers = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+        ] {
+            let status = client
+                .get(format!("{base}/host/status"))
+                .header(reqwest::header::HOST, host.as_str())
+                .send()
+                .await
+                .expect("host route answer")
+                .status()
+                .as_u16();
+            answers.push((host, status));
+        }
+        let _ = server.shutdown().await;
+        runtime.shutdown().await;
+        assert_eq!(
+            answers,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+                (format!("localhost:{port}"), 200),
+            ]
+        );
     }
 }
 

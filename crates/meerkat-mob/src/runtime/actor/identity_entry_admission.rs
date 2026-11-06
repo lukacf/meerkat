@@ -79,7 +79,13 @@ impl MobActor {
     /// (`AdoptLegacyIdentityEntry`), decided by MobMachine from the handle's
     /// observation of the member's incarnation at `generation` (its legacy
     /// marks, whether the roster lists it, whether a host's intent row names
-    /// it). An `Adopted` verdict journals the adoption's row (the member's
+    /// it) and from the identity's intent row in the identity store, read in
+    /// this step: a host's adoption commits its intent row as a command of
+    /// this actor, so the step sees every adoption committed before it,
+    /// however early the handle read the member's history. A row present,
+    /// readable or not, names the member, as the member binding history
+    /// classifies it; a store read that fails fails the step, and nothing
+    /// is decided. An `Adopted` verdict journals the adoption's row (the member's
     /// current binding, unchanged, with the entry's origin) before it
     /// commits; every other verdict changes nothing and is answered as
     /// decided. A mob that is not running answers an invalid transition.
@@ -89,6 +95,15 @@ impl MobActor {
         generation: crate::ids::Generation,
         observation: super::super::identity_entry::LegacyMemberObservation,
     ) -> Result<mob_dsl::LegacyIdentityEntryAdoptionKind, MobError> {
+        let intent_row = observation.intent_row
+            || crate::store::intent_row_management(
+                &self
+                    .identity
+                    .observe_identity_intent(&self.definition.id, &agent_identity)
+                    .await
+                    .map_err(MobError::from)?,
+            )
+            .is_some();
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
         let prepared = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::AdoptLegacyIdentityEntry {
@@ -97,7 +112,7 @@ impl MobActor {
                 durable_identity_marker: observation.marks.durable_identity,
                 own_identity_label: observation.marks.own_identity_label,
                 listed: observation.listed,
-                intent_row: observation.intent_row,
+                intent_row,
             },
             "adopt_legacy_identity_entry",
         )?;

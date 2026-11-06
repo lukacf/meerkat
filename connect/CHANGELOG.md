@@ -7,12 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- A setup check that answers for an already retained validation id with
-  something that is not a valid proposal (for example, a file list naming both
-  a declaration and an activation document) now invalidates the retained
-  proposal, as a changed answer already did, so a selection made from that
-  proposal is no longer current. Before, the check was refused but the earlier
-  selection stayed current.
+- Setup: when a setup check answered again for a validation it had already
+  accepted, with something that is not a valid proposal (for example a file
+  list that names both a declaration and an activation document), the check
+  was refused but the selection made from the earlier proposal stayed in
+  force. Such an answer now withdraws the earlier proposal, as a changed
+  answer already did, so a selection made from it no longer applies.
 
 ### Known limitations
 

@@ -1668,10 +1668,21 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
             .write("cursor/mob-b", Some(b"other".to_vec()))
             .await
             .expect("another document still serves");
+        // The realm stays ready: the poisoned document is named, and every
+        // call that does not need it serves.
         let readiness = provider.readiness();
         assert!(
-            readiness.scope_poisoned && readiness.realm_poisoned.is_none() && !readiness.is_ready(),
+            readiness.scope_poisoned && readiness.realm_poisoned.is_none() && readiness.is_ready(),
             "{readiness:?}"
+        );
+        assert_eq!(
+            readiness
+                .poisoned_scopes
+                .iter()
+                .map(|scope| scope.id.to_string())
+                .collect::<Vec<_>>(),
+            vec!["mx:cursor/mob-a".to_string()],
+            "the probe names the poisoned document: {readiness:?}"
         );
     }
 
@@ -3739,11 +3750,12 @@ async fn a_declared_runner_is_left_to_the_host_and_one_step_is_one_batch() {
     stop(runtime).await;
 }
 
-/// A poisoned announcement store makes the realm not ready: a batch of the
-/// store the host refuses poisons its scope, the readiness probe says so,
-/// and the store refuses every later call until the realm is opened again.
+/// A poisoned announcement store is named by the readiness probe while the
+/// realm stays ready: a batch of the store the host refuses poisons its
+/// scope, the probe names it, and the store refuses every later call until
+/// the realm is opened again, while the rest of the realm serves.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_poisoned_announcement_store_makes_the_realm_not_ready() {
+async fn a_poisoned_announcement_store_is_named_by_readiness_and_the_realm_stays_ready() {
     let fixture = Fixture::new();
     let mob_id = unique_mob_id("announcements-poisoned");
     let model = Model::default();
@@ -3769,8 +3781,16 @@ async fn a_poisoned_announcement_store_makes_the_realm_not_ready() {
     .expect_err("the refused batch answers an error");
     let readiness = provider.readiness();
     assert!(
-        readiness.scope_poisoned && !readiness.is_ready(),
+        readiness.scope_poisoned && readiness.is_ready(),
         "{readiness:?}"
+    );
+    assert!(
+        !readiness.poisoned_scopes.is_empty()
+            && readiness
+                .poisoned_scopes
+                .iter()
+                .all(|scope| scope.id.family.tag == "mxa"),
+        "the probe names the announcement store's scopes, and only them: {readiness:?}"
     );
     try_announcement_call(
         &service,
@@ -5113,4 +5133,66 @@ async fn a_builder_roster_member_delegates_on_a_host_store_realm() {
         .collect();
     assert_eq!(stored, vec![ROOT_MOB_STORAGE_KEY.to_string()]);
     stop(runtime).await;
+}
+
+/// A poisoned scope leaves the realm ready: the realm keeps serving every
+/// call that does not need that scope, so the readiness probe reports the
+/// scope and stays ready, and the realm's reads of other families (the
+/// session catalog listing behind `sessions/list`) answer. Only a poisoned
+/// realm, a lost fence, makes the probe not ready. Before, any poisoned
+/// scope made the probe not ready, and a host restarted the whole process
+/// for one degraded document or member.
+#[tokio::test]
+async fn readiness_stays_ready_and_names_the_poisoned_scope() {
+    let fixture = Fixture::new();
+    let host = fixture.process();
+    let provider = fixture
+        .open_with(&host, failing_fast())
+        .await
+        .expect("open");
+    let documents = provider.realm.documents();
+    documents
+        .write("cursor/mob-a", Some(b"first".to_vec()))
+        .await
+        .expect("the first write");
+    host.fail_next_commits(1);
+    documents
+        .write("cursor/mob-a", Some(b"second".to_vec()))
+        .await
+        .expect_err("the store fails the batch");
+
+    let readiness = provider.readiness();
+    assert!(
+        readiness.scope_poisoned && readiness.realm_poisoned.is_none(),
+        "{readiness:?}"
+    );
+    assert!(
+        readiness.is_ready(),
+        "a poisoned scope leaves the realm ready: {readiness:?}"
+    );
+    assert_eq!(readiness.poisoned_scopes.len(), 1, "{readiness:?}");
+    let poisoned = &readiness.poisoned_scopes[0];
+    assert_eq!(
+        poisoned.id.to_string(),
+        "mx:cursor/mob-a",
+        "the poisoned document: {poisoned:?}"
+    );
+    assert!(
+        poisoned.cause.contains("the store failed this batch"),
+        "the cause is the failed batch's: {poisoned:?}"
+    );
+    // Both come from the realm: `scope_poisoned` is its
+    // `has_poisoned_scopes`, and the names its `poisoned_scopes`.
+    let realm = provider.realm.realm();
+    assert_eq!(readiness.scope_poisoned, realm.has_poisoned_scopes());
+    assert_eq!(readiness.poisoned_scopes, realm.poisoned_scopes());
+    let catalog = provider
+        .realm
+        .runtime_store()
+        .list_runtime_session_catalog_entries(meerkat_core::SessionFilter::default())
+        .await;
+    assert!(
+        catalog.is_ok(),
+        "the session catalog listing answers while a document scope is poisoned: {catalog:?}"
+    );
 }

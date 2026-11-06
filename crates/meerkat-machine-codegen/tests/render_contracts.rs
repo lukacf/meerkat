@@ -903,6 +903,37 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
 }
 
 #[test]
+fn meerkat_switch_turn_settlement_arms_follow_every_published_variant() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    let variants = transition_id_variants(&rendered);
+    let index = |name: &str| {
+        variants
+            .iter()
+            .position(|variant| variant == name)
+            .expect("the named variant is a rendered TransitionId variant")
+    };
+    // The last TransitionId variant 0.9.9 published.
+    assert_eq!(index("StopCurrentRunForRunResumableAttached"), 2742);
+    for arm in [
+        "AbortUntilChangedSwitchTurnReconfigureIdle",
+        "AbortUntilChangedSwitchTurnReconfigureAttached",
+        "AbortUntilChangedSwitchTurnReconfigureRunning",
+        "AbortUntilChangedSwitchTurnReconfigureRetired",
+        "AbortUntilChangedSwitchTurnReconfigureStopped",
+        "RequestUntilChangedSwitchTurnPendingConflictIdle",
+        "RequestUntilChangedSwitchTurnPendingConflictAttached",
+        "RequestUntilChangedSwitchTurnPendingConflictRunning",
+        "CompleteUntilChangedSwitchTurnReconfigureRetired",
+        "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    ] {
+        assert!(
+            index(arm) > 2742,
+            "`{arm}` must follow every variant 0.9.9 published"
+        );
+    }
+}
+
+#[test]
 fn generated_meerkat_operation_status_is_closed_enum() {
     let rendered = render_machine_kernel_module(&meerkat_machine());
 

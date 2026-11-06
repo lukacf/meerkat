@@ -49,8 +49,8 @@ pub use record::{
     StoredDecision,
 };
 pub use store::{
-    DECISION_PAGE_MAX, DecisionListFilter, DecisionPage, DecisionRow, DecisionStore,
-    InMemoryDecisionStore, UnreadableDecision, decision_is_due, decision_owes_work,
+    DECISION_PAGE_MAX, DecisionExecutorClaim, DecisionListFilter, DecisionPage, DecisionRow,
+    DecisionStore, InMemoryDecisionStore, UnreadableDecision, decision_is_due, decision_owes_work,
 };
 
 /// A durable decision value is not valid.

@@ -35,21 +35,6 @@ them.
 
 ## [Unreleased]
 
-### Highlights
-
-- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
-  states a Copilot account's token source once (an `env` or
-  `external_resolver` source) in place of nine backend, auth and binding
-  tables: the realm gets the account's `copilot_openai`,
-  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
-  names the explicit tables use. Account models: a request that names a
-  route of a Copilot account can run a model only the account lists (no
-  catalog row, no `[models.<id>]` entry), with the protocol and limits
-  from the account's model list; a model the account does not offer is
-  refused before any model request, and no other route or credential is
-  tried. See Added and Breaking, and Known limitations for Meerkat
-  Connect.
-
 ### Breaking
 
 - `meerkat-mob`: `DeclaredEntryRefusal::NonAuthoritative` carries `would_be:
@@ -63,6 +48,7 @@ them.
   `NonAuthoritative { .. }`. `meerkat-machine-kernels`: the MobMachine
   effect `IdentityEntryDeclared` gains `would_be`, set on a candidate's
   refusal only.
+
 - `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
   `MobMachineInput` variant `DeclareIdentityEntry` (meerkat-machine-schema
   and meerkat-mob) and the kernel `generated::mob::inputs` struct
@@ -74,6 +60,7 @@ them.
   literally must set them (`false`, `false` and `Generation(0)` declare no
   observation), and a serialized kernel input without them no longer
   deserializes.
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both
@@ -131,6 +118,247 @@ them.
   keeps the previous seal), a serialized kernel input or state without them
   no longer deserializes, and exhaustive matches must add the new variants.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-runtime`: the
+  MeerkatMachine gains the failure arm of an until-changed switch-turn
+  reconfigure, the refusal of an until-changed switch-turn while another
+  switch is pending, and the completion of a reconfigured switch-turn in a
+  retired or stopped session (see Fixed). `MeerkatMachineInput`
+  (meerkat-machine-schema and meerkat-runtime) and the kernel
+  `generated::meerkat` `Input` gain
+  `AbortUntilChangedSwitchTurnReconfigure { request_id }`, and
+  `MeerkatMachineInputVariant` (meerkat-machine-schema and meerkat-runtime),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `InputKind` gain `AbortUntilChangedSwitchTurnReconfigure`. The kernel
+  `generated::meerkat::TransitionId` gains
+  `AbortUntilChangedSwitchTurnReconfigureIdle`,
+  `AbortUntilChangedSwitchTurnReconfigureAttached`,
+  `AbortUntilChangedSwitchTurnReconfigureRunning`,
+  `AbortUntilChangedSwitchTurnReconfigureRetired`,
+  `AbortUntilChangedSwitchTurnReconfigureStopped`,
+  `RequestUntilChangedSwitchTurnPendingConflictIdle`,
+  `RequestUntilChangedSwitchTurnPendingConflictAttached`,
+  `RequestUntilChangedSwitchTurnPendingConflictRunning`,
+  `CompleteUntilChangedSwitchTurnReconfigureRetired` and
+  `CompleteUntilChangedSwitchTurnReconfigureStopped`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves. Every
+  enum named here is exhaustive, so a downstream exhaustive match needs the
+  new arms, or a wildcard arm.
+
+### Added
+
+- `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
+  declared-apply verdict a candidate composition reports
+  (`DeclaredEntryRefusal::NonAuthoritative`). Its vocabulary is closed, so a
+  host's projection matches every verdict.
+
+- `meerkat-mob`: a declared roster entry says what its spec carries of the
+  identity's member build (`DeclaredEntry::build`, set with
+  `DeclaredEntry::with_build`, a `DeclaredBuild`): `Composed` (the
+  default, as before) or `FactsOnly`, the identity's lifecycle facts with
+  none of its build. No member is ever built from facts only: a verdict
+  that would seat the identity, rotate its member onto a fresh session,
+  migrate it to another role on its own session or start its first-boot
+  fresh life answers
+  `DeclaredEntryOutcome::BuildRequired` and takes no member step (the
+  first-boot request is kept, and so is an archived session record on a
+  session service that keeps durable member sessions), and the host
+  declares the identity again with its composed build. Every other verdict
+  answers as before. A host whose member builds are costly to compose
+  (a customizer per identity) composes only the identities it expects the
+  apply to seat, rotate or migrate, and an unchanged roster composes none.
+
+- `meerkat-mob`: the one encoding of a name into a member id,
+  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
+  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
+  comms-name component and does not begin with the marker is its own
+  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
+  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
+  member ids are this encoding.
+
+- `meerkat-mob`: `UnlistedEntryOutcome::NotAdopted { reason }`, with the new
+  `NotAdoptedReason` (`Retiring`): a complete roster's answer for a member
+  it does not list that carries both legacy marks and that MobMachine
+  neither adopted nor retired, because the member's retirement started
+  already. The member stays as it is, its own retirement ends it, and the
+  next complete apply decides it again if it is still there.
+
+- `meerkat-mob`: `MemberRetirementCause::HostAdopted`, the cause of the
+  retirement with which a host's adoption takes a declared identity entry
+  over (see Fixed): the end of that retirement ends the entry. The enum is
+  `#[non_exhaustive]`, so the variant is additive. It is a Rust-only fact of
+  the member lifecycle journal (`MemberLifecycleEvent::RetirementStarted`)
+  and reaches no wire type or SDK. A release that predates it reads its
+  stored token as no cause: 0.9.10 replays the retirement as one the seal
+  did not start and reads the identity as the declared entry again, so a
+  rollback to 0.9.10 has one step to take (see the upgrading guide).
+
+- `meerkat-mob`: `MemberLifecycleRecord::timestamp`, the time the record's
+  journal event was appended (the `MobEvent` timestamp, stored with the
+  event): a later read of the journal, after a restart included, reads the
+  same time again, so a reader can key work it owes a retirement by when
+  Core journaled it. The struct is `#[non_exhaustive]`, so the field is
+  additive.
+
+### Changed
+
+- `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
+  composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a
+  closed vocabulary (no `#[non_exhaustive]`): a host's projection of it
+  matches every verdict with no wildcard arm, so adding a verdict is a
+  breaking change, named under Breaking in the release that adds it.
+
+- `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
+  sign-in is refused (`AttachmentRefused`), because it is governed and the
+  router holds no control that covers it, or because it was signed out
+  ungoverned and its name has been governed since, is reported as a failed
+  add once, at the first boundary after its release settles, where every
+  later boundary reported it again. It stays listed as awaiting sign-in, and
+  a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
+### Fixed
+
+- `meerkat-mob`: a host's adoption of an identity a declared roster lists
+  (`MobHandle::adopt_member_identity_declaration` over a declared identity
+  entry) takes the entry over: the identity reconciler retires the member
+  with the cause `MemberRetirementCause::HostAdopted` and materializes it
+  again under the host's intent, on its own session, as no entry, and the
+  end of that retirement ends the entry. The entry outlived the retirement,
+  unseated and owed its seat, and the reconciler's spawn of the identity was
+  refused `MobError::IdentityMember`, so the host's identity was not served
+  again. From the host's intent row on, a declared apply answers the
+  identity host-adopted (`DeclaredEntryRefusal::HostAdopted`) and a complete
+  roster's seal leaves its entry as it is, where the seal unlisted the entry
+  and retired the host's member.
+
+- `meerkat-mob`: `MobHandle::rotate_member` of an identity whose entry no
+  member holds (the fresh life of an unseated identity: a reset or a delete)
+  is checked as a seat of its name is. With the entry's custody the rotation
+  lets the entry's archived session record go (`ForgetArchivedSession`,
+  reason `FreshLifeRequested`, as the declared apply's first-boot `Fresh`
+  path does; the archived session itself stays readable, its history and
+  transcript included) and seats the member on a fresh session, where it
+  failed at its seat while the entry held that record. Without the entry's
+  custody it is refused `MobError::IdentityMember` before anything is
+  created.
+
+- `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
+  answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on
+  the member's own session with the declaration's build inputs, as a
+  resume of that session built from the declared spec does, after a
+  restart too. Its successor kept the build inputs the session's earlier
+  builds recorded, so the member ran its new role with, for one, its
+  previous role's context.
+
+- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
+  label in the one encoding of a name into a member id
+  (`ids::member_id_for_name`): a label naming the identity a member id
+  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
+  member `mk--mk--ops`) marks the member as a legacy member, as a label
+  spelling the member id itself always did. The label is read trimmed, and
+  an empty label or one in the generated runtime-alias namespace (`rt:`)
+  names no member. A declared apply that listed such a member without the
+  durable-identity marker, a member labelled with an identity no member id
+  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
+  member of that name could not have it adopted.
+
+- `meerkat-mcp`: retained attachment controls are released when the
+  router's close begins (`McpRouterAdapter::begin_close`), so a router whose
+  shutdown never runs no longer keeps the controls it retains for a re-add
+  after a sign-in, and what they hold, alive after its close.
+
+- `meerkat-runtime`: a failed model switch during a session no longer
+  discards an input admitted while the switch was in progress. A switch
+  that lasts until changed (`SwitchTurnDuration::UntilChanged`) records its
+  request and runs the LLM reconfigure without holding the session's
+  mutation gate, so other callers can admit input meanwhile. When the
+  reconfigure failed, the switch wrote back the whole generated state it
+  had read before its request, erasing every fact other callers committed
+  in that gap: an input admitted then lost its generated phase while its
+  ledger row stayed, so the machine no longer tracked an input the runtime
+  had accepted, and a stop in that gap was undone in the machine. A failed
+  switch now withdraws only its own request, through the MeerkatMachine
+  input `AbortUntilChangedSwitchTurnReconfigure` (see Breaking), and leaves
+  every other fact as it stands, a stop included; a failed preparation,
+  which fails before the gate is released, withdraws through the same
+  input. The caller still gets the reconfigure's error. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a model switch that lasts until changed, requested
+  while another switch was pending, replaced the pending switch. A pending
+  until-changed switch could then neither complete nor be withdrawn, so its
+  caller got an error although its reconfigure had applied, and a finite
+  switch waiting for its next turn was dropped although its caller had been
+  told it applied. Such a request is now denied with
+  `SwitchTurnDenialReason::ScopedOverrideConflict`, as a finite switch
+  requested while another switch is pending already is, and so is a model
+  change a run requested when it is realized while a switch is pending. A
+  retry of a pending until-changed request itself (the same `request_id`)
+  is accepted, so a caller that dropped its request while the reconfigure
+  ran can finish it; an until-changed request that reuses the id of a
+  finite switch waiting for its turn is refused with an error and leaves
+  that switch in place. A request that reuses a pending switch's id and
+  cannot be accepted (a finite request, or an until-changed one that is not
+  approved or whose target cannot carry the session's transcript) is
+  likewise refused with an error and records nothing: before, it was
+  recorded as denied under that id, so the pending switch's own approved
+  retry was answered as denied too and the switch stayed pending, and a
+  retried finite switch was answered as denied although it still applied
+  at its turn. A denied `request_id` now stays denied: its retry is answered
+  with the recorded denial and stages nothing. Before, a retry sent after
+  the conflict that refused it had cleared was staged but answered as
+  denied: an until-changed switch then stayed pending without its
+  reconfigure, and a finite one still applied at its turn. Affects 0.6.0
+  through 0.9.10.
+
+- `meerkat-runtime`: a stop or a retirement that landed after an
+  until-changed model switch had reconfigured the session, but before the
+  switch finished, failed the switch: the caller got an error although the
+  reconfigure had applied, and the switch stayed pending. The switch now
+  finishes in a stopped or retired session as well. Affects 0.6.0 through
+  0.9.10.
+
+## [0.9.10] - 2026-11-04
+
+### Highlights
+
+- GitHub Copilot configured once. A `[realm.<realm>.copilot]` section
+  states a Copilot account's token source once (an `env` or
+  `external_resolver` source) in place of nine backend, auth and binding
+  tables: the realm gets the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes in token mode, under the
+  names the explicit tables use. Account models: a request that names a
+  route of a Copilot account can run a model only the account lists (no
+  catalog row, no `[models.<id>]` entry), with the protocol and limits
+  from the account's model list; a model the account does not offer is
+  refused before any model request, and no other route or credential is
+  tried. See Added and Breaking.
+
+- One poisoned host store scope no longer refuses store-wide reads
+  realm-wide. Each such read now depends only on the scope families it
+  reads, and a call a poisoned scope refuses answers the typed
+  `RuntimeStoreError::ScopeRefused { scopes }`, naming each refused scope
+  with its poison cause. The recovery-work scan answers, listing a
+  poisoned runtime as holding work. Affects 0.9.5 through 0.9.9. See
+  Breaking, Added, Changed and Fixed.
+
+### Breaking
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  durable decisions check the approver who decided at execution (see
+  Changed). `DurableDecisionService::authorize_execution` takes a fourth
+  parameter, `approver: &ConsentEligibilityAnswer`, the host's answer for
+  the approver who decided; pass `ConsentEligibilityAnswer::Eligible` with
+  current evidence to keep the previous behaviour.
+  `DurableDecisionInput::AuthorizeExecution` (meerkat-runtime
+  `decision::dsl` and meerkat-machine-schema
+  `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::AuthorizeExecution` gain the public
+  field `approver_current: bool`, so code that builds them literally must
+  set it. The kernel `generated::durable_decision::TransitionId` gains
+  `AuthorizeExecutionRefusedApproverRevoked` and
+  `AuthorizeExecutionRefusedRevokedSettlementOwed`, appended last, so an
+  exhaustive match needs their arms.
+
 - `meerkat-core`, `meerkat-llm-core`: a GitHub Copilot account configured
   once, and account models (see Added). `RealmConfigSection` gains the
   public field `copilot: Option<CopilotAccountConfig>`, so code that builds
@@ -168,14 +396,129 @@ them.
   account. In 0.9.9 a zero-config route's session carried the binding
   itself as its credential identity
   (`AuthCredentialIdentity::from_auth_binding`) and ran with provider-native
-  tools on (`ProviderNativeToolPolicy::Inherit`). See Changed.
+  tools on (`ProviderNativeToolPolicy::Inherit`), so a provider switch or a
+  fallback target did not stay on the account.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: an
+  `OperationRefusalObserver` sees
+  `OperationRefusalDisposition::WaitedForOwnerChange` where it saw `Rebuilt`
+  and `ControllerFeedback` for a model request whose read went stale because
+  an owner change completed, and `WaitedForOwnerChange` now also names the
+  one-step pause after a stale read with no change in progress. A review
+  whose currentness read went stale that way is superseded and reviewed once
+  more, where it was retired as an authority change. See Fixed.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a refusal a
+  governed tool call meets at its own effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`) before any effect of the
+  call entered is certified not dispatched: `OperationRefused::dispatch()`
+  is `NotDispatched` and the model reads `tool_invoked: false`, where it read
+  `"unknown"`. A comparison with `OperationRefused::new(kind)` no longer
+  matches such a refusal: compare `kind()` and `dispatch()`. A tool that runs
+  an effect of its own before its effect entry forwards the entry's refusal
+  as `OperationRefused::new(refusal.kind())`. See Fixed.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host
+  store call refused by a poisoned scope or a poisoned realm answers the
+  typed `RuntimeStoreError::ScopeRefused { scopes }`, naming each refused
+  scope with its poison cause, or `RuntimeStoreError::RealmRefused { cause }`
+  (both new, see Added), where it answered `RuntimeStoreError::ReadFailed` or
+  `WriteFailed` with the refusal's text. `SpiError::into_read` and
+  `SpiError::into_write` map `ScopePoisoned`, `RealmPoisoned` and the new
+  `ScopesPoisoned` to them, and `SpiRealm::check_cross_scope_read` answers
+  `SpiError::ScopesPoisoned`, naming every poisoned scope, where it answered
+  `SpiError::RealmPoisoned`. The batch that fails still answers `WriteFailed`
+  to the call that sent it; the refusal is what the later calls on its scopes
+  answer. A caller that matched the old variants for these refusals matches
+  the new ones; one that only formats the error keeps compiling, and the text
+  still names the scope and its cause.
+
+- Behaviour-only (not measured by the gate): `meerkat-session`: a committed
+  read that a host store refuses until its realm is reopened keeps the
+  store's typed refusal as `SessionError::Store`, where it surfaced as
+  `SessionError::Agent(AgentError::InternalError)`: a WholeBlob session's
+  committed read, the HeadCanonical boundary authority read, and the
+  committed snapshot read under a provisional tail. Its `SessionError::code`
+  is `SESSION_STORE_ERROR` (was `AGENT_ERROR`), and
+  `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`). A wire error built from it (`WireError::from`) carries
+  `INTERNAL_ERROR`, JSON-RPC `-32603` (was `AGENT_ERROR`, `-32013`). The
+  session transport code (`session_transport_error_code`: a session
+  method's JSON-RPC error over `rkat-rpc`, and the `rkat` exit status) is
+  `INTERNAL_ERROR` either way, and the HTTP status stays 500.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`:
+  `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` answer while only scopes of other
+  families are poisoned, and while a runtime scope is poisoned they refuse
+  with `RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })`,
+  naming each poisoned runtime scope. They refused with
+  `RuntimeDeliveryError::Store(RuntimeStoreError::ReadFailed(..))` while any
+  scope of the realm was poisoned. Neither answers a count or a list that
+  leaves a poisoned runtime out; `runtime_delivery_backlog` (see Added)
+  answers per runtime.
+
+- Behaviour-only (not measured by the gate): `meerkat`: a delivery owner
+  pass (`RuntimeDeliveryPass`) lists a runtime whose host store scope is
+  poisoned in `blocked_runtimes`, with a `failures` line naming the store's
+  refusal, while its rows stay pending: the owner does not drain it until
+  the realm is reopened, and `blocked_sessions` does not list its sessions.
+  Before, a poisoned scope of any family failed the pass's backlog
+  reconcile instead (one `failures` line, "runtime delivery backlog could
+  not be read"), and no runtime was listed for it.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`:
+  `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
+  `wait_for_members_kickoff_complete` end with an error when a member they
+  wait on is not final (for a kickoff wait, its kickoff is not resolved) and
+  the store refuses its session until the realm is reopened:
+  `MobError::SessionError` carrying the store's typed refusal as its
+  `SessionError::Store` source, with no new error code. They polled that
+  member's status until the caller gave up, a kickoff wait until its timeout.
+  The member's lifecycle is unchanged; only the wait ends.
 
 ### Added
 
-- `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
-  declared-apply verdict a candidate composition reports
-  (`DeclaredEntryRefusal::NonAuthoritative`). Its vocabulary is closed, so a
-  host's projection matches every verdict.
+- `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
+  decision store's registered kinds. A host registers one
+  `DecisionExecutor` per decision kind (execute a held request under its
+  permit, read its own record of whether a commit landed, deliver the
+  requester notice) and a `DecisionApproverCurrentness` (its answer for the
+  approver who decided), then drives `pass()`: at start, after it records a
+  decision, and on a timer. A pass reads the due and owed pages only. It
+  records the expiries its due page shows, settles every permit outstanding
+  when it reads it first (a landed commit is recorded executed, a permit
+  with no commit is released), executes each approved decision at most
+  once and settles its permit (`Committed`, `Released`, or `Refused` with
+  the owner's typed reference), and delivers owed notices. Each decision's
+  outcome is reported (`DecisionPassOutcome`), with `Deferred` for an
+  unsettled approver answer (or evidence no longer current when the
+  authorization commits), an unreadable executor record or an
+  undelivered notice. `DecisionExecutorLoop::start` claims the store's
+  executor role and refuses a second loop (`DecisionError::ExecutorHeld`), a
+  candidate launch and two executors of one kind. A pass, and an
+  executor's `execute` with it, may be dropped at any await: nothing the
+  execution started may commit afterwards unless `committed` reports it,
+  and the next pass settles its permit first. Notices are delivered at
+  least once.
+- `meerkat-runtime`: `DurableDecisionService::claim_executor`, and
+  `DecisionError::Unsettled(DecisionId)` (no settled answer for the party
+  that decided: nothing was applied, and the call may be made again) and
+  `DecisionError::ExecutorHeld`.
+  `APPROVER_NOT_CURRENT_REFUSAL` names the execution refusal a decision
+  records when its approver is no longer current.
+- `meerkat-core`: `approval::decision::DecisionExecutorClaim` and the
+  provided method `DecisionStore::claim_executor`. The default refuses (a
+  store that cannot keep the role exclusive has no executor), so a
+  `DecisionStore` wrapper forwards it; `InMemoryDecisionStore` keeps the
+  claim among the owners that share it.
+- `meerkat-store`: `SqliteDecisionStore` claims the executor role with an
+  OS lock on `approval_decisions.executor.lock` beside the database
+  (`SqliteDecisionStore::executor_lock_path`,
+  `DECISION_EXECUTOR_LOCK_EXTENSION`), exclusive across opens and
+  processes and released when its process ends. Creating the lock file is
+  the claim's only write.
+
 - GitHub Copilot configured once: `[realm.<realm>.copilot]` states a Copilot
   account's credential source once (`source`, an `env` or
   `external_resolver` source; optional `options`, the client identity
@@ -257,61 +600,63 @@ them.
   doctor's operator-instruction census readers over a connection the caller
   opened read-only, so another storage doctor counts by the same rule.
 
-- `meerkat-mob`: a declared roster entry says what its spec carries of the
-  identity's member build (`DeclaredEntry::build`, set with
-  `DeclaredEntry::with_build`, a `DeclaredBuild`): `Composed` (the
-  default, as before) or `FactsOnly`, the identity's lifecycle facts with
-  none of its build. No member is ever built from facts only: a verdict
-  that would seat the identity, rotate its member onto a fresh session,
-  migrate it to another role on its own session or start its first-boot
-  fresh life answers
-  `DeclaredEntryOutcome::BuildRequired` and takes no member step (the
-  first-boot request is kept, and so is an archived session record on a
-  session service that keeps durable member sessions), and the host
-  declares the identity again with its composed build. Every other verdict
-  answers as before. A host whose member builds are costly to compose
-  (a customizer per identity) composes only the identities it expects the
-  apply to seat, rotate or migrate, and an unchanged roster composes none.
+- `meerkat-runtime`: a host store's refusal until its realm is reopened is
+  typed through the runtime store: `RuntimeStoreError::ScopeRefused { scopes }`
+  and `RuntimeStoreError::RealmRefused { cause }` (the enum is
+  non-exhaustive), `RefusedScope` (a refused scope, `<family tag>:<key>`, and
+  its poison cause) and `RuntimeStoreError::is_refused_until_reopen`. The
+  realm names every poisoned scope with its cause: `PoisonedScope`,
+  `SpiRealm::poisoned_scopes` and `SpiRealm::poisoned_scopes_of`, and
+  `SpiRealm::check_cross_scope_read_of` refuses a read across scopes only
+  while a scope of a family it reads is poisoned (`SpiError::ScopesPoisoned`,
+  new). See Fixed.
 
-- `meerkat-mob`: the one encoding of a name into a member id,
-  `ids::member_id_for_name`, and its inverse `ids::name_for_member_id`
-  (with `ids::ENCODED_MEMBER_ID_MARKER`). A name that is a member
-  comms-name component and does not begin with the marker is its own
-  member id; any other name (`team:alice`, or `mk--ops`) is the marker and
-  the escaped name (`mk--team_calice`, `mk--mk--ops`). Meerkat Meta's
-  member ids are this encoding.
+- `meerkat-runtime`: `RuntimeStore::list_runtime_delivery_authorities_or_unavailable`,
+  the delivery authority listing answered per runtime
+  (`RuntimeDeliveryAuthorityListing { records, unavailable }`, with
+  `UnavailableRuntime`), and `RuntimeDeliveryInbox::runtime_delivery_backlog`,
+  the backlog answered per runtime (`RuntimeDeliveryBacklog { pending,
+  unavailable }`). The trait default answers every record of
+  `list_runtime_delivery_authorities` and no unavailable runtime, so the
+  in-memory and SQLite stores answer as before; the host store adapter
+  answers it per runtime. A store decorator forwards it to the store it
+  wraps; one that keeps the default answers through its own listing, which a
+  host store refuses while any runtime scope is poisoned.
 
-- `meerkat-mob`: `UnlistedEntryOutcome::NotAdopted { reason }`, with the new
-  `NotAdoptedReason` (`Retiring`): a complete roster's answer for a member
-  it does not list that carries both legacy marks and that MobMachine
-  neither adopted nor retired, because the member's retirement started
-  already. The member stays as it is, its own retirement ends it, and the
-  next complete apply decides it again if it is still there.
+- `meerkat-mob`: `MemberPreviewUnavailable::StoreRefused` (the enum is
+  non-exhaustive): a member status read whose session the store refuses
+  until its realm is reopened. Its serialized and wire value is the existing
+  `read_failed`, and nothing deserializes into it.
 
-- `meerkat-mob`: `MemberRetirementCause::HostAdopted`, the cause of the
-  retirement with which a host's adoption takes a declared identity entry
-  over (see Fixed): the end of that retirement ends the entry. The enum is
-  `#[non_exhaustive]`, so the variant is additive. It is a Rust-only fact of
-  the member lifecycle journal (`MemberLifecycleEvent::RetirementStarted`)
-  and reaches no wire type or SDK. A release that predates it reads its
-  stored token as no cause: 0.9.10 replays the retirement as one the seal
-  did not start and reads the identity as the declared entry again, so a
-  rollback to 0.9.10 has one step to take (see the upgrading guide).
+- `meerkat-core`:
+  `ToolDispatchContext::enter_reviewed_effect_held_after_owner_change` is now
+  public. A tool leaf's reviewed effect entry can wait out an owner change in
+  progress, within the dispatch attempt's owner-change bounds, instead of
+  refusing with `reprepare_required`. The review is spent once, after its
+  staging, and a refusal met before any effect stays certified as not
+  dispatched.
 
-- `meerkat-mob`: `MemberLifecycleRecord::timestamp`, the time the record's
-  journal event was appended (the `MobEvent` timestamp, stored with the
-  event): a later read of the journal, after a restart included, reads the
-  same time again, so a reader can key work it owes a retirement by when
-  Core journaled it. The struct is `#[non_exhaustive]`, so the field is
-  additive.
+- `meerkat-core`:
+  `ToolDispatchContext::check_tool_authorization_before_effect` checks a tool
+  call's authorization before the tool code it guards runs, without recording
+  an entry or spending the review. An operation refusal met while no effect of
+  the dispatch has entered is certified as not dispatched.
 
 ### Changed
 
-- `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
-  composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a
-  closed vocabulary (no `#[non_exhaustive]`): a host's projection of it
-  matches every verdict with no wildcard arm, so adding a verdict is a
-  breaking change, named under Breaking in the release that adds it.
+- Host store refusals are typed and scoped to the families a read needs
+  (see Breaking, Added and Fixed). A call refused by a poisoned scope or
+  realm answers `RuntimeStoreError::ScopeRefused` or `RealmRefused`
+  (`SpiError::into_read` and `into_write`; `SpiRealm::check_cross_scope_read`
+  answers `SpiError::ScopesPoisoned`). A session read refused so answers
+  `SessionError::Store` (`SESSION_STORE_ERROR`; `-32006` from
+  `meerkat_core::service::transport::jsonrpc_code`, was `-32000`; a wire
+  error's `INTERNAL_ERROR`, was `AGENT_ERROR`; HTTP 500 unchanged). The
+  delivery inbox's total and runtime list refuse typed while a runtime scope
+  is poisoned, the delivery owner lists a poisoned runtime in
+  `blocked_runtimes`, and `MobHandle` waits end on the refusal. Meerkat
+  Meta's `HostStoreReadiness::is_ready()` no longer counts a scope-only
+  poison (see Meta's changelog).
 
 - A session on a zero-config Copilot route, or on a route of a
   `[realm.<realm>.copilot]` account, carries the route's account as its
@@ -327,78 +672,65 @@ them.
   envelope of the head they committed, beside the head rows, the head-less
   documents and the WholeBlob documents.
 
+- `meerkat-runtime`, `meerkat-machine-schema`: `DurableDecisionMachine`
+  issues an execution permit only while the party who decided is still
+  current. An authorization the host's answer refuses issues no permit:
+  with no permit outstanding the decision ends `execution_refused`, records
+  `approver_not_current` and owes its notice; with one outstanding nothing
+  changes and `SettlementOwed` is answered, so the owner settles it first
+  and a commit made under it still records executed. Only a refusal ends a
+  decision: an unsettled answer, evidence an owner change made stale before
+  the authorization commits (related or not) and an answer of a kind the
+  service does not know apply nothing and answer `DecisionError::Unsettled`,
+  so the host is asked again. The hand-written audit checks
+  `AuditPermitOnlyForCurrentApprover` with two new witnesses and three new
+  mutants.
+
 ### Fixed
 
-- `meerkat-mob`: a host's adoption of an identity a declared roster lists
-  (`MobHandle::adopt_member_identity_declaration` over a declared identity
-  entry) takes the entry over: the identity reconciler retires the member
-  with the cause `MemberRetirementCause::HostAdopted` and materializes it
-  again under the host's intent, on its own session, as no entry, and the
-  end of that retirement ends the entry. The entry outlived the retirement,
-  unseated and owed its seat, and the reconciler's spawn of the identity was
-  refused `MobError::IdentityMember`, so the host's identity was not served
-  again. From the host's intent row on, a declared apply answers the
-  identity host-adopted (`DeclaredEntryRefusal::HostAdopted`) and a complete
-  roster's seal leaves its entry as it is, where the seal unlisted the entry
-  and retired the host's member.
-
-- `meerkat-mob`: `MobHandle::rotate_member` of an identity whose entry no
-  member holds (the fresh life of an unseated identity: a reset or a delete)
-  is checked as a seat of its name is. With the entry's custody the rotation
-  lets the entry's archived session record go (`ForgetArchivedSession`,
-  reason `FreshLifeRequested`, as the declared apply's first-boot `Fresh`
-  path does; the archived session itself stays readable, its history and
-  transcript included) and seats the member on a fresh session, where it
-  failed at its seat while the entry held that record. Without the entry's
-  custody it is refused `MobError::IdentityMember` before anything is
-  created.
-
-- `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
-  answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on
-  the member's own session with the declaration's build inputs, as a
-  resume of that session built from the declared spec does, after a
-  restart too. Its successor kept the build inputs the session's earlier
-  builds recorded, so the member ran its new role with, for one, its
-  previous role's context.
-
-- `meerkat-mob`: the legacy adoption reads a member's `agent_identity`
-  label in the one encoding of a name into a member id
-  (`ids::member_id_for_name`): a label naming the identity a member id
-  encodes (`team:alice` on the member `mk--team_calice`, `mk--ops` on the
-  member `mk--mk--ops`) marks the member as a legacy member, as a label
-  spelling the member id itself always did. The label is read trimmed, and
-  an empty label or one in the generated runtime-alias namespace (`rt:`)
-  names no member. A declared apply that listed such a member without the
-  durable-identity marker, a member labelled with an identity no member id
-  can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
-  member of that name could not have it adopted.
-
-- `meerkat-rpc`: a session's runtime loop no longer waits forever on the
-  turn-finalization boundary that its own turn holds. A turn that
-  materializes a staged session (the first turn of an immediate
-  `session/create`, or the first `turn/start` of a deferred session) or
-  rebuilds a cold one checks that the session's executor still serves. When
-  an unregister of the session began during that turn, the check took a
-  path that asks for the boundary again, so the loop waited on itself, the
-  unregister waited for the loop, and every caller joined to the unregister
-  waited with them. An immediate `session/create` whose first agent build
-  failed (for example a scoped tool grant gate refused with
-  `tool_grant_gate_refused`) could stay unanswered, because its completion
-  cleanup unregisters the session while the loop retries the failed turn.
-  The check now answers the loop's own turn with the typed
-  teardown-in-progress refusal (`UnregisterInProgress`); the loop hands its
-  executor off, and the unregister and its callers complete. A stuck session
-  logged "unregister is still waiting for the runtime loop to hand off the
-  exact executor" every 5 s and "staged run has not begun executing" every
-  two minutes. Affects 0.8.22 through 0.9.9: `rkat-rpc`, the Python and
+- `meerkat-rpc`: a `session/create`, or the first `turn/start` of a deferred
+  session, no longer hangs when the session starts to unregister during its
+  first turn. The usual case was an immediate `session/create` whose first
+  agent build failed (for example a scoped tool grant gate refused with
+  `tool_grant_gate_refused`): its cleanup unregisters the session while the
+  session's runtime loop retries the failed turn, and the loop then waited
+  for the turn-finalization boundary its own turn held, so the unregister,
+  every caller joined to it and the request waited forever. A cold session's
+  rebuild could hang the same way. The loop now answers its own turn with the
+  typed teardown-in-progress refusal (`UnregisterInProgress`, the retryable
+  `runtime_teardown_in_progress` error data) and hands its executor off, so
+  the unregister and the request complete. A stuck session logged
+  "unregister is still waiting for the runtime loop to hand off the exact
+  executor" every 5 s and "staged run has not begun executing" every two
+  minutes. Affects 0.8.22 through 0.9.9: `rkat-rpc`, the Python and
   TypeScript SDKs that drive it, `rkat mob deploy --surface rpc`, and other
   hosts of `meerkat_rpc::SessionRuntime`.
 
-- `meerkat-store`: `FileApprovalStore` now creates its files private (0600)
-  on Unix regardless of the process umask, so consumers that verify private
-  decision files no longer refuse stores created under the common 022/002
-  umask. A store file an older version left readable by others becomes
-  private on its next commit.
+- `meerkat-rpc`: a `session/create` with `keep_alive: true` answers once its
+  first turn has built the session, and lets that turn run on; the answer
+  still carries none of the turn's output. A first build that fails is
+  answered as an immediate create answers it, so a scoped tool grant gate no
+  grant could honour fails the create with invalid params
+  (`data.kind = "tool_grant_gate_refused"`). This resolves the 0.9.9 Known
+  limitation "a `session/create` with `keep_alive: true` answers before its
+  first turn builds the session, so it does not report a scoped tool grant
+  gate no grant could honour". Before, the create answered as soon as the
+  session's comms runtime was up, or after 250 ms without it (at once in a
+  build without the `comms` feature), so a failed first build was answered
+  as a success and only logged. The create now waits for the build however
+  long it takes. Affects a refused grant gate from 0.9.9, and any other
+  failed first build of a `keep_alive` (before 0.5, `host_mode`) create from
+  0.3.3, through 0.9.9: `rkat-rpc`, and the Python and TypeScript SDKs that
+  drive it.
+
+- `meerkat-store`: `FileApprovalStore` now creates every file it writes (the
+  store file, its lock file, and its temporary and marker files) owner-only
+  (`0600`) on Unix, whatever the process umask, so a host that requires
+  private approval files no longer refuses a store created under the common
+  022 or 002 umask. A store file an older version left readable by others
+  becomes private on its next commit; an existing lock file is tightened in
+  place, and a tightening the filesystem refuses is logged as a warning.
+  Other platforms are unchanged. See Upgrade notes.
 
 - `meerkat-core`: a governed tool call refused at its own effect entry
   (`ToolDispatchContext::enter_reviewed_effect`, or a ticket or governed
@@ -412,46 +744,41 @@ them.
   read `"unknown"`. The entry now certifies its refusal while no effect of
   the dispatch entered, that is while no earlier entry of the call passed
   and no governed step of it ran its operation; a later entry's refusal,
-  and one met outside a fenced dispatch, still make no claim.
-  Behaviour change: `OperationRefused::dispatch()` of such a refusal is
-  `NotDispatched`, so a comparison with `OperationRefused::new(kind)` no
-  longer matches it (compare `kind()` and `dispatch()`). A tool that runs
-  an effect of its own before its effect entry forwards the entry's
-  refusal as `OperationRefused::new(refusal.kind())`. Affects 0.9.4
+  and one met outside a fenced dispatch, still make no claim. Affects 0.9.4
   through 0.9.9.
 
-- `meerkat-mob`: a Dormant member reads with its peer id and transport key in
-  every roster and member-list read (`MobHandle::get_member`, `roster`,
-  `list_all_members`, `list_members` and the member lists built on it, the
-  `mob_list_members` tool's included), as a live member does. A member seated
-  Dormant while its mob ran (a fresh `seat_dormant_members` seat, or the next
-  incarnation of a rotation or a same-session respawn) read with neither
-  until its first wake, although MobMachine recorded its endpoint at the
-  seat, while a member restored Dormant at a restart, or released after it
-  ran, read with them. A member seated and not materialized now reads with
-  the peer id and transport key of the endpoint MobMachine records for it,
-  the endpoint `member_peer_endpoint` answers and its wake presents, and the
-  read wakes nothing. A member on network comms has no recorded endpoint
-  until its first wake registers one, and reads with none until then, as
-  before.
+- `meerkat-mob`: a member that was seated dormant while its mob ran now shows
+  its peer id and transport key in every roster and member-list read
+  (`MobHandle::get_member`, `roster`, `list_all_members`, `list_members` and
+  the member lists built on it, the `mob_list_members` tool's included), as a
+  member restored dormant at a restart already did. A member seated Dormant
+  while its mob ran (a fresh `seat_dormant_members` seat, or the next
+  incarnation of a rotation or a same-session respawn) read with neither until
+  its first wake, although MobMachine recorded its endpoint at the seat, while
+  a member restored Dormant at a restart, or released after it ran, read with
+  them. A member seated and not materialized now reads with the peer id and
+  transport key of the endpoint MobMachine records for it, the endpoint
+  `member_peer_endpoint` answers and its wake presents, and the read wakes
+  nothing. A member on network comms has no recorded endpoint until its first
+  wake registers one, and reads with none until then, as before.
 
-- `meerkat-core`: a governed tool dispatch no longer refuses a call because
-  another actor's owner change completed while the dispatch read the work's
-  authorization publication. Its prepared entry and its entry stagings (the
-  root staging, the call-level execution policy gate's and a dispatch
+- `meerkat-core`: a governed tool call no longer fails with
+  `reprepare_required` when another actor's grant or policy change finished
+  while the call was being prepared. Its prepared entry and its entry stagings
+  (the root staging, the call-level execution policy gate's and a dispatch
   issuance's) waited only for a change still in progress, so a read that
   waited for an owner's lock while a change held it (for example during a
   concurrent call's grant issuance on the same publication) ended stale with
   none in progress, and the call answered `operation_refused` with
   `{"kind": "reprepare_required", "tool_invoked": false}`. They now take the
-  wait after a stale read (`OwnerChangeChurn::wait_after_stale_read`): with
-  no change in progress they pause 1 ms and prepare again from the owners,
-  as one of the dispatch attempt's free rebuilds, within the existing bounds
-  (3 free rebuilds and 2 s per waiting state, inside the tool's timeout).
-  The rebuilt decision is current, or its refusal is the owners' current
-  answer, typed as before: a call whose authority the change revoked is
-  refused with that answer (`denied`). Shell synchronization only: no
-  machine input, wire type or error variant changes.
+  wait after a stale read (`OwnerChangeChurn::wait_after_stale_read`): with no
+  change in progress they pause 1 ms and prepare again from the owners, as one
+  of the dispatch attempt's free rebuilds, within the existing bounds (3 free
+  rebuilds and 2 s per waiting state, inside the tool's timeout). The rebuilt
+  decision is current, or its refusal is the owners' current answer, typed as
+  before: a call whose authority the change revoked is refused with that
+  answer (`denied`). Shell synchronization only: no machine input, wire type
+  or error variant changes.
 
 - `meerkat-core`, `meerkat-tools`: the rest of Core's governed operations
   no longer settle a stale read as their outcome when the owner change that
@@ -526,19 +853,230 @@ them.
   instead of every second. Affects hosts up to 0.9.9 that compose the live
   delegation coordinator with lazily restored members.
 
+- `meerkat-runtime`: an exact-input cancellation
+  (`MeerkatMachine::cancel_input_if_present`) that raced its input's own
+  finalization no longer reports the input absent although the
+  cancellation took effect. The cancellation reads its input, interrupts
+  the input's run and reads again. On a persistent runtime the run can end
+  in between, abandoning the input as cancelled, committing that terminal
+  and archiving the input out of the live ledger; the second read then
+  found no input and the call answered `false`, the answer for an input it
+  never met. A read that finds no ledger row for the input now answers
+  `true` when an earlier read of the same call observed the input through
+  the same runtime attachment. An input the call never observed, a
+  missing, destroyed or replaced attachment, and a row the ledger keeps
+  without its lifecycle state still answer `false`.
+
+- `meerkat-runtime`: host store commits that fail together no longer retry
+  together. Core sends a batch whose commit answers `Unavailable`, or
+  `Indeterminate` without having landed, again after a pause that starts at
+  100 ms and doubles up to 3.2 s, within `SpiRealmConfig::commit_retry_budget`
+  (30 s by default). Batches that failed at the same moment, such as the
+  commits of many runtimes during one store outage, paused exactly alike, so
+  the store met every retry of them at the same instants. Each pause below
+  3.2 s is now lengthened by up to half, by an amount derived from the
+  batch's commit id and the attempt number: such batches spread out, and one
+  batch pauses the same on every run. No pause is shorter than before, so
+  this never adds an attempt: with every attempt failing at once, a batch
+  makes at most 14 within the default budget, as before, and about 1.6% of
+  batches now make 13. The budget, the errors that are retried, and the
+  poisoning of the scopes of a batch that does not settle are unchanged.
+  Affects 0.9.5 through 0.9.9.
+
+- `meerkat-runtime`, `meerkat`, `meerkat-mob`: one poisoned host store scope
+  no longer refuses store-wide reads realm-wide. A batch that fails, or whose
+  outcome stays unknown past the retry budget, poisons the scopes it touched
+  until the realm is reopened. Until now any poisoned scope, of any family (a
+  session's runtime, a mob's event log, a Meta document), also made every
+  read across scopes refuse until a restart: the session listing
+  (`sessions/list`), the delivery backlog reconcile (deliveries for healthy
+  runtimes stayed pending), a lazy mob boot's obligation scan (every mob
+  start, lift or seat woke every member), governed controller
+  administration, and mob host convergence. Each such read now depends only
+  on the scope families it reads. The recovery-work scan answers, listing a
+  poisoned runtime as holding work; the delivery owner drains every healthy
+  runtime and reports a poisoned one as a blocked runtime with the store's
+  refusal; a lazy boot plans only the member whose runtime scope is poisoned
+  as holding work and leaves the others dormant. The session listing, the
+  controller custody and the delivery backlog total still refuse, typed,
+  while a session's runtime scope is poisoned, and a mob host listing while
+  a scope of its own family is. Affects 0.9.5 through 0.9.9.
+
+- `meerkat-mob`: a member status read whose session the store refuses until
+  its realm is reopened records the refusal, with the member's binding it
+  was read for, and logs it once, at WARN. Later status reads of the member
+  under that binding answer from the record without reading the session; a
+  member rebound, reloaded or woken since is read again. Every status read
+  read the session again and logged again (at DEBUG). A wait on such a
+  member ends with the refusal (see Breaking). Affects 0.9.5 through 0.9.9.
+
+- `meerkat-mob-mcp`: a live delegation's outcome append to a session whose
+  store refuses it until the realm is reopened settles once instead of
+  retrying until shutdown.
+
+- `meerkat-runtime`: one host store commit that settles slowly no longer
+  stalls every session's runtime store calls. A runtime store call holds the
+  store until its batch settles, and a batch that meets `Unavailable` or
+  `Indeterminate` is retried for up to `SpiRealmConfig::commit_retry_budget`
+  (30 s by default). A read across sessions (a listing, or the delivery total
+  a host's delivery driver reads every second) waits until no batch is in
+  flight, and it queued in arrival order with every other call: once it
+  waited, every later call of every session waited behind it until the slow
+  batch settled. Such a read now waits outside that queue while a commit
+  settles slowly (from its first unknown or unavailable answer, or once its
+  first call outlasts the host's declared `FenceTiming::max_commit_latency`;
+  any commit on the realm counts, the mob store's included) and queues as
+  before otherwise, so the other sessions keep working and the read still
+  never sees a batch whose outcome is unknown. Affects 0.9.5 through 0.9.9.
+
+### Security
+
+- `meerkat-mcp`: a governed MCP server that is re-added after a sign-in (the
+  retry of a connection that needed authorization, or the restage of a server
+  released at sign-out) now connects only under the attachment control it was
+  attached under, and the new connection asks that control again. A governed
+  server without such a control is refused (`AttachmentRefused`) and is never
+  re-added without one.
+
+### Upgrade notes
+
+- Approval store files are owner-only on Unix (see Fixed). A process that
+  runs as another user or group and read `approvals.json` (a backup or
+  monitoring agent, for example) loses access after the store's next
+  commit: run it as the store's user, or read approvals through the API.
+
+- A rollback to 0.9.9 does not read a `[realm.<realm>.copilot]` section, so
+  the routes it declares are missing there: write the explicit Copilot
+  tables before such a rollback. A session that runs a model only its
+  Copilot account lists does not build on 0.9.9 until that model has a
+  `[models.<id>]` entry.
+
+- Keep treating native admission's `policy_changed` as retryable: under
+  back-to-back owner changes, wait outside your own locks with a bounded
+  `meerkat_core::authorization::OwnerChangeChurn::wait_after_stale_read`,
+  then resubmit once. A host or test that counts refusal observer
+  dispositions, or matches a review's authority-change retirement, expects
+  the new ones (see Breaking).
+
+- Custom tools: a tool that runs an effect of its own before its effect entry
+  forwards the entry's refusal as `OperationRefused::new(refusal.kind())`, so
+  the model does not read `tool_invoked: false` for a call that had an effect
+  (see Breaking).
+
+- Per-tool timeout strings (`[tools.tool_timeouts]`, for example
+  `shell = "2m"`) load only on 0.9.10 and later. Before a rollback, turn any
+  string written by hand into the `{ secs, nanos }` table; Meerkat itself
+  always writes the table.
+
+- A live channel open on a host whose start-up recovery of voice
+  delegations cannot finish (for example, a mob restore that keeps failing)
+  is refused after 30 seconds with an error that names it, where it waited
+  without limit. Treat it as retryable once the mob restores.
+
+- A poisoned host store scope (see Breaking): a session read the store
+  refuses until its realm is reopened answers `SessionError::Store`, whose
+  `SessionError::code` is `SESSION_STORE_ERROR` (was `AGENT_ERROR`);
+  `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`), and a wire error built from it carries `INTERNAL_ERROR`
+  (was `AGENT_ERROR`). The HTTP status stays 500, and a session method's
+  JSON-RPC error over `rkat-rpc` is `INTERNAL_ERROR` either way. `MobHandle`
+  waits on a member whose session the store refuses end with
+  `MobError::SessionError`, carrying the store's typed refusal, and
+  `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` refuse typed while a runtime scope is
+  poisoned. Meerkat Meta's `HostStoreReadiness::is_ready()` no longer counts
+  a scope-only poison: a probe that must keep the earlier rule checks
+  `readiness.is_ready() && !readiness.scope_poisoned`, and
+  `HostStoreReadiness::poisoned_scopes` is new (see Meta's changelog).
+
+- `meerkat-mcp` hosts with governed MCP servers: a native live-attachment
+  control admits one live attachment. After a sign-in that follows a 401 from
+  the server, or after the restage of a released server that had connected,
+  the re-add is refused and reported as a failed add. Attach the server again
+  with a fresh control. Configured servers come back by themselves.
+  `McpRouter::retry_authorized` can now return `McpError::AttachmentRefused`
+  (`McpAttachmentRefusal::Mismatch`) for a governed server without a matching
+  control; nothing is staged then.
+
 ### Known limitations
 
-- Meerkat Connect: its provider setup and first-target setup read a
-  realm's explicit tables only, so they do not yet list the routes a
-  `[realm.<realm>.copilot]` section declares (see Added), and a realm whose
-  Copilot account is configured only by the section can look unconfigured
-  there. Use the explicit Copilot tables with Connect until a later
-  release. With the explicit tables, Connect can offer each of the three
-  Copilot routes as a target for a model of one provider family, and the
-  session runs on the account's route of the model's family whichever is
-  chosen, on the same credential (see Breaking): choosing `copilot_openai`
-  for an Anthropic model runs on `copilot_anthropic`, so the chosen
-  target's name is not the route the session runs on.
+- `meerkat-rpc`, `meerkat-runtime`: scoped tool grants are for sessions
+  only. `tool_grants/grant`, `tool_grants/list` and `tool_grants/audit`
+  refuse an `identity` subject as capability unavailable ("this server
+  grants tools to sessions only: identity subjects are unsupported"), so a
+  grant cannot name a mob member's durable identity. Grant to the member's
+  current session instead. The grant names that one session, so a member
+  that moves to a new session (after a reset, for example) needs a new
+  grant.
+
+- `meerkat-runtime`, `meerkat-rpc`: a scoped tool grant is issued directly,
+  with `tool_grants/grant`, for a time window only. No approval flow carries
+  a grant (the `requested` and `declined` grant statuses are not produced in
+  this release), and no grant is scoped to a turn or a run. A host that
+  wants a human to approve a grant decides first and then issues it. For a
+  grant that should end with a run, give it a short `duration_ms` and revoke
+  it with `tool_grants/revoke` when the run ends.
+
+- `meerkat-runtime`, `meerkat-rpc`: a grant gate (`grant_gated_tools`) names
+  built-in tool families and individual tool names only. There is no gate
+  for a whole MCP server: each of a server's tools is gated by name. A gated
+  name that no tool source of the session provides when the session is
+  built fails the build (`tool_grant_gate_refused`), so a tool of a server
+  added after the build cannot be gated in that session.
+
+- `meerkat-mob`: store-owned identity changes
+  (`MobHandle::create_store_owned_identities`,
+  `update_store_owned_identity`, `archive_identity`, `unarchive_identity`
+  and `remove_identity`) and the declared-roster apply
+  (`MobHandle::apply_declared_roster`) are Rust APIs only. No JSON-RPC, REST
+  or MCP method and no Core SDK method carries them, and no agent tool
+  creates a durable identity: a host calls them on its own `MobHandle`.
+
+- `meerkat-mob`: legacy adoption compares a member's `agent_identity` label
+  with the member id, but the label holds the identity's name. A legacy
+  member that carries only that label, and no durable-identity continuity
+  marker, is therefore not adopted when its member id is an escaped form of
+  the name (a name that contains `:`, for example):
+  `MobHandle::adopt_legacy_identity_entry` answers
+  `LegacyIdentityEntryAdoption::NameHeldByWorker`, and the declared-roster
+  apply (`MobHandle::apply_declared_roster`) refuses the identity with
+  `DeclaredEntryRefusal::NameHeldByWorker`. A legacy member that carries the
+  durable-identity continuity marker is adopted through it as before. Meta
+  calls neither method, so Meta hosts that do not call them directly are not
+  affected. A later release fixes the comparison.
+
+- `meerkat-mob`: a role change or a rotation that finishes while its mob is
+  stopped seats the member's new incarnation without the edges the mob
+  definition declares for it (`auto_wire_orchestrator`, `role_wiring`), and
+  the mob logs "the declared edges of newly seated members are not wired:
+  the mob is not running". Starting the mob does not add those edges. Wire
+  the member to its declared peers with `mob/wire` (`MobHandle::wire`) once
+  the mob is running, or rotate the member again while the mob is running,
+  which wires its new incarnation to them.
+
+- `meerkat-core`, `meerkat-session`, `meerkat-mob`: operator instructions
+  are a Rust host API only (`SessionServiceInstructionExt`,
+  `MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+  `operator_instruction_status`). No JSON-RPC, REST or MCP method and no SDK
+  method sets, revokes or reads them; history reads only carry each entry's
+  identity (`WireInstructionEntryIdentity`). A placed member is reported
+  blocked (`member_host_unsupported`), and operator instructions do not
+  reach a live channel. Instruction activations
+  (`session/activate_instruction`) are a separate mechanism and do not set
+  operator instructions.
+
+- `meerkat-runtime`: on a host store realm, a scope that a failed commit
+  poisoned (a batch that did not settle within
+  `SpiRealmConfig::commit_retry_budget`, or a lost fence) refuses until the
+  realm is reopened. There is no in-place recovery of a poisoned scope or
+  member yet: reopen the realm (for a Meta gateway, restart it).
+
+- `meerkat-runtime`: when a model switch that lasts until changed
+  (`SwitchTurnDuration::UntilChanged`) fails, an input admitted to the
+  session during the switch can be accepted but never run, and a stop
+  requested in that window can be lost from the session's state. On a
+  persistent session, reloading the session or restarting its host restores
+  the input from its stored record so it runs; retrying the switch does not.
 
 ## [0.9.9] - 2026-11-03
 
@@ -4332,9 +4870,10 @@ them.
   neither `runtime.sqlite` nor the gateway's own mob journal,
   `event_log.sqlite3`): Meta's storage doctor (`meta/storage/doctor`) takes
   that census from Meta 0.9.10, and the upgrade guide gives read-only
-  queries for Meta 0.9.9. A member session that recorded its snapshot is
-  written at session envelope 5, which the older binary refuses session by
-  session (the `operator-instruction-envelope` finding lists them).
+  queries for Meta 0.9.9 (corrected in 0.9.10). A member session that
+  recorded its snapshot is written at session envelope 5, which the older
+  binary refuses session by session (the `operator-instruction-envelope`
+  finding lists them).
 
 - A session's grant gate is recorded in its tooling metadata, which a binary
   older than scoped tool grants does not read: such a binary resumes a gated
@@ -42063,7 +42602,8 @@ tag, so its comparison link uses v0.3.0 as the exact ancestry base.
 
 Initial development release.
 
-[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.9...HEAD
+[Unreleased]: https://github.com/lukacf/meerkat/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/lukacf/meerkat/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/lukacf/meerkat/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/lukacf/meerkat/compare/v0.9.7...v0.9.8
 [0.9.7]: https://github.com/lukacf/meerkat/compare/v0.9.6...v0.9.7

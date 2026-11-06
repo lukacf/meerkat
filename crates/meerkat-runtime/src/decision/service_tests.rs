@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use meerkat_core::approval::consent::{
-    AuthenticatedApprover, ConsentEligibility, ConsentIneligible,
+    AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DecisionContractError,
-    DecisionEvidence, DecisionHoldRequest, DecisionId, DecisionIngress, DecisionKind,
-    DecisionListFilter, DecisionNotice, DecisionOperationId, DecisionPage, DecisionPhase,
-    DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
+    DecisionEvidence, DecisionExecutorClaim, DecisionHoldRequest, DecisionId, DecisionIngress,
+    DecisionKind, DecisionListFilter, DecisionNotice, DecisionOperationId, DecisionPage,
+    DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
     DecisionRequestBody, DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore,
     DecisionSubjectKey, DecisionTier, InMemoryDecisionStore, PresentationAudience,
     PresentationRecord, Sha256Digest, StoredDecision, decision_is_due, decision_owes_work,
@@ -29,9 +29,11 @@ use super::dsl::{
 };
 use super::service::{issued_permit, machine_state};
 use super::{
-    DecisionClock, DecisionClockError, DecisionError, DecisionRefusal, DecisionWithdrawer,
-    DecisionWriteMode, DurableDecisionService,
+    APPROVER_NOT_CURRENT_REFUSAL, DecisionClock, DecisionClockError, DecisionError,
+    DecisionRefusal, DecisionWithdrawer, DecisionWriteMode, DurableDecisionService,
 };
+
+mod executor_rows;
 
 const HELD_AT: u64 = 1_000;
 const DEADLINE: u64 = 61_000;
@@ -138,6 +140,11 @@ impl DecisionStore for CountingStore {
     fn is_persistent(&self) -> bool {
         false
     }
+
+    fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        self.record("claim_executor");
+        self.inner.claim_executor()
+    }
 }
 
 struct ManualClock(AtomicU64);
@@ -179,6 +186,11 @@ impl ConsentEligibility for Eligibility {
             Err(ConsentIneligible)
         }
     }
+}
+
+/// The host's answer for an approver who is still current.
+fn current() -> ConsentEligibilityAnswer {
+    ConsentEligibilityAnswer::Eligible(Arc::new(Eligibility::current()))
 }
 
 fn principal(kind: PrincipalKind, id: &str) -> PrincipalRef {
@@ -807,7 +819,7 @@ fn an_approved_decision_executes_once_across_a_restart() {
     let first = service_over(&store, &clock);
     let decision_id = approved(&first, &rendering);
     let permit = first
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     // The owner commits under the permit and stops before it records the
     // commit.
@@ -836,7 +848,7 @@ fn an_approved_decision_executes_once_across_a_restart() {
     assert_eq!(
         refusal(
             &second
-                .authorize_execution(&decision_id, &operation_id(), &request_digest())
+                .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
                 .expect_err("an executed decision executes once")
         ),
         DecisionRefusal::NotApproved
@@ -857,7 +869,7 @@ fn a_retryable_refusal_keeps_the_approval() {
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     let released = service
         .release_execution(permit)
@@ -874,7 +886,7 @@ fn a_retryable_refusal_keeps_the_approval() {
     );
 
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("a later attempt is authorized again");
     let executed = service
         .record_executed(&decision_id, permit.operation_id(), permit.request_digest())
@@ -888,7 +900,7 @@ fn a_permanent_refusal_closes_and_owes_the_notice() {
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     let closed = service
         .close_refused(permit, &reference("quota_exceeded"))
@@ -999,10 +1011,10 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     // Permits the admitted owner issued: a candidate settles none of them.
     let approved_id = approved_subject(&admitted, &rendering, "subject:approved");
     let released_permit = admitted
-        .authorize_execution(&approved_id, &operation_id(), &request_digest())
+        .authorize_execution(&approved_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     let closed_permit = admitted
-        .authorize_execution(&approved_id, &operation_id(), &request_digest())
+        .authorize_execution(&approved_id, &operation_id(), &request_digest(), &current())
         .expect("the same permit again");
 
     store.clear();
@@ -1049,7 +1061,7 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     );
     assert_eq!(
         candidate
-            .authorize_execution(&decision_id, &operation_id(), &request_digest())
+            .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
             .expect_err("authorize"),
         DecisionError::CandidateLaunch
     );
@@ -1092,6 +1104,12 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
                 },
             )
             .expect_err("settle"),
+        DecisionError::CandidateLaunch
+    );
+    assert_eq!(
+        candidate
+            .claim_executor()
+            .expect_err("claim the executor role"),
         DecisionError::CandidateLaunch
     );
     assert!(store.calls().is_empty(), "a refused write reads nothing");
@@ -1274,7 +1292,7 @@ fn a_torn_row_is_unreadable_and_never_executes() {
         .replace_if_revision(torn.revision, &torn)
         .expect("tamper with the row");
     let error = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect_err("a torn row never executes");
     assert!(
         matches!(&error, DecisionError::Unreadable { decision_id: id, .. } if id == decision_id.as_str()),
@@ -1317,14 +1335,19 @@ fn the_permit_carries_decided_consent_and_the_held_binding() {
     assert_eq!(
         refusal(
             &service
-                .authorize_execution(&decision_id, &operation_id(), &Sha256Digest::of(b"other"))
+                .authorize_execution(
+                    &decision_id,
+                    &operation_id(),
+                    &Sha256Digest::of(b"other"),
+                    &current()
+                )
                 .expect_err("another request")
         ),
         DecisionRefusal::BindingMismatch
     );
 
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     assert_eq!(permit.decision_id(), &decision_id);
     assert!(permit.binds(&operation_id(), &request_digest()));
@@ -1358,7 +1381,7 @@ fn the_permit_carries_decided_consent_and_the_held_binding() {
     }
 
     let again = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("authorizing again before the deadline");
     assert_eq!(again, permit);
     assert_eq!(
@@ -1415,7 +1438,7 @@ fn a_permit_outstanding_across_the_deadline_settles_executed() {
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
 
     clock.set(DEADLINE + 5);
@@ -1443,7 +1466,7 @@ fn a_permit_outstanding_across_the_deadline_settles_executed() {
     assert_eq!(
         refusal(
             &service
-                .authorize_execution(&decision_id, &operation_id(), &request_digest())
+                .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
                 .expect_err("nothing new runs after the deadline")
         ),
         DecisionRefusal::SettlementOwed
@@ -1463,7 +1486,7 @@ fn a_release_after_the_deadline_records_the_expiry() {
     let rendering = rendering();
     let decision_id = approved(&service, &rendering);
     let permit = service
-        .authorize_execution(&decision_id, &operation_id(), &request_digest())
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
         .expect("permit");
     clock.set(DEADLINE);
     let released = service
@@ -1488,7 +1511,7 @@ fn recovery_settles_an_outstanding_permit_without_its_object() {
     // stay outstanding.
     for decision_id in [&released, &refused] {
         let _permit = first
-            .authorize_execution(decision_id, &operation_id(), &request_digest())
+            .authorize_execution(decision_id, &operation_id(), &request_digest(), &current())
             .expect("permit");
     }
     drop(first);
@@ -1498,7 +1521,7 @@ fn recovery_settles_an_outstanding_permit_without_its_object() {
     assert_eq!(
         refusal(
             &second
-                .authorize_execution(&released, &operation_id(), &request_digest())
+                .authorize_execution(&released, &operation_id(), &request_digest(), &current())
                 .expect_err("nothing new runs after the deadline")
         ),
         DecisionRefusal::SettlementOwed
@@ -1530,7 +1553,7 @@ fn an_authorization_at_the_deadline_is_refused_and_records_the_expiry() {
     assert_eq!(
         refusal(
             &service
-                .authorize_execution(&decision_id, &operation_id(), &request_digest())
+                .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
                 .expect_err("an authorization at the deadline")
         ),
         DecisionRefusal::Expired
@@ -1538,6 +1561,255 @@ fn an_authorization_at_the_deadline_is_refused_and_records_the_expiry() {
     let expired = service.get(&decision_id).expect("read");
     assert_eq!(expired.state.phase, DecisionPhase::Expired);
     assert!(!expired.state.permit_issued);
+}
+
+/// An approver who is no longer current gets no permit: the decision ends
+/// refused, records `approver_not_current` and owes its notice. Another
+/// binding is refused as before and ends nothing.
+#[test]
+fn an_approver_who_is_no_longer_current_gets_no_permit() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let refused = approved_subject(&service, &rendering, "subject:refused");
+
+    assert_eq!(
+        refusal(
+            &service
+                .authorize_execution(
+                    &refused,
+                    &DecisionOperationId::new("operation-8").expect("operation id"),
+                    &request_digest(),
+                    &ConsentEligibilityAnswer::Refused,
+                )
+                .expect_err("another binding")
+        ),
+        DecisionRefusal::BindingMismatch
+    );
+    assert_eq!(
+        service.get(&refused).expect("read").state.phase,
+        DecisionPhase::Approved,
+        "another binding ends nothing"
+    );
+
+    let error = service
+        .authorize_execution(
+            &refused,
+            &operation_id(),
+            &request_digest(),
+            &ConsentEligibilityAnswer::Refused,
+        )
+        .expect_err("no permit for an approver who is no longer current");
+    assert_eq!(refusal(&error), DecisionRefusal::NotEligible);
+    let ended = service.get(&refused).expect("read");
+    assert_eq!(ended.state.phase, DecisionPhase::ExecutionRefused);
+    assert!(!ended.state.permit_issued);
+    assert_eq!(ended.state.ended_at_ms, Some(HELD_AT));
+    assert_eq!(ended.state.notice, DecisionNotice::Owed);
+    assert_eq!(
+        ended.execution_refusal,
+        Some(reference(APPROVER_NOT_CURRENT_REFUSAL))
+    );
+    assert_eq!(
+        refusal(
+            &service
+                .authorize_execution(&refused, &operation_id(), &request_digest(), &current())
+                .expect_err("an ended decision is never authorized")
+        ),
+        DecisionRefusal::NotApproved
+    );
+}
+
+/// Evidence that is no longer current when the authorization commits (an
+/// owner change published since the answer, related or not) says nothing
+/// about the party that decided: it applies nothing and the call may be
+/// made again, as for an unsettled answer, with no permit outstanding, with
+/// one, and at the deadline, whose expiry a read then records as for any
+/// decision. A current answer authorizes.
+#[test]
+fn evidence_no_longer_current_at_the_commit_applies_nothing() {
+    let (store, clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved_subject(&service, &rendering, "subject:stale");
+    let at_deadline = approved_subject(&service, &rendering, "subject:deadline");
+    let stale = || {
+        let evidence = Arc::new(Eligibility::current());
+        let answer = ConsentEligibilityAnswer::Eligible(evidence.clone());
+        evidence.revoke();
+        answer
+    };
+
+    let unsettled = |service: &DurableDecisionService, decision_id: &DecisionId| {
+        assert_eq!(
+            service
+                .authorize_execution(decision_id, &operation_id(), &request_digest(), &stale())
+                .expect_err("stale evidence applies nothing"),
+            DecisionError::Unsettled(decision_id.clone())
+        );
+    };
+    let before = service.get(&decision_id).expect("read");
+    unsettled(&service, &decision_id);
+    assert_eq!(service.get(&decision_id).expect("read"), before);
+    assert_eq!(before.state.phase, DecisionPhase::Approved);
+    assert!(before.execution_refusal.is_none());
+
+    let permit = service
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
+        .expect("a current answer authorizes");
+    let outstanding = service.get(&decision_id).expect("read");
+    assert!(outstanding.state.permit_issued);
+    unsettled(&service, &decision_id);
+    assert_eq!(service.get(&decision_id).expect("read"), outstanding);
+    service
+        .record_executed(&decision_id, permit.operation_id(), permit.request_digest())
+        .expect("executed");
+
+    clock.set(DEADLINE);
+    let due = store.stored(&at_deadline);
+    unsettled(&service, &at_deadline);
+    assert_eq!(store.stored(&at_deadline), due, "nothing applied");
+    assert_eq!(
+        service.get(&at_deadline).expect("read").state.phase,
+        DecisionPhase::Expired,
+        "a read records the expiry"
+    );
+}
+
+/// An unsettled answer for the approver applies nothing, and reads and
+/// writes nothing; asked again, a current answer authorizes.
+#[test]
+fn an_unsettled_approver_answer_applies_nothing() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let before = store.stored(&decision_id);
+
+    store.clear();
+    assert_eq!(
+        service
+            .authorize_execution(
+                &decision_id,
+                &operation_id(),
+                &request_digest(),
+                &ConsentEligibilityAnswer::Unsettled,
+            )
+            .expect_err("an unsettled answer"),
+        DecisionError::Unsettled(decision_id.clone())
+    );
+    assert!(store.calls().is_empty(), "{:?}", store.calls());
+    assert_eq!(store.stored(&decision_id), before);
+
+    let permit = service
+        .authorize_execution(&decision_id, &operation_id(), &request_digest(), &current())
+        .expect("asked again, a current answer authorizes");
+    assert_eq!(permit.decision_id(), &decision_id);
+}
+
+/// While a permit is outstanding, an approver who is no longer current gets
+/// no new permit and nothing is undone: a commit made under the permit
+/// settles executed, and once a permit is released with no commit the next
+/// authorization ends the decision refused.
+#[test]
+fn a_permit_outstanding_when_the_approver_is_no_longer_current_settles_first() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let committed = approved_subject(&service, &rendering, "subject:committed");
+    let released = approved_subject(&service, &rendering, "subject:released");
+    let committed_permit = service
+        .authorize_execution(&committed, &operation_id(), &request_digest(), &current())
+        .expect("permit");
+    let released_permit = service
+        .authorize_execution(&released, &operation_id(), &request_digest(), &current())
+        .expect("permit");
+    for decision_id in [&committed, &released] {
+        assert_eq!(
+            refusal(
+                &service
+                    .authorize_execution(
+                        decision_id,
+                        &operation_id(),
+                        &request_digest(),
+                        &ConsentEligibilityAnswer::Refused,
+                    )
+                    .expect_err("no new permit while one is outstanding")
+            ),
+            DecisionRefusal::SettlementOwed
+        );
+        let waiting = service.get(decision_id).expect("read");
+        assert_eq!(waiting.state.phase, DecisionPhase::Approved);
+        assert!(
+            waiting.state.permit_issued,
+            "the outstanding permit is kept"
+        );
+    }
+
+    let executed = service
+        .record_executed(
+            &committed,
+            committed_permit.operation_id(),
+            committed_permit.request_digest(),
+        )
+        .expect("a commit made under the permit settles");
+    assert_eq!(executed.state.phase, DecisionPhase::Executed);
+
+    let approved_again = service
+        .release_execution(released_permit)
+        .expect("release with no commit");
+    assert_eq!(approved_again.state.phase, DecisionPhase::Approved);
+    assert_eq!(
+        refusal(
+            &service
+                .authorize_execution(
+                    &released,
+                    &operation_id(),
+                    &request_digest(),
+                    &ConsentEligibilityAnswer::Refused,
+                )
+                .expect_err("no permit")
+        ),
+        DecisionRefusal::NotEligible
+    );
+    let ended = service.get(&released).expect("read");
+    assert_eq!(ended.state.phase, DecisionPhase::ExecutionRefused);
+    assert_eq!(
+        ended.execution_refusal,
+        Some(reference(APPROVER_NOT_CURRENT_REFUSAL))
+    );
+}
+
+/// At or after the deadline the deadline answers first, whatever the
+/// approver's answer: with no permit the expiry is recorded, with one the
+/// settlement is owed.
+#[test]
+fn at_the_deadline_the_expiry_answers_before_the_approver() {
+    let (_store, clock, service) = fixture();
+    let rendering = rendering();
+    let lapsed = approved_subject(&service, &rendering, "subject:lapsed");
+    let outstanding = approved_subject(&service, &rendering, "subject:outstanding");
+    let _permit = service
+        .authorize_execution(&outstanding, &operation_id(), &request_digest(), &current())
+        .expect("permit");
+    clock.set(DEADLINE);
+    for (decision_id, expected) in [
+        (&lapsed, DecisionRefusal::Expired),
+        (&outstanding, DecisionRefusal::SettlementOwed),
+    ] {
+        assert_eq!(
+            refusal(
+                &service
+                    .authorize_execution(
+                        decision_id,
+                        &operation_id(),
+                        &request_digest(),
+                        &ConsentEligibilityAnswer::Refused,
+                    )
+                    .expect_err("at the deadline")
+            ),
+            expected
+        );
+    }
+    let expired = service.get(&lapsed).expect("read");
+    assert_eq!(expired.state.phase, DecisionPhase::Expired);
+    assert_eq!(expired.execution_refusal, None);
 }
 
 #[test]
@@ -1853,7 +2125,7 @@ fn store_due_and_owed_predicates_agree_with_the_machine() {
     };
     let permit = |decision_id: &DecisionId| {
         service
-            .authorize_execution(decision_id, &operation_id(), &request_digest())
+            .authorize_execution(decision_id, &operation_id(), &request_digest(), &current())
             .expect("permit")
     };
 

@@ -70,6 +70,11 @@ pub const CAPABILITY_UNAVAILABLE_CODE: i64 = -32004;
 /// verifier refuses each token of the principal issued before then, on
 /// every route, and ends the streams and voice sessions such tokens opened.
 pub const CONSOLE_REVOKE_SESSIONS_METHOD: &str = "meta/console/revoke_sessions";
+/// Who the Console acts as for the calling request: the actor kind and its
+/// assurance, the console's posture, when the caller's login stops being
+/// accepted, and the caller scope a client sends back with a change. Served
+/// on the Console route only; the stdin host is not a Console caller.
+pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
 /// `meta/capabilities.feature_capabilities` name of a keyed `meta/send` that
 /// takes `handling_mode`; a gateway without it ignores the mode and queues.
 pub(crate) const KEYED_SEND_HANDLING_MODE_FEATURE: &str = "keyed_send_handling_mode";

@@ -12414,7 +12414,9 @@ pub(super) fn restore_error_is_retryable(error: &MobError) -> bool {
 /// busy, its runtime authority was unavailable, another runtime owner holds
 /// its hosting claim (or the claim cannot be taken now), or its external
 /// write authority could not be checked without waiting. A malformed or
-/// refusing persisted state, a durable tail held for or refused by its
+/// refusing persisted state, a store that refuses the session until its realm
+/// is reopened (it answers the same until then), a durable tail held for or
+/// refused by its
 /// recovery (a hold is reported with the member Broken, so its host sees it),
 /// quarantined or diverged durable evidence (which needs its sanctioned
 /// repair), an agent fault and every other typed cause are terminal. The

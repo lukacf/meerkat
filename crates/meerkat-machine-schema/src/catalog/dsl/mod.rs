@@ -3522,6 +3522,10 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // A failed until-changed switch-turn reconfigure withdraws the
+        // request it staged: the switch-turn chain applies it beside
+        // CompleteUntilChangedSwitchTurnReconfigure. No caller can ask for it.
+        AbortUntilChangedSwitchTurnReconfigure,
     ]
 );
 

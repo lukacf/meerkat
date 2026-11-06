@@ -1739,6 +1739,7 @@ async fn a_governed_console_send_reaches_only_the_hosts_binder_for_the_verified_
                 &governance,
             )
             .await
+            .map_err(super::CheckedConsoleSendError::into_send_error)
         }
     };
 
@@ -1901,6 +1902,7 @@ async fn send_pinned(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The host's per-send hook receives exactly the request's client key and

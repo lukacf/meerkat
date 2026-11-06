@@ -6,8 +6,12 @@
 //! notices, due expiries) grow with the rows that owe work, never with all
 //! rows.
 
+use std::any::Any;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::Bound;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
 
@@ -152,6 +156,37 @@ pub fn decision_is_due(row: &StoredDecision, now_ms: u64) -> bool {
     expires && row.descriptor.deadline_at_ms <= now_ms
 }
 
+/// The executor role of one decision store, held while this value lives.
+///
+/// One executor at a time executes the approved decisions of a store and
+/// settles their permits ([`DecisionStore::claim_executor`]). The claim ends
+/// when this value drops, or when its process ends. The next executor
+/// settles first each execution permit the store records as outstanding,
+/// from its own record of the operation, which reports every commit that
+/// can still land under it.
+pub struct DecisionExecutorClaim {
+    _held: Box<dyn Any + Send + Sync>,
+}
+
+impl DecisionExecutorClaim {
+    /// A claim that lasts as long as `held`: the store's exclusive hold on
+    /// the role (an open locked file, or a process-local flag that `held`
+    /// clears when it drops).
+    #[must_use]
+    pub fn new(held: impl Any + Send + Sync) -> Self {
+        Self {
+            _held: Box::new(held),
+        }
+    }
+}
+
+impl fmt::Debug for DecisionExecutorClaim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecisionExecutorClaim")
+            .finish_non_exhaustive()
+    }
+}
+
 /// The store of durable decision rows.
 ///
 /// Stores persist whole rows and decide no lifecycle legality: the owner
@@ -225,13 +260,39 @@ pub trait DecisionStore: Send + Sync {
 
     /// Whether rows survive a restart.
     fn is_persistent(&self) -> bool;
+
+    /// Claim the executor role of this store. At most one claim of a store
+    /// is live at a time, in this process or any other; the claim ends when
+    /// the returned value drops or its process ends. The default refuses: a
+    /// store that cannot keep the role exclusive has no executor.
+    ///
+    /// # Errors
+    /// [`ApprovalStoreError::Contended`] while another claim is live; other
+    /// store failures.
+    fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        Err(ApprovalStoreError::NotCommitted(
+            "this decision store keeps no executor claim".to_owned(),
+        ))
+    }
 }
 
 /// In-memory decision store for tests and process-local hosts. A write holds
-/// the map's lock for that write alone: no owner holds it across calls.
+/// the map's lock for that write alone: no owner holds it across calls. Its
+/// executor claim is held in the store itself, so it is exclusive among the
+/// owners that share the store.
 #[derive(Debug, Default)]
 pub struct InMemoryDecisionStore {
     rows: RwLock<BTreeMap<String, StoredDecision>>,
+    executor_claimed: Arc<AtomicBool>,
+}
+
+/// The in-memory store's executor claim: clears the store's flag on drop.
+struct InMemoryExecutorClaim(Arc<AtomicBool>);
+
+impl Drop for InMemoryExecutorClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl InMemoryDecisionStore {
@@ -331,5 +392,14 @@ impl DecisionStore for InMemoryDecisionStore {
 
     fn is_persistent(&self) -> bool {
         false
+    }
+
+    fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        self.executor_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ApprovalStoreError::Contended)?;
+        Ok(DecisionExecutorClaim::new(InMemoryExecutorClaim(
+            Arc::clone(&self.executor_claimed),
+        )))
     }
 }

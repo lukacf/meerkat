@@ -466,6 +466,7 @@ pub mod inputs {
     pub struct AuthorizeExecution {
         pub operation_id: String,
         pub request_digest: DecisionDigest,
+        pub approver_current: bool,
         pub now_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -798,6 +799,8 @@ pub enum TransitionId {
     SettleNoticeRefusedExecutionRefused,
     SettleNoticeRefusedNotEndedOpen,
     SettleNoticeRefusedNotEndedApproved,
+    AuthorizeExecutionRefusedApproverRevoked,
+    AuthorizeExecutionRefusedRevokedSettlementOwed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -7,22 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Meta Forge 0.3.1 installs the matched Meta 0.9.10 and Toolkit/Connect 0.9.10
-selection. Build and Resume now check the saved guide within the same writer
-reservation that publishes the build.
-
-Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
-release from this repository: tag `meta-installer-v0.3.1`, with packages named
-`meta-installer-0.3.1-<target>.zip` for `linux-x86_64` and `macos-arm64`.
-Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
-`forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
-selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
-agent teams pin the published Meta 0.9.6 runtime, and the protected
-application receiver keeps its Meta 0.9.7 SDK tuple. Acceptance is per target:
-each package is accepted only on evidence for that exact package, and the
-`linux-x86_64` evidence does not stand in for `macos-arm64`.
-
 ### Breaking
+
+- Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
+  are shared-account tokens unless the configuration declares
+  `accounts: "personal"`: such a token identifies a principal and never
+  counts as a person.
+- Rust: `TrustedOidcRuntimeConfig` gains `shared_account_tokens`
+  (`#[serde(default)]`, so a serialized state keeps today's behaviour). A
+  host that builds the struct literally adds `shared_account_tokens: false`
+  to keep today's behaviour.
+- On an open console with an access controller, an anonymous caller is
+  bound by every deny rule that names a subject or a group.
+
+- The console no longer accepts a bearer token in the query string of a
+  POST: `/console/rpc`, `/console/rpc/multipart`, `/console/send`,
+  `/console/send/recover`, the MCP Apps routes and the Flow Editor RPC
+  (`/flow-editor/rpc`) refuse a request whose only token is in the query
+  string with 401, on an open console too. Every GET still takes the
+  `auth_token` query parameter (an `EventSource` stream or an image load
+  cannot set headers).
+- An open console refuses a request whose `Host` names a host its listener
+  does not serve (403 `host_not_served`), on its own routes and on the host
+  composition's routes under `/host`. Plain `/healthz` answers any host.
+- New refusal code `-32056` with the kinds `caller_changed` and
+  `caller_not_current`; `POST /console/send` and `/console/send/recover`
+  answer `409` and `401`. `/console/mcp-apps/call-tool` answers `409`
+  `caller_changed`, and a call whose caller's login ended while it ran gets
+  the route's `403` `mcp_app_unavailable`.
 
 - `IdentityRuntime::register` and `IdentityRuntime::update_spec` declare the
   identity in Core's mob and return Core's answer for it,
@@ -37,6 +49,7 @@ each package is accepted only on evidence for that exact package, and the
   when the first-boot manifest or Core's member history cannot be read. A
   `match` over every `IdentityRuntimeError` variant adds an arm for the new
   one.
+
 - `SessionBridge` has a new method, `apply_declared_roster`: Core's declared
   apply (`MobHandle::apply_declared_roster`) of a roster of
   `DeclaredIdentity` values, answered with a `DeclaredRosterAnswer` (a
@@ -47,6 +60,7 @@ each package is accepted only on evidence for that exact package, and the
   and is refused (`DeclarationNotApplied`). A host's own wrapper of a session
   bridge forwards it to the bridge it wraps; a test double with no Core mob
   can answer `DeclaredRosterAnswer::kept_for(&roster)`.
+
 - `RestoreFlowResult` has a new field, `unlisted`: what the host's whole
   roster did with each identity Core held declared that the roster does not
   list (`UnlistedIdentityAnswer`: its member retired, its declaration
@@ -54,13 +68,206 @@ each package is accepted only on evidence for that exact package, and the
   literal of `RestoreFlowResult` sets it; `restore_flow` and
   `lazy_register_flow`, which declare part of the roster, answer it empty.
 
+### Security
+
+- Tokens minted with an `auth_config` shared secret no longer count as a
+  person unless the configuration declares `accounts: "personal"`.
+- On a console without sign-in, a deny rule that names a person or a group
+  also applies to callers who send no token, so leaving out a token never
+  escapes it.
+
+- A console change re-checks, right before it is made, that its caller's
+  login is still current (token not expired, console sessions not
+  revoked), and is refused with `caller_not_current` otherwise; a send
+  checks again right before it is reserved or sent.
+- An open console refuses requests addressed to a host it does not serve,
+  so a page that rebinds its own name to the console's address cannot
+  drive it.
+
 ### Upgrade
+
+- A front that mints one token per person with a shared secret adds
+  `"accounts": "personal"` to its `auth_config`.
+- On an open console with an access controller, grant anonymous callers
+  explicitly, or sign people in.
+
+- Clients send console writes with the token in the `Authorization`
+  header.
+- Host check (open consoles only):
+  - set the gateway's public base URL (`http_public_base_url`) when a proxy
+    or another name fronts the console; one public name only;
+  - a wildcard bind (`0.0.0.0`, `::`) admits only loopback names and the
+    public base URL's host, so LAN clients that reach the console by its
+    address need that address declared as the public base URL;
+  - `UnifiedRuntime::run` and `serve` admit loopback names and the bound
+    address only, so a library host behind a proxy that keeps the client's
+    `Host` serves the router on its own server instead;
+  - a probe that asks `/healthz` for JSON by a pod or service name now gets
+    403; the plain `/healthz` answer is unchanged.
+
+### Added
+
+- `meta/console/whoami` reports who the console acts as: the actor
+  (`person`, `service`, `token_principal` or `anonymous`), the posture, the
+  login expiry, whether the caller may administer access, the approver ids
+  it holds, and an opaque `caller_scope`.
+- `auth_config.accounts` (`"personal"` or `"shared"`) states whether an
+  issuer's tokens name persons; the Python and TypeScript auth config
+  builders carry it. The TypeScript `JwtAuthConfig.accounts` member is
+  optional, so a config built by hand without it still type-checks.
+
+- Console changes accept `expected_caller_scope` (the `caller_scope` read
+  from `meta/console/whoami`), and a change made for another caller is
+  refused with `caller_changed`.
+
+- `MemberLifecycleFactRecord::recorded_at_ms`, with
+  `MemberLifecycleFactRecord::with_recorded_at_ms`: when Core appended the
+  fact's journal event, in Unix milliseconds. The session bridge over a Core
+  mob sets it from Core's journal; a bridge that builds its records with
+  `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
+  `#[non_exhaustive]`, so the field is additive.
+
+### Changed
+
+- Registering an identity (`IdentityRuntime::register`) or updating its spec
+  (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
+  MobMachine decides what becomes of the identity's member and Core realizes
+  it. Meta records the spec as the identity's registration whatever Core
+  answers: the registration is the host's declaration, and the identity's
+  doors declare it again and answer Core's typed refusal. An identity whose
+  declaration Core refused for good (a raw member holds its name, its name
+  is a removed entry's or unreadable, its first-boot `Resume` row names a
+  session Core holds no copy of, its host rejects its build every time)
+  reads `broken` in its status, the status list and its health, names no
+  member and is not active, until Core answers a later declaration
+  otherwise. An identity Core holds no member for is seated Dormant when it
+  is registered, on its archived
+  session or a fresh one, instead of at the next roster pass or its first
+  delivery. The host's customizer composes the member build only when Core
+  answers that the identity's verdict builds a member: an identity Core keeps
+  is declared with its lifecycle facts alone, and no customizer runs. A raw
+  member a host spawned under the identity's member id is adopted when its
+  spawn carries the durable-identity marker or the `agent_identity` label
+  naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
+  runtime with no session bridge records the spec and answers
+  `DeclaredIdentityAnswer::RecordedOnly`.
+
+- The roster pass declares the host's roster in Core's mob through Core's
+  declared apply, and no longer seats, releases, respawns or retires members
+  itself. A bootstrap or a refresh declares the whole roster: Core seats,
+  keeps, restamps or moves each listed identity (MobMachine decides each
+  verdict), and unlists each identity it holds declared that the roster no
+  longer lists and retires its member, after which the identity leaves
+  Meta's registry. A send, a dispatch or a materialization of an identity
+  Core holds no member for, or one whose first-boot row, held role move or
+  host preparation is still owed, declares that identity alone before it
+  acts. A respawn of a built member is such a declaration: Core seats the
+  member again, Dormant, on the session it kept archived, building nothing,
+  and the wake that follows builds it once, so the host's `customize_build`
+  runs twice (the seat's composed build, then the build's own), as for a
+  lazily seated identity, where the seat step revived the member live with
+  one call. One identity's refusal, held role move or failed retirement is that
+  identity's own typed outcome, and the pass goes on; a retirement that
+  failed is retried by the next complete roster. An identity refused before
+  Core is asked (its first-boot row contradicts Core's history) turns a
+  complete roster into a partial one for that pass, so nothing is unlisted
+  until every listed identity is declared. A placed or externally bound
+  identity Core holds no member of is created through its host (at the
+  default pass, or at its first use after a lazy one), and that creation
+  carries out its pending first-boot `Resume` row: the member is created on
+  the row's session, with its history, and the row is settled; a session
+  Core holds no durable copy of is the row's typed refusal, and nothing is
+  created in its place. An identity awaiting a held creation that no held
+  pass in progress covers is refused typed (`held_completion_owed`): it owes
+  its host a held completion.
+
+- A member whose spawn carries the `agent_identity` label but not the
+  durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
+  respawned onto its session to gain the marker, and the roster pass no
+  longer retires it when the roster stops listing it: to Core such a member
+  is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
+  members with the marker at its roster pass, so a state directory last run
+  by the previous matched release holds none.
+
+### Fixed
+
+- The exit interview a retirement no Meta verb asked for owes (Core's seal
+  unlisted the identity) is queued once when the process stops inside the
+  retirement's side effects and the next start delivers them again. Its
+  pending harvest was keyed by the time the side effect ran, so the replay
+  after the restart queued a second one; it is now keyed by the time Core
+  journaled the retirement, which the replay reads again. The harvest's
+  `retired_at_ms` stays a wall-clock time (the Console shows it as the
+  retirement's time, and the harvest queue reads oldest first by it). With
+  a session bridge whose journal records carry no time
+  (`MemberLifecycleFactRecord::recorded_at_ms` is `None`), the key stays
+  the time the side effect runs.
+
+- The roster pass no longer retires a member a host spawned under an
+  identity's member id and labelled with the identity when the roster never
+  declared that identity.
+
+- The first roster pass after a restart lets the previous role of an
+  identity the roster moved to another profile go: Core holds the member
+  under its previous role, or migrates it when the activation declared the
+  migration, and releases its materialization. The pass used to skip an
+  identity it had not registered yet in this process, so the member stayed
+  loaded under its previous role.
+
+- One identity whose member Core fails to retire no longer fails the whole
+  roster pass: its outcome is typed and its own, the other identities are
+  declared and unlisted as usual, and the next complete roster retires it
+  again.
+
+## [0.9.10] - 2026-11-04
+
+Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect
+0.9.10, released together) and pins Core `=0.9.10`. Meta Forge 0.3.1 ships
+with it and installs the matched Meta 0.9.10, Connect 0.9.10 and Connect
+Python SDK (`meerkat-toolkit`) 0.9.10 set. Its Build and Resume now check the
+saved guide within the same writer reservation that publishes the build.
+
+Forge 0.3.1 is part of the Meerkat 0.9.10 release and is the first Forge
+release from this repository: tag `meta-installer-v0.3.1`, with packages named
+`meta-installer-0.3.1-<target>.zip` for `linux-x86_64` and `macos-arm64`.
+Releases up to Forge 0.3.0 stay in `lukacf/meerkat-meta` (tags
+`forge-v<version>`, packages `meta-forge-<version>-<target>.zip`). Three
+selections stay as in Forge 0.3.0: the Guide runs Meta 0.9.3 with Core 0.9.3,
+agent teams pin the published Meta 0.9.6 runtime, and the application receiver
+keeps the Meta 0.9.7 SDK. Each target's package is released on its own
+verification.
+
+### Upgrade
+
+- Meta 0.9.10 pins Core `=0.9.10`: a host that embeds Meta moves Meta and
+  Core to 0.9.10 together (Meta 0.9.9 pinned Core `=0.9.9`).
+
+- Core 0.9.10 fixes that reach Meta gateways are listed in Core's CHANGELOG:
+  the restart recovery of live voice delegations with dormant members (a
+  gateway composes it when `openai_live`, `experimental_live` or
+  `console_voice` is registered), the peer address of dormant members in
+  roster reads, governed operations that no longer refuse after a completed
+  grant change, a refusal met at a tool's own effect entry before any effect,
+  which now reads as not dispatched (`tool_invoked: false`), and per-tool
+  timeouts (`[tools.tool_timeouts]`) that accept duration strings.
 
 - An application that Forge 0.3.0 prepared with its Connect gateway (0.9.5 on
   Linux, 0.9.4 on macOS) is prepared again at its next install step. Forge
   0.3.1 and Connect 0.9.10 bind an activation's policy bundle as
   `policy-v1:sha256:<manifest digest>`, and an activation bound in the
   earlier form is not current.
+
+- A host store realm's readiness probe stays ready while only scopes are
+  poisoned: `HostStoreReadiness::is_ready()` is false for a poisoned realm
+  (a lost fence), a restored member whose comms identity is missing on this
+  host, or a member Core restored broken, and no longer for a poisoned scope
+  alone. A probe that restarted the process whenever `is_ready()` was false
+  no longer restarts it for one poisoned member or document. A host that
+  restarts on a scope poison reads `scope_poisoned` (unchanged, true while
+  any scope is poisoned), or the new `poisoned_scopes`, and restarts at a
+  planned point, after a drain, to recover those members and documents. A
+  probe that must keep the earlier rule checks `readiness.is_ready() &&
+  !readiness.scope_poisoned`.
 
 ### Added
 
@@ -98,81 +305,25 @@ each package is accepted only on evidence for that exact package, and the
   store. The text report prints the same counts. The format stays
   `meerkat-meta.identity-census` version 1: the field is additive.
 
-- `MemberLifecycleFactRecord::recorded_at_ms`, with
-  `MemberLifecycleFactRecord::with_recorded_at_ms`: when Core appended the
-  fact's journal event, in Unix milliseconds. The session bridge over a Core
-  mob sets it from Core's journal; a bridge that builds its records with
-  `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
-  `#[non_exhaustive]`, so the field is additive.
+- `HostStoreReadiness::poisoned_scopes`: every poisoned scope of a host
+  store realm with its cause (`PoisonedScope`, re-exported from
+  `meerkat_meta::host_store`). A session's runtime scope is
+  `rt:<runtime id>`; a mob's scopes are tagged `mb`, `mbi`, `mbr` and `mbs`;
+  Meta's documents `mx` and its mob announcements `mxa`.
 
 ### Changed
 
-- Registering an identity (`IdentityRuntime::register`) or updating its spec
-  (`update_spec`) declares it in Core's mob as a one-identity roster: Core's
-  MobMachine decides what becomes of the identity's member and Core realizes
-  it. Meta records the spec as the identity's registration whatever Core
-  answers: the registration is the host's declaration, and the identity's
-  doors declare it again and answer Core's typed refusal. An identity whose
-  declaration Core refused for good (a raw member holds its name, its name
-  is a removed entry's or unreadable, its first-boot `Resume` row names a
-  session Core holds no copy of, its host rejects its build every time)
-  reads `broken` in its status, the status list and its health, names no
-  member and is not active, until Core answers a later declaration
-  otherwise. An identity Core holds no member for is seated Dormant when it
-  is registered, on its archived
-  session or a fresh one, instead of at the next roster pass or its first
-  delivery. The host's customizer composes the member build only when Core
-  answers that the identity's verdict builds a member: an identity Core keeps
-  is declared with its lifecycle facts alone, and no customizer runs. A raw
-  member a host spawned under the identity's member id is adopted when its
-  spawn carries the durable-identity marker or the `agent_identity` label
-  naming the identity, and is refused (`NameHeldByWorker`) otherwise. A
-  runtime with no session bridge records the spec and answers
-  `DeclaredIdentityAnswer::RecordedOnly`.
-- The roster pass declares the host's roster in Core's mob through Core's
-  declared apply, and no longer seats, releases, respawns or retires members
-  itself. A bootstrap or a refresh declares the whole roster: Core seats,
-  keeps, restamps or moves each listed identity (MobMachine decides each
-  verdict), and unlists each identity it holds declared that the roster no
-  longer lists and retires its member, after which the identity leaves
-  Meta's registry. A send, a dispatch or a materialization of an identity
-  Core holds no member for, or one whose first-boot row, held role move or
-  host preparation is still owed, declares that identity alone before it
-  acts. A respawn of a built member is such a declaration: Core seats the
-  member again, Dormant, on the session it kept archived, building nothing,
-  and the wake that follows builds it once, so the host's `customize_build`
-  runs twice (the seat's composed build, then the build's own), as for a
-  lazily seated identity, where the seat step revived the member live with
-  one call. One identity's refusal, held role move or failed retirement is that
-  identity's own typed outcome, and the pass goes on; a retirement that
-  failed is retried by the next complete roster. An identity refused before
-  Core is asked (its first-boot row contradicts Core's history) turns a
-  complete roster into a partial one for that pass, so nothing is unlisted
-  until every listed identity is declared. A placed or externally bound
-  identity Core holds no member of is created through its host (at the
-  default pass, or at its first use after a lazy one), and that creation
-  carries out its pending first-boot `Resume` row: the member is created on
-  the row's session, with its history, and the row is settled; a session
-  Core holds no durable copy of is the row's typed refusal, and nothing is
-  created in its place. An identity awaiting a held creation that no held
-  pass in progress covers is refused typed (`held_completion_owed`): it owes
-  its host a held completion.
-- A member whose spawn carries the `agent_identity` label but not the
-  durable-identity marker (the shape Meta 0.9.3 spawned) is no longer
-  respawned onto its session to gain the marker, and the roster pass no
-  longer retires it when the roster stops listing it: to Core such a member
-  is a host's raw member. Every Meta from 0.9.4 to 0.9.10 respawned these
-  members with the marker at its roster pass, so a state directory last run
-  by the previous matched release holds none.
 - Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
   gateway for applications on both targets, and the Meta 0.9.10 `rpc_gateway`
   for applications without a connection setup helper. Forge 0.3.0 selected
   Meta 0.9.7 with Toolkit 0.9.5 on Linux x86_64 and Meta 0.9.4 with Toolkit
   0.9.4 on macOS arm64.
+
 - Forge 0.3.1 accepts the Meta 0.9.10 and Toolkit 0.9.10 SDK wheels in a
   selected Meta and Toolkit SDK pair, besides the releases it accepted
   before. The Toolkit wheel's `native-host` extra must still require exactly
   the selected Meta version.
+
 - Forge 0.3.1 downloads a Meta release after 0.9.7 from this repository's
   `meta-v<version>` release, and 0.9.7 or earlier from `lukacf/meerkat-meta`'s
   `v<version>` release as before: both for the pinned agent team runtime and
@@ -181,32 +332,15 @@ each package is accepted only on evidence for that exact package, and the
   major.minor.patch. The archive and checksum names are unchanged, and an
   install receipt keeps its fields.
 
+- `HostStoreReadiness::is_ready()` no longer counts a scope-only poison: the
+  realm keeps serving every call that does not need a poisoned scope (Core
+  0.9.10 answers store-wide reads per scope family), so the probe stays ready
+  and names the scopes in `poisoned_scopes`. A poisoned realm still makes it
+  not ready. Hosts that restart on a scope poison read `scope_poisoned`,
+  whose meaning is unchanged: true while any scope is poisoned. See Upgrade.
+
 ### Fixed
 
-- The exit interview a retirement no Meta verb asked for owes (Core's seal
-  unlisted the identity) is queued once when the process stops inside the
-  retirement's side effects and the next start delivers them again. Its
-  pending harvest was keyed by the time the side effect ran, so the replay
-  after the restart queued a second one; it is now keyed by the time Core
-  journaled the retirement, which the replay reads again. The harvest's
-  `retired_at_ms` stays a wall-clock time (the Console shows it as the
-  retirement's time, and the harvest queue reads oldest first by it). With
-  a session bridge whose journal records carry no time
-  (`MemberLifecycleFactRecord::recorded_at_ms` is `None`), the key stays
-  the time the side effect runs.
-- The roster pass no longer retires a member a host spawned under an
-  identity's member id and labelled with the identity when the roster never
-  declared that identity.
-- The first roster pass after a restart lets the previous role of an
-  identity the roster moved to another profile go: Core holds the member
-  under its previous role, or migrates it when the activation declared the
-  migration, and releases its materialization. The pass used to skip an
-  identity it had not registered yet in this process, so the member stayed
-  loaded under its previous role.
-- One identity whose member Core fails to retire no longer fails the whole
-  roster pass: its outcome is typed and its own, the other identities are
-  declared and unlisted as usual, and the next complete roster retires it
-  again.
 - Build and Resume check the saved guide within the same writer reservation
   that publishes the build: the final comparison with the saved guide, the
   service check and the build's publication run inside one SQLite writer
@@ -215,6 +349,60 @@ each package is accepted only on evidence for that exact package, and the
   could still start the builder from the earlier read. A busy, missing or
   unreadable store refuses the build at once, and a refused build starts
   nothing.
+
+### Known limitations
+
+- Meta's roster pass still decides the lifecycle of the identities a host
+  declares: which are seated, and which are retired when the roster no
+  longer lists them. It does not use Core's declared-roster apply
+  (`MobHandle::apply_declared_roster`) yet, so the verdicts and role-change
+  holds Core's 0.9.9 notes describe for that apply do not govern a Meta
+  host's declared identities.
+
+- Agents and Console users cannot create durable identities through Meta
+  yet. The identity policy a launch takes
+  (`runtime_options.identity_creation`, or
+  `GatewayHostComposition::identity_creation_policy` for a native host) is
+  validated at launch but not enforced: no executor, decision ingress, host
+  RPC method, agent tool or Meta SDK method carries an identity request, and
+  the Console has no form that creates a durable agent. Durable identities
+  still come from the host's roster declarations.
+
+- Meta has no host verbs and no SDK methods for operator instructions. A
+  native host sets, revokes and reads them with Core's Rust API on the mob
+  handle (`UnifiedRuntime::mob_handle`, then
+  `MobHandle::set_operator_instruction`, `revoke_operator_instruction` and
+  `operator_instruction_status`); a host that reaches Meta only over RPC or
+  an SDK cannot set them.
+
+- Meta builds its members with no tool grant gate and has no grant methods,
+  so scoped tool grants do not apply to Meta members: nothing in Meta's RPC,
+  the Console or the Meta SDKs issues, lists or revokes a grant.
+
+- The Console reads the status of a member whose events it cannot follow
+  (its session has no live actor, for example after its store scope was
+  refused) again on every change of its team, and does not wait after a
+  status read that does not answer. A few such members keep it reading
+  their status without pause, which costs CPU and log volume (at DEBUG, one
+  actor log line per read). Keep the team runtime's log at INFO; restarting
+  the gateway clears a refused scope. A host that builds the Console
+  aggregator itself can turn its history backfill off
+  (`session_history_backfill_enabled: false` in `ConsoleAggregatorOptions`).
+- While its store refuses appends, the event log asks the store again for
+  every event that arrives, and it sends its whole retry buffer (up to 4096
+  events) as one append. A store that refuses requests above a size limit
+  can then refuse every later flush, so the event log takes no event again
+  until the process restarts. Use an event log store that takes 4096 events
+  in one append, or restart the process when `event_log_flush_failure`
+  error events keep coming after the store is back.
+
+- `meta/compact_member` after a failed turn: when the forced maintenance turn
+  ends in a definite failure (a provider error, a rate limit, or a request
+  that compaction could not shrink), the temporary compaction threshold (1024
+  tokens by default) stays on the member, durably, and every later
+  `compact_member` on that identity is refused as busy until the gateway
+  restarts. After a failed `compact_member`, call `meta/respawn` for the
+  identity, then restart the gateway.
 
 ## [0.9.9] - 2026-11-03
 

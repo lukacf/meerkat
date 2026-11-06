@@ -719,6 +719,9 @@ pub(super) struct MemberStatusSessionObservation {
     /// Set when the session view was not observed, so `output_preview` and
     /// `tokens_used` are not observations.
     pub(super) preview_unavailable: Option<super::handle::MemberPreviewUnavailable>,
+    /// The store's refusal of the session's read, when it refuses until its
+    /// realm is reopened (`preview_unavailable` is then `StoreRefused`).
+    pub(super) store_refusal: Option<meerkat_runtime::store::RuntimeStoreError>,
     pub(super) observed_at_ms: u64,
 }
 

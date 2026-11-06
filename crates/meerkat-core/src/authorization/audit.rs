@@ -123,7 +123,16 @@ pub enum OperationEntryBoundary {
     ToolExecutionPolicy,
     /// The owning tool leaf's single consuming entry, immediately before
     /// its effect or transport handoff
-    /// ([`crate::ToolDispatchContext::enter_reviewed_effect`]).
+    /// ([`crate::ToolDispatchContext::enter_reviewed_effect`]). A waiting
+    /// entry
+    /// ([`crate::ToolDispatchContext::enter_reviewed_effect_held_after_owner_change`])
+    /// can record it after a refused staging of the same operation: a
+    /// staging refused to rebuild while an owner change was in progress
+    /// waits that change out (its wait traced at site `tool_entry`) and
+    /// stages again, and the entry is recorded for the decision checked
+    /// after the wait. A staging whose final check refused had already
+    /// recorded its entry, so the operation then records this boundary
+    /// twice, as at the root staging.
     ToolEffect,
     /// An MCP resource read's transport entry.
     McpResourceRead,

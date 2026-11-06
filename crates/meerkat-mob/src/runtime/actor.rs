@@ -529,6 +529,12 @@ pub(crate) enum SessionStoreFailureClass {
     /// degraded, an internal store fault, or a source that is not a session
     /// store error.
     Unavailable,
+    /// The store refuses the session until its realm is reopened: a host
+    /// store whose scope of the session, or whose realm, is poisoned (a
+    /// runtime store's `ScopeRefused` or `RealmRefused`). Every read answers
+    /// the same until the process opens the realm again, so it is never
+    /// retried as an outage, and a status read answers it from its record.
+    RefusedUntilReopen,
 }
 
 /// Classify the source of a [`meerkat_core::service::SessionError::Store`]
@@ -539,12 +545,16 @@ pub(crate) fn session_store_failure_class(
     use meerkat_core::SessionStoreError;
 
     // A runtime store read a host store realm answers through: stored data
-    // that does not decode is malformed; any other (a store that could not
-    // serve now included) is unavailable, as an unknown source is.
+    // that does not decode is malformed; a refusal until the realm reopens
+    // is its own class; any other (a store that could not serve now
+    // included) is unavailable, as an unknown source is.
     if let Some(runtime) = source.downcast_ref::<meerkat_runtime::store::RuntimeStoreError>() {
         return match runtime {
             meerkat_runtime::store::RuntimeStoreError::Corrupt(_) => {
                 SessionStoreFailureClass::Malformed
+            }
+            refusal if refusal.is_refused_until_reopen() => {
+                SessionStoreFailureClass::RefusedUntilReopen
             }
             _ => SessionStoreFailureClass::Unavailable,
         };
@@ -569,12 +579,33 @@ pub(crate) fn session_store_failure_class(
     }
 }
 
+/// The store's refusal of a session read that lasts until the realm is
+/// reopened ([`SessionStoreFailureClass::RefusedUntilReopen`]), carried as
+/// the boxed source of a [`meerkat_core::service::SessionError::Store`].
+pub(crate) fn store_refusal_of(
+    error: &meerkat_core::service::SessionError,
+) -> Option<meerkat_runtime::store::RuntimeStoreError> {
+    match error {
+        meerkat_core::service::SessionError::WithSettlementFailures { error, .. } => {
+            store_refusal_of(error)
+        }
+        meerkat_core::service::SessionError::Store(source) => source
+            .downcast_ref::<meerkat_runtime::store::RuntimeStoreError>()
+            .filter(|refusal| refusal.is_refused_until_reopen())
+            .cloned(),
+        _ => None,
+    }
+}
+
 /// Classify a session read failure by its typed cause. Durable corruption and
 /// unsupported persistence are permanent observations; transport, I/O, and
 /// unknown failures remain retryable. Display text is diagnostic only. A store
 /// failure is read through [`session_store_failure_class`]: only a malformed
 /// persisted state is permanent here, and the identity machine reads a
-/// missing or refusing one again on its retry.
+/// missing or refusing one again on its retry. A refusal until the realm
+/// reopens is unavailable to the identity machine, the observation it got
+/// before the refusal was typed: what the identity machine decides of it is
+/// its own, and this classification leaves its inputs unchanged.
 fn identity_session_load_error_class(
     error: &meerkat_core::service::SessionError,
 ) -> IdentitySessionLoadErrorClass {
@@ -589,7 +620,9 @@ fn identity_session_load_error_class(
         | SessionError::Unsupported(_) => IdentitySessionLoadErrorClass::Malformed,
         SessionError::Store(source) => match session_store_failure_class(source.as_ref()) {
             SessionStoreFailureClass::Malformed => IdentitySessionLoadErrorClass::Malformed,
-            SessionStoreFailureClass::Refused | SessionStoreFailureClass::Unavailable => {
+            SessionStoreFailureClass::Refused
+            | SessionStoreFailureClass::Unavailable
+            | SessionStoreFailureClass::RefusedUntilReopen => {
                 IdentitySessionLoadErrorClass::Unavailable
             }
         },
@@ -15017,6 +15050,7 @@ impl MobActor {
             execution_snapshot: None,
             runtime_run_state: None,
             preview_unavailable: None,
+            store_refusal: None,
             observed_at_ms,
         };
         let Some(session_id) = target
@@ -15063,6 +15097,14 @@ impl MobActor {
         if target.unborn_seat {
             return (observation, None);
         }
+        // A session whose read the store refused until its realm is reopened
+        // answers from the recorded refusal: every read would refuse again.
+        if let Some(refusal) = view_reads.recorded_refusal(session_id, target) {
+            observation.preview_unavailable =
+                Some(super::handle::MemberPreviewUnavailable::StoreRefused);
+            observation.store_refusal = Some(refusal);
+            return (observation, None);
+        }
         // Preview and token count come from the session view, which serves
         // the live actor's published state or the committed durable head and
         // never waits on the member's session task. At most one underlying
@@ -15088,7 +15130,7 @@ impl MobActor {
                     }
                     _ = deadline.as_mut() => (
                         deadline_reached(),
-                        Some(MemberStatusViewReadDrain::new(owner, agent_identity, read)),
+                        Some(MemberStatusViewReadDrain::new(owner, agent_identity.clone(), read)),
                     ),
                 }
             }
@@ -15113,6 +15155,19 @@ impl MobActor {
             }
             MemberStatusSessionViewRead::Unavailable(marker) => {
                 observation.preview_unavailable = Some(marker);
+            }
+            MemberStatusSessionViewRead::StoreRefused(refusal) => {
+                if view_reads.record_refusal(session_id, target, refusal.clone()) {
+                    tracing::warn!(
+                        %agent_identity,
+                        bridge_session_id = %session_id,
+                        error = %refusal,
+                        "member status session view read refused until the host store realm is reopened; later status reads answer from this refusal"
+                    );
+                }
+                observation.preview_unavailable =
+                    Some(super::handle::MemberPreviewUnavailable::StoreRefused);
+                observation.store_refusal = Some(refusal);
             }
         }
         (observation, drain)
@@ -15145,6 +15200,11 @@ impl MobActor {
         let view = match session_service.observe_member_status_view(session_id).await {
             Ok(view) => view,
             Err(error) => {
+                // A refusal until the realm reopens is recorded, and logged
+                // once, by the observation.
+                if let Some(refusal) = store_refusal_of(&error) {
+                    return MemberStatusSessionViewRead::StoreRefused(refusal);
+                }
                 tracing::debug!(
                     %agent_identity,
                     bridge_session_id = %session_id,

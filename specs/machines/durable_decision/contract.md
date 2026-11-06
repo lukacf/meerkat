@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `self` / `catalog::dsl::durable_decision`
 
 ## State
@@ -32,7 +32,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Review`(verdict: DurableDecisionReviewVerdict, reviewer: DecisionParty, digest: DecisionDigest, evidence_digest: Option<String>, now_ms: u64)
 - `Withdraw`(withdrawer: DecisionParty, by_host: Bool, now_ms: u64)
 - `Expire`(now_ms: u64)
-- `AuthorizeExecution`(operation_id: String, request_digest: DecisionDigest, now_ms: u64)
+- `AuthorizeExecution`(operation_id: String, request_digest: DecisionDigest, approver_current: Bool, now_ms: u64)
 - `ReleaseExecution`(now_ms: u64)
 - `RecordExecuted`(operation_id: String, request_digest: DecisionDigest, now_ms: u64)
 - `CloseRefused`(now_ms: u64)
@@ -860,17 +860,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeExecution`
 - From: `Approved`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Guards:
   - `same_operation`
   - `same_request`
   - `before_deadline`
+  - `approver_current`
 - Emits: `ExecutionAuthorized`
 - To: `Approved`
 
 ### `AuthorizeExecutionAtDeadline`
 - From: `Approved`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Guards:
   - `same_operation`
   - `same_request`
@@ -881,7 +882,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeExecutionRefusedSettlementOwed`
 - From: `Approved`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Guards:
   - `same_operation`
   - `same_request`
@@ -892,7 +893,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeExecutionRefusedBinding`
 - From: `Approved`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Guards:
   - `binding_differs`
 - Emits: `Refused`
@@ -900,37 +901,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeExecutionRefusedNotApprovedOpen`
 - From: `Open`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `Open`
 
 ### `AuthorizeExecutionRefusedNotApprovedRejected`
 - From: `Rejected`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `Rejected`
 
 ### `AuthorizeExecutionRefusedNotApprovedExpired`
 - From: `Expired`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `Expired`
 
 ### `AuthorizeExecutionRefusedNotApprovedWithdrawn`
 - From: `Withdrawn`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `Withdrawn`
 
 ### `AuthorizeExecutionRefusedNotApprovedExecuted`
 - From: `Executed`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `Executed`
 
 ### `AuthorizeExecutionRefusedNotApprovedExecutionRefused`
 - From: `ExecutionRefused`
-- On: `AuthorizeExecution`(operation_id, request_digest, now_ms)
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
 - Emits: `Refused`
 - To: `ExecutionRefused`
 
@@ -1315,6 +1316,30 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `Refused`
 - To: `Approved`
 
+### `AuthorizeExecutionRefusedApproverRevoked`
+- From: `Approved`
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
+- Guards:
+  - `same_operation`
+  - `same_request`
+  - `before_deadline`
+  - `approver_revoked`
+  - `no_permit`
+- Emits: `ExecutionRefused`, `Refused`
+- To: `ExecutionRefused`
+
+### `AuthorizeExecutionRefusedRevokedSettlementOwed`
+- From: `Approved`
+- On: `AuthorizeExecution`(operation_id, request_digest, approver_current, now_ms)
+- Guards:
+  - `same_operation`
+  - `same_request`
+  - `before_deadline`
+  - `approver_revoked`
+  - `permit_outstanding`
+- Emits: `Refused`
+- To: `Approved`
+
 ## Coverage
 ### Code Anchors
 - `durable_decision` (machine `DurableDecisionMachine`): `crates/meerkat-runtime/src/decision/dsl.rs` — DurableDecisionMachine owns one durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision bound to the subject digest, the execution permit and the executed fact, expiry at the sealed deadline, withdrawal, and the requester notice an ended decision owes; ended decisions are terminal
@@ -1326,5 +1351,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `durable_decision_deadline` — durable_decision_machine.rs::a_touch_at_the_deadline_records_expiry and an_approved_decision_expires_at_its_deadline_unless_a_permit_is_outstanding record the expiry of an open decision at any touch at or after its deadline, let an approved decision with no outstanding permit lapse at its deadline, and hold the expiry off while a permit is outstanding
 - `durable_decision_withdrawal` — durable_decision_machine.rs::withdraw_is_open_only_by_requester_or_host withdraws an open decision by its requester or the host before its deadline and refuses another withdrawer and a decided decision
 - `durable_decision_execution` — durable_decision_machine.rs::execution_is_authorized_only_while_approved_with_the_held_binding, executed_replays_and_a_mismatched_binding_is_refused, a_permit_outstanding_across_the_deadline_settles_executed_or_expired and close_refused_never_follows_executed authorize a permit only for the held binding of an approved decision, record the execution only under an outstanding permit, replay it, release a permit with no commit, and close a permanent refusal
+- `durable_decision_approver_currentness` — durable_decision_machine.rs::an_approver_who_is_no_longer_current_gets_no_permit refuses a permit when the approver who decided is no longer current, ends a decision with no outstanding permit refused with its notice owed, and holds one whose permit is outstanding until its owner settles it
 - `durable_decision_notice` — durable_decision_machine.rs::notice_is_owed_once_at_the_end_for_routable_decisions owes one requester notice at every end of a routable decision, settles it delivered or failed, replays the same receipt and refuses a contradicting one, an unroutable requester's and a notice before the end
 - `durable_decision_terminal_latch` — durable_decision_machine.rs::every_command_class_in_every_phase_is_total_and_only_mutates_where_intended and recover_from_state_refuses_each_torn_shape refuse every input an ended or approved decision does not accept with its typed refusal and a byte-identical state, and refuse a recovered row that breaks any invariant

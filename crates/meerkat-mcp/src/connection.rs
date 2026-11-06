@@ -3520,6 +3520,35 @@ struct CloseIndexShared {
     /// The router's attempt guards, cancelled with `RouterClosed` when the
     /// close begins, before any attempt is stopped.
     guards: std::sync::OnceLock<std::sync::Weak<crate::attempt_guard::RouterGuards>>,
+    /// The governed attachment controls the router retains for a re-add
+    /// after a sign-in, released when the close begins.
+    retained: std::sync::Mutex<RetainedControls>,
+}
+
+#[derive(Default)]
+struct RetainedControls {
+    /// Set when the close began: a control retained after it is released at
+    /// once.
+    released: bool,
+    cells: Vec<std::sync::Weak<RetainedControl>>,
+}
+
+/// One governed attachment control a router retains past its connection's
+/// physical entry, for the governed name's re-add after a sign-in: the
+/// name's own and its retry records' share it. Empty once the router's
+/// close began ([`CloseIndex::begin_close`]): no re-add is staged after it,
+/// so a router whose shutdown never runs keeps no control alive past its
+/// close.
+pub(crate) struct RetainedControl(std::sync::Mutex<Option<Arc<dyn McpAttachmentAuthority>>>);
+
+impl RetainedControl {
+    /// The retained control, unless the router's close released it.
+    pub(crate) fn control(&self) -> Option<Arc<dyn McpAttachmentAuthority>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[derive(Default)]
@@ -3600,6 +3629,48 @@ impl CloseIndex {
         let _ = self.0.guards.set(Arc::downgrade(guards));
     }
 
+    /// Retain `control` for a governed name's re-add after a sign-in, until
+    /// the close begins. Once it began, the cell is empty from the start.
+    pub(crate) fn retain_control(
+        &self,
+        control: Arc<dyn McpAttachmentAuthority>,
+    ) -> Arc<RetainedControl> {
+        let mut retained = self
+            .0
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retained.released {
+            return Arc::new(RetainedControl(std::sync::Mutex::new(None)));
+        }
+        retained.cells.retain(|cell| cell.strong_count() > 0);
+        let cell = Arc::new(RetainedControl(std::sync::Mutex::new(Some(control))));
+        retained.cells.push(Arc::downgrade(&cell));
+        cell
+    }
+
+    /// Release every retained control: nothing can be re-added once the
+    /// close began.
+    fn release_retained_controls(&self) {
+        let cells = {
+            let mut retained = self
+                .0
+                .retained
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.released = true;
+            std::mem::take(&mut retained.cells)
+        };
+        for cell in cells.iter().filter_map(std::sync::Weak::upgrade) {
+            let control = cell
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(control);
+        }
+    }
+
     /// Freeze admission and start, now, every close this index covers that
     /// has not started, without any router lock or in-flight call: a held
     /// stdio server's client is closed and then its process, under that
@@ -3608,13 +3679,18 @@ impl CloseIndex {
     /// holds nothing yet is retired, so its attempt stops and spawns or
     /// connects nothing more (a client it still connects is closed at
     /// once). A close already running is joined. A later call returns a
-    /// ticket over the same closes. Call it within a Tokio runtime.
+    /// ticket over the same closes. The governed attachment controls the
+    /// router retains for a re-add after a sign-in are released. Call it
+    /// within a Tokio runtime.
     pub(crate) fn begin_close(&self) -> McpCloseTicket {
         // The router is closing: its attempts' guards learn it first, so an
         // attempt stopped below is cancelled as `RouterClosed`.
         if let Some(guards) = self.0.guards.get().and_then(std::sync::Weak::upgrade) {
             guards.close(crate::McpAttemptCancelCause::RouterClosed);
         }
+        // Nothing is re-added once the close began, so no control is kept
+        // for it, whether or not the router's shutdown ever runs.
+        self.release_retained_controls();
         let now = tokio::time::Instant::now();
         let closes = {
             let mut state = self.state();

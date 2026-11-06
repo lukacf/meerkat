@@ -396,6 +396,7 @@ Important files:
 - `artifacts/` (stable artifact records)
 - `<store_path>/approvals.json` (RPC approval-record sidecar when the persistence bundle exposes a store path)
 - `<store_path>/approval_decisions.sqlite3` (durable decisions, created by the first hold)
+- `<store_path>/approval_decisions.executor.lock` (the decision executor's OS lock, created when an executor starts; holds no data)
 - `mobs/` (per-mob `<mob_id>.db` SQLite storage plus `realm_profiles.db`)
 
 `<store_path>/approvals.json` is not an eighth `RealmStorageProvider` durability domain.

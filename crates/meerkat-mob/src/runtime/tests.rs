@@ -34,6 +34,8 @@ mod member_wake_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod poisoned_scope_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod rotation_intent_rows;
@@ -2064,6 +2066,10 @@ impl TestRuntimeControlBarrier {
     }
 }
 
+/// The error a refused member-status view read answers
+/// ([`MockSessionService::refuse_status_view_reads`]).
+type StatusViewRefusal = Arc<dyn Fn() -> SessionError + Send + Sync>;
+
 /// How the mock's durable read of a session refuses.
 #[derive(Debug, Clone, Copy)]
 enum PersistedSessionReadRefusal {
@@ -2326,6 +2332,9 @@ struct MockSessionService {
     /// Sessions whose every durable read refuses, and how.
     persisted_session_read_refusals_for:
         std::sync::Mutex<HashMap<SessionId, PersistedSessionReadRefusal>>,
+    /// Sessions whose every member-status view read refuses, with the error
+    /// each refusal answers (built per read: a session error is not `Clone`).
+    status_view_refusals_for: std::sync::Mutex<HashMap<SessionId, StatusViewRefusal>>,
     /// Whether a durable fork commits its child with its source's build
     /// state, projected as the persistent service's fork projects it.
     fork_carries_source_build_state: AtomicBool,
@@ -2694,6 +2703,7 @@ impl MockSessionService {
             live_durable_source_observation_delay_ms: AtomicU64::new(0),
             fail_live_durable_source_observation: AtomicBool::new(false),
             persisted_session_read_refusals_for: std::sync::Mutex::new(HashMap::new()),
+            status_view_refusals_for: std::sync::Mutex::new(HashMap::new()),
             fork_carries_source_build_state: AtomicBool::new(false),
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
@@ -3624,6 +3634,39 @@ impl MockSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), refusal);
+    }
+
+    /// Make every member-status view read of `session_id`
+    /// ([`MobSessionService::observe_member_status_view`]) refuse with the
+    /// error `refusal` builds, as a store refuses a read of a session whose
+    /// live actor is gone. Each refused read counts as a durable-head read of
+    /// the session (`member_status_durable_head`).
+    #[cfg_attr(
+        any(not(feature = "runtime-adapter"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    fn refuse_status_view_reads(
+        &self,
+        session_id: &SessionId,
+        refusal: impl Fn() -> SessionError + Send + Sync + 'static,
+    ) {
+        self.status_view_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::new(refusal));
+    }
+
+    /// Let member-status view reads of `session_id` answer again after
+    /// [`Self::refuse_status_view_reads`].
+    #[cfg_attr(
+        any(not(feature = "runtime-adapter"), target_arch = "wasm32"),
+        allow(dead_code)
+    )]
+    fn answer_status_view_reads(&self, session_id: &SessionId) {
+        self.status_view_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     fn take_session_read_failure(&self, session_id: &SessionId) -> bool {
@@ -6048,6 +6091,18 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<crate::MemberStatusSessionView, SessionError> {
+        let refusal = self
+            .status_view_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned();
+        if let Some(refusal) = refusal {
+            self.count_durable_read(session_id, |reads| {
+                reads.member_status_durable_head += 1;
+            });
+            return Err(refusal());
+        }
         if self.durable_head_status_views.load(Ordering::Relaxed)
             && !self.sessions.read().await.contains_key(session_id)
         {
@@ -79551,6 +79606,7 @@ async fn test_member_status_completion_cancels_while_mailbox_is_full() {
                     execution_snapshot: None,
                     runtime_run_state: None,
                     preview_unavailable: None,
+                    store_refusal: None,
                     observed_at_ms: 1,
                 },
             )),
@@ -96757,7 +96813,7 @@ fn kickoff_notices_are_sent_as_typed_lifecycle_notices_not_requests() {
 
 #[tokio::test]
 async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let (handle, service) = create_test_mob(sample_definition()).await;
     let member = AgentIdentity::from("worker-kickoff-quiesce-retire");
     handle
         .spawn_with_options(
@@ -96774,6 +96830,15 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
     // exact shape the old shell cannot quiesce (its cancel path probes the
     // shell-side `autonomous_initial_turns` map instead of discharging the
     // machine obligation).
+    //
+    // The actor then starts the kickoff this live member owes
+    // (`start_owed_kickoffs`): it marks it starting, admits the kickoff input
+    // and waits on its run. Hold that run at the provider so the kickoff is
+    // still in flight when retire is admitted. A run that completes first
+    // resolves the kickoff Started, and retire then has nothing to cancel.
+    service.set_start_turn_delay_ms(600_000);
+    let mut turns_entered = service.start_turns_entered.subscribe();
+    let entered_before = *turns_entered.borrow_and_update();
     let dsl_member = crate::machines::mob_machine::AgentIdentity::from_domain(&member);
     handle
         .project_machine_input(
@@ -96784,6 +96849,13 @@ async fn test_retire_quiesces_machine_inflight_kickoff_without_shell_handle() {
         )
         .await
         .expect("mark kickoff pending");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        turns_entered.wait_for(|entered| *entered > entered_before),
+    )
+    .await
+    .expect("the owed kickoff run reaches the provider")
+    .expect("start-turn watch");
     handle
         .project_machine_input(
             crate::machines::mob_machine::MobMachineInput::KickoffMarkStarting {
@@ -101510,7 +101582,7 @@ fn placement_fixture_uses_local_mob_authority_types() {
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
             function_type_id(crate::runtime::bridge_protocol::seal_host_bind_bootstrap_proof),
         ],
-        "shared unit fixtures must not import the separately compiled self-dev-dependency",
+        "shared unit fixtures must use this crate's own types, not a separately compiled copy",
     );
 }
 /// A turn-driven placed spawn with an initial message settles its activation

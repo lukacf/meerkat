@@ -588,6 +588,35 @@ pub(super) mod legacy_observation_hold {
         stale[position].1 -= 1;
         observed.and_then(|(generation, legacy)| generation.next().map(|next| (next, legacy)))
     }
+
+    static NO_INTENT_ROW: Mutex<Vec<(AgentIdentity, usize)>> = Mutex::new(Vec::new());
+
+    /// Answer the next `count` observations of `identity` without a host's
+    /// intent row, as a member binding history read before the host
+    /// adopted the identity answers them.
+    pub(crate) fn force_no_intent_row(identity: &AgentIdentity, count: usize) {
+        NO_INTENT_ROW
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((identity.clone(), count));
+    }
+
+    /// The observation the adoption uses: `observed`, without its intent
+    /// row while a forced count for `identity` remains.
+    pub(crate) fn intent_row_observed(
+        identity: &AgentIdentity,
+        mut observed: crate::runtime::identity_entry::LegacyMemberObservation,
+    ) -> crate::runtime::identity_entry::LegacyMemberObservation {
+        let mut held = NO_INTENT_ROW.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(position) = held
+            .iter()
+            .position(|(identity_held, count)| identity_held == identity && *count > 0)
+        {
+            held[position].1 -= 1;
+            observed.intent_row = false;
+        }
+        observed
+    }
 }
 
 /// Test-only holds between the steps of a scoped retire, keyed by the root
@@ -1444,6 +1473,12 @@ pub struct MobMemberSnapshot {
     /// session to observe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_unavailable: Option<MemberPreviewUnavailable>,
+    /// The store's refusal of the member's session read, when it refuses
+    /// until its realm is reopened (`preview_unavailable` is then
+    /// [`MemberPreviewUnavailable::StoreRefused`]): what a wait on the member
+    /// ends with.
+    #[serde(skip)]
+    pub(crate) store_refusal: Option<meerkat_runtime::store::RuntimeStoreError>,
     /// Machine-recorded remote placement (owning host peer id) for this
     /// member (phase 7, ADJ-P7-2: produced from the `member_placement`
     /// machine fact at the status projection). `None` = local to the
@@ -1501,6 +1536,17 @@ pub enum MemberPreviewUnavailable {
     /// The member is retiring, and a status read of a retiring member is
     /// answered from the mob's machine state without reading its session.
     NotObservedWhileRetiring,
+    /// The store refuses to read the member's session until its realm is
+    /// reopened (a host store whose scope of the session, or whose realm,
+    /// is poisoned). The refusal is recorded: later status reads answer from
+    /// it without reading the session again, and a wait on the member ends
+    /// with it ([`MobHandle::wait_one`]).
+    ///
+    /// Its wire value is `read_failed`, the value a client that predates it
+    /// knows: it serializes as `read_failed`, and nothing deserializes into
+    /// it.
+    #[serde(rename(serialize = "read_failed"), skip_deserializing)]
+    StoreRefused,
 }
 
 /// Machine-owned liveness classification.
@@ -1552,6 +1598,30 @@ impl MobMemberSnapshot {
     ) -> Self {
         self.preview_unavailable = preview_unavailable;
         self
+    }
+
+    pub(crate) fn with_store_refusal(
+        mut self,
+        store_refusal: Option<meerkat_runtime::store::RuntimeStoreError>,
+    ) -> Self {
+        self.store_refusal = store_refusal;
+        self
+    }
+
+    /// The error a wait on this member ends with when it is not final and
+    /// the store refuses its session until the realm is reopened: no later
+    /// status read can observe it otherwise, so polling it would last until
+    /// the reopen. The member's lifecycle is MobMachine's and is left as it
+    /// is; this only ends the caller's wait, with the store's typed refusal.
+    fn store_refused_wait(&self) -> Option<MobError> {
+        if self.is_final {
+            return None;
+        }
+        self.store_refusal.clone().map(|refusal| {
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                refusal,
+            )))
+        })
     }
 
     /// Convenience accessor for the canonical member identity. Equivalent to
@@ -1751,7 +1821,9 @@ fn wire_preview_unavailable(
         MemberPreviewUnavailable::ObservationDeadline => {
             meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline
         }
-        MemberPreviewUnavailable::ReadFailed => {
+        // A store refusal until the realm reopens is a failed read on the
+        // wire, whose closed vocabulary has no value of its own for it.
+        MemberPreviewUnavailable::ReadFailed | MemberPreviewUnavailable::StoreRefused => {
             meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
         }
         MemberPreviewUnavailable::SessionAbsent => {
@@ -6677,7 +6749,7 @@ impl MobHandle {
     /// real process exit still destroys its process-global inproc registry,
     /// so same-process cold-restart fixtures must establish that boundary
     /// explicitly instead of racing the last `Arc` drop.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn retire_supervisor_transport_for_process_exit_test(&self) {
         self.supervisor_bridge.shutdown().await;
     }
@@ -10737,8 +10809,9 @@ impl MobHandle {
             return Ok((super::LegacyIdentityEntryAdoption::AlreadyAnEntry, None));
         }
         // The host names the identity: its member is observed as listed.
-        let (generation, observation, verdict) =
-            self.adopt_observed_legacy_member(identity, true).await?;
+        let (generation, observation, verdict) = self
+            .adopt_observed_legacy_member(identity, true, None)
+            .await?;
         let adoption = super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine answered the adoption of member '{identity}' with no answer: \
@@ -10761,14 +10834,19 @@ impl MobHandle {
     /// ([`super::identity_entry::LegacyMemberObservation`]: its legacy marks,
     /// whether a host's intent row names it, and `listed`, whether the
     /// roster or the host names the identity), and MobMachine decides the
-    /// verdict from that observation. An observation whose incarnation moved
-    /// before MobMachine decided is observed again, a bounded number of
-    /// times. The answer is MobMachine's verdict, with the generation of the
-    /// incarnation it decided on and the observation it decided from.
+    /// verdict from that observation. The first observation is read from
+    /// `history` when the caller read that history already (a complete
+    /// roster's pass over its unlisted members reads it once for all of
+    /// them), and from a fresh read otherwise. An observation whose
+    /// incarnation moved before MobMachine decided is observed again from a
+    /// fresh read, a bounded number of times. The answer is MobMachine's
+    /// verdict, with the generation of the incarnation it decided on and the
+    /// observation it decided from.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
         listed: bool,
+        history: Option<&super::MemberBindingHistory>,
     ) -> Result<
         (
             crate::ids::Generation,
@@ -10782,11 +10860,19 @@ impl MobHandle {
             .identity_member
             .as_ref()
             .ok_or(crate::store::MobStoreError::IdentityMemberAtomicPersistenceUnavailable)?;
+        let mut first = history;
         for _ in 0..LEGACY_ADOPTION_OBSERVATIONS {
-            let history = self
-                .member_binding_fold
-                .read(store.as_ref(), self.mob_id())
-                .await?;
+            let read;
+            let history = match first.take() {
+                Some(history) => history,
+                None => {
+                    read = self
+                        .member_binding_fold
+                        .read(store.as_ref(), self.mob_id())
+                        .await?;
+                    &read
+                }
+            };
             let observation = history.last_binding(identity).map(|binding| {
                 (
                     binding.generation(),
@@ -10795,6 +10881,13 @@ impl MobHandle {
             });
             #[cfg(test)]
             let observation = legacy_observation_hold::observed(identity, observation);
+            #[cfg(test)]
+            let observation = observation.map(|(generation, legacy)| {
+                (
+                    generation,
+                    legacy_observation_hold::intent_row_observed(identity, legacy),
+                )
+            });
             let (generation, observation) = match observation {
                 Some(observation) => observation,
                 // No incarnation of the identity since the latest mob reset
@@ -18098,19 +18191,27 @@ impl MobHandle {
                 // The poll uses only the member's status. A Dormant member's
                 // comes from the published machine state, so a poll reads no
                 // Dormant member's session.
-                let status = match self.dormant_member_status_from_machine_state(id) {
-                    Some((status, _)) => status,
-                    None => {
-                        self.member_status(&AgentIdentity::from(id.as_str()))
-                            .await?
-                            .status
-                    }
-                };
+                let (status, store_refused) =
+                    match self.dormant_member_status_from_machine_state(id) {
+                        Some((status, _)) => (status, None),
+                        None => {
+                            let snapshot = self
+                                .member_status(&AgentIdentity::from(id.as_str()))
+                                .await?;
+                            (snapshot.status, snapshot.store_refused_wait())
+                        }
+                    };
                 if !Self::kickoff_wait_is_satisfied(
                     entry,
                     status,
                     &kickoff_snapshot.pending_kickoff_member_ids,
                 ) {
+                    // A member whose session the store refuses until the
+                    // realm reopens cannot be observed resolving its
+                    // kickoff: the wait ends with the refusal.
+                    if let Some(refused) = store_refused {
+                        return Err(refused);
+                    }
                     pending_member_ids.push(id.clone());
                 }
             }
@@ -18294,6 +18395,9 @@ impl MobHandle {
         let snapshot = self
             .member_status(&AgentIdentity::from(agent_identity.as_str()))
             .await?;
+        if let Some(refused) = snapshot.store_refused_wait() {
+            return Err(refused);
+        }
         Ok(snapshot.is_final.then_some(snapshot))
     }
 
@@ -18661,7 +18765,10 @@ impl MobHandle {
     /// The wait polls only each member's status, and a Dormant member's comes
     /// from MobMachine with no read of its session. The returned snapshots are
     /// [`Self::member_status`]'s: one durable-head read per Dormant member per
-    /// call, for its preview and token count.
+    /// call, for its preview and token count. A member whose kickoff is not
+    /// resolved and whose session the store refuses until its realm is
+    /// reopened ends the wait with that refusal (as for [`Self::wait_one`]),
+    /// before its timeout.
     pub async fn wait_for_kickoff_complete(
         &self,
         timeout: Option<Duration>,
@@ -18751,7 +18858,12 @@ impl MobHandle {
 
     /// Wait for a specific member to reach a terminal state, then return its snapshot.
     ///
-    /// Polls canonical member classification until terminal.
+    /// Polls canonical member classification until terminal. A member that
+    /// is not terminal and whose session the store refuses until its realm
+    /// is reopened ([`MemberPreviewUnavailable::StoreRefused`]) ends the wait
+    /// with that refusal: a [`MobError::SessionError`] carrying the store's
+    /// typed refusal as its [`meerkat_core::service::SessionError::Store`]
+    /// source.
     pub async fn wait_one(&self, identity: &AgentIdentity) -> Result<MobMemberSnapshot, MobError> {
         self.wait_one_snapshot(identity).await
     }
@@ -18761,7 +18873,9 @@ impl MobHandle {
     /// One poller reads the members one after another, so a wait over many
     /// members issues one member-status read at a time instead of competing
     /// with itself for the mob's status observation capacity. Snapshots are
-    /// returned in `identities` order; the first failed poll ends the wait.
+    /// returned in `identities` order; the first failed poll ends the wait,
+    /// and so does a member whose session the store refuses until its realm
+    /// is reopened, with that refusal (as for [`Self::wait_one`]).
     pub async fn wait_all(
         &self,
         identities: &[AgentIdentity],
@@ -22323,6 +22437,33 @@ mod tests {
     use super::*;
     use crate::ids::Generation;
 
+    /// A store refusal of a member's session read is a typed marker for Rust
+    /// callers and the existing `read_failed` on every wire: the closed wire
+    /// enum maps it there, the domain marker serializes as it in snapshot
+    /// JSON, and `read_failed` reads back as `ReadFailed`, never as the new
+    /// marker. The refusal itself never leaves the process in a snapshot.
+    #[test]
+    fn a_store_refused_preview_is_read_failed_on_the_wire() {
+        assert_eq!(
+            wire_preview_unavailable(MemberPreviewUnavailable::StoreRefused),
+            meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        );
+        assert_eq!(
+            serde_json::to_value(MemberPreviewUnavailable::StoreRefused).expect("serialize"),
+            serde_json::json!("read_failed")
+        );
+        assert_eq!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("read_failed"))
+                .expect("deserialize"),
+            MemberPreviewUnavailable::ReadFailed
+        );
+        assert!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("store_refused"))
+                .is_err(),
+            "no wire value reads as the store refusal"
+        );
+    }
+
     /// A durable profile turns a spawn's default ephemeral intent into a
     /// durable identity keyed by the member's identity. An explicit durable
     /// intent keeps its own key, and an ordinary profile changes nothing.
@@ -22492,6 +22633,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         }
@@ -22535,6 +22677,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         };
@@ -22580,6 +22723,7 @@ mod tests {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: None,
             custody_deferred: None,
         };

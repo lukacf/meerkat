@@ -1465,7 +1465,9 @@ impl LegacyRosterMarks {
 /// member's incarnation ([`legacy_roster_member`]), whether the declared
 /// roster lists the identity (a host's own adoption names it, so it is
 /// listed), and whether a host's identity intent row names it, readable or
-/// not. MobMachine decides the adoption from it.
+/// not. MobMachine decides the adoption from it. The actor's adoption step
+/// reads the identity's intent row from the identity store again, so an
+/// adoption a host commits after this observation's read still names it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LegacyMemberObservation {
     pub(crate) marks: LegacyRosterMarks,

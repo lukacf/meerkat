@@ -908,11 +908,21 @@ impl From<meerkat_core::service::SessionControlError> for LiveResponsesOutcomeAp
 /// Whether a session error may clear without any change to the append: the
 /// runtime or session is momentarily busy, unavailable or held for recovery.
 /// Every other error (a deleted destination, a refused recovery, an
-/// unsupported or disabled capability, a fence conflict) settles once.
+/// unsupported or disabled capability, a fence conflict, a store that refuses
+/// the session until its realm is reopened) settles once.
 fn session_error_is_transient(error: &meerkat_core::service::SessionError) -> bool {
     use meerkat_core::service::SessionError;
     match error {
         SessionError::WithSettlementFailures { error, .. } => session_error_is_transient(error),
+        // A host store that refuses the session's scope until the realm is
+        // reopened answers every attempt the same: retrying cannot clear it.
+        SessionError::Store(source)
+            if source
+                .downcast_ref::<meerkat_runtime::store::RuntimeStoreError>()
+                .is_some_and(meerkat_runtime::store::RuntimeStoreError::is_refused_until_reopen) =>
+        {
+            false
+        }
         SessionError::RuntimeUnavailable { .. }
         | SessionError::Busy { .. }
         | SessionError::Store(_)
@@ -12018,6 +12028,32 @@ mod tests {
             }
         ));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A session whose host store scope refuses until the realm is reopened
+    /// settles an outcome append once: every retry would meet the same
+    /// refusal. A store that could not serve now stays transient.
+    #[test]
+    fn a_store_refusal_until_reopen_settles_the_append_once() {
+        use meerkat_core::service::SessionError;
+        use meerkat_runtime::store::{RefusedScope, RuntimeStoreError};
+
+        for refusal in [
+            RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::new("rt:refused", "the store refused a batch")],
+            },
+            RuntimeStoreError::RealmRefused {
+                cause: "fenced out".to_string(),
+            },
+        ] {
+            assert!(
+                !session_error_is_transient(&SessionError::Store(Box::new(refusal.clone()))),
+                "{refusal:?}"
+            );
+        }
+        assert!(session_error_is_transient(&SessionError::Store(Box::new(
+            RuntimeStoreError::Unavailable("down".to_string())
+        ))));
     }
 
     #[tokio::test]

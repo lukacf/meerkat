@@ -729,12 +729,18 @@ impl Fixture {
                 panic!("actual actor controller pin failed: {error:?}");
             });
 
-        meerkat_core::publish_token_lifecycle_acquired_for_identity(
+        // Native startup may briefly hold controller custody. The bounded owner
+        // helper retries only typed Busy within the setup deadline, as the
+        // sibling fixtures do; no input is submitted until this publication
+        // succeeds.
+        meerkat_core::publish_token_lifecycle_acquired_for_identity_within(
             &machine.generated_auth_lease_handle(),
             pin.selection().credential(),
             &meerkat_core::auth::PersistedTokens::api_key("synthetic-native-caller-fixture"),
+            tokio::time::Instant::now() + WAIT,
         )
-        .unwrap();
+        .await
+        .expect("fixture credential publishes within its setup deadline");
         let fault = Arc::new(DeliveryFault::new(mode));
         let bridge = observed::ObservedBridge {
             inner: MobSessionBridge::new(handle.observer()).with_controller_pin_source(service),

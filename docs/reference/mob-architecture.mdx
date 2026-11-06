@@ -440,7 +440,9 @@ complete roster also offers MobMachine each member it does not list whose
 spawn row carries a legacy mark, with the raw observation of its current
 incarnation read from the member binding history and the intent rows: its
 two legacy marks, that the roster does not list it, and whether a host's
-intent row names it, readable or not. MobMachine decides
+intent row names it, readable or not. The adoption's own step reads the
+identity's intent row again, so a host's adoption committed after the
+history read still names the member. MobMachine decides
 (`AdoptLegacyIdentityEntry`). A member with both legacy marks (the
 durable-identity continuity marker and the legacy label naming its own
 identity) that no host's intent row names is a legacy member. A local one

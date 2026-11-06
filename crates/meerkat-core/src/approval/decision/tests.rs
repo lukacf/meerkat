@@ -848,3 +848,23 @@ fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() 
         );
     }
 }
+
+#[test]
+fn the_in_memory_store_keeps_one_executor_claim_at_a_time() {
+    let store = InMemoryDecisionStore::new();
+    let claim = store.claim_executor().expect("the first claim");
+    assert_eq!(
+        store.claim_executor().map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "one claim at a time"
+    );
+    drop(claim);
+    let again = store
+        .claim_executor()
+        .expect("the claim ends when it drops");
+    assert_eq!(
+        store.claim_executor().map(|_| ()),
+        Err(ApprovalStoreError::Contended)
+    );
+    drop(again);
+}

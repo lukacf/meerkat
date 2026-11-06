@@ -173,6 +173,43 @@ describe("GatingInboxPanel recorded audit", () => {
       expect(view.getByTitle(action, { exact: true })).toBeTruthy();
     }
   });
+
+  // audit_tab_shows_decider_and_assurance
+  it("names who decided, as which approver, and with what assurance", () => {
+    const decided = {
+      ...evaluated, audit_id: "person-decision", pending_id: "pending-2", event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
+      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held", assurance: "person_authenticated" },
+    };
+    const device = {
+      ...decided, audit_id: "operator-decision", action_id: "stdio-check",
+      detail: { decision: "approve", approver_id: "ops-lead", deciding_principal: "ops-lead", approver_binding: "principal", assurance: "device_trusted" },
+    };
+    const unnamed = { ...decided, audit_id: "label-only", action_id: "older-record", detail: { decision: "approve", approver_id: "duty-approver" } };
+    const view = render(<GatingInboxPanel pending={[]} audit={[decided, device, unnamed]} onDecide={vi.fn()} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(row).getByText("Decided by: alice@example.test (as Release manager) - person authenticated")).toBeTruthy();
+    expect(row.textContent?.includes("Approver:")).toBe(false);
+    const operator = view.getByTitle("stdio-check", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(operator).getByText("Decided by: ops-lead - device trusted")).toBeTruthy();
+    const older = view.getByTitle("older-record", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(older).getByText("Approver: Duty approver")).toBeTruthy();
+    expect(older.textContent?.includes("Decided by:")).toBe(false);
+  });
+
+  it("says when the records are kept in the gateway's memory, without claiming a start time", () => {
+    const memory = "Kept in the gateway's memory: decisions from before a gateway restart may be missing.";
+    const view = render(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} auditRetention="process" />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    expect(view.getByTestId("gating-audit-retention").textContent).toBe(memory);
+    fireEvent.click(view.getByTestId("gating-tab:auto"));
+    expect(view.getByTestId("gating-audit-retention").textContent).toBe(memory);
+    expect(view.queryByText(/since the gateway started/i)).toBeNull();
+    view.rerender(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} auditRetention="durable" />);
+    expect(view.queryByTestId("gating-audit-retention")).toBeNull();
+    view.rerender(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} />);
+    expect(view.queryByTestId("gating-audit-retention")).toBeNull();
+  });
 });
 
 describe("GatingInboxPanel frame and requests without the shared resource", () => {

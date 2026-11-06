@@ -10860,7 +10860,12 @@ mod tests {
                 serde_json::json!({
                     "definition": {
                         "id": mob_id,
-                        "profiles": { "worker": { "model": "claude-sonnet-4-5" } }
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
                     }
                 }),
             ))

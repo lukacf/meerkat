@@ -65,6 +65,10 @@ struct HostState {
 pub(crate) struct Faults {
     /// Commits that apply and then answer `Indeterminate`.
     pub(crate) indeterminate_after_apply: u32,
+    /// Commits that answer `Indeterminate` without applying, before any
+    /// other commit fault: a call that failed after it was sent, of a batch
+    /// that never reached the store.
+    pub(crate) indeterminate_without_apply: u32,
     /// Commits that answer `Unavailable` without applying.
     pub(crate) unavailable: u32,
     /// Commits that answer `Conflict` without applying.
@@ -566,6 +570,12 @@ impl HostStore for TestHost {
         }
         let indeterminate = {
             let mut faults = self.faults();
+            if faults.indeterminate_without_apply > 0 {
+                faults.indeterminate_without_apply -= 1;
+                return Err(HostStoreError::Indeterminate(
+                    "injected, not applied".into(),
+                ));
+            }
             if faults.unavailable > 0 {
                 faults.unavailable -= 1;
                 return Err(HostStoreError::Unavailable("injected".into()));

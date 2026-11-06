@@ -3983,3 +3983,6 @@ mod settle_deadline;
 /// A grant at or below the token the writer holds breaks the store's token
 /// order.
 mod token_order;
+
+/// A batch unsettled past its retry budget is judged by the reopen alone.
+mod unsettled_budget;

@@ -218,9 +218,40 @@ struct FenceControl {
     stopped_at: StdMutex<Option<tokio::time::Instant>>,
     /// The realm, once it is open: a row waits on its own window.
     realm: OnceLock<Weak<SpiRealm>>,
+    /// The next host commit answers `Indeterminate`, having applied its
+    /// batch when `Some(true)` and nothing when `Some(false)`.
+    unsettle_next_commit: StdMutex<Option<bool>>,
+    /// The commit id of the batch the store keeps unsettled: every retry of
+    /// it answers `Unavailable` and every head load fails, so nothing the
+    /// writer asks settles it, until the row clears it.
+    unsettled_batch: StdMutex<Option<String>>,
 }
 
 impl FenceControl {
+    /// Keep the next host commit unsettled ([`Self::unsettle_next_commit`]).
+    fn unsettle_next_commit(&self, applied: bool) {
+        *self
+            .unsettle_next_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(applied);
+    }
+
+    /// The store answers again: it keeps no batch unsettled.
+    fn settle_nothing(&self) {
+        *self
+            .unsettled_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    /// Whether the store keeps a batch unsettled now.
+    fn keeps_a_batch_unsettled(&self) -> bool {
+        self.unsettled_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+    }
+
     /// Close the writer's window while the next host commit is in flight:
     /// the commit has passed the write path's own fence check when the host
     /// sees it, and the writer stops only from then on, so the commit lands
@@ -442,6 +473,11 @@ impl HostStore for FenceHost {
     }
 
     async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        if self.control.keeps_a_batch_unsettled() {
+            return Err(HostStoreError::Unavailable(
+                "the row keeps a batch unsettled".to_string(),
+            ));
+        }
         Ok(self
             .state()
             .scopes
@@ -552,6 +588,37 @@ impl HostStore for FenceHost {
                 Stop::TakenOver => self.control.take_over().await,
             }
         }
+        if self
+            .control
+            .unsettled_batch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_deref()
+            == Some(batch.commit_id().as_str())
+        {
+            return Err(HostStoreError::Unavailable(
+                "the row keeps this batch unsettled".to_string(),
+            ));
+        }
+        let unsettle = self
+            .control
+            .unsettle_next_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(applied) = unsettle {
+            *self
+                .control
+                .unsettled_batch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(batch.commit_id().as_str().to_string());
+            if !applied {
+                return Err(HostStoreError::Indeterminate(
+                    "the row's store applied nothing".to_string(),
+                ));
+            }
+        }
         let mut state = self.state();
         if state.landed.contains(batch.commit_id().as_str()) {
             return Ok(());
@@ -604,6 +671,11 @@ impl HostStore for FenceHost {
             stored.commit_id = batch.commit_id().clone();
         }
         state.landed.insert(batch.commit_id().as_str().to_string());
+        if unsettle == Some(true) {
+            return Err(HostStoreError::Indeterminate(
+                "the row's store applied the batch".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -628,6 +700,10 @@ enum ModelStep {
     Hold,
     /// Answer with text.
     Text,
+    /// Ask for one call of `probe` under this call id; when the second field
+    /// is set, the store keeps the next host commit, the round's first,
+    /// unsettled ([`FenceControl::unsettle_next_commit`]).
+    NamedTools(&'static str, Option<bool>),
 }
 
 /// Answers each request with the next step of its script, and with text past
@@ -670,6 +746,23 @@ impl LlmClient for FenceModel {
             return Box::pin(stream::once(std::future::pending::<
                 Result<LlmEvent, LlmError>,
             >()));
+        }
+        if let ModelStep::NamedTools(id, unsettle) = step {
+            if let Some(applied) = unsettle {
+                self.control.unsettle_next_commit(applied);
+            }
+            return Box::pin(stream::iter(vec![
+                Ok(LlmEvent::ToolCallComplete {
+                    id: id.into(),
+                    name: "probe".into(),
+                    args: json!({}),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate { usage }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                }),
+            ]));
         }
         if step == ModelStep::StopThenText {
             let control = Arc::clone(&self.control);
@@ -1245,36 +1338,44 @@ impl FenceRow {
     /// The session's committed transcript, one label per message after the
     /// system prompt.
     async fn committed_rows(&self) -> Vec<String> {
-        let session = self
-            .service
-            .load_authoritative_session(&self.session_id)
-            .await
-            .expect("read the committed session")
-            .expect("the session is committed");
-        session
-            .messages()
-            .iter()
-            .filter_map(|message| match message {
-                meerkat_core::Message::System(_) => None,
-                meerkat_core::Message::User(user) => Some(format!("user {}", user.text_content())),
-                meerkat_core::Message::BlockAssistant(assistant) => {
-                    Some(
-                        if assistant.blocks.iter().any(|block| {
-                            matches!(block, meerkat_core::AssistantBlock::ToolUse { .. })
-                        }) {
-                            "assistant tool use".to_string()
-                        } else {
-                            format!("assistant {}", assistant.text_blocks().collect::<String>())
-                        },
-                    )
-                }
-                meerkat_core::Message::ToolResults { .. } => Some("tool results".to_string()),
-                meerkat_core::Message::SystemNotice(notice) => {
-                    Some(format!("notice {:?}", notice.kind))
-                }
-            })
-            .collect()
+        committed_rows_of(&self.service, &self.session_id).await
     }
+}
+
+/// `session_id`'s committed transcript as `service` loads it, one label per
+/// message after the system prompt.
+async fn committed_rows_of(
+    service: &PersistentSessionService<FenceBuilder>,
+    session_id: &meerkat_core::SessionId,
+) -> Vec<String> {
+    let session = service
+        .load_authoritative_session(session_id)
+        .await
+        .expect("read the committed session")
+        .expect("the session is committed");
+    session
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            meerkat_core::Message::System(_) => None,
+            meerkat_core::Message::User(user) => Some(format!("user {}", user.text_content())),
+            meerkat_core::Message::BlockAssistant(assistant) => Some(
+                if assistant
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, meerkat_core::AssistantBlock::ToolUse { .. }))
+                {
+                    "assistant tool use".to_string()
+                } else {
+                    format!("assistant {}", assistant.text_blocks().collect::<String>())
+                },
+            ),
+            meerkat_core::Message::ToolResults { .. } => Some("tool results".to_string()),
+            meerkat_core::Message::SystemNotice(notice) => {
+                Some(format!("notice {:?}", notice.kind))
+            }
+        })
+        .collect()
 }
 
 /// Whether every input row reads a phase that is not terminal: the input is
@@ -2447,3 +2548,7 @@ async fn a_requeue_stop_suspends_a_facade_run_in_flight_for_the_next_start() {
         "the suspended run asks the model no more in this process"
     );
 }
+
+/// A round commit unsettled past its retry budget, the scope poison, a
+/// restart, and the run resuming at the next registration.
+mod unsettled_restart;

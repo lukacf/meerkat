@@ -5831,3 +5831,7 @@ async fn a_requeue_stop_keeps_a_governed_consent_notice_that_runs_and_spends_its
         "a second spend is refused"
     );
 }
+
+/// A governed run whose round commit stays unsettled past its retry budget
+/// on a host store realm, across a restart.
+mod unsettled_restart;

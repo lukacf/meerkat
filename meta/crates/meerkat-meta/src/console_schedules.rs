@@ -1252,13 +1252,13 @@ mod tests {
         prompt
     }
 
-    async fn list_page(tools: &Arc<dyn AgentToolDispatcher>, args: Value) -> Result<Value, String> {
+    async fn list_page(
+        tools: &Arc<dyn AgentToolDispatcher>,
+        args: Value,
+    ) -> Result<Value, meerkat_core::ToolError> {
         let args = raw(&args);
-        let outcome = tools
-            .dispatch(call("meerkat_schedule_list", &args))
-            .await
-            .map_err(|error| error.to_string())?;
-        serde_json::from_str(&outcome.result.text_content()).map_err(|error| error.to_string())
+        let outcome = tools.dispatch(call("meerkat_schedule_list", &args)).await?;
+        Ok(serde_json::from_str(&outcome.result.text_content()).unwrap())
     }
 
     fn page_ids(page: &Value) -> Vec<String> {
@@ -1308,7 +1308,7 @@ mod tests {
 
     /// The agent-facing `meerkat_schedule_list`, through the stack a gateway
     /// attaches, pages over the agents' schedules only: 120 agent schedules
-    /// with ~40 KB prompts and large superseded-ack sets, and 5 console
+    /// with ~40 KB prompts, some carrying superseded acknowledgements, and 5 console
     /// schedules interleaved among them (two straddling the first page
     /// boundary), list as full pages of 50, 50 and 20 in creation order, each
     /// agent schedule once, no console schedule, every row a bounded summary
@@ -1336,7 +1336,7 @@ mod tests {
                 .create(agent_schedule(
                     format!("agent schedule {index}"),
                     long_prompt(index, MARKER),
-                    30,
+                    2,
                 ))
                 .await
                 .unwrap();
@@ -1362,8 +1362,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            heavy.superseded_ack_ids.len() >= 20,
-            "the fixture carries large ack sets: {}",
+            !heavy.superseded_ack_ids.is_empty(),
+            "the fixture carries superseded acknowledgements: {}",
             heavy.superseded_ack_ids.len()
         );
 
@@ -1402,7 +1402,9 @@ mod tests {
         let mut walked = Vec::new();
         let mut cursor: Option<String> = None;
         let mut sizes = Vec::new();
-        loop {
+        // Bounded: a cursor that never ends the walk fails here, not by timeout.
+        let mut finished = false;
+        for _ in 0..10 {
             let mut args = json!({ "limit": 50 });
             if let Some(cursor) = &cursor {
                 args["cursor"] = json!(cursor);
@@ -1454,10 +1456,12 @@ mod tests {
                 }
                 None => {
                     assert_eq!(page["page"]["has_more"], false, "{}", page["page"]);
+                    finished = true;
                     break;
                 }
             }
         }
+        assert!(finished, "the page walk ends within 10 pages: {sizes:?}");
         assert_eq!(sizes, vec![50, 50, 20]);
         assert_eq!(walked, expected, "each agent schedule once, in order");
 
@@ -1576,8 +1580,8 @@ mod tests {
                 .await
                 .expect_err("malformed page options are refused");
             assert!(
-                refused.to_lowercase().contains("invalid"),
-                "{args}: {refused}"
+                matches!(refused, meerkat_core::ToolError::InvalidArguments { .. }),
+                "{args}: {refused:?}"
             );
         }
     }

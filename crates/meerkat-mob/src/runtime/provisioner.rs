@@ -1894,6 +1894,22 @@ pub trait MobProvisioner: Send + Sync {
             reason: "this provisioner serves no placed run-fenced stop bridge lane".to_string(),
         })
     }
+    /// Settle the run a LOCAL member's runtime retained, without resuming it
+    /// and without a model request, through the member session's
+    /// MeerkatMachine (`settle_retained_run`). A session with no runtime
+    /// registration in this process is `member_identity`'s
+    /// [`MobError::MemberSessionNotLive`]. Default = typed reject.
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        let _ = (member_ref, member_identity);
+        Err(MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            reason: "this provisioner serves no retained-run settle".to_string(),
+        })
+    }
     /// Level-triggered cancellation of one exact tracked placed input.
     /// Implementations must preserve the full residency fence and return only
     /// an authenticated, replay-stable host receipt; transport failure is
@@ -15905,6 +15921,33 @@ impl MobProvisioner for SessionBackend {
         meerkat_runtime::run_stop_wire::wire_run_stop_receipt(&receipt).map_err(MobError::Internal)
     }
 
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        let session_id = Self::require_session(member_ref, "settle retained run")?;
+        let Some(adapter) = &self.runtime_adapter else {
+            return Err(MobError::Internal(format!(
+                "settling the retained run of '{session_id}' requires MeerkatMachine runtime authority"
+            )));
+        };
+        match adapter.settle_retained_run(&session_id).await {
+            Ok(settlement) => Ok(settlement),
+            // No registration of the session in this process: the member's
+            // session has no live runtime here, and nothing wakes it.
+            Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            }) => Err(MobError::MemberSessionNotLive {
+                agent_identity: member_identity.clone(),
+                session_id,
+            }),
+            Err(error) => Err(MobError::Internal(format!(
+                "settling the retained run of '{session_id}' failed: {error}"
+            ))),
+        }
+    }
+
     async fn start_turn(
         &self,
         member_ref: &MemberRef,
@@ -19924,6 +19967,25 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
         self.session
             .stop_member_run(member_ref, expected_run_id, reason)
+            .await
+    }
+
+    async fn settle_member_retained_run(
+        &self,
+        member_ref: &MemberRef,
+        member_identity: &AgentIdentity,
+    ) -> Result<meerkat_runtime::RetainedRunSettlement, MobError> {
+        // A legacy unplaced peer-only member has no local runtime to settle.
+        if matches!(member_ref, MemberRef::BackendPeer { .. }) {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "a legacy peer-only member has no local runtime whose retained run \
+                         could be settled"
+                    .to_string(),
+            });
+        }
+        self.session
+            .settle_member_retained_run(member_ref, member_identity)
             .await
     }
 

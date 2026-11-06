@@ -32592,6 +32592,13 @@ impl MobActor {
                     self.handle_stop_member_run(agent_identity, run_id, reason, reply_tx)
                         .await;
                 }
+                MobCommand::SettleMemberRetainedRun {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    self.handle_settle_member_retained_run(agent_identity, reply_tx)
+                        .await;
+                }
                 MobCommand::MemberHistory {
                     agent_identity,
                     from_index,
@@ -42547,6 +42554,80 @@ impl MobActor {
                         .await
                 }
             };
+            let _ = reply_tx.send(result);
+        });
+    }
+
+    /// A host's settle of the run a local member's runtime retained: the run
+    /// a crash or a graceful stop left open, which the member's registration
+    /// kept and which has not resumed. The member runtime's machine decides
+    /// (`SettleRetainedRun`); see
+    /// [`MobHandle::settle_member_retained_run`](super::MobHandle::settle_member_retained_run).
+    /// A member the mob does not hold is `MemberNotFound`. A member not
+    /// materialized in this process (dormant, or waking) is
+    /// `MemberSessionNotLive`, and nothing wakes it: a wake while nothing
+    /// holds its run starts would resume the run. A placed member's runtime
+    /// lives on its member host (`UnsupportedForMode`). A member runtime that
+    /// needs a durability reload is `MemberReloadRequired`. The settle waits
+    /// for the run's settlement on a DETACHED task (ADJ-P4-12).
+    async fn handle_settle_member_retained_run(
+        &mut self,
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
+    ) {
+        let projection = self.machine_projection_for_identity(&agent_identity);
+        if projection.runtime_id.is_none() {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        }
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(&agent_identity).cloned()
+        };
+        let Some(entry) = entry else {
+            let _ = reply_tx.send(Err(MobError::MemberNotFound(agent_identity)));
+            return;
+        };
+        let placed = self
+            .dsl_authority
+            .state()
+            .member_placement
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(&agent_identity));
+        if placed {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "a placed member's retained run is settled on its member host".to_string(),
+            }));
+            return;
+        }
+        let Some(session_id) = entry.member_ref.bridge_session_id().cloned() else {
+            let _ = reply_tx.send(Err(MobError::UnsupportedForMode {
+                mode: entry.runtime_mode,
+                reason: "settling a retained run requires a session-backed member".to_string(),
+            }));
+            return;
+        };
+        if super::boot_plan::domain_member_is_unmaterialized(
+            self.dsl_authority.state(),
+            &agent_identity,
+        ) || !projection.live_runtime
+        {
+            let _ = reply_tx.send(Err(MobError::MemberSessionNotLive {
+                agent_identity,
+                session_id,
+            }));
+            return;
+        }
+        if let Err(error) = self.ensure_member_runtime_durability_ready(&entry).await {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
+        let provisioner = self.provisioner.clone();
+        let member_ref = entry.member_ref.clone();
+        self.actor_io_tasks.spawn(async move {
+            let result = provisioner
+                .settle_member_retained_run(&member_ref, &agent_identity)
+                .await;
             let _ = reply_tx.send(result);
         });
     }

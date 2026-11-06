@@ -2723,6 +2723,11 @@ struct PowerCutRuntimeStore {
     /// While set, every read of this runtime's machine lifecycle record
     /// answers that the store cannot serve it now.
     unavailable_lifecycle_reads: std::sync::Mutex<Option<meerkat_runtime::LogicalRuntimeId>>,
+    /// While set, the store answers the reads of delivery authorities (the
+    /// listing and the per-runtime load) from its inner store. Unset, it
+    /// cannot list them, as before, so a mob boot over it cannot tell which
+    /// members hold pending deliveries and materializes every member.
+    delivery_reads_forwarded: std::sync::atomic::AtomicBool,
 }
 
 /// Where a held boundary commit is.
@@ -2788,6 +2793,7 @@ impl PowerCutRuntimeStore {
             forward_hosting: std::sync::atomic::AtomicBool::new(false),
             hold_tail_recovery: std::sync::atomic::AtomicBool::new(false),
             unavailable_lifecycle_reads: std::sync::Mutex::new(None),
+            delivery_reads_forwarded: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2816,6 +2822,15 @@ impl PowerCutRuntimeStore {
     #[cfg(feature = "test-support")]
     fn forward_hosting_capability(&self) {
         self.forward_hosting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Answer the reads of delivery authorities from the inner store from now
+    /// on, so a mob boot over this store plans its members lazily, as over
+    /// the store itself, and a cold work-state read tells pending deliveries.
+    #[cfg(feature = "test-support")]
+    fn forward_delivery_reads(&self) {
+        self.delivery_reads_forwarded
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -2913,6 +2928,49 @@ impl meerkat_runtime::RuntimeStore for PowerCutRuntimeStore {
     ) -> Result<Vec<meerkat_runtime::LogicalRuntimeId>, meerkat_runtime::store::RuntimeStoreError>
     {
         meerkat_runtime::RuntimeStore::list_runtimes_with_recovery_work(&self.inner).await
+    }
+
+    // While forwarded (`Self::forward_delivery_reads`), the delivery reads a
+    // mob boot and a cold work-state read make answer from the wrapped store.
+    async fn list_runtime_delivery_authorities(
+        &self,
+    ) -> Result<
+        Vec<(
+            meerkat_runtime::LogicalRuntimeId,
+            meerkat_runtime::RuntimeDeliveryAuthorityRecord,
+        )>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        if self
+            .delivery_reads_forwarded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            meerkat_runtime::RuntimeStore::list_runtime_delivery_authorities(&self.inner).await
+        } else {
+            Err(meerkat_runtime::RuntimeStoreError::Unsupported(
+                "list_runtime_delivery_authorities".into(),
+            ))
+        }
+    }
+
+    async fn load_runtime_delivery_authority(
+        &self,
+        runtime_id: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<
+        Option<meerkat_runtime::RuntimeDeliveryAuthorityRecord>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        if self
+            .delivery_reads_forwarded
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            meerkat_runtime::RuntimeStore::load_runtime_delivery_authority(&self.inner, runtime_id)
+                .await
+        } else {
+            Err(meerkat_runtime::RuntimeStoreError::Unsupported(
+                "load_runtime_delivery_authority".into(),
+            ))
+        }
     }
 
     fn hosting_capability(&self) -> meerkat_runtime::HostingCapability {
@@ -13037,8 +13095,10 @@ async fn held_members_open_run_resumes_on_release(
 /// member `w-1` for its recovery (`HostRecovery`, staged before the start, as
 /// a host's Recover flow stages it): the start materializes `w-1` (it holds
 /// recovery work), its runtime loop parks on the hold, and no model request
-/// is made. Before the start, the host reads `w-1`'s session cold
-/// (`cold_before_start`), and the read registers nothing.
+/// is made. The store answers the start's delivery reads as the store itself
+/// does, so the start plans its members lazily. Before the start, the host
+/// reads `w-1`'s session cold (`cold_before_start`), and the read registers
+/// nothing.
 #[cfg(feature = "test-support")]
 struct HeldForRecovery {
     handle: MobHandle,
@@ -13051,9 +13111,11 @@ struct HeldForRecovery {
 #[cfg(feature = "test-support")]
 async fn start_held_for_recovery(
     paths: &Paths,
-    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    power_store: &Arc<PowerCutRuntimeStore>,
     run: &RequeuedMemberRun,
 ) -> HeldForRecovery {
+    power_store.forward_delivery_reads();
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
     let client = Arc::new(HoldingToolLoopClient::new(0));
     let service = requeue_service(paths, runtime_store, true, client.clone());
     let runtime = service
@@ -13121,10 +13183,10 @@ async fn start_held_for_recovery(
 async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request() {
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
     let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
-    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let held = start_held_for_recovery(&paths, &power_store, &run).await;
 
     assert_eq!(
         held.handle
@@ -13206,10 +13268,10 @@ async fn a_host_recover_settles_a_held_members_kept_run_without_a_model_request(
 async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
     let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
-    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let held = start_held_for_recovery(&paths, &power_store, &run).await;
 
     let nobody = AgentIdentity::from("nobody");
     let refused = held.handle.settle_member_retained_run(&nobody).await;
@@ -13224,9 +13286,17 @@ async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
         .resolve_bridge_session_id(&lead)
         .await
         .expect("the lead's session");
+    // The lead holds no work, so the lazy start left it dormant.
     assert!(
         held.handle.member_unmaterialized(&lead),
         "the start leaves the lead, which holds no work, dormant"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "the dormant lead's session is not registered"
     );
     let refused = held.handle.settle_member_retained_run(&lead).await;
     assert!(
@@ -13288,10 +13358,10 @@ async fn a_host_settle_retried_after_a_lost_reply_answers_not_retained() {
 
     let temp = tempfile::tempdir().expect("temp dir");
     let paths = Paths::new(temp.path());
-    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
-        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let power_store = Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = power_store.clone();
     let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
-    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let held = start_held_for_recovery(&paths, &power_store, &run).await;
     let kept_input = held
         .runtime
         .session_input_states(&run.w1_sid)

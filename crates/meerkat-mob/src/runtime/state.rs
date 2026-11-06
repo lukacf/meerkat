@@ -1803,6 +1803,14 @@ pub(super) enum MobCommand {
         reason: String,
         reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
     },
+    /// A host's settle of the run a local member's runtime retained, without
+    /// resuming it and without a model request: the member runtime's
+    /// machine decides (`SettleRetainedRun`). `Cancel`-scoped at chokepoint
+    /// (a); never wakes the member.
+    SettleMemberRetainedRun {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
+    },
     /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
     /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
     /// chokepoint (a). There is deliberately NO MobMachine input for the
@@ -2449,6 +2457,7 @@ impl MobCommand {
             Self::CompleteHostForkedParticipantSpawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HardCancelMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StopMemberRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SettleMemberRetainedRun { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveOpen { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveClose { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2707,6 +2716,7 @@ impl MobCommand {
             Self::ForceCancel { .. } => "ForceCancel",
             Self::HardCancelMember { .. } => "HardCancelMember",
             Self::StopMemberRun { .. } => "StopMemberRun",
+            Self::SettleMemberRetainedRun { .. } => "SettleMemberRetainedRun",
             Self::MemberHistory { .. } => "MemberHistory",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",

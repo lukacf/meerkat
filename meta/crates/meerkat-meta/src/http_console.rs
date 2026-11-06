@@ -10436,25 +10436,27 @@ impl ConsoleDecideRefusal {
     }
 }
 
-/// Test hook: holds a Console gating decide right before it takes the
-/// gating owner, until the test releases it.
+/// Test hook: holds a Console decision right before its last step (a
+/// gating decide before it takes the gating owner, a WorkGraph goal
+/// confirmation before its person is checked again), until the test
+/// releases it. Keyed by the pending id or the binding id.
 #[cfg(test)]
-pub(crate) mod gating_decide_holds {
+pub(crate) mod console_decide_holds {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex, PoisonError};
 
     use tokio::sync::Semaphore;
 
-    static HOLDS: Mutex<BTreeMap<String, GatingDecideHold>> = Mutex::new(BTreeMap::new());
+    static HOLDS: Mutex<BTreeMap<String, ConsoleDecideHold>> = Mutex::new(BTreeMap::new());
 
     /// A hold on the next decide of one pending id.
     #[derive(Clone)]
-    pub(crate) struct GatingDecideHold {
+    pub(crate) struct ConsoleDecideHold {
         reached: Arc<Semaphore>,
         release: Arc<Semaphore>,
     }
 
-    impl GatingDecideHold {
+    impl ConsoleDecideHold {
         /// Hold the next decide of `pending_id`.
         pub(crate) fn install(pending_id: &str) -> Self {
             let hold = Self {
@@ -13051,7 +13053,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
             #[cfg(test)]
-            gating_decide_holds::pass(pending_id).await;
+            console_decide_holds::pass(pending_id).await;
             let mut owner = module_runtime.lock().await;
             let request = GatingDecideRequest {
                 pending_id: pending_id.to_string(),

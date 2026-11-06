@@ -852,6 +852,8 @@ pub(crate) async fn handle_workgraph_method(
                 }
                 Some(value) => parse_confirm_evidence(value)?,
             };
+            #[cfg(test)]
+            crate::http_console::console_decide_holds::pass(&binding_id.to_string()).await;
             let request = GoalConfirmRequest {
                 binding_id,
                 realm_id: None,

@@ -1814,7 +1814,13 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    // Paused time: the five calls enter the escalation at the same virtual
+    // instant, so their per-call timeouts coincide. On the wall clock a
+    // loaded host staggers the spawns, and a call that entered a few
+    // milliseconds after the first still has that much budget left when the
+    // first times out, so it reaches the human too (a real behaviour, not
+    // the one this test pins).
+    #[tokio::test(start_paused = true)]
     async fn parallel_escalations_share_one_timeout_including_the_queue() {
         // Five calls escalate at once; the human answers none. Each call
         // waits for the serial lock and the answer inside one timeout, so
@@ -1824,7 +1830,7 @@ mod tests {
             (0..5).map(|_| Err(ClassifierError::Timeout)).collect(),
             timeout,
         );
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let ids = ["p1", "p2", "p3", "p4", "p5"];
         let tasks: Vec<_> = ids
             .iter()
@@ -1840,10 +1846,9 @@ mod tests {
                 }
             );
         }
-        // Five fresh timeouts would take at least five times `timeout`; the
-        // bound leaves room for a loaded test host without reaching that.
+        // Five fresh timeouts would take at least five times `timeout`.
         assert!(
-            started.elapsed() < timeout * 4,
+            started.elapsed() < timeout * 2,
             "queued escalations must not each get a fresh timeout: {:?}",
             started.elapsed()
         );

@@ -400,6 +400,10 @@ pub fn classify_recovered_create_failure(
 /// materializes successfully but before the apply task waits for the
 /// turn result. Surfaces wire their `update_peer_ingress_context`
 /// invocation here; surfaces compiled without `comms` pass a no-op.
+/// A surface may also take it as the signal that the session is built
+/// (the RPC `keep_alive` create waits on it), so its ordering is a
+/// contract: it fires only after a successful build, never after a
+/// failed one, and before the turn's result is handed on.
 pub type CommsContextRefreshFn = Arc<dyn Fn(SessionId) -> BoxFut<'static, ()> + Send + Sync>;
 
 /// Spawn the staged-session promotion task that reconstructs the live actor

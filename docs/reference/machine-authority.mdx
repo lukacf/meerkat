@@ -799,9 +799,10 @@ make seam-inventory
 make rmat-audit
 ```
 
-`make agent-gate` and CI run the relevant gates for normal development. Use the
-direct targets when you are touching the catalog, generated kernels, composition
-routes, or runtime bridge code.
+CI runs the relevant gates for normal development, and
+`node scripts/affected-tests.mjs` prints the regeneration, test and TLC
+commands a change needs locally. Use the direct targets when you are touching
+the catalog, generated kernels, composition routes, or runtime bridge code.
 
 ## See Also
 

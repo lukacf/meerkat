@@ -165,6 +165,21 @@ it cannot turn a denied request into a more privileged request of its own.
 Schedules retain their commissioning mandate. Console visibility and a signed-in
 provider account are not substitutes for those checks.
 
+Between agents in one process, Core carries the original requester itself. A
+comms delivery that governed work sends in process carries that work's origin:
+its requester, the sending agent, and every work it names. Core's peer binder
+(`OriginalRequesterPeerBinder`, which a host composition installs) binds the
+receiving work under that requester, with the sending agent as its ingress
+actor and every work of the sending work as a contributor. It takes only the
+receiving agent's own facts from the host (`PeerServiceBasis`): its basis for
+serving peers, its destination and its controller. Every operation of the
+receiving work is narrowed by the requester's current grant, at every hop, so
+the receiving agent's own access never widens what the requester may do. Core
+refuses any binder's binding of such a delivery that drops the requester, the
+sending agent or a work of the sending work. A delivery over a network carries
+no origin, and Core's binder refuses it (`origin_unverifiable`), as it refuses
+a sending work whose basis narrows nothing (`sender_basis_unbounded`).
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot

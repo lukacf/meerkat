@@ -4817,6 +4817,25 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Dispatch a canonical comms command with the origin of the governed
+    /// work that sends it, if any ([`crate::GovernedSendOrigin`]): an
+    /// in-process delivery carries it to its receiver unchanged, and a
+    /// delivery over a network carries none. A comms tool passes the origin
+    /// of its dispatch context's work, never one from its arguments. With no
+    /// origin this is [`Self::send`].
+    ///
+    /// The default sends `cmd` without the origin, so a receiver sees a
+    /// delivery from an ungoverned sender, which a binder that keeps the
+    /// original requester refuses (`origin_unverifiable`).
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        origin: Option<crate::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
+        let _ = origin;
+        self.send(cmd).await
+    }
+
     #[doc(hidden)]
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {

@@ -492,7 +492,7 @@ make build
 make check
 make lint
 make test
-make agent-gate
+node scripts/affected-tests.mjs --run   # the tests your change affects
 ```
 
 Use the repository wrapper instead of bare `cargo` for targeted work. It keeps

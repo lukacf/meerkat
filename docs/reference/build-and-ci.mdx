@@ -20,8 +20,11 @@ make build
 make check
 make lint
 make test
-make agent-gate
+node scripts/affected-tests.mjs --run
 ```
+
+`scripts/affected-tests.mjs` selects the tests a change affects with the CI
+planner; without `--run` it prints the commands instead of running them.
 
 Avoid raw `cargo` for normal repo work. When you need targeted Cargo commands,
 use `./scripts/repo-cargo` so output roots and multi-agent work stay isolated.

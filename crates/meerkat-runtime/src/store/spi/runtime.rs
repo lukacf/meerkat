@@ -5,7 +5,9 @@
 //! ([`InMemoryRuntimeStore`], WholeBlobV1) under the locks of the scopes
 //! its arguments name, inside a change capture ([`journal::capture`]):
 //!
-//! 1. take the realm gate shared (cross-scope reads take it exclusive);
+//! 1. take the realm gate shared (cross-scope reads take it exclusive,
+//!    waiting outside its queue while a commit settles slowly, see
+//!    `SpiRuntimeStore::exclusive_gate`);
 //! 2. a mutation checks the self-fence first ([`SpiRealm::ensure_lease`]),
 //!    so a writer past its window changes nothing;
 //! 3. lock the named scopes in order, refuse poisoned ones, and load a body
@@ -23,6 +25,16 @@
 //! Which scopes each method names is written beside it; the capture, not the
 //! list, decides what is committed, and a touch outside the list is a typed
 //! refusal.
+//!
+//! **Store-wide reads** answer from memory under the realm gate held
+//! exclusive (no commit in flight). Each depends only on the scope families
+//! it reads, so a poisoned scope of another family (a mob event log, a Meta
+//! document) refuses none of them. Where a read enumerates the runtimes, a
+//! poisoned runtime is never left out: the recovery scan lists it as holding
+//! work, the delivery authority listing per runtime names it unavailable,
+//! and the reads that cannot answer for it (the session catalog listing,
+//! the controller custody, the delivery authority listing as a whole)
+//! refuse typed while a runtime scope is poisoned.
 //!
 //! **One call, one batch.** Every change one in-memory call makes to a
 //! runtime lands in the same host batch. In particular a run boundary commit
@@ -51,7 +63,8 @@ use tokio::sync::RwLock;
 
 use super::SpiError;
 use super::realm::{
-    ArmedScopes, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId, ScopeState, SpiRealm,
+    ArmedScopes, PoisonedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId,
+    ScopeState, SpiRealm,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
@@ -71,12 +84,17 @@ use crate::store::{
     MachineLifecycleExpectedVersion, MachineLifecycleObservation, PreparedRecoveryInputSnapshot,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
     PreparedWholeBlobSnapshotCas, RecoveryInputSetRevision, RecoveryInputStateMutation,
-    RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
-    RuntimeSessionAuthority, RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost,
-    RuntimeSessionCatalogEntry, RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError,
-    RuntimeStoreWriteFence, SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority,
+    RefusedScope, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
+    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
+    RuntimeSessionAuthorityOps, RuntimeSessionAuthorityReadCost, RuntimeSessionCatalogEntry,
+    RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
+    SerializedSessionSnapshot, UnavailableRuntime, WholeBlobProvisionalTailAuthority,
     WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority,
 };
+
+/// How often a cross-scope read waiting outside the gate's queue for a slow
+/// settle tries the gate again ([`SpiRuntimeStore::exclusive_gate`]).
+const SLOW_SETTLE_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// One runtime: a session scope. Its head pins the catalog entry, the
 /// machine lifecycle, the delivery authority and the boot facts; its rows
@@ -650,17 +668,98 @@ impl SpiRuntimeStore {
         result
     }
 
-    /// A cross-scope read: exclusive gate (no commit in flight), and
-    /// refused while any scope is poisoned.
-    async fn cross_scope_read<T, F>(&self, op: F) -> Result<T, RuntimeStoreError>
+    /// Take the gate exclusive for a cross-scope read without holding back
+    /// every other call behind a slow settle.
+    ///
+    /// The gate is a first-in-first-out lock: an exclusive waiter in its
+    /// queue lets no new shared holder in, and a call holds the gate shared
+    /// until its batch settles, for as long as the commit retry budget. So
+    /// the read takes the gate at once when it is free. While no commit
+    /// settles slowly ([`SpiRealm::slow_settles`]) it queues as before, and
+    /// leaves the queue if one turns slow meanwhile. While one does, it waits
+    /// outside the queue and tries again whenever the count changes, and
+    /// every [`SLOW_SETTLE_RETRY`], since a slow settle of another adapter
+    /// on the realm does not hold this gate. The read still runs only with
+    /// the gate exclusive: no call is between its change of memory and its
+    /// settle, so it never reads a batch whose outcome is unknown.
+    async fn exclusive_gate(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        let mut slow = self.realm.slow_settles();
+        loop {
+            if let Ok(gate) = self.gate.try_write() {
+                return gate;
+            }
+            if *slow.borrow_and_update() == 0 {
+                tokio::select! {
+                    biased;
+                    gate = self.gate.write() => return gate,
+                    // A settle turned slow: leave the queue. The watch's
+                    // guard stays inside this future (it is not `Send`).
+                    gone = async { slow.wait_for(|count| *count > 0).await.is_err() } => {
+                        if gone {
+                            return self.gate.write().await;
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    changed = slow.changed() => {
+                        if changed.is_err() {
+                            return self.gate.write().await;
+                        }
+                    }
+                    () = tokio::time::sleep(SLOW_SETTLE_RETRY) => {}
+                }
+            }
+        }
+    }
+
+    /// A cross-scope read of the memory of `families`: exclusive gate (no
+    /// commit in flight), and refused typed while the realm, or a scope of
+    /// one of those families, is poisoned
+    /// ([`SpiRealm::check_cross_scope_read_of`]).
+    async fn cross_scope_read<T, F>(
+        &self,
+        families: &[ScopeFamily],
+        op: F,
+    ) -> Result<T, RuntimeStoreError>
     where
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
     {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
-            .check_cross_scope_read()
+            .check_cross_scope_read_of(families)
             .map_err(SpiError::into_read)?;
+        Self::read_memory(op).await
+    }
+
+    /// A cross-scope read of the runtimes that answers per runtime:
+    /// exclusive gate (no commit in flight), refused only while the realm is
+    /// poisoned, and answered with the poisoned runtime scopes, read under
+    /// the same gate. The caller answers each poisoned runtime fail closed:
+    /// its memory may differ from the host, so what memory says of it is
+    /// never the answer, and it is never left out.
+    async fn cross_scope_read_per_runtime<T, F>(
+        &self,
+        op: F,
+    ) -> Result<(T, Vec<PoisonedScope>), RuntimeStoreError>
+    where
+        F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
+        T: Send,
+    {
+        let _gate = self.exclusive_gate().await;
+        self.realm.check_realm().map_err(SpiError::into_read)?;
+        let poisoned = self.realm.poisoned_scopes_of(RUNTIME_FAMILY);
+        let answer = Self::read_memory(op).await?;
+        Ok((answer, poisoned))
+    }
+
+    /// Run a read of memory, refused when it changed the store.
+    async fn read_memory<T, F>(op: F) -> Result<T, RuntimeStoreError>
+    where
+        F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
+        T: Send,
+    {
         let (result, touches) = journal::capture(op).await;
         if !(touches.whole.is_empty() && touches.entries.is_empty()) {
             return Err(
@@ -990,12 +1089,16 @@ impl crate::store::RuntimeStoreControllerCustody for SpiControllerCustody<'_> {
 
 #[async_trait::async_trait]
 impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
+    /// The in-memory custody under the realm gate held exclusive. A
+    /// controller visits every runtime, so the custody refuses typed while
+    /// any runtime scope is poisoned; a poisoned scope of another family
+    /// does not refuse it.
     fn try_controller_mutation_custody<'a>(
         &'a self,
         claim: &'a crate::store::RuntimeStoreExecutionClaim,
     ) -> Result<Box<dyn crate::store::RuntimeStoreControllerCustody + 'a>, RuntimeStoreError> {
         self.realm
-            .check_cross_scope_read()
+            .check_cross_scope_read_of(&[RUNTIME_FAMILY])
             .map_err(SpiError::into_write)?;
         let gate = self.gate.try_write().map_err(|_| {
             RuntimeStoreError::WriteFailed("controller administration memory writer is busy".into())
@@ -1166,11 +1269,16 @@ impl RuntimeSessionAuthorityOps for SpiRuntimeStore {
         self.call(Mode::ReadPinned, vec![runtime_id_scope(runtime_id)], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::load_runtime_session_catalog_entry(&self.memory, runtime_id)).await
     }
 
+    /// Answered from memory as a cross-scope read of the runtimes. A poisoned
+    /// runtime's catalog entry cannot be trusted and leaving it out would
+    /// read as a deleted session, so the listing refuses typed while any
+    /// runtime scope is poisoned, naming them; a poisoned scope of another
+    /// family does not refuse it.
     async fn list_runtime_session_catalog_entries(
         &self,
         filter: meerkat_core::SessionFilter,
     ) -> Result<Vec<crate::store::RuntimeSessionCatalogEntry>, RuntimeStoreError> {
-        self.cross_scope_read(<InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::list_runtime_session_catalog_entries(&self.memory, filter)).await
+        self.cross_scope_read(&[RUNTIME_FAMILY], <InMemoryRuntimeStore as RuntimeSessionAuthorityOps>::list_runtime_session_catalog_entries(&self.memory, filter)).await
     }
 
     async fn load_committed_whole_blob_bytes(
@@ -1403,17 +1511,52 @@ impl RuntimeStore for SpiRuntimeStore {
         self.call(Mode::Mutate, vec![runtime_id_scope(runtime_id), key_binding_scope(&binding.owner, &binding.key)], <InMemoryRuntimeStore as RuntimeStore>::compare_and_swap_runtime_delivery_authority_with_key_binding(&self.memory, runtime_id, expected_revision, replacement, inserted_delivery, binding)).await
     }
 
+    /// Answered from memory as a cross-scope read of the runtimes: refused
+    /// typed while any runtime scope is poisoned, whose record cannot be
+    /// trusted. [`Self::list_runtime_delivery_authorities_or_unavailable`]
+    /// answers the others.
     async fn list_runtime_delivery_authorities(
         &self,
     ) -> Result<Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>, RuntimeStoreError> {
         self.cross_scope_read(
+            &[RUNTIME_FAMILY],
             <InMemoryRuntimeStore as RuntimeStore>::list_runtime_delivery_authorities(&self.memory),
         )
         .await
     }
 
+    /// Answered from memory as a cross-scope read of the runtimes, refused
+    /// only while the realm is poisoned: the record of every healthy
+    /// runtime, and every poisoned runtime as unavailable, whether or not
+    /// its memory holds a record (the batch that poisoned it may have
+    /// written or removed one).
+    async fn list_runtime_delivery_authorities_or_unavailable(
+        &self,
+    ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
+        let (mut records, poisoned) = self
+            .cross_scope_read_per_runtime(
+                <InMemoryRuntimeStore as RuntimeStore>::list_runtime_delivery_authorities(
+                    &self.memory,
+                ),
+            )
+            .await?;
+        let unavailable: HashSet<&str> =
+            poisoned.iter().map(|scope| scope.id.key.as_str()).collect();
+        records.retain(|(runtime_id, _)| !unavailable.contains(runtime_id.0.as_str()));
+        let unavailable = poisoned
+            .into_iter()
+            .map(|scope| {
+                UnavailableRuntime::new(
+                    LogicalRuntimeId::new(scope.id.key.clone()),
+                    RefusedScope::new(scope.id.to_string(), scope.cause),
+                )
+            })
+            .collect();
+        Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable))
+    }
+
     /// Answered from memory, with no host read, as a cross-scope read (no
-    /// commit in flight, refused while a scope is poisoned).
+    /// commit in flight), refused only while the realm is poisoned.
     ///
     /// The answer is complete. The open imported every runtime's pinned
     /// entries, its catalog entry and its lifecycle among them, and loaded
@@ -1428,11 +1571,18 @@ impl RuntimeStore for SpiRuntimeStore {
     /// head committed before then may leave such work out, so its runtime
     /// is listed as holding work (fail closed) until that commit: the open
     /// recorded every such head it did not load.
+    ///
+    /// A poisoned runtime is listed as holding work too, whatever its memory
+    /// says: the batch that poisoned it may have changed its facts in memory
+    /// without the host, so they cannot be trusted either way, and leaving it
+    /// out would read as a runtime with nothing to recover. Every other
+    /// runtime answers from memory, so one poisoned scope never turns the
+    /// scan into a refusal.
     async fn list_runtimes_with_recovery_work(
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
-        let mut listed = self
-            .cross_scope_read(
+        let (mut listed, poisoned) = self
+            .cross_scope_read_per_runtime(
                 <InMemoryRuntimeStore as RuntimeStore>::list_runtimes_with_recovery_work(
                     &self.memory,
                 ),
@@ -1444,13 +1594,12 @@ impl RuntimeStore for SpiRuntimeStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let present: HashSet<String> = listed.iter().map(|runtime| runtime.0.clone()).collect();
-        let mut extra: Vec<LogicalRuntimeId> = unfolded
+        let extra: std::collections::BTreeSet<String> = unfolded
             .into_iter()
+            .chain(poisoned.into_iter().map(|scope| scope.id.key))
             .filter(|runtime| !present.contains(runtime))
-            .map(LogicalRuntimeId)
             .collect();
-        extra.sort_by(|a, b| a.0.cmp(&b.0));
-        listed.extend(extra);
+        listed.extend(extra.into_iter().map(LogicalRuntimeId));
         Ok(listed)
     }
 
@@ -2154,10 +2303,12 @@ impl RuntimeStore for SpiRuntimeStore {
         Ok(lock_records(&self.mob_host).bindings.get(mob_id).cloned())
     }
 
+    /// Every mob's binding record, read under the realm gate held exclusive:
+    /// refused typed only while a binding record scope is poisoned.
     async fn list_mob_host_bindings(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
-            .check_cross_scope_read()
+            .check_cross_scope_read_of(&[MOB_HOST_BINDING_FAMILY])
             .map_err(SpiError::into_read)?;
         Ok(lock_records(&self.mob_host)
             .bindings
@@ -2257,10 +2408,13 @@ impl RuntimeStore for SpiRuntimeStore {
             .cloned())
     }
 
+    /// Every mob's revocation receipt, read under the realm gate held
+    /// exclusive: refused typed only while a revocation record scope is
+    /// poisoned.
     async fn list_mob_host_revocations(&self) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
-        let _gate = self.gate.write().await;
+        let _gate = self.exclusive_gate().await;
         self.realm
-            .check_cross_scope_read()
+            .check_cross_scope_read_of(&[MOB_HOST_REVOCATION_FAMILY])
             .map_err(SpiError::into_read)?;
         Ok(lock_records(&self.mob_host)
             .revocations

@@ -1010,6 +1010,8 @@ moves to the fresh session:
   session's transcript keeps that round and, once the hard cancel ended the
   run, closes with Core's notice that it was interrupted and its input not
   requeued; a run that committed nothing leaves nothing in the transcript.
+  A run that reached its boundary keeps what it committed there, its final
+  reply included, although its input reads `cancelled`.
 - **Every input still queued** on the member (a send, a dispatch, an admitted
   keyed send, a peer message or reply, a scheduled turn) is cancelled by the
   retirement before the runtime starts it, and none moves to the fresh

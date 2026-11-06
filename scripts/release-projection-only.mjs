@@ -5,7 +5,7 @@
 //
 // Exit status: 0 projection only, 1 not a projection (or not provably one),
 // 2 classification error. One implementation serves the pre-push hooks
-// (scripts/pre-push-unit.sh, pre-push-ratchets.sh, pre-push-machines.sh) and
+// (scripts/pre-push-unit.sh and pre-push-machines.sh) and
 // CI (scripts/ci-cargo-lanes.mjs and scripts/ci-release-evidence.mjs, which
 // the CI gate and the release workflow's require_ci_green run from the
 // parent commit's tree), so the hook and CI accept exactly the same diffs.

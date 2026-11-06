@@ -158,11 +158,26 @@ of a large value are settled the same way.
 A commit that does not settle within its budget, or ends in another error,
 fails the call that made it with a write error, and every scope the batch
 would have changed is poisoned; `FencedOut` poisons the whole realm. A
-poisoned scope refuses every later call on it, reads included, and calls
-that read across scopes, such as listings, refuse while any scope is
-poisoned; calls on other scopes keep serving. Only opening the realm again
-lifts the poison: the next open loads what your store holds, so a batch that
-did land after all is part of the realm, and one that did not is not.
+poisoned scope refuses every later call on it, reads included, with a typed
+refusal (`RuntimeStoreError::ScopeRefused`, naming the scope and its cause;
+`RealmRefused` for a poisoned realm) that answers the same until the realm is
+opened again, so a caller never retries it as an outage. Calls on other
+scopes keep serving. Only opening the realm again lifts the poison: the next
+open loads what your store holds, so a batch that did land after all is part
+of the realm, and one that did not is not.
+
+A call that reads across scopes, such as a listing, depends only on the
+scope families it reads: a poisoned scope of another family (a mob's event
+log, a Meta document) refuses none of them. Where a read enumerates the
+sessions' runtimes, a poisoned runtime is answered fail closed and never
+left out: the recovery-work scan lists it as holding work, and the delivery
+authority listing per runtime
+(`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`) names it
+unavailable, so a mob boot stays lazy for every other member and the
+delivery owner drains every other runtime. The reads that cannot answer for
+a poisoned runtime refuse typed while one exists: the session catalog listing
+(`sessions/list`), the controller custody of governed administration, and the
+delivery backlog total.
 
 ## Obligations
 
@@ -292,6 +307,17 @@ retry it, and poisons nothing. The call that made it waits for its answer,
 later calls on the scopes it holds wait for those scopes, and a run waits
 for its round commit, since the runtime store over a host store declares no
 commit outcome deadline (`RuntimeStore::commit_outcome_deadline` is `None`).
+
+Core also uses the longest commit to tell a slow commit: one that met an
+unknown or unavailable answer, or whose first call has run longer than the
+longest commit, until it settles. Any commit on the realm counts, including
+the mob store's and those of other layers that share the realm. A read of
+the runtime store across sessions (a listing, the delivery total) waits
+until no commit it could see is in flight, so it never reads a batch that
+has not settled. While a commit settles slowly, such a read waits without
+holding back the other sessions' calls: it takes the store at a moment when
+no call holds it. Under a sustained partial outage, with slow commits
+overlapping, that wait can last several retry budgets.
 
 ### Core's Writer Rules
 

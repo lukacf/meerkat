@@ -149,7 +149,7 @@ Meerkat favors boring, repeatable commands:
 make check
 make lint
 make test
-make agent-gate
+node scripts/affected-tests.mjs --run
 ```
 
 Cargo remains the default backend. BuildBuddy accelerates the same lanes when

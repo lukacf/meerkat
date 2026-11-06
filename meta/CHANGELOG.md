@@ -30,6 +30,18 @@ each package is accepted only on evidence for that exact package, and the
   `policy-v1:sha256:<manifest digest>`, and an activation bound in the
   earlier form is not current.
 
+- A host store realm's readiness probe stays ready while only scopes are
+  poisoned: `HostStoreReadiness::is_ready()` is false for a poisoned realm
+  (a lost fence), a restored member whose comms identity is missing on this
+  host, or a member Core restored broken, and no longer for a poisoned scope
+  alone. A probe that restarted the process whenever `is_ready()` was false
+  no longer restarts it for one poisoned member or document. A host that
+  restarts on a scope poison reads `scope_poisoned` (unchanged, true while
+  any scope is poisoned), or the new `poisoned_scopes`, and restarts at a
+  planned point, after a drain, to recover those members and documents. A
+  probe that must keep the earlier rule checks `readiness.is_ready() &&
+  !readiness.scope_poisoned`.
+
 ### Added
 
 - The storage doctor (`meta/storage/doctor`, and the console's read method)
@@ -66,6 +78,12 @@ each package is accepted only on evidence for that exact package, and the
   store. The text report prints the same counts. The format stays
   `meerkat-meta.identity-census` version 1: the field is additive.
 
+- `HostStoreReadiness::poisoned_scopes`: every poisoned scope of a host
+  store realm with its cause (`PoisonedScope`, re-exported from
+  `meerkat_meta::host_store`). A session's runtime scope is
+  `rt:<runtime id>`; a mob's scopes are tagged `mb`, `mbi`, `mbr` and `mbs`;
+  Meta's documents `mx` and its mob announcements `mxa`.
+
 ### Changed
 
 - Forge 0.3.1 selects Meta 0.9.10 with Toolkit 0.9.10 and the Connect 0.9.10
@@ -84,6 +102,13 @@ each package is accepted only on evidence for that exact package, and the
   (`install_gateway.py`). Both refuse a version that is not exactly
   major.minor.patch. The archive and checksum names are unchanged, and an
   install receipt keeps its fields.
+
+- `HostStoreReadiness::is_ready()` no longer counts a scope-only poison: the
+  realm keeps serving every call that does not need a poisoned scope (Core
+  0.9.10 answers store-wide reads per scope family), so the probe stays ready
+  and names the scopes in `poisoned_scopes`. A poisoned realm still makes it
+  not ready. Hosts that restart on a scope poison read `scope_poisoned`,
+  whose meaning is unchanged: true while any scope is poisoned. See Upgrade.
 
 ### Fixed
 

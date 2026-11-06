@@ -34,6 +34,7 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "topology.cross_authority": "Connect agents across teams",
   "mobpack.author": "Author team packages",
   "mobpack.deploy": "Deploy team packages",
+  "audit.view": "Read the console audit log",
   "access.admin": "Administer console access",
   "extension.read": "Read extension state",
   "extension.edit": "Edit extension state",
@@ -55,6 +56,7 @@ const FAMILY_WORDS: Readonly<Record<string, string>> = {
   topology: "topology",
   mobpack: "team package",
   access: "console access",
+  audit: "audit",
   extension: "extension",
 };
 

@@ -1591,6 +1591,72 @@ async fn settling_detached_writes_lands_the_cursor_writes_in_flight() {
     );
 }
 
+/// Realm documents (the console audit log's pages, a runtime's kept gating
+/// state) are documents of the host store realm: written, listed by prefix
+/// and removed, and read again after a failover.
+#[tokio::test]
+async fn realm_documents_survive_a_failover() {
+    let fixture = Fixture::new();
+    {
+        let provider = fixture.open(&fixture.process()).await.expect("open");
+        let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+        assert_eq!(
+            metadata.realm_document_retention(),
+            Some(crate::runtime::RecordRetention::Durable)
+        );
+        for (key, document) in [
+            ("console-audit/page/1", "one"),
+            ("console-audit/page/2", "two"),
+            ("gating/state", "gating"),
+        ] {
+            metadata
+                .set_realm_document(key, Some(document))
+                .await
+                .expect("write a realm document");
+        }
+        metadata
+            .set_realm_document("console-audit/page/2", None)
+            .await
+            .expect("remove a realm document");
+    }
+
+    fixture.lapse();
+    let provider = fixture.open(&fixture.process()).await.expect("failover");
+    let metadata = SpiMetadataStore::new(provider.realm.documents().clone());
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/1")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("one")
+    );
+    assert_eq!(
+        metadata
+            .realm_document("console-audit/page/2")
+            .await
+            .expect("read"),
+        None
+    );
+    let keys = metadata
+        .realm_document_keys("console-audit/")
+        .await
+        .expect("list");
+    assert!(
+        keys.contains(&"console-audit/page/1".to_string()),
+        "{keys:?}"
+    );
+    assert!(!keys.contains(&"gating/state".to_string()), "{keys:?}");
+    assert_eq!(
+        metadata
+            .realm_document("gating/state")
+            .await
+            .expect("read")
+            .as_deref(),
+        Some("gating")
+    );
+}
+
 /// The host's fence timing shows in the storage census, and a restart waits
 /// at most its lease.
 #[tokio::test]

@@ -80,6 +80,10 @@ pub const ACTION_TOPOLOGY_CROSS_AUTHORITY: &str = "topology.cross_authority";
 pub const ACTION_MOBPACK_AUTHOR: &str = "mobpack.author";
 /// Execute a mobpack deploy on the host (`rkat mob run`).
 pub const ACTION_MOBPACK_DEPLOY: &str = "mobpack.deploy";
+/// Read the console audit log (`meta/console/audit`): who made each console
+/// change, when, and how it ended. Kept apart from `access.admin` so a
+/// reviewer can read the log without editing access.
+pub const ACTION_AUDIT_VIEW: &str = "audit.view";
 /// Read and mutate the access-control configuration itself.
 pub const ACTION_ACCESS_ADMIN: &str = "access.admin";
 
@@ -144,6 +148,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_TOPOLOGY_CROSS_AUTHORITY,
     ACTION_MOBPACK_AUTHOR,
     ACTION_MOBPACK_DEPLOY,
+    ACTION_AUDIT_VIEW,
     ACTION_ACCESS_ADMIN,
 ];
 

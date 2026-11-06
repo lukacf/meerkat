@@ -216,6 +216,12 @@ pub struct UnifiedRuntimeBuilder {
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
     persistent_metadata: Option<Arc<dyn PersistentMetadataStore>>,
     access_controller: Option<crate::access::AccessController>,
+    /// Whether the runtime keeps the gating owner's state in its metadata
+    /// store (see [`keep_gating_state`](Self::keep_gating_state)).
+    keep_gating_state: bool,
+    /// The console audit log's bounds, when not the default (see
+    /// [`console_audit_limits`](Self::console_audit_limits)).
+    console_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1358,6 +1364,26 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Keep the gating owner's state (its pending approvals and its bounded
+    /// gating audit) in the composition's metadata store across restarts:
+    /// restored when the runtime is built, before anything evaluates a
+    /// gating action, and written after every gating change and at
+    /// shutdown. The stock gateways keep it. Off by default, so a host that
+    /// persists [`UnifiedRuntime::gating_state_snapshot`] itself keeps doing
+    /// so: the owner restores only once. A metadata store that keeps nothing
+    /// across restarts keeps gating in memory.
+    pub fn keep_gating_state(mut self, keep: bool) -> Self {
+        self.keep_gating_state = keep;
+        self
+    }
+
+    /// Bound the console audit log (by default 20000 rows, none older than
+    /// 365 days). The log is kept in the composition's metadata store.
+    pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_audit_limits = Some(limits);
+        self
+    }
+
     /// Let the Flow Editor on the reference app router run `rkat` on this
     /// host for callers that no enforced access controller governs. Off by
     /// default; see [`UnifiedRuntime::allow_flow_editor_host_deploy`].
@@ -2187,6 +2213,20 @@ impl UnifiedRuntimeBuilder {
         #[cfg(feature = "extension-state")]
         {
             runtime.extension_authority = extension_authority;
+        }
+
+        // The console audit log over the composition's metadata store, with
+        // the host's bounds when it set them.
+        if let Some(limits) = self.console_audit_limits {
+            runtime.console_audit = crate::console_audit::ConsoleAuditLog::over(
+                Arc::clone(&runtime.persistent_metadata),
+                limits,
+            )
+            .map(Arc::new);
+        }
+        // Restored before anything can evaluate a gating action.
+        if self.keep_gating_state {
+            runtime.keep_gating_state_in_realm().await;
         }
 
         // Construct session bridge from the mob handle for identity-first wiring.

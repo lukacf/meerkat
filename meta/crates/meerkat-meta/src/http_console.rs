@@ -1,5 +1,6 @@
 //! HTTP routes for the admin console REST API.
 
+mod audit;
 mod mcp_apps;
 pub(crate) mod schedules;
 mod shared_panels;
@@ -38,11 +39,11 @@ use std::time::{Duration, Instant};
 use crate::access::{
     ACCESS_ACTIONS, ACTION_AGENT_MEMORY_DELETE, ACTION_AGENT_MEMORY_READ,
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
-    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_GATING_DECIDE,
-    ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW, ACTION_MOB_MEMORY_READ,
-    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_WORKGRAPH_MANAGE,
-    ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource, AccessRule, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_AUDIT_VIEW,
+    ACTION_GATING_DECIDE, ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW,
+    ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN,
+    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource,
+    AccessRule, AccessView, AgentResourceAttributes, LiveAccessView,
 };
 use crate::blob_store::{BinaryBlobPayload, BinaryBlobStore, is_valid_blob_id_value};
 use crate::console_aggregator::{
@@ -146,6 +147,11 @@ pub struct ConsoleJsonState {
     /// read it at each request: the owner attaches after the console router
     /// may be built. Empty when announcements are off.
     pub(crate) mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    /// The console audit log (`crate::console_audit`): each console change
+    /// writes a row, and `meta/console/audit` reads them. `None` on a router
+    /// built without a runtime, or over a metadata store that keeps no realm
+    /// documents.
+    pub(crate) console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
 }
 
 #[derive(Debug, Clone)]
@@ -654,6 +660,7 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        console_audit: None,
     })
 }
 
@@ -699,6 +706,7 @@ pub fn console_json_router_with_aggregator_and_access(
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        console_audit: None,
     })
 }
 
@@ -764,6 +772,7 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         Default::default(),
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
+        None,
     )
 }
 
@@ -792,6 +801,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
 ) -> Router {
     let console_aggregator = shared_aggregator.or_else(|| {
         console_events.clone().map(|events| {
@@ -854,6 +864,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         job_health_projection,
         governed_ingress,
         mob_announcements,
+        console_audit,
     })
 }
 
@@ -1402,7 +1413,7 @@ pub async fn console_rpc_handler(
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
     // Parse the request early so we can check the method for auth gating.
-    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -1415,7 +1426,6 @@ pub async fn console_rpc_handler(
             );
         }
     };
-    let request_method = parsed_request.method.clone();
 
     // Auth enforcement:
     // - When require_app_auth is true: validate bearer token (OIDC + allowlist)
@@ -1428,28 +1438,37 @@ pub async fn console_rpc_handler(
             return console_rpc_unauthenticated_response(parsed_request.id.unwrap_or(Value::Null));
         }
     };
+    // A console change is recorded in the console audit log once its answer
+    // is known, a refusal included (`crate::console_audit`).
+    let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
+    let response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
+    if let Some(intent) = audited {
+        intent.record(&auth_context, &response).await;
+    }
+    (StatusCode::OK, Json::<Value>(response))
+}
+
+/// The answer of one authenticated `POST /console/rpc` request.
+async fn console_rpc_answer(
+    state: &ConsoleJsonState,
+    voice: Option<axum::Extension<crate::console_voice::ConsoleVoiceController>>,
+    auth_context: &ConsoleHttpAuthContext,
+    mut parsed_request: JsonRpcRequest,
+) -> Value {
+    let request_method = parsed_request.method.clone();
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
         Err(message) => {
-            return (
-                StatusCode::OK,
-                Json::<Value>(invalid_params(
-                    parsed_request.id.clone().unwrap_or(Value::Null),
-                    message,
-                )),
-            );
+            return invalid_params(parsed_request.id.clone().unwrap_or(Value::Null), message);
         }
     };
     if is_console_mutating_rpc_method(&request_method)
         && let Err(refusal) = auth_context.refuse_other_caller(expected_caller_scope.as_deref())
     {
-        return (
-            StatusCode::OK,
-            Json::<Value>(response_value(
-                parsed_request.id.clone().unwrap_or(Value::Null),
-                None,
-                Some(refusal.json_rpc_error()),
-            )),
+        return response_value(
+            parsed_request.id.clone().unwrap_or(Value::Null),
+            None,
+            Some(refusal.json_rpc_error()),
         );
     }
     // By this point the request is always authorized:
@@ -1469,19 +1488,16 @@ pub async fn console_rpc_handler(
             parsed_request.id.clone().unwrap_or(Value::Null),
         )
     {
-        return (
-            StatusCode::OK,
-            Json::<Value>(response_value(refusal.id, refusal.result, refusal.error)),
-        );
+        return response_value(refusal.id, refusal.result, refusal.error);
     }
     if request_method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD {
-        let response =
-            console_revoke_sessions_rpc(&state, &auth_context, read_only, &parsed_request);
-        return (StatusCode::OK, Json::<Value>(response));
+        return console_revoke_sessions_rpc(state, auth_context, read_only, &parsed_request);
     }
     if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
-        let response = console_whoami_rpc(&state.decisions, &auth_context, &parsed_request);
-        return (StatusCode::OK, Json::<Value>(response));
+        return console_whoami_rpc(&state.decisions, auth_context, &parsed_request);
+    }
+    if request_method == crate::rpc::CONSOLE_AUDIT_METHOD {
+        return audit::console_audit_rpc(state, auth_context, &parsed_request).await;
     }
     if matches!(
         request_method.as_str(),
@@ -1495,32 +1511,28 @@ pub async fn console_rpc_handler(
             | crate::console_voice::VOICE_CAPTIONS_METHOD
     ) || crate::console_voice::is_channel_method(&request_method)
     {
-        let response = handle_console_voice_rpc(
-            &state,
+        return handle_console_voice_rpc(
+            state,
             voice.as_ref().map(|extension| &extension.0),
-            &auth_context,
+            auth_context,
             parsed_request,
         )
         .await;
-        return (StatusCode::OK, Json::<Value>(response));
     }
     let Some(runtime) = &state.runtime else {
         // A change checks its caller again right before its handler runs,
         // as the runtime dispatch does.
         if is_console_mutating_rpc_method(&request_method)
-            && let Err(refusal) = ConsoleSendGovernance::for_request(&state, &auth_context)
+            && let Err(refusal) = ConsoleSendGovernance::for_request(state, auth_context)
                 .refuse_unless_caller_current()
         {
-            return (
-                StatusCode::OK,
-                Json::<Value>(response_value(
-                    parsed_request.id.clone().unwrap_or(Value::Null),
-                    None,
-                    Some(refusal.json_rpc_error()),
-                )),
+            return response_value(
+                parsed_request.id.clone().unwrap_or(Value::Null),
+                None,
+                Some(refusal.json_rpc_error()),
             );
         }
-        let response_value = Box::pin(handle_console_aggregator_rpc(
+        return Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
             is_authenticated,
@@ -1530,7 +1542,6 @@ pub async fn console_rpc_handler(
             &auth_context.send_scope(),
         ))
         .await;
-        return (StatusCode::OK, Json::<Value>(response_value));
     };
 
     let response_value = Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -1558,16 +1569,15 @@ pub async fn console_rpc_handler(
         state.workgraph.as_ref(),
         state.topology.as_ref(),
         state.mob_announcements.get(),
-        &ConsoleSendGovernance::for_request(&state, &auth_context),
-        &console_topology_apply_scope(&auth_context),
+        &ConsoleSendGovernance::for_request(state, auth_context),
+        &console_topology_apply_scope(auth_context),
     ))
     .await;
-    let response_value = decorate_console_job_projection(
+    decorate_console_job_projection(
         response_value,
         &request_method,
         state.job_health_projection.as_ref(),
-    );
-    (StatusCode::OK, Json::<Value>(response_value))
+    )
 }
 
 /// Server-side bound on one readiness answer. It sits below the console's
@@ -3254,6 +3264,10 @@ mod console_schedule_tests;
 #[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
+
+#[cfg(test)]
+#[path = "console_audit_tests.rs"]
+mod console_audit_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -5034,6 +5048,7 @@ fn console_rpc_access_requirements(
         }
         "meta/gating/decide" => one(ACTION_GATING_DECIDE, None),
         "meta/gating/pending" | "meta/gating/audit" => one(ACTION_GATING_VIEW, None),
+        crate::rpc::CONSOLE_AUDIT_METHOD => one(ACTION_AUDIT_VIEW, None),
         "meta/mob_events/query" | "meta/mob_events/subscribe" => one(ACTION_MOB_OBSERVE, None),
         "meta/reconcile_edges"
         | "meta/cross_mob/wire_local"
@@ -7740,7 +7755,7 @@ pub async fn console_rpc_multipart_handler(
             );
         }
     };
-    let mut parsed_request = match serde_json::from_str::<JsonRpcRequest>(&payload) {
+    let parsed_request = match serde_json::from_str::<JsonRpcRequest>(&payload) {
         Ok(req) => req,
         Err(err) => {
             return (
@@ -7753,22 +7768,35 @@ pub async fn console_rpc_multipart_handler(
             );
         }
     };
+    // A blob upload is a console change the console audit log records once
+    // its answer is known, a refusal included (`crate::console_audit`).
+    let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
+    let (status, response) =
+        console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await;
+    if let Some(intent) = audited {
+        intent.record(&auth_context, &response).await;
+    }
+    (status, Json::<Value>(response))
+}
+
+/// The answer of one authenticated `POST /console/rpc/multipart` request
+/// whose payload part is `parsed_request` and whose file parts are `files`.
+async fn console_rpc_multipart_answer(
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    mut parsed_request: JsonRpcRequest,
+    files: std::collections::BTreeMap<String, MultipartImageUpload>,
+) -> (StatusCode, Value) {
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
         crate::member_comms_id::validate_public_rpc_member_aliases(&parsed_request.params)
     {
-        return (
-            StatusCode::OK,
-            Json::<Value>(invalid_params(response_id, message)),
-        );
+        return (StatusCode::OK, invalid_params(response_id, message));
     }
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
         Err(message) => {
-            return (
-                StatusCode::OK,
-                Json::<Value>(invalid_params(response_id, message)),
-            );
+            return (StatusCode::OK, invalid_params(response_id, message));
         }
     };
     if is_console_mutating_rpc_method(&parsed_request.method)
@@ -7776,18 +7804,11 @@ pub async fn console_rpc_multipart_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(
-                response_id,
-                None,
-                Some(refusal.json_rpc_error()),
-            )),
+            response_value(response_id, None, Some(refusal.json_rpc_error())),
         );
     }
     if state.decisions.console.read_only && is_console_mutating_rpc_method(&parsed_request.method) {
-        return (
-            StatusCode::OK,
-            Json::<Value>(console_read_only_rpc_error(response_id)),
-        );
+        return (StatusCode::OK, console_read_only_rpc_error(response_id));
     }
     // A candidate launch admits no member input, attachments included.
     if let Some(runtime) = state.runtime.as_ref()
@@ -7801,7 +7822,7 @@ pub async fn console_rpc_multipart_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(response_id, refusal.result, refusal.error)),
+            response_value(response_id, refusal.result, refusal.error),
         );
     }
     match parsed_request.method.as_str() {
@@ -7809,10 +7830,10 @@ pub async fn console_rpc_multipart_handler(
             let Some(aggregator) = &state.console_aggregator else {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(invalid_params(
+                    invalid_params(
                         response_id,
                         "meta/console/send multipart requires a console aggregator",
-                    )),
+                    ),
                 );
             };
             let Some(identity) = parsed_request
@@ -7822,14 +7843,14 @@ pub async fn console_rpc_multipart_handler(
             else {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(invalid_params(response_id, "identity required")),
+                    invalid_params(response_id, "identity required"),
                 );
             };
             // Gate BEFORE externalizing/persisting uploads, mirroring the JSON
             // /console/send gate-first ordering. Without this, a caller denied
             // `agent.send` on this identity could still write attacker-supplied
             // image bytes into the target identity's blob store (a pre-auth
-            // side effect / storage-amplification vector) — the send is denied
+            // side effect / storage-amplification vector): the send is denied
             // later, but the blob write already happened. Prime the attribute
             // cache first so role/label-scoped deny rules resolve fail-closed.
             if let Some(runtime) = &state.runtime {
@@ -7842,7 +7863,7 @@ pub async fn console_rpc_multipart_handler(
             ) {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(response_value(response_id, None, Some(violation))),
+                    response_value(response_id, None, Some(violation)),
                 );
             }
             let binary_blob_store =
@@ -7851,17 +7872,14 @@ pub async fn console_rpc_multipart_handler(
                     Ok(None) => {
                         return (
                             StatusCode::OK,
-                            Json::<Value>(invalid_params(
+                            invalid_params(
                                 response_id,
                                 "binary blob store unavailable for identity",
-                            )),
+                            ),
                         );
                     }
                     Err(err) => {
-                        return (
-                            StatusCode::OK,
-                            Json::<Value>(console_send_rpc_error(response_id, err)),
-                        );
+                        return (StatusCode::OK, console_send_rpc_error(response_id, err));
                     }
                 };
             if let Err(message) = externalize_image_upload_placeholders(
@@ -7871,31 +7889,24 @@ pub async fn console_rpc_multipart_handler(
             )
             .await
             {
-                return (
-                    StatusCode::OK,
-                    Json::<Value>(invalid_params(response_id, message)),
-                );
+                return (StatusCode::OK, invalid_params(response_id, message));
             }
         }
         "meta/blob/upload" => {
             let Some(runtime) = &state.runtime else {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json::<Value>(json_rpc_error_value(
+                    json_rpc_error_value(
                         response_id,
                         -32600,
                         "meta/blob/upload multipart requires a unified runtime",
-                    )),
+                    ),
                 );
             };
             let Some(binary_blob_store) = runtime.binary_blob_store() else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json::<Value>(json_rpc_error_value(
-                        response_id,
-                        -32000,
-                        "binary blob store unavailable",
-                    )),
+                    json_rpc_error_value(response_id, -32000, "binary blob store unavailable"),
                 );
             };
             let result = match externalize_single_image_upload(
@@ -7907,24 +7918,21 @@ pub async fn console_rpc_multipart_handler(
             {
                 Ok(result) => result,
                 Err(message) => {
-                    return (
-                        StatusCode::OK,
-                        Json::<Value>(invalid_params(response_id, message)),
-                    );
+                    return (StatusCode::OK, invalid_params(response_id, message));
                 }
             };
             return (
                 StatusCode::OK,
-                Json::<Value>(response_value(response_id, Some(result), None)),
+                response_value(response_id, Some(result), None),
             );
         }
         _ => {
             return (
                 StatusCode::OK,
-                Json::<Value>(invalid_params(
+                invalid_params(
                     response_id,
                     "multipart RPC supports meta/console/send and meta/blob/upload only",
-                )),
+                ),
             );
         }
     }
@@ -7933,15 +7941,11 @@ pub async fn console_rpc_multipart_handler(
         // The send checks its caller again right before it is handed to the
         // aggregator, as the runtime dispatch does.
         if let Err(refusal) =
-            ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+            ConsoleSendGovernance::for_request(state, auth_context).refuse_unless_caller_current()
         {
             return (
                 StatusCode::OK,
-                Json::<Value>(response_value(
-                    response_id,
-                    None,
-                    Some(refusal.json_rpc_error()),
-                )),
+                response_value(response_id, None, Some(refusal.json_rpc_error())),
             );
         }
         Box::pin(handle_console_aggregator_rpc(
@@ -7958,11 +7962,11 @@ pub async fn console_rpc_multipart_handler(
         let Some(runtime) = &state.runtime else {
             return (
                 StatusCode::NOT_FOUND,
-                Json::<Value>(json_rpc_error_value(
+                json_rpc_error_value(
                     response_id,
                     -32600,
                     "console rpc multipart requires a unified runtime",
-                )),
+                ),
             );
         };
         Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -7990,12 +7994,12 @@ pub async fn console_rpc_multipart_handler(
             state.workgraph.as_ref(),
             state.topology.as_ref(),
             state.mob_announcements.get(),
-            &ConsoleSendGovernance::for_request(&state, &auth_context),
-            &console_topology_apply_scope(&auth_context),
+            &ConsoleSendGovernance::for_request(state, auth_context),
+            &console_topology_apply_scope(auth_context),
         ))
         .await
     };
-    (StatusCode::OK, Json::<Value>(response_value))
+    (StatusCode::OK, response_value)
 }
 
 pub async fn blob_get_handler(
@@ -13061,15 +13065,16 @@ async fn handle_console_runtime_rpc_with_visibility(
             // With a cursor, the gap is computed on the owner's full audit;
             // the caller then sees only entries whose origin it may view, and
             // the next cursor never names an entry it cannot see.
-            let (entries, gap) = {
+            let (entries, gap, retention) = {
                 let mut owner = module_runtime.lock().await;
-                match after_audit_id {
+                let (entries, gap) = match after_audit_id {
                     Some(cursor) => {
                         let page = owner.gating_audit_after(Some(cursor));
                         (page.entries, page.gap)
                     }
                     None => (owner.gating_audit_entries(limit), false),
-                }
+                };
+                (entries, gap, owner.gating_retention())
             };
             let entries = entries
                 .into_iter()
@@ -13086,7 +13091,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .or_else(|| (!gap).then(|| after_audit_id.map(ToString::to_string)).flatten());
             response_value(
                 response_id,
-                Some(json!({ "entries": entries, "next_cursor": next_cursor, "gap": gap })),
+                Some(json!({
+                    "entries": entries,
+                    "next_cursor": next_cursor,
+                    "gap": gap,
+                    "retention": retention,
+                })),
                 None,
             )
         })
@@ -20906,6 +20916,7 @@ message = "review"
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            console_audit: None,
         };
         let authenticate = |subject: &str| {
             let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -30030,6 +30041,7 @@ mod console_viewer_resolver_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            console_audit: None,
         }
     }
 
@@ -30533,6 +30545,7 @@ mod console_human_admission_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            console_audit: None,
         }
     }
 

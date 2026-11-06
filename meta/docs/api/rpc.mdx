@@ -1278,6 +1278,59 @@ nothing is changed. `/console/mcp-apps/call-tool` checks its caller again
 after each step too, and answers a login that ended with its own `403`
 `mcp_app_unavailable`.
 
+### `meta/console/audit`
+
+The console audit log: one row per console change on `POST /console/rpc` and
+`/console/rpc/multipart`, a refusal included, naming who made it and how it
+ended. Sends and their recovery, voice and live media are not in it: their
+record is the transcript. Read-only, and served on the console route only;
+it needs the `audit.view` action, which an enforced access policy grants to
+admins and to the rules that name it (see
+[Access control](/concepts/access-control)). A console that keeps no log (a
+router built without a runtime) answers `-32601`.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `after_seq` | `integer` | Read the rows after this one; without it, from the oldest row kept |
+| `limit` | `integer` | At most this many rows, from 1 to 500 (default 100) |
+
+| Result field | Type | Description |
+|--------------|------|-------------|
+| `records` | `object[]` | The rows, oldest first (below) |
+| `next_after_seq` | `integer` | The `after_seq` of the next read: the last row's `seq`, or this read's own cursor when it found none |
+| `oldest_available_seq` | `integer` or `null` | The oldest row the log keeps; `null` while it keeps none |
+| `latest_seq` | `integer` | The newest row written; `0` before the first |
+| `has_more` | `boolean` | More rows follow this read |
+| `gap` | `boolean` | `after_seq` named rows the log does not keep (pruned, or past the newest row): the read starts at the oldest row kept, and the reader resynchronizes |
+| `retention` | `string` | How long the log keeps its rows, from the metadata store the gateway opened: `durable` (across restarts) or `process` (for the life of the gateway process) |
+
+A row:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `seq` | `integer` | The row's place in the log, from 1, never reused |
+| `at_ms` | `integer` | When the console wrote the row, in milliseconds since the epoch |
+| `actor.kind` | `string` | `person`, `service`, `token_principal` or `anonymous`, as `meta/console/whoami` reports it |
+| `actor.principal` | `string` | The caller's principal; absent for `anonymous` |
+| `actor.issuer`, `actor.subject` | `string` | A person's verified OIDC issuer and `sub` |
+| `actor.assurance` | `string` | `person_authenticated` or `service_credential`; absent otherwise |
+| `actor.login_scope_digest` | `string` | A person's login, as `sha256:` and a hex digest (of the token's signed `sid`, else of the token); never the token |
+| `method` | `string` | The console method |
+| `target` | `object` | The identifiers among the params (`id` and `*_id` fields, `identity`, `agent_identity`, `realm`, `role`, `principal`, `name`, `decision`, `action`, `operation`, `enabled`, and an upserted access rule's `rule_id`); never content such as messages, memory bodies, labels or configurations |
+| `outcome` | `string` | `committed` (the owner answered with a result), `failed` (`-32603` or `-32000`: whether anything changed is not known) or `refused` (any other error) |
+| `code`, `kind` | `integer`, `string` | The error's code and its `data.kind`, for `refused` and `failed` |
+| `receipt` | `object` | The identifiers in the owner's result (`id` and `*_id` fields, `revision`, `generation`, `agent_identity`, `supersedes`, and a quarantine decision's `audit_token`) |
+
+The console writes a row after the owner answered; nothing reads the log to
+decide anything, and each owner's own record stays the authority for what
+happened. A row that cannot be written is logged and dropped, and the change
+stands as its owner answered it. The log is kept in the realm's metadata
+store: durable for `rpc_gateway` over a state directory or a host store
+realm, and for the process on `meta_gateway`, which keeps its metadata in
+memory. It keeps at most 20000 rows, none older than 365 days, each bound
+give or take one page of 64 rows; an embedder sets other bounds with
+`UnifiedRuntimeBuilder::console_audit_limits`.
+
 ### `meta/console/recover_send`
 
 Recover the caller's own console send: its acceptance as it is now and what
@@ -1584,6 +1637,14 @@ List all pending gated actions awaiting approval.
 ### `meta/gating/audit`
 
 Return the gating audit log (most recent entries, bounded by retention limit).
+
+Every result carries `retention`: `durable` where the runtime keeps the gating
+state in a durable metadata store (a stock gateway over a state directory or
+a host store realm, or a runtime built with
+`UnifiedRuntimeBuilder::keep_gating_state(true)` over one), so entries and
+pending requests survive a restart; `process` otherwise, where they are kept
+in the gateway's memory and decisions from before a gateway restart may be
+missing. See [Gating](/concepts/gating#pending-approval).
 
 ---
 

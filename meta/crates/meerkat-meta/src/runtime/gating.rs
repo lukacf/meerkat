@@ -1138,6 +1138,20 @@ impl MetaRuntimeHandle {
         self.gating_changes.subscribe()
     }
 
+    /// How long this owner's gating state (its pending entries and audit) is
+    /// kept: `Durable` where the runtime keeps it in a durable metadata
+    /// store, restored at startup and written after every change; `Process`
+    /// otherwise. Gating audit reads report it.
+    pub fn gating_retention(&self) -> RecordRetention {
+        self.gating_retention
+    }
+
+    /// Record how long this owner's gating state is kept: the runtime that
+    /// keeps it in a durable metadata store says so.
+    pub(crate) fn set_gating_retention(&mut self, retention: RecordRetention) {
+        self.gating_retention = retention;
+    }
+
     pub fn gating_audit_entries(&mut self, limit: usize) -> Vec<GatingAuditEntry> {
         self.refresh_gating_timeouts();
         self.flush_gating_notices();

@@ -117,6 +117,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `AccessView::hides_agent` and `AccessView::private_owner_key`;
   `ConsoleSendGateRefusal::UnknownIdentity`.
 
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, a refusal included, writes a row naming the
+  actor (kind, principal, assurance and a digest of the login, never the
+  token), the method, its target identifiers, the outcome and the owner's
+  receipt; sends, voice and live media are left out. The log is kept in
+  the realm's metadata store, bounded by count and age
+  (`UnifiedRuntimeBuilder::console_audit_limits`), and read with
+  `meta/console/audit` under the new `audit.view` access action. Its reads,
+  and `meta/gating/audit`, report `retention`: `durable` where the records
+  survive a restart, `process` where the gateway keeps them in memory.
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory.
+
 ### Changed
 
 - On a console with sign-in, a side chat is private to the person who
@@ -125,6 +141,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stays its own: the memory distiller never reads a private side chat.
   Side chats opened before this release keep their audience, and consoles
   without sign-in keep side chats shared.
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+
+### Fixed
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
 
 ## [0.9.10] - 2026-11-04
 

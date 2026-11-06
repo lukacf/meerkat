@@ -100,6 +100,11 @@ them.
   appended last, so no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
+- `meerkat-copilot`: `CopilotModelPolicyState` keeps a policy state other
+  than `enabled` and `disabled` as the account states it: the variant
+  `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
+  It still serializes as the state string. New
+  `CopilotModelPolicyState::as_str`.
 
 ### Added
 
@@ -133,6 +138,14 @@ them.
   neither adopted nor retired, because the member's retirement started
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
+  tokens one request may carry on the client's account and model, when the
+  provider states one (default `None`; wrappers delegate). A GitHub Copilot
+  route states the account model's prompt limit (the tighter of
+  `max_prompt_tokens` and `max_context_window_tokens`).
+- `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
+  model, state }` refuses a model the account lists under a policy that is
+  not `enabled`, naming the state.
 
 ### Changed
 
@@ -143,6 +156,30 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+- GitHub Copilot: a session's default compaction threshold stays below the
+  account model's prompt limit. The model-aware default (four-fifths of the
+  model's context window or input ceiling) now also takes the selected
+  account's prompt limit when the account states a smaller one, so a long
+  session compacts before the account refuses its prompt. An explicit
+  threshold or a per-build override keeps its value. A prompt the provider
+  measured over that limit is refused as a context-length error, the class
+  the agent compacts on, instead of an invalid request; Copilot's own answer
+  to an over-limit prompt is not known, so no error body is assumed.
+- GitHub Copilot: a model whose catalog entry lists no endpoint is served on
+  `/chat/completions` by the OpenAI and Gemini routes (before, it could not
+  be selected). A model that lists only endpoints Meerkat does not speak
+  still has none.
+- GitHub Copilot: a model the account lists under a policy other than
+  `enabled` is refused naming the state: an account-defined model with
+  `AccountModelRefusal::PolicyNotEnabled` (before, "does not offer"), a
+  registry model's route with "Copilot account policy state for ... is
+  '<state>', not 'enabled'" (before, "does not expose").
+- `meerkat`: a fallback web-search helper resolves its binding like a build
+  whose output budget is known: during a temporary credential exchange
+  outage of its account (a GitHub Copilot route) an explicit web search is
+  provisioned, and an inherited one kept, instead of failing the build or
+  dropping the tool for the build's lifetime. The first search completes the
+  exchange.
 
 ### Fixed
 
@@ -221,6 +258,15 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+### Security
+
+- `meerkat-gemini`: the Gemini client marks its credential header values
+  sensitive, as the other provider clients do: the values a dynamic
+  authorizer supplies (a Vertex or Code Assist bearer) and the static API
+  key's `x-goog-api-key`, so a request's `Debug` output does not print them
+  and HTTP/2 never indexes them. A value that is not a valid header value
+  fails the request as an authentication failure before it is sent.
 
 ## [0.9.10] - 2026-11-04
 

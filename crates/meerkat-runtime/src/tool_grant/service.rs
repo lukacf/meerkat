@@ -640,7 +640,8 @@ impl ToolGrantService {
     /// [`Self::revoke`] revokes one: a grant at or after its deadline records
     /// the expiry it reached instead, and a grant that already ended is left
     /// as it stands. A row this binary cannot read admits nothing and is left
-    /// as it is, logged. Answers how many grants this call ended.
+    /// as it is, logged. A store without the grant domain holds no grant, so
+    /// there it ends none. Answers how many grants this call ended.
     ///
     /// # Errors
     /// Store, clock and conflict failures; a grant the call did not reach
@@ -650,7 +651,11 @@ impl ToolGrantService {
         subject: &ToolGrantSubjectKey,
         revocation: ToolGrantRevocation,
     ) -> Result<usize, ToolGrantServiceError> {
-        let rows = self.subject_rows(std::slice::from_ref(subject)).await?;
+        let rows = match self.subject_rows(std::slice::from_ref(subject)).await {
+            Ok(rows) => rows,
+            Err(ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_))) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         rows.warn_unreadable("revoke_subject");
         let mut ended = 0;
         for read in rows.readable {

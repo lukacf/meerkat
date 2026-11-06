@@ -8,9 +8,11 @@ Connect 0.9.10 works with Meerkat Core and Meta 0.9.10. Download archives, SDKs 
 
 <Note>
 The commands on this page and in the quickstart select released 0.9.10 artifacts.
-In-place updates of existing applications and shared multi-caller setup are
-unsupported in 0.9.4. Preserve the existing installation and state when trying
-a separate fresh installation.
+Connect 0.9.10 does not support in-place updates that change an application's
+tool policy, definition, instructions or runtime; Forge's Stage refuses them,
+so keep the existing installation and state. Shared multi-caller setup is an
+unqualified opt-in, available only when an application starts the gateway with
+`--private-workflow-launch`; ordinary CLI and Console setup stay single-caller.
 </Note>
 
 ## Platforms

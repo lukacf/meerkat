@@ -193,6 +193,26 @@ them.
   last, so an exhaustive match needs its arm: a durable fork that takes no
   message of its source (see Added).
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`: the grant owner's
+  approval-carried children (see Added). `GrantRecord`
+  (`catalog::dsl::grant_authority::types`) gains the public fields
+  `child_approval: Option<ChildApprovalRule>` and
+  `approval: Option<GrantApproval>`, so code that builds it literally must
+  set them (`None` for both is the record as before, serialized to the
+  same bytes). In `GrantAuthorityInput` (meerkat-machine-schema
+  `catalog::dsl::grant_authority`) and the kernel
+  `generated::grant_authority::inputs`, `IssueChild` gains
+  `terms_digest: Sha256Digest` and `ResolveUse` gains
+  `requester: Option<GrantPrincipal>`, `work: Option<OriginalWorkRef>` and
+  `operation: Option<GrantOperationBinding>`, so code that builds them
+  literally must set them (`None` for the three is a plain resolution). The
+  machine's state gains `spent`, `consumed` and `carried_decisions`.
+  `GrantAuthorityInput` gains `ConsumeUse` and `GrantAuthorityEffect` gains
+  `UseConsumed`; the kernel's `Input` and `InputKind` gain `ConsumeUse`,
+  its `Effect` and `EffectKind` gain `UseConsumed`, and its `TransitionId`
+  gains `ConsumeUse` and `ConsumeUseRefusedApproverRevoked`, each appended
+  last, so an exhaustive match needs their arms.
+
 ### Added
 
 - `meerkat-runtime`: `decision::DecisionExecutorLoop`, the one executor of a
@@ -435,6 +455,37 @@ them.
   the fork never writes the source. The durable fork owner admits it as
   `DurableForkSourceAdmission::EmptyPrefix`, which refuses any message count
   other than 0.
+
+- `meerkat-authorization`: approval-carried child grants (the grant owner,
+  `GrantAuthorityMachine`, at version 3). A grant issued under a child rule
+  (`LocalGrantAuthority::issue_root_with_child_rule` or
+  `issue_child_with_child_rule`; a `ChildApprovalRule` names an approver id
+  and whether a device-trusted person is accepted, `GrantDeviceTrust`,
+  refused by default) has children only through `issue_approval_child`.
+  Each such child carries a `GrantApproval`: the decision it was issued
+  under (its id; its approver id, which must be the rule's; a human tier;
+  and the decider's assurance, the person authenticated on the decision's
+  event, or device trust where the rule accepts it, while a service
+  credential relaying a decision never meets a rule), the approved
+  request's digest, the one requester and the one work that may use it, the
+  exact operation when one is bound (`GrantOperationBinding`), and its
+  uses. The owner issues it only with terms whose digest
+  (`grant_child_terms_digest` over `GrantChildTerms`) is the approved
+  request's, at depth 0, in a window, with at least one use, and at most
+  one grant per decision; a refusal is typed (`ApprovalChildRefusal`). An
+  approval-carried child resolves only for a use that names its requester,
+  its work and its operation (`resolve_lineage_with_use` with a
+  `GrantUse`; a governed work's resolution names the work's own requester
+  and work), and each use is spent by `consume_use` before it enters: the
+  spend is acknowledged in the grant journal first, advances the owner's
+  revision so that every decision prepared before it is stale, and is
+  refused, with nothing spent, for a decision whose approver is no longer
+  current (`ConsumeUseRefusal::ApproverNotCurrent`). A spend whose journal
+  write is uncertain counts as spent and its use does not enter
+  (`ConsumeUseRefusal::Uncertain`). A hand-written TLC audit
+  (`specs/machines/grant_authority/approval_grant_audit.sh`) checks the
+  rule, the terms, the uses and the spend, across a restart from the
+  journal and two concurrent attempts.
 
 ### Changed
 
@@ -749,6 +800,11 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- A grant journal that holds a grant issued under a child rule, an
+  approval-carried child or a spent use (see Added) cannot be read by
+  0.9.10: its reader refuses the journal, so that grant owner is
+  unavailable there. A journal of plain grants is read by both releases.
 
 ### Known limitations
 

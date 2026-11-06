@@ -675,10 +675,18 @@ impl GrantBackedWorkPolicy {
                 candidate.represented_subject.as_ref(),
             )
         } else {
-            self.grants.resolve_lineage_observed(
+            // An operation's lineage is resolved for this work's use: a leaf
+            // that carries an approval serves only its own requester and
+            // work.
+            self.grants.resolve_lineage_with_use_observed(
                 lineage,
                 &candidate.logical_executor,
                 candidate.represented_subject.as_ref(),
+                crate::grants::GrantUse {
+                    requester: &candidate.requester,
+                    work: &candidate.original_work,
+                    operation: None,
+                },
             )
         };
         resolved.map(Some).map_err(observed_grant_refusal)

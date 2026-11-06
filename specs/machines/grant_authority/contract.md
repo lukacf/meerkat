@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `2`
+- Version: `3`
 - Rust owner: `self` / `catalog::dsl::grant_authority`
 
 ## State
@@ -14,13 +14,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `revision`: `u64`
 - `records`: `Map<EvidenceId, GrantRecord>`
 - `revoked`: `Set<EvidenceId>`
+- `spent`: `Map<EvidenceId, u64>`
+- `consumed`: `u64`
+- `carried_decisions`: `Set<DecisionId>`
 
 ## Inputs
 - `Configure`(root: GrantPrincipal, namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation)
 - `IssueRoot`(actor: GrantPrincipal, record: GrantRecord)
-- `IssueChild`(actor: GrantPrincipal, record: GrantRecord, derived: DerivedChildRestrictions, chain: Seq<GrantRecord>, now_ms: u64)
+- `IssueChild`(actor: GrantPrincipal, record: GrantRecord, derived: DerivedChildRestrictions, chain: Seq<GrantRecord>, now_ms: u64, terms_digest: Sha256Digest)
 - `Revoke`(actor: GrantPrincipal, record: GrantRecord)
-- `ResolveUse`(namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation, executor: GrantPrincipal, represented_subject: Option<GrantPrincipal>, leaf: GrantRecord, chain: Seq<GrantRecord>, now_ms: u64)
+- `ResolveUse`(namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation, executor: GrantPrincipal, represented_subject: Option<GrantPrincipal>, requester: Option<GrantPrincipal>, work: Option<OriginalWorkRef>, operation: Option<GrantOperationBinding>, leaf: GrantRecord, chain: Seq<GrantRecord>, now_ms: u64)
+- `ConsumeUse`(namespace: EvidenceId, generation: u64, incarnation: GrantAuthorityIncarnation, executor: GrantPrincipal, represented_subject: Option<GrantPrincipal>, requester: Option<GrantPrincipal>, work: Option<OriginalWorkRef>, operation: Option<GrantOperationBinding>, leaf: GrantRecord, chain: Seq<GrantRecord>, now_ms: u64, approver_current: Bool)
 
 ## Signals
 
@@ -29,11 +33,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Issued`(record: GrantRecord)
 - `Revoked`(grant_id: EvidenceId)
 - `UseResolved`(leaf: GrantRecord)
+- `UseConsumed`(leaf: GrantRecord)
 
 ## Helpers
 - `lifetime_current`(restrictions: ExecutionRestrictions, now_ms: u64) -> `Bool`
 - `child_rank`(parent: ExecutionRestrictions, child: ExecutionRestrictions) -> `Bool`
 - `chain_links`(chain: Seq<GrantRecord>, root: Option<GrantPrincipal>, now_ms: u64) -> `Bool`
+- `approval_rule_admits`(parent: GrantRecord, record: GrantRecord) -> `Bool`
+- `approval_bounded`(record: GrantRecord) -> `Bool`
+- `approval_use_bound`(leaf: GrantRecord, requester: Option<GrantPrincipal>, work: Option<OriginalWorkRef>, operation: Option<GrantOperationBinding>) -> `Bool`
 
 ## Invariants
 - `configured_identity_is_present`
@@ -42,6 +50,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `issued_records_have_exact_identity_and_revision`
 - `issued_records_belong_to_this_incarnation`
 - `revoked_records_remain_present`
+- `spent_only_for_approval_children`
+- `approval_children_are_bounded`
+- `approval_children_have_a_parent_rule`
+- `carried_decisions_match_records`
 
 ## Transitions
 ### `Configure`
@@ -61,13 +73,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - ``
   - ``
   - ``
+  - ``
 - Emits: `Issued`
 - To: `Active`
 
 ### `IssueChild`
 - From: `Active`
-- On: `IssueChild`(actor, record, derived, chain, now_ms)
+- On: `IssueChild`(actor, record, derived, chain, now_ms, terms_digest)
 - Guards:
+  - ``
+  - ``
+  - ``
   - ``
   - ``
   - ``
@@ -100,13 +116,43 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ResolveUse`
 - From: `Active`
-- On: `ResolveUse`(namespace, generation, incarnation, executor, represented_subject, leaf, chain, now_ms)
+- On: `ResolveUse`(namespace, generation, incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms)
 - Guards:
   - ``
   - ``
   - ``
   - ``
+  - ``
+  - ``
 - Emits: `UseResolved`
+- To: `Active`
+
+### `ConsumeUse`
+- From: `Active`
+- On: `ConsumeUse`(namespace, generation, incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms, approver_current)
+- Guards:
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+- Emits: `UseConsumed`
+- To: `Active`
+
+### `ConsumeUseRefusedApproverRevoked`
+- From: `Active`
+- On: `ConsumeUse`(namespace, generation, incarnation, executor, represented_subject, requester, work, operation, leaf, chain, now_ms, approver_current)
+- Guards:
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
+  - ``
 - To: `Active`
 
 ## Coverage

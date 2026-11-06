@@ -368,6 +368,11 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # durable_decision_audit) generated a state, its seventeen witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
+# approval_grant_audit.sh (grant_authority) requires a final distinct-state
+# count at or above its floor, a coverage block in which each of its covered
+# actions (of module approval_grant_audit) generated a state, its fourteen
+# witnesses violated, and with --mutants each seeded defect's invariant
+# violated.
 # instruction_boundary_audit.sh (session_document) requires its six
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
@@ -861,6 +866,32 @@ printf '%s\n' \
   'echo "Error: Invariant AuditCommittedIsSettleable is violated."' \
   'echo "Error: Invariant AuditFirstPresentationIsTheEarliest is violated."' \
   'echo "Error: Invariant first_presentation_is_a_reading is violated."' \
+  'for action in AuditConfigure AuditIssueRoot AuditIssueChild AuditRevoke AuditResolve AuditSpend AuditSpendRefusedApproverRevoked AuditSpendUncertain AuditRestart AuditPrepare AuditEnter AuditEnterStale; do echo "<$action line 1, col 1 to line 1, col 2 of module approval_grant_audit>: 1:1"; done' \
+  'echo "Error: Invariant NotAuditWitnessApprovalChildIssued is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUsedOnce is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSecondUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherDigestRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherRequesterRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOtherWorkRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWindowElapsedRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessParentRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessApproverRevokedBeforeUseRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessDeviceTrustRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSpentThenCrashStillSpent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRacingSecondAttemptRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPlainChildRefusedUnderRule is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncertainSpendNotEntered is violated."' \
+  'echo "Error: Invariant AuditNoUseBeyondUses is violated."' \
+  'echo "Error: Invariant AuditUseOnlyExactOperation is violated."' \
+  'echo "Error: Invariant AuditUseOnlyBoundRequesterAndWork is violated."' \
+  'echo "Error: Invariant AuditNoChildWithoutApprovalUnderRule is violated."' \
+  'echo "Error: Invariant AuditNoApprovalChildWithoutRule is violated."' \
+  'echo "Error: Invariant AuditRuleAssuranceHolds is violated."' \
+  'echo "Error: Invariant AuditIssuedTermsAreApproved is violated."' \
+  'echo "Error: Invariant AuditNoSpendAfterApproverRevoked is violated."' \
+  'echo "Error: Invariant AuditOneGrantPerDecision is violated."' \
+  'echo "Error: Invariant AuditSpendAdvancesPublication is violated."' \
+  'echo "Error: Invariant AuditSpentSurvivesRestart is violated."' \
   'echo "Error: Invariant unseated_entry_is_not_a_member is violated."' \
   'echo "Error: Invariant retiring_entry_is_a_declared_entry is violated."' \
   'echo "Error: Invariant marked_entry_has_no_spawn_in_flight is violated."' \

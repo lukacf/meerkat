@@ -61,8 +61,17 @@ pub struct GrantOwnerChange {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum GrantOwnerChangeKind {
-    Issued { record: GrantRecord },
-    Revoked { grant_id: EvidenceId },
+    Issued {
+        record: GrantRecord,
+    },
+    Revoked {
+        grant_id: EvidenceId,
+    },
+    /// One use of an approval-carried grant was spent. A reader that
+    /// predates approval-carried grants refuses a store holding one.
+    Consumed {
+        grant_id: EvidenceId,
+    },
 }
 
 impl GrantOwnerChange {
@@ -223,6 +232,9 @@ impl DurableCustody {
                 [GrantAuthorityEffect::Revoked { grant_id }] => GrantOwnerChangeKind::Revoked {
                     grant_id: grant_id.clone(),
                 },
+                [GrantAuthorityEffect::UseConsumed { leaf }] => GrantOwnerChangeKind::Consumed {
+                    grant_id: leaf.id.clone(),
+                },
                 _ => return Err(GrantRefusal::Unavailable),
             };
             let change = GrantOwnerChange {
@@ -279,12 +291,27 @@ fn rebuild(retained: DurableGrantOwner) -> Result<GrantAuthorityMachineAuthority
                 {
                     return Err(());
                 }
+                // An approval-carried record starts with no use spent and
+                // carries its decision, as its issuance recorded them.
+                if let Some(approval) = &record.approval {
+                    if !state.carried_decisions.insert(approval.decision_id.clone()) {
+                        return Err(());
+                    }
+                    state.spent.insert(record.id.clone(), 0);
+                }
                 state.records.insert(record.id.clone(), record);
             }
             GrantOwnerChangeKind::Revoked { grant_id } => {
                 if !state.records.contains_key(&grant_id) || !state.revoked.insert(grant_id) {
                     return Err(());
                 }
+            }
+            GrantOwnerChangeKind::Consumed { grant_id } => {
+                let Some(spent) = state.spent.get_mut(&grant_id) else {
+                    return Err(());
+                };
+                *spent = spent.checked_add(1).ok_or(())?;
+                state.consumed = state.consumed.checked_add(1).ok_or(())?;
             }
         }
         state.revision = change.revision;
@@ -418,7 +445,7 @@ pub(crate) fn with_last_issued_restrictions(
         .rev()
         .find_map(|change| match &mut change.kind {
             GrantOwnerChangeKind::Issued { record } => Some(record),
-            GrantOwnerChangeKind::Revoked { .. } => None,
+            GrantOwnerChangeKind::Revoked { .. } | GrantOwnerChangeKind::Consumed { .. } => None,
         })?;
     record.restrictions = restrictions;
     let copy = std::sync::Arc::new(InMemoryGrantOwnerStore::new());

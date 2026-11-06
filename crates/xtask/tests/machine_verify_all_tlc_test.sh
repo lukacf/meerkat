@@ -1206,6 +1206,33 @@ if run_part audits-j; then
   TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
+# Approval-carried child grants (GrantAuthorityMachine: a grant under a child
+# rule has children only through a person's decision for the rule's approver
+# id, and such a child serves its own requester, work and operation, at most
+# its uses) are model-checked by a hand-written audit over the generated
+# model: a parent without a rule or under one of two rules, children with
+# the valid approval or one defect, uses with the valid facts or one defect
+# at a clock in 0..3, revocations, an uncertain journal write, one restart
+# from the journal and two concurrent attempts, under every generated
+# invariant plus eight step properties (a use names its leaf's exact
+# operation, requester and work; a child under a rule meets it, with an
+# assurance it accepts; an approval child only under a rule, with the
+# approved request's terms, depth 0, a window and a use; nothing spent for
+# an approver no longer current; a spend advances the revision) and three
+# state invariants (no use beyond the uses; one grant per decision; every
+# entered use spent in the journal). It requires every wrapper to fire,
+# fourteen witnesses reached and refuses thirteen seeded defects
+# (--mutants). 6 steps reach every witness.
+approval_grant_audit="${workspace_root}/specs/machines/grant_authority/approval_grant_audit.sh"
+if [[ ! -x "${approval_grant_audit}" ]]; then
+  echo "error: approval grant audit runner is missing from workspace runfiles: ${approval_grant_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded approval grant TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${approval_grant_audit}" "${APPROVAL_GRANT_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
 # codegen defects. `machine-verify` still validates drift and the generated
 # ci.cfg structural-invariant contract before honoring these skips. The earlier

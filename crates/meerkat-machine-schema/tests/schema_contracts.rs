@@ -3111,6 +3111,8 @@ mod grant_candidate_wire {
             represented_subject: None,
             issued_revision: 1,
             restrictions: ExecutionRestrictions::unrestricted(),
+            child_approval: None,
+            approval: None,
         };
         let wire = serde_json::to_string(&record).expect("record wire");
         let mut missing_incarnation = serde_json::to_value(&record).expect("record value");

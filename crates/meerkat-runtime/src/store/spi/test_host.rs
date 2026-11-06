@@ -4,7 +4,7 @@
 //! deleted name is refused if created again. Faults are injected per call.
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -79,6 +79,12 @@ pub(crate) struct Faults {
     /// Acquires that never answer and grant nothing: the realm's acquire
     /// timeout gives up on them.
     pub(crate) acquire_hang: u32,
+    /// The next acquire of this mode never answers, and the host grants it
+    /// on its own this long after it arrived, as the store decides it then:
+    /// a store that completes a request its caller gave up on (the realm's
+    /// acquire timeout dropped the call before the grant). The grant's answer
+    /// reaches nobody.
+    pub(crate) acquire_granted_late: Option<(AcquireMode, Duration)>,
     /// How long every acquire takes to answer: the host decides when the
     /// call arrives, and the answer reaches the caller this much later, as
     /// over a slow network.
@@ -107,7 +113,9 @@ pub(crate) struct Faults {
 /// The test host store.
 #[derive(Debug)]
 pub(crate) struct TestHost {
-    state: Mutex<HostState>,
+    /// Shared with the grants the host makes on its own after their caller
+    /// gave up ([`Faults::acquire_granted_late`]).
+    state: Arc<Mutex<HostState>>,
     timing: FenceTiming,
     pub(crate) faults: Mutex<Faults>,
     /// When set, every commit waits here until notified.
@@ -152,7 +160,7 @@ impl TestHost {
 
     pub(crate) fn with_timing(timing: FenceTiming) -> Self {
         Self {
-            state: Mutex::new(HostState::default()),
+            state: Arc::new(Mutex::new(HostState::default())),
             timing,
             faults: Mutex::new(Faults::default()),
             commit_gate: Mutex::new(None),
@@ -269,47 +277,83 @@ impl TestHost {
         self.state().commits
     }
 
+    /// The highest token the host acquired.
+    pub(crate) fn token(&self) -> u64 {
+        self.state().token
+    }
+
     /// An acquire's answer, decided when the call arrives.
     fn decide_acquire(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
-        let now = Instant::now();
-        let mut state = self.state();
-        let remaining = state
-            .lease_until
-            .filter(|until| *until > now)
-            .map(|until| until - now);
-        if let Some(remaining) = remaining
-            && mode == AcquireMode::Exclusive
-        {
-            return Err(HostStoreError::Held {
-                holder: FenceToken::new(state.token),
-                remaining,
-            });
-        }
-        state.token += 1;
-        state.lease_until = Some(now + self.timing.lease());
-        Ok(FenceGrant {
-            token: FenceToken::new(state.token),
-            superseded_lease: remaining.unwrap_or(Duration::ZERO),
-        })
+        decide_acquire(&self.state, self.timing, mode)
     }
+}
+
+/// An acquire's answer, decided now: a live holder answers an exclusive
+/// acquire `Held`; otherwise the host grants the next token and records its
+/// lease from now.
+fn decide_acquire(
+    state: &Mutex<HostState>,
+    timing: FenceTiming,
+    mode: AcquireMode,
+) -> Result<FenceGrant, HostStoreError> {
+    let now = Instant::now();
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let remaining = state
+        .lease_until
+        .filter(|until| *until > now)
+        .map(|until| until - now);
+    if let Some(remaining) = remaining
+        && mode == AcquireMode::Exclusive
+    {
+        return Err(HostStoreError::Held {
+            holder: FenceToken::new(state.token),
+            remaining,
+        });
+    }
+    state.token += 1;
+    state.lease_until = Some(now + timing.lease());
+    Ok(FenceGrant {
+        token: FenceToken::new(state.token),
+        superseded_lease: remaining.unwrap_or(Duration::ZERO),
+    })
 }
 
 #[async_trait]
 impl HostStore for TestHost {
     async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
         self.record(HostCall::AcquireFence);
-        let (delay, hang) = {
+        let (delay, hang, granted_late) = {
             let mut faults = self.faults();
             if faults.acquire_unavailable > 0 {
                 faults.acquire_unavailable -= 1;
                 return Err(HostStoreError::Unavailable("injected".into()));
             }
-            let hang = faults.acquire_hang > 0;
+            let granted_late = match faults.acquire_granted_late {
+                Some((late_mode, after)) if late_mode == mode => {
+                    faults.acquire_granted_late = None;
+                    Some(after)
+                }
+                _ => None,
+            };
+            let hang = granted_late.is_none() && faults.acquire_hang > 0;
             if hang {
                 faults.acquire_hang -= 1;
             }
-            (faults.acquire_delay, hang)
+            (faults.acquire_delay, hang, granted_late)
         };
+        if let Some(after) = granted_late {
+            // The store goes on with the request on its own: it grants it
+            // later, and its answer reaches nobody.
+            let state = Arc::clone(&self.state);
+            let timing = self.timing;
+            tokio::spawn(async move {
+                tokio::time::sleep(after).await;
+                let _late = decide_acquire(&state, timing, mode);
+            });
+            std::future::pending::<()>().await;
+        }
         if hang {
             std::future::pending::<()>().await;
         }

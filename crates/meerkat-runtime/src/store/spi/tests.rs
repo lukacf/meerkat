@@ -3929,3 +3929,6 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
 
 /// What one poisoned scope refuses, and what it leaves serving.
 mod poison_radius;
+
+/// An acquire the realm gave up on, which the store grants anyway (H0).
+mod abandoned_acquire;

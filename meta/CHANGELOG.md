@@ -96,6 +96,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   label set any other way, or copied from the forked agent, is dropped on
   every surface. It records the creator and grants nothing.
 
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, a refusal included, writes a row naming the
+  actor (kind, principal, assurance and a digest of the login, never the
+  token), the method, its target identifiers, the outcome and the owner's
+  receipt; sends, voice and live media are left out. The log is kept in
+  the realm's metadata store, bounded by count and age
+  (`UnifiedRuntimeBuilder::console_audit_limits`), and read with
+  `meta/console/audit` under the new `audit.view` access action. Its reads,
+  and `meta/gating/audit`, report `retention`: `durable` where the records
+  survive a restart, `process` where the gateway keeps them in memory.
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory.
+
+### Changed
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

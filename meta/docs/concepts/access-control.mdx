@@ -43,6 +43,7 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `topology.audit` | Read durable topology mutation attempts and actor/principal attribution; required on every endpoint returned |
 | `mobpack.author` | Author mobpacks in the Flow Editor: drafts, authoring operations, validation, source rendering, export/import, authoring catalogs |
 | `mobpack.deploy` | Execute a mobpack flow run on the host (`rkat mob run`); also unlocks the editor's deploy affordances |
+| `audit.view` | Read the console audit log (`meta/console/audit`): who made each console change, when, and how it ended |
 | `access.admin` | Read and edit this configuration |
 
 - **Rule** — matches principals (`subjects`, `groups`), actions (exact, `agent.*`, or `*`), and resources (`agents`, `roles`, `match_labels`). Resource selectors AND together; values within a list OR together. Empty selectors leave a dimension unconstrained.

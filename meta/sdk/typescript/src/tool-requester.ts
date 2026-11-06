@@ -48,6 +48,40 @@ export interface ToolCallRequester {
  * `undefined`: no requester, which a person-scoped tool refuses.
  */
 export function parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
-  void raw;
-  return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const { principal, carried } = raw as Record<string, unknown>;
+  if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
+    return undefined;
+  }
+  const { kind, id, qualification } = principal as Record<string, unknown>;
+  if (typeof kind !== "string" || kind.trim() === "" || typeof id !== "string" || id.trim() === "") {
+    return undefined;
+  }
+  let trustDomainId: string | undefined;
+  if (qualification !== undefined && qualification !== null) {
+    if (typeof qualification !== "object" || Array.isArray(qualification)) {
+      return undefined;
+    }
+    const { kind: qualificationKind, trust_domain_id: domain } = qualification as Record<
+      string,
+      unknown
+    >;
+    if (qualificationKind === "qualified") {
+      if (typeof domain !== "string" || domain.trim() === "") {
+        return undefined;
+      }
+      trustDomainId = domain;
+    } else if (qualificationKind !== "unqualified") {
+      return undefined;
+    }
+  }
+  if (carried !== undefined && typeof carried !== "boolean") {
+    return undefined;
+  }
+  return {
+    principal: trustDomainId === undefined ? { kind, id } : { kind, id, trustDomainId },
+    carried: carried === true,
+  };
 }

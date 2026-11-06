@@ -136,6 +136,38 @@ margins are 125 and 130 seconds). On reconnect, Meta offers the exact
 committed attempt, fence, lease, checkpoint, and runner handle. Reopening does
 not mint a new fence; only a machine-authorized claim or retry can do that.
 Resolved credentials are attempt-local and never enter durable job state.
+`ctx.requester` is the requester of the run that submitted the job (see
+[Who a tool call serves](#who-a-tool-call-serves)), recorded with the job, or
+`None` when that run had none.
+
+## Who a tool call serves
+
+A tool handler that declares a `requester` parameter receives the original
+requester of the run the call serves (`ToolCallRequester`): its `principal`
+(`kind`, `id`, and `trust_domain_id` when it is qualified) and `carried`,
+true when the run's work reached the agent through another actor, such as a
+peer hop. A console send from a person on a console that requires sign-in
+names that person, with `trust_domain_id` `oidc-issuer:` and the issuer; a
+run without a requester passes `None`. The runtime sets it, never the
+arguments, so a tool that acts in one person's name can refuse everyone else:
+
+```python
+from meerkat_meta import RequesterPrincipal
+
+OWNER = RequesterPrincipal(
+    kind="human", id=OWNER_SUB, trust_domain_id="oidc-issuer:https://id.example"
+)
+
+async def read_mail(args, requester=None):
+    # direct_principal is None for a carried requester.
+    if requester is None or requester.direct_principal != OWNER:
+        raise PermissionError("this mailbox serves its owner only")
+    return await fetch_mail(args)
+
+options.register_tool("read_mail", read_mail)
+```
+
+A handler without a `requester` parameter is called with the arguments alone.
 
 ## Identity-First API
 

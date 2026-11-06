@@ -19,6 +19,10 @@ A handler that declares a ``dedupe_key`` parameter also receives the call's
     @client.tool("charge", description="Charge a card")
     async def handle_charge(arguments: dict, dedupe_key=None) -> str:
         ...
+
+A handler that declares a ``requester`` parameter receives the
+:class:`ToolCallRequester` of the run the call serves (``None`` when it has
+none), so a tool that acts in one person's name can refuse anyone else.
 """
 
 from __future__ import annotations
@@ -81,17 +85,23 @@ class ToolCallDedupeKey:
         )
 
 
-def _accepts_dedupe_key(handler: Callable[..., Any]) -> bool:
-    """Whether ``handler`` declares a ``dedupe_key`` parameter it can take by
+def _accepts_keyword(handler: Callable[..., Any], name: str) -> bool:
+    """Whether ``handler`` declares a ``name`` parameter it can take by
     keyword."""
     try:
-        parameter = inspect.signature(handler).parameters.get("dedupe_key")
+        parameter = inspect.signature(handler).parameters.get(name)
     except (TypeError, ValueError):
         return False
     return parameter is not None and parameter.kind in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         inspect.Parameter.KEYWORD_ONLY,
     )
+
+
+def _accepts_dedupe_key(handler: Callable[..., Any]) -> bool:
+    """Whether ``handler`` declares a ``dedupe_key`` parameter it can take by
+    keyword."""
+    return _accepts_keyword(handler, "dedupe_key")
 
 
 @dataclass(frozen=True)
@@ -135,7 +145,47 @@ class ToolCallRequester:
         An absent or malformed value is ``None``: no requester, which a
         person-scoped tool refuses.
         """
-        return None
+        if not isinstance(value, dict):
+            return None
+        principal = value.get("principal")
+        if not isinstance(principal, dict):
+            return None
+        kind = principal.get("kind")
+        principal_id = principal.get("id")
+        if (
+            not isinstance(kind, str)
+            or not kind.strip()
+            or not isinstance(principal_id, str)
+            or not principal_id.strip()
+        ):
+            return None
+        trust_domain_id = None
+        qualification = principal.get("qualification")
+        if qualification is not None:
+            if not isinstance(qualification, dict):
+                return None
+            qualification_kind = qualification.get("kind")
+            if qualification_kind == "qualified":
+                trust_domain_id = qualification.get("trust_domain_id")
+                if not isinstance(trust_domain_id, str) or not trust_domain_id.strip():
+                    return None
+            elif qualification_kind != "unqualified":
+                return None
+        carried = value.get("carried", False)
+        if not isinstance(carried, bool):
+            return None
+        return cls(
+            principal=RequesterPrincipal(
+                kind=kind, id=principal_id, trust_domain_id=trust_domain_id
+            ),
+            carried=carried,
+        )
+
+
+def _accepts_requester(handler: Callable[..., Any]) -> bool:
+    """Whether ``handler`` declares a ``requester`` parameter it can take by
+    keyword."""
+    return _accepts_keyword(handler, "requester")
 
 
 @dataclass
@@ -148,6 +198,8 @@ class ToolRegistration:
     handler: Callable[..., Awaitable[ToolResult]]
     # Whether the handler declares a ``dedupe_key`` parameter.
     accepts_dedupe_key: bool = False
+    # Whether the handler declares a ``requester`` parameter.
+    accepts_requester: bool = False
 
 
 class ToolRegistry:
@@ -168,7 +220,9 @@ class ToolRegistry:
 
         The handler receives the call's arguments. A handler that declares a
         ``dedupe_key`` parameter also receives the call's
-        :class:`ToolCallDedupeKey` by keyword, or ``None``.
+        :class:`ToolCallDedupeKey` by keyword, or ``None``; one that declares
+        a ``requester`` parameter receives the :class:`ToolCallRequester` of
+        the run the call serves, or ``None``.
         """
         self._tools[name] = ToolRegistration(
             name=name,
@@ -176,6 +230,7 @@ class ToolRegistry:
             input_schema=input_schema or {"type": "object"},
             handler=handler,
             accepts_dedupe_key=_accepts_dedupe_key(handler),
+            accepts_requester=_accepts_requester(handler),
         )
 
     def definitions(self) -> list[dict[str, Any]]:
@@ -195,6 +250,7 @@ class ToolRegistry:
         arguments: dict[str, Any],
         *,
         dedupe_key: ToolCallDedupeKey | None = None,
+        requester: ToolCallRequester | None = None,
     ) -> tuple[ToolResult, bool]:
         """Execute a tool handler. Returns (content, is_error).
 
@@ -204,17 +260,19 @@ class ToolRegistry:
         coerced to a stringified blob; only genuine non-list scalars are
         stringified.
 
-        ``dedupe_key`` reaches a handler that declares that parameter; other
-        handlers are called with the arguments alone.
+        ``dedupe_key`` and ``requester`` each reach a handler that declares
+        that parameter; other handlers are called with the arguments alone.
         """
         tool = self._tools.get(name)
         if tool is None:
             return f"Unknown tool: {name}", True
+        keywords: dict[str, Any] = {}
+        if tool.accepts_dedupe_key:
+            keywords["dedupe_key"] = dedupe_key
+        if tool.accepts_requester:
+            keywords["requester"] = requester
         try:
-            if tool.accepts_dedupe_key:
-                result = await tool.handler(arguments, dedupe_key=dedupe_key)
-            else:
-                result = await tool.handler(arguments)
+            result = await tool.handler(arguments, **keywords)
             if isinstance(result, list):
                 # Typed multimodal block list — deliver as structured content.
                 return result, False

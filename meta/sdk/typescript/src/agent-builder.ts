@@ -15,6 +15,7 @@ import {
   type LiveAssistantOutputAddress,
 } from "./live.js";
 import { ToolResultContent } from "./tool-content.js";
+import { parseToolCallRequester } from "./tool-requester.js";
 import {
   DetachedJobContext,
   DetachedJobExecution,
@@ -325,7 +326,9 @@ export class CallbackDispatcher {
         );
       }
 
-      const result = await handler(args);
+      // The gateway names the run's requester here, never in the arguments;
+      // absent or malformed is no requester.
+      const result = await handler(args, parseToolCallRequester(params.requester));
       // Rich content is opt-in: only an explicit ToolResultContent is delivered
       // as content blocks (images / multi-block). Any other return keeps the
       // legacy single-text-block behavior.
@@ -596,6 +599,7 @@ export class CallbackDispatcher {
         : null,
       controller.signal,
       reporter,
+      parseToolCallRequester(params.requester),
     );
     const attempt: ActiveJobAttempt = {
       authority,

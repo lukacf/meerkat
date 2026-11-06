@@ -21,8 +21,9 @@ that acts in one person's name can refuse every other requester::
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 __all__ = [
     "RequesterPrincipal",
@@ -68,4 +69,51 @@ class ToolCallRequester:
         An absent or malformed value is ``None``: no requester, which a
         person-scoped tool refuses.
         """
-        return None
+        if not isinstance(value, dict):
+            return None
+        principal = value.get("principal")
+        if not isinstance(principal, dict):
+            return None
+        kind = principal.get("kind")
+        principal_id = principal.get("id")
+        if (
+            not isinstance(kind, str)
+            or not kind.strip()
+            or not isinstance(principal_id, str)
+            or not principal_id.strip()
+        ):
+            return None
+        trust_domain_id = None
+        qualification = principal.get("qualification")
+        if qualification is not None:
+            if not isinstance(qualification, dict):
+                return None
+            qualification_kind = qualification.get("kind")
+            if qualification_kind == "qualified":
+                trust_domain_id = qualification.get("trust_domain_id")
+                if not isinstance(trust_domain_id, str) or not trust_domain_id.strip():
+                    return None
+            elif qualification_kind != "unqualified":
+                return None
+        carried = value.get("carried", False)
+        if not isinstance(carried, bool):
+            return None
+        return cls(
+            principal=RequesterPrincipal(
+                kind=kind, id=principal_id, trust_domain_id=trust_domain_id
+            ),
+            carried=carried,
+        )
+
+
+def _accepts_requester(handler: Callable[..., Any]) -> bool:
+    """Whether ``handler`` declares a ``requester`` parameter it can take by
+    keyword."""
+    try:
+        parameter = inspect.signature(handler).parameters.get("requester")
+    except (TypeError, ValueError):
+        return False
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )

@@ -5225,8 +5225,48 @@ export class MeerkatClient {
    * requester, which a person-scoped tool refuses.
    */
   static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
-    void raw;
-    return undefined;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const { principal, carried } = raw as Record<string, unknown>;
+    if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
+      return undefined;
+    }
+    const { kind, id, qualification } = principal as Record<string, unknown>;
+    if (
+      typeof kind !== "string" ||
+      kind.trim() === "" ||
+      typeof id !== "string" ||
+      id.trim() === ""
+    ) {
+      return undefined;
+    }
+    let trustDomainId: string | undefined;
+    if (qualification !== undefined && qualification !== null) {
+      if (typeof qualification !== "object" || Array.isArray(qualification)) {
+        return undefined;
+      }
+      const { kind: qualificationKind, trust_domain_id } = qualification as Record<
+        string,
+        unknown
+      >;
+      if (qualificationKind === "qualified") {
+        if (typeof trust_domain_id !== "string" || trust_domain_id.trim() === "") {
+          return undefined;
+        }
+        trustDomainId = trust_domain_id;
+      } else if (qualificationKind !== "unqualified") {
+        return undefined;
+      }
+    }
+    if (carried !== undefined && typeof carried !== "boolean") {
+      return undefined;
+    }
+    return {
+      principal:
+        trustDomainId === undefined ? { kind, id } : { kind, id, trust_domain_id: trustDomainId },
+      carried: carried === true,
+    };
   }
 
   /**
@@ -9121,8 +9161,11 @@ export class MeerkatClient {
       if (handler) {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         const dedupeKey = MeerkatClient.parseToolCallDedupeKey(params.dedupe_key);
+        // The runtime names the run's requester here, never in the
+        // arguments; absent or malformed is no requester.
+        const requester = MeerkatClient.parseToolCallRequester(params.requester);
         handler
-          .handler(args, dedupeKey)
+          .handler(args, dedupeKey, requester)
           .then((content) => {
             this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })

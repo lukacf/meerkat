@@ -48,6 +48,11 @@ from .generated.types import (
     WireMemberProgressSnapshot,
 )
 from .streaming import EventSubscription
+from .instructions import (
+    InstructionTarget,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+)
 from .types import (
     MobControlScope,
     MobGrantRecord,
@@ -766,6 +771,59 @@ class Mob:
             text,
             source=source,
             idempotency_key=idempotency_key,
+        )
+
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: InstructionTarget,
+        *,
+        content_sha256: str | None = None,
+    ) -> MobInstructionWriteResult:
+        """Write one operator instruction for the members ``target`` selects;
+        delivery to them is asynchronous."""
+        return await self._client.set_mob_instruction(
+            self.id,
+            namespace,
+            key,
+            revision,
+            body,
+            target,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self, namespace: str, key: str, revision: int
+    ) -> MobInstructionWriteResult:
+        """Revoke one operator instruction at a higher revision; the record
+        keeps its target."""
+        return await self._client.revoke_mob_instruction(
+            self.id, namespace, key, revision
+        )
+
+    async def instruction_status(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        agent_identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> MobInstructionStatus:
+        """Read the mob's operator-instruction records and one page of
+        members, without waking a member."""
+        return await self._client.mob_instruction_status(
+            self.id,
+            namespace=namespace,
+            key=key,
+            agent_identity=agent_identity,
+            profile=profile,
+            offset=offset,
+            limit=limit,
         )
 
     async def flows(self) -> list[str]:

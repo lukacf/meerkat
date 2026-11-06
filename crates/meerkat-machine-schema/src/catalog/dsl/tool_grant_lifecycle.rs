@@ -396,13 +396,16 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
                 // ----------------------------------------------------------
 
                 // A live grant admits a use of its own run, or any use when
-                // it is bounded by its window only.
+                // it is bounded by its window only. A use of its own run
+                // names a run (`run_id != None`): stated, so the arm is
+                // structurally exclusive with `AdmitOutsideRun`.
                 transition AdmitLive {
                     on input AdmitUse { now_ms, run_id }
                     guard "active" { self.lifecycle_phase == Phase::Active }
                     guard "deadline_not_reached" { now_ms < self.expires_at_ms }
                     guard "use_within_scope" {
-                        self.run_scope == None || self.run_scope == run_id
+                        self.run_scope == None
+                            || (run_id != None && self.run_scope == run_id)
                     }
                     update {}
                     to Active

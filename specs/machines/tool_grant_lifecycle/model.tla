@@ -165,7 +165,7 @@ RevokeSettledRevoked(now_ms) ==
 AdmitLive(now_ms, run_id) ==
     /\ phase = "Active"
     /\ (now_ms < expires_at_ms)
-    /\ (IF (run_scope = None) THEN TRUE ELSE (run_scope = run_id))
+    /\ (IF (run_scope = None) THEN TRUE ELSE ((run_id # None) /\ (run_scope = run_id)))
     /\ phase' = "Active"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_bf68d02069a0314e

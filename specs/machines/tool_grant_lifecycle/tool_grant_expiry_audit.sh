@@ -294,7 +294,7 @@ PY
     'AdmitLive|    /\ (now_ms < expires_at_ms)|    /\ (now_ms <= expires_at_ms)'
   mutate admit_ignores_run_scope "Invariant AuditRunScopedUseInItsRun" \
     AuditRunScopedUseInItsRun none \
-    'AdmitLive|    /\ (IF (run_scope = None) THEN TRUE ELSE (run_scope = run_id))|    /\ TRUE'
+    'AdmitLive|    /\ (IF (run_scope = None) THEN TRUE ELSE ((run_id # None) /\ (run_scope = run_id)))|    /\ TRUE'
 
   # The shell's use of the machine, seeded through AuditMutant.
   mutate dispatch_reuses_boundary_verdict "Invariant AuditNoAdmitAtOrAfterDeadline" \

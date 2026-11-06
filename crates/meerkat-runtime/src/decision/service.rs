@@ -895,6 +895,10 @@ impl DurableDecisionService {
                 audience: audience_party(&presentation.audience),
                 digest: machine_digest(&presentation.subject_digest),
                 complete: presentation.shows_every_part_of(&loaded.row.descriptor.rendering),
+                link_served_digest: presentation
+                    .link
+                    .as_ref()
+                    .map(|link| machine_digest(&link.served_digest)),
                 presented_at_ms: presentation.at_ms,
                 now_ms,
             };
@@ -943,7 +947,7 @@ impl DurableDecisionService {
                     PresentationAudience::Approver { approver_id }
                         if *approver_id == descriptor.approver_id
                 ) && presentation.subject_digest == descriptor.subject_digest
-                    && presentation.shows_every_part_of(&descriptor.rendering)
+                    && presentation.is_complete_for(&descriptor.rendering)
             });
             let input = DurableDecisionInput::Decide {
                 approve: decision.approves(),

@@ -17,7 +17,8 @@ use meerkat_core::approval::decision::{
     DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
     DecisionRequestBody, DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore,
     DecisionSubjectKey, DecisionTier, InMemoryDecisionStore, PresentationAudience,
-    PresentationRecord, Sha256Digest, StoredDecision, decision_is_due, decision_owes_work,
+    PresentationLink, PresentationRecord, Sha256Digest, StoredDecision, decision_is_due,
+    decision_owes_work,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState, ApprovalStoreError};
 use meerkat_core::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
@@ -809,6 +810,157 @@ fn a_presentation_time_of_zero_is_no_presentation() {
         presented,
         "the refusal changes nothing"
     );
+}
+
+/// A size-limited surface's summary of `rendering` to the approver id, shown
+/// at `at_ms`: no canonical part, and a link to the full presentation that
+/// served the rendering whose digest is `served`.
+fn linked_presentation_at(
+    rendering: &DecisionRendering,
+    served: Sha256Digest,
+    at_ms: u64,
+) -> PresentationRecord {
+    PresentationRecord::linked(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        PresentationLink::new(reference("decision-page"), served),
+        reference("chat"),
+        reference("message-1"),
+        at_ms,
+    )
+}
+
+/// A summary whose link served the whole, unchanged rendering is a complete
+/// presentation: recorded, it is the approver's first presentation and a
+/// decision observed after it approves; carried by the decision event, it
+/// decides the same way.
+#[test]
+fn a_linked_presentation_that_served_the_rendering_lets_the_approver_decide() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+    let linked = linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT);
+
+    let recorded = hold("subject:recorded");
+    let presented = service
+        .present(&recorded, &linked)
+        .expect("a summary whose link served the rendering is complete");
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    assert_eq!(presented.presentations, vec![linked.clone()]);
+    let decided = service
+        .decide(
+            &recorded,
+            &attested_at("alice", digest.clone(), true, PRESENTED_AT),
+            &Eligibility::current(),
+        )
+        .expect("approve after the linked presentation");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+
+    let carried = hold("subject:carried");
+    let decision =
+        attested_at("alice", digest, true, PRESENTED_AT).with_presentation(linked.clone());
+    let decided = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect("approve on the carried linked presentation");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+    assert_eq!(
+        decided.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    assert_eq!(decided.presentations, vec![linked]);
+}
+
+/// The observed-time order applies to a linked presentation's time as to a
+/// shown one: a decision observed before it is refused
+/// `decided_before_presentation`, recorded or carried.
+#[test]
+fn a_decide_observed_before_a_linked_presentation_is_refused() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+    let linked = linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT);
+
+    let recorded = hold("subject:recorded");
+    let presented = service
+        .present(&recorded, &linked)
+        .expect("present the summary");
+    let refused = service
+        .decide(
+            &recorded,
+            &attested_at("alice", digest.clone(), true, PRESENTED_AT - 1),
+            &Eligibility::current(),
+        )
+        .expect_err("a decision observed before the linked presentation");
+    assert_eq!(refusal(&refused).as_str(), "decided_before_presentation");
+    assert_eq!(
+        store.stored(&recorded),
+        presented,
+        "the refusal changes nothing"
+    );
+
+    let carried = hold("subject:carried");
+    let held = store.stored(&carried);
+    let decision = attested_at("alice", digest, true, PRESENTED_AT - 1).with_presentation(linked);
+    let refused = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect_err("a decision observed before the linked presentation it carries");
+    assert_eq!(refusal(&refused).as_str(), "decided_before_presentation");
+    assert_eq!(store.stored(&carried), held, "the refusal changes nothing");
+}
+
+/// A summary whose link served another rendering (the request changed
+/// after the summary was sent) is no presentation of the held one: it is
+/// refused `presentation_incomplete` and records nothing, and a decision
+/// carrying it stays `presentation_incomplete`.
+#[test]
+fn a_link_to_a_changed_rendering_is_refused_presentation_incomplete() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+    let stale = linked_presentation_at(&rendering, changed.subject_digest(), PRESENTED_AT);
+
+    let refused = service
+        .present(&decision_id, &stale)
+        .expect_err("a link that served a changed rendering");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let decision = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+        .with_presentation(stale);
+    let refused = service
+        .decide(&decision_id, &decision, &Eligibility::current())
+        .expect_err("a decision carrying the stale summary");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
 }
 
 #[test]

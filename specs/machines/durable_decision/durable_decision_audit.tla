@@ -169,16 +169,25 @@ AuditHoldInputs ==
       n \in AuditTimes, d \in 1..2,
       r \in {None, Some(AuditReviewer), Some(AuditRequester)}, b \in BOOLEAN }
 
+\* What a presentation shows: every canonical part, or a summary of none
+\* with a link to the full presentation that served the held subject's
+\* rendering or another one, or with no link.
+AuditPresentShapes ==
+    { [complete |-> TRUE, link |-> None],
+      [complete |-> FALSE, link |-> None],
+      [complete |-> FALSE, link |-> Some(AuditHeld)],
+      [complete |-> FALSE, link |-> Some(AuditOther)] }
+
 \* A complete presentation of the held subject to the approver is shown at
 \* 0 (no reading) or at a reading; any other presentation records no time,
 \* so it is shown at 1.
 AuditPresentInputs ==
-    UNION { { [audience |-> a, digest |-> g, complete |-> c, presented_at_ms |-> p,
-               now_ms |-> n] :
-              p \in IF a = AuditApprover /\ g = AuditHeld /\ c THEN AuditTimes ELSE {1},
+    UNION { { [audience |-> a, digest |-> g, complete |-> s.complete,
+               link_served_digest |-> s.link, presented_at_ms |-> p, now_ms |-> n] :
+              p \in IF a = AuditApprover /\ g = AuditHeld /\ s.complete THEN AuditTimes ELSE {1},
               n \in AuditTimes } :
-            <<a, g, c>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
-                             \X BOOLEAN }
+            <<a, g, s>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
+                             \X AuditPresentShapes }
 
 AuditValidDecision ==
     [approver_id |-> AuditApprover, decider |-> AuditApprover,
@@ -251,8 +260,9 @@ HoldArm(Arm(_, _, _, _, _, _, _, _, _, _), in) ==
     Arm(in.decision_id, in.now_ms, in.deadline_at_ms, in.subject_digest,
         in.operation_id, in.request_digest, in.requester, in.approver_id,
         in.reviewer, in.notice_routable)
-PresentArm(Arm(_, _, _, _, _), in) ==
-    Arm(in.audience, in.digest, in.complete, in.presented_at_ms, in.now_ms)
+PresentArm(Arm(_, _, _, _, _, _), in) ==
+    Arm(in.audience, in.digest, in.complete, in.link_served_digest, in.presented_at_ms,
+        in.now_ms)
 DecideArm(Arm(_, _, _, _, _, _, _, _, _), in) ==
     Arm(in.approve, in.approver_id, in.decider, in.digest, in.evidence_digest,
         in.eligible, in.carried_presentation_at_ms, in.observed_at_ms, in.now_ms)

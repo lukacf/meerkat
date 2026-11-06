@@ -429,6 +429,7 @@ pub mod inputs {
         pub audience: DecisionParty,
         pub digest: DecisionDigest,
         pub complete: bool,
+        pub link_served_digest: Option<DecisionDigest>,
         pub presented_at_ms: u64,
         pub now_ms: u64,
     }

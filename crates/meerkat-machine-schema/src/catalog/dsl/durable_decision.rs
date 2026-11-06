@@ -321,11 +321,15 @@ macro_rules! durable_decision_catalog_machine_dsl {
                     },
                     // A presentation of `digest`, complete or not, was shown
                     // to `audience` at `presented_at_ms`, the presentation
-                    // record's own time.
+                    // record's own time. `complete` says it showed every
+                    // canonical part; `link_served_digest` is, for a
+                    // summary shown with a link to the full presentation,
+                    // the digest of the rendering that link served.
                     Present {
                         audience: DecisionParty,
                         digest: DecisionDigest,
                         complete: bool,
+                        link_served_digest: Option<DecisionDigest>,
                         presented_at_ms: u64,
                         now_ms: u64,
                     },
@@ -813,7 +817,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // ----------------------------------------------------------
 
                 transition PresentAtDeadline {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "deadline_reached" { self.deadline_at_ms <= now_ms }
                     update {
@@ -830,7 +834,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedSubjectChanged {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_differs" { digest != self.subject_digest }
@@ -843,7 +847,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedIncomplete {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -857,7 +861,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentToApprover {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -878,7 +882,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 // A presentation to the approver at 0 is no reading of when
                 // it was shown: it never becomes the first presentation.
                 transition PresentRefusedUntimed {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -895,7 +899,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedWrongApproverAudience {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -911,7 +915,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentToReviewer {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -926,7 +930,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
                 }
 
                 transition PresentRefusedWrongReviewerAudience {
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     guard "open" { self.lifecycle_phase == Phase::Open }
                     guard "before_deadline" { now_ms < self.deadline_at_ms }
                     guard "subject_matches" { digest == self.subject_digest }
@@ -943,7 +947,7 @@ macro_rules! durable_decision_catalog_machine_dsl {
 
                 transition PresentRefusedNotOpen {
                     per_phase [Approved, Rejected, Expired, Withdrawn, Executed, ExecutionRefused]
-                    on input Present { audience, digest, complete, presented_at_ms, now_ms }
+                    on input Present { audience, digest, complete, link_served_digest, presented_at_ms, now_ms }
                     update {}
                     to Approved
                     emit Refused { decision_id: self.decision_id, reason: DurableDecisionRefusal::NotOpen }

@@ -205,7 +205,22 @@ fn present_at(
         audience: party(audience),
         digest: digest(subject),
         complete,
+        link_served_digest: None,
         presented_at_ms,
+        now_ms,
+    }
+}
+
+/// A summary presentation of `subject` that shows no canonical part, with a
+/// link to the full presentation that served the rendering whose digest is
+/// `served`, recorded when it was shown (`now_ms`).
+fn present_linked(audience: &str, subject: &str, served: &str, now_ms: u64) -> Input {
+    Input::Present {
+        audience: party(audience),
+        digest: digest(subject),
+        complete: false,
+        link_served_digest: Some(digest(served)),
+        presented_at_ms: now_ms,
         now_ms,
     }
 }
@@ -1053,6 +1068,64 @@ fn a_presentation_time_of_zero_is_no_presentation() {
             );
             assert_eq!(authority.state(), &before, "the refusal changes nothing");
         }
+    }
+}
+
+/// A summary shown with a link to the full presentation is complete exactly
+/// when that link served the held subject's rendering: to the approver it
+/// is the first presentation, and a decision observed after it decides; to
+/// the reviewer it opens the review. A link that served another rendering,
+/// and a summary without a link, are incomplete and record nothing.
+#[test]
+fn a_linked_presentation_is_complete_only_when_its_link_served_the_held_subject() {
+    let mut authority = authority_in(Phase::Open);
+    let presented = apply(
+        &mut authority,
+        present_linked(APPROVER, SUBJECT, SUBJECT, HELD_AT + 1),
+    );
+    assert_eq!(labels(&presented), ["Presented"]);
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(HELD_AT + 1)
+    );
+    let approved = apply(
+        &mut authority,
+        Decision {
+            carried_presentation_at_ms: None,
+            ..Decision::valid(true)
+        }
+        .input(),
+    );
+    assert_eq!(labels(&approved), ["Approved"]);
+
+    let mut authority = Authority::new();
+    apply(&mut authority, hold_with(Some(REVIEWER), true));
+    let presented = apply(
+        &mut authority,
+        present_linked(REVIEWER, SUBJECT, SUBJECT, HELD_AT + 1),
+    );
+    assert_eq!(labels(&presented), ["Presented"]);
+    assert!(authority.state().presented_to_reviewer);
+
+    for (input, case) in [
+        (
+            present_linked(APPROVER, SUBJECT, OTHER_SUBJECT, HELD_AT + 1),
+            "a link that served another rendering",
+        ),
+        (
+            present(APPROVER, SUBJECT, false, HELD_AT + 1),
+            "a summary without a link",
+        ),
+    ] {
+        let mut authority = authority_in(Phase::Open);
+        let before = authority.state().clone();
+        let refused = apply(&mut authority, input);
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::PresentationIncomplete,
+            "{case}"
+        );
+        assert_eq!(authority.state(), &before, "{case} records nothing");
     }
 }
 

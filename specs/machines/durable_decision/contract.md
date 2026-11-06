@@ -27,7 +27,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Inputs
 - `Hold`(decision_id: String, now_ms: u64, deadline_at_ms: u64, subject_digest: DecisionDigest, operation_id: String, request_digest: DecisionDigest, requester: DecisionParty, approver_id: DecisionParty, reviewer: Option<DecisionParty>, notice_routable: Bool)
-- `Present`(audience: DecisionParty, digest: DecisionDigest, complete: Bool, presented_at_ms: u64, now_ms: u64)
+- `Present`(audience: DecisionParty, digest: DecisionDigest, complete: Bool, link_served_digest: Option<DecisionDigest>, presented_at_ms: u64, now_ms: u64)
 - `Decide`(approve: Bool, approver_id: DecisionParty, decider: DecisionParty, digest: DecisionDigest, evidence_digest: Option<String>, eligible: Bool, carried_presentation_at_ms: Option<u64>, observed_at_ms: u64, now_ms: u64)
 - `Review`(verdict: DurableDecisionReviewVerdict, reviewer: DecisionParty, digest: DecisionDigest, evidence_digest: Option<String>, now_ms: u64)
 - `Withdraw`(withdrawer: DecisionParty, by_host: Bool, now_ms: u64)
@@ -290,7 +290,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentAtDeadline`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `deadline_reached`
 - Emits: `Expired`, `Refused`
@@ -298,7 +298,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedSubjectChanged`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_differs`
@@ -307,7 +307,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedIncomplete`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -317,7 +317,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentToApprover`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -330,7 +330,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedUntimed`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -343,7 +343,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedWrongApproverAudience`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -355,7 +355,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentToReviewer`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -367,7 +367,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedWrongReviewerAudience`
 - From: `Open`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Guards:
   - `before_deadline`
   - `subject_matches`
@@ -379,37 +379,37 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PresentRefusedNotOpenApproved`
 - From: `Approved`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `Approved`
 
 ### `PresentRefusedNotOpenRejected`
 - From: `Rejected`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `Rejected`
 
 ### `PresentRefusedNotOpenExpired`
 - From: `Expired`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `Expired`
 
 ### `PresentRefusedNotOpenWithdrawn`
 - From: `Withdrawn`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `Withdrawn`
 
 ### `PresentRefusedNotOpenExecuted`
 - From: `Executed`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `Executed`
 
 ### `PresentRefusedNotOpenExecutionRefused`
 - From: `ExecutionRefused`
-- On: `Present`(audience, digest, complete, presented_at_ms, now_ms)
+- On: `Present`(audience, digest, complete, link_served_digest, presented_at_ms, now_ms)
 - Emits: `Refused`
 - To: `ExecutionRefused`
 

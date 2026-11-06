@@ -216,6 +216,135 @@ fn a_presentation_missing_a_part_is_incomplete() {
     assert!(!complete.shows_every_part_of(&self::rendering("another rendering")));
 }
 
+/// A summary presentation that shows no canonical part, with a link to the
+/// full presentation of `rendering` that served the rendering whose digest
+/// is `served_digest`.
+fn linked_presentation(
+    rendering: &DecisionRendering,
+    served_digest: Sha256Digest,
+) -> PresentationRecord {
+    PresentationRecord::linked(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        PresentationLink::new(reference("decision-page:7"), served_digest),
+        reference("chat"),
+        reference("message-1"),
+        5,
+    )
+}
+
+/// A summary with a link is a complete presentation exactly when the link
+/// served the whole, unchanged rendering: its served digest is the
+/// rendering's subject digest. A record that shows every part stays
+/// complete.
+#[test]
+fn a_link_presentation_counts_complete_only_when_its_served_digest_equals_the_subject_digest() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(linked.parts_shown.is_empty(), "a summary shows no part");
+    assert_eq!(linked.subject_digest, rendering.subject_digest());
+    assert!(!linked.shows_every_part_of(&rendering));
+    assert!(
+        linked.is_complete_for(&rendering),
+        "the link served the whole, unchanged rendering"
+    );
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(shown.is_complete_for(&rendering));
+}
+
+/// A summary without a link shows only some parts, or none: incomplete.
+#[test]
+fn a_summary_without_a_link_is_incomplete() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let complete = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(complete.parts_shown.len() > 1);
+
+    let mut summary = complete.clone();
+    summary.parts_shown.truncate(1);
+    assert!(!summary.is_complete_for(&rendering));
+
+    let mut nothing = complete;
+    nothing.parts_shown.clear();
+    assert!(!nothing.is_complete_for(&rendering));
+}
+
+/// A link that served another rendering (the request changed after the
+/// summary was sent) completes nothing, and a link that served this
+/// rendering completes no presentation of another.
+#[test]
+fn a_link_to_a_changed_rendering_is_incomplete() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let changed = self::rendering("Release build 8 to the stable channel.");
+
+    let stale = linked_presentation(&rendering, changed.subject_digest());
+    assert!(!stale.is_complete_for(&rendering));
+
+    let served = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(!served.is_complete_for(&changed));
+}
+
+/// The link is part of the record's closed form: it round-trips, a field it
+/// does not know is refused, and a record without a link writes none, so
+/// its stored bytes are those of a record from before links.
+#[test]
+fn a_linked_presentation_record_round_trips_and_refuses_unknown_fields() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    let value = serde_json::to_value(&linked).expect("encode the record");
+    assert_eq!(
+        value["link"],
+        serde_json::json!({
+            "reference": "decision-page:7",
+            "served_digest": rendering.subject_digest().as_str(),
+        })
+    );
+    let back: PresentationRecord =
+        serde_json::from_value(value.clone()).expect("decode the record");
+    assert_eq!(back, linked);
+
+    let mut later = value;
+    later["link"]["a_later_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<PresentationRecord>(later).is_err());
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        None,
+        reference("console"),
+        reference("message-1"),
+        5,
+    );
+    assert!(
+        serde_json::to_value(&shown)
+            .expect("encode the record")
+            .get("link")
+            .is_none()
+    );
+}
+
 #[test]
 fn decision_id_derives_from_kind_and_subject_key() {
     let kind = DecisionKind::new("identity.create").expect("kind");

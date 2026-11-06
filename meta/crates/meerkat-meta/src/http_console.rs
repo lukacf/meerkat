@@ -210,6 +210,16 @@ impl ConsoleActorKind {
 }
 
 impl ConsoleHttpAuthContext {
+    /// Who this caller is to a side chat's creator label, which the console
+    /// shows only to its creator and to access admins
+    /// ([`crate::side_chat::clear_unseen_side_chat_creators`]).
+    fn side_chat_creator_viewer(&self) -> crate::side_chat::SideChatCreatorViewer<'_> {
+        crate::side_chat::SideChatCreatorViewer::new(
+            self.principal.as_deref(),
+            self.access_view.as_ref(),
+        )
+    }
+
     /// Who the Console acts as for this request.
     fn actor_kind(&self) -> ConsoleActorKind {
         match (&self.human, &self.principal) {
@@ -1431,10 +1441,14 @@ pub async fn console_rpc_handler(
     // A console change is recorded in the console audit log once its answer
     // is known, a refusal included (`crate::console_audit`).
     let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
-    let response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
+    let mut response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
     if let Some(intent) = audited {
         intent.record(&auth_context, &response).await;
     }
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut response,
+        auth_context.side_chat_creator_viewer(),
+    );
     (StatusCode::OK, Json::<Value>(response))
 }
 
@@ -2175,11 +2189,14 @@ async fn console_identities_handler(
     ))
     .await
     {
-        Ok(identities) => (
-            StatusCode::OK,
-            Json::<Value>(json!({ "identities": identities })),
-        )
-            .into_response(),
+        Ok(identities) => {
+            let mut body = json!({ "identities": identities });
+            crate::side_chat::clear_unseen_side_chat_creators(
+                &mut body,
+                auth_context.side_chat_creator_viewer(),
+            );
+            (StatusCode::OK, Json::<Value>(body)).into_response()
+        }
         Err(err) => {
             tracing::warn!(target: "meta::console", error = %err, "console identities request failed");
             console_json_error(
@@ -7656,11 +7673,15 @@ pub async fn console_rpc_multipart_handler(
     // A blob upload is a console change the console audit log records once
     // its answer is known, a refusal included (`crate::console_audit`).
     let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
-    let (status, response) =
+    let (status, mut response) =
         console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await;
     if let Some(intent) = audited {
         intent.record(&auth_context, &response).await;
     }
+    crate::side_chat::clear_unseen_side_chat_creators(
+        &mut response,
+        auth_context.side_chat_creator_viewer(),
+    );
     (status, Json::<Value>(response))
 }
 

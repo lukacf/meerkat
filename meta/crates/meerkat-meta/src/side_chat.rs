@@ -62,6 +62,7 @@ use meerkat_core::{
 };
 use meerkat_mob::SpawnMemberSpec;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::fork::{ForkChildRetention, ForkMemberError, ForkMemberOutcome};
 use crate::mob_handle_runtime::MobRuntime;
@@ -454,6 +455,76 @@ pub(crate) fn project_side_chat_lineage(
     );
     if let Some(creator) = &lineage.creator {
         labels.insert(SIDE_CHAT_CREATOR_LABEL.to_string(), creator.clone());
+    }
+}
+
+/// Who reads a console answer, as far as [`SIDE_CHAT_CREATOR_LABEL`] goes.
+/// A side chat's creator is a person's principal, so the console shows it
+/// to that person and to access admins only: other people's principals go in
+/// privileged projections only.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SideChatCreatorViewer<'a> {
+    /// The viewer's console principal, when the console identified them.
+    principal: Option<&'a str>,
+    /// Whether the viewer administers access.
+    access_admin: bool,
+}
+
+impl<'a> SideChatCreatorViewer<'a> {
+    /// The viewer with console principal `principal` (`None` for an
+    /// anonymous caller) and access view `access` (`None` on a console
+    /// without an access controller, which has no access admins).
+    pub(crate) fn new(
+        principal: Option<&'a str>,
+        access: Option<&crate::access::AccessView>,
+    ) -> Self {
+        Self {
+            principal: principal
+                .map(str::trim)
+                .filter(|principal| !principal.is_empty()),
+            access_admin: access.is_some_and(crate::access::AccessView::can_administer),
+        }
+    }
+
+    fn sees(&self, creator: &Value) -> bool {
+        self.access_admin
+            || creator
+                .as_str()
+                .zip(self.principal)
+                .is_some_and(|(creator, principal)| creator.trim() == principal)
+    }
+}
+
+/// Clear [`SIDE_CHAT_CREATOR_LABEL`] from every `labels` object of a console
+/// answer that `viewer` may not see it in ([`SideChatCreatorViewer`]). Every
+/// other label is left as it is, and the access decisions the label takes
+/// part in are made before an answer is built, so clearing it changes none.
+pub(crate) fn clear_unseen_side_chat_creators(
+    value: &mut Value,
+    viewer: SideChatCreatorViewer<'_>,
+) {
+    if viewer.access_admin {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::Object(labels)) = object.get_mut("labels")
+                && labels
+                    .get(SIDE_CHAT_CREATOR_LABEL)
+                    .is_some_and(|creator| !viewer.sees(creator))
+            {
+                labels.remove(SIDE_CHAT_CREATOR_LABEL);
+            }
+            for child in object.values_mut() {
+                clear_unseen_side_chat_creators(child, viewer);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                clear_unseen_side_chat_creators(item, viewer);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1380,6 +1451,67 @@ mod tests {
 
     fn marked(source: &str) -> BTreeMap<String, String> {
         BTreeMap::from([(SIDE_CHAT_OF_LABEL.to_string(), source.to_string())])
+    }
+
+    /// A side chat's creator shows only to that person and to access
+    /// admins: every other viewer gets the answer without it, with every
+    /// other label kept.
+    #[test]
+    fn a_creator_label_shows_only_to_its_creator_and_access_admins() {
+        let answer = serde_json::json!({
+            "result": [
+                {
+                    "member_id": "alpha-side",
+                    "labels": { "side_chat_of": "alpha", "side_chat_creator": "bob@example.test" },
+                },
+                { "member_id": "alpha", "labels": { "team": "ops" } },
+            ],
+            "identities": [{ "labels": { "side_chat_creator": "bob@example.test" } }],
+        });
+        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("controller");
+        let seen = |viewer: SideChatCreatorViewer<'_>| {
+            let mut answer = answer.clone();
+            clear_unseen_side_chat_creators(&mut answer, viewer);
+            answer
+        };
+        let creators = |answer: &Value| {
+            (
+                answer["result"][0]["labels"][SIDE_CHAT_CREATOR_LABEL].clone(),
+                answer["identities"][0]["labels"][SIDE_CHAT_CREATOR_LABEL].clone(),
+            )
+        };
+        let bob = serde_json::json!("bob@example.test");
+
+        let by_creator = seen(SideChatCreatorViewer::new(Some(" bob@example.test "), None));
+        assert_eq!(creators(&by_creator), (bob.clone(), bob.clone()));
+        let admin = controller.view_for_subject(Some("root@example.test"));
+        let by_admin = seen(SideChatCreatorViewer::new(
+            Some("root@example.test"),
+            Some(&admin),
+        ));
+        assert_eq!(creators(&by_admin), (bob.clone(), bob));
+
+        let other = controller.view_for_subject(Some("carol@example.test"));
+        for viewer in [
+            SideChatCreatorViewer::new(Some("carol@example.test"), Some(&other)),
+            SideChatCreatorViewer::new(None, None),
+        ] {
+            let cleared = seen(viewer);
+            assert_eq!(creators(&cleared), (Value::Null, Value::Null));
+            assert_eq!(
+                cleared["result"][0]["labels"],
+                serde_json::json!({ "side_chat_of": "alpha" })
+            );
+            assert_eq!(
+                cleared["result"][1]["labels"],
+                serde_json::json!({ "team": "ops" })
+            );
+        }
     }
 
     #[test]

@@ -98,7 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`null` for an anonymous caller of an open console). The label counts
   only on a side chat Meerkat's roster verifies; a `side_chat_creator`
   label set any other way, or copied from the forked agent, is dropped on
-  every surface. It records the creator and grants nothing.
+  every surface. It records the creator and grants nothing, and the
+  console shows it only to the creator and to access admins.
 
 - A console audit log: each console change on `POST /console/rpc` and
   `/console/rpc/multipart`, a refusal included, writes a row naming the

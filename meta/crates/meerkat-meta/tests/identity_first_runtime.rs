@@ -6552,8 +6552,11 @@ async fn dormant_identity_owing_a_compaction(
     meerkat_meta::identity_first::IdentityFirstRuntimeContext,
     tempfile::TempDir,
 ) {
-    let (runtime, bridge, session) = seated_dormant_identity(name).await;
+    let bridge = Arc::new(CountingBridge::default());
+    // The lifecycle projection reads Core's journal from its first
+    // preparation on: the journal answers before anything is seated.
     bridge.core.keep_journal();
+    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
     let context = meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
         runtime.clone(),
         Arc::new(StaticRosterProvider::new(vec![make_spec(name)])),
@@ -6561,6 +6564,13 @@ async fn dormant_identity_owing_a_compaction(
         None,
         None,
     );
+    lazy_register_flow(&runtime, &[make_spec(name)], None)
+        .await
+        .unwrap();
+    assert_eq!(bridge.seats(), vec![(make_identity(name), None)]);
+    let session = core_member(&bridge, &make_identity(name))
+        .session_id
+        .expect("the seat binds a session");
     let memory_dir = tempfile::tempdir().unwrap();
     let memory_store =
         Arc::new(meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).unwrap());

@@ -2154,6 +2154,112 @@ mod tests {
         );
     }
 
+    /// The reporting finalization answers exactly the records it published,
+    /// as a scoped enumeration then reads them (content and metadata, in
+    /// order). A second finalization of the same stage publishes and answers
+    /// nothing, and so does one of a dropped scope.
+    #[tokio::test]
+    async fn the_reporting_finalization_answers_exactly_what_it_published() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let session_id = SessionId::new();
+        let projection = compaction_projection(&session_id, "parent-report", "revision-report");
+        let scope = MemorySearchScope::for_session(session_id.clone());
+        let store = HnswMemoryStore::open(&memory_dir).unwrap();
+        let indexed_at = UNIX_EPOCH + Duration::from_secs(30);
+        store
+            .stage_compaction_batch(
+                projection.clone(),
+                MemoryIndexBatch::new(
+                    MemoryIndexScope::for_session(session_id.clone()),
+                    vec![
+                        request_with(
+                            "first discard",
+                            &session_id,
+                            MessageRange::new(0, 2).unwrap(),
+                            indexed_at,
+                        ),
+                        request_with(
+                            "second discard",
+                            &session_id,
+                            MessageRange::new(2, 3).unwrap(),
+                            indexed_at,
+                        ),
+                    ],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let published = match store.finalize_compaction_batch_reporting(&projection).await {
+            Ok(records) => records,
+            Err(error) => panic!("the reporting finalization publishes the stage: {error}"),
+        };
+        let page = store
+            .enumerate_scoped(&scope, enumeration(10, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            published
+                .iter()
+                .map(|record| record.content.as_str())
+                .collect::<Vec<_>>(),
+            page.records
+                .iter()
+                .map(|record| record.content.as_str())
+                .collect::<Vec<_>>(),
+            "the answered records are the published records, in order"
+        );
+        assert_eq!(published.len(), 2, "both entries are answered");
+        for (answered, read) in published.iter().zip(&page.records) {
+            assert_eq!(answered.metadata.session_id, read.metadata.session_id);
+            assert_eq!(answered.metadata.source, read.metadata.source);
+            assert_eq!(answered.metadata.indexed_at, read.metadata.indexed_at);
+        }
+
+        let again = store
+            .finalize_compaction_batch_reporting(&projection)
+            .await
+            .unwrap();
+        assert!(
+            again.is_empty(),
+            "a finalized stage publishes nothing again"
+        );
+        assert_eq!(
+            store
+                .enumerate_scoped(&scope, enumeration(10, 0))
+                .await
+                .unwrap()
+                .records
+                .len(),
+            2,
+            "the second finalization added no row"
+        );
+
+        let dropped_session = SessionId::new();
+        let dropped = compaction_projection(&dropped_session, "parent-drop", "revision-drop");
+        store
+            .stage_compaction_batch(
+                dropped.clone(),
+                MemoryIndexBatch::single(request("dropped discard", &dropped_session)),
+            )
+            .await
+            .unwrap();
+        store
+            .drop_scope(&MemoryOwner::canonical_session(dropped_session))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .finalize_compaction_batch_reporting(&dropped)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a dropped scope publishes nothing"
+        );
+    }
+
     #[tokio::test]
     async fn dropped_stage_await_retries_same_rewrite_with_new_timestamp_idempotently() {
         let dir = TempDir::new().unwrap();

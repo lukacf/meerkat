@@ -771,9 +771,10 @@ impl AgentMemoryRuntimeInjector {
         identity: &AgentIdentity,
         session_key: Option<&str>,
         content: &meerkat_core::ContentInput,
+        requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<Vec<meerkat_core::ContentInput>, AgentMemoryError> {
         self.coordinator
-            .inject_for_turn(identity, session_key, content)
+            .inject_for_turn(identity, session_key, content, requester)
             .await
     }
 
@@ -2631,7 +2632,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("Where did I put my passport?".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content)
+            .inject_for_turn(&identity()?, None, &content, None)
             .await?;
 
         let request = {
@@ -2671,7 +2672,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content)
+            .inject_for_turn(&identity()?, None, &content, None)
             .await?;
 
         assert!(injected.is_empty());
@@ -2690,7 +2691,10 @@ mod tests {
         );
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
-        let err = match injector.inject_for_turn(&identity()?, None, &content).await {
+        let err = match injector
+            .inject_for_turn(&identity()?, None, &content, None)
+            .await
+        {
             Ok(_) => return Err("fail policy should return provider error".into()),
             Err(err) => err,
         };
@@ -2712,7 +2716,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content)
+            .inject_for_turn(&identity()?, None, &content, None)
             .await?;
 
         assert!(injected.is_empty());
@@ -2775,7 +2779,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("where is the fact?".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, Some("session-1"), &content)
+            .inject_for_turn(&identity()?, Some("session-1"), &content, None)
             .await?;
 
         // Recall ran and the record was injected as its own body — and the
@@ -2815,12 +2819,12 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = injector
-            .inject_for_turn(&identity()?, Some("session-a"), &content)
+            .inject_for_turn(&identity()?, Some("session-a"), &content, None)
             .await?;
         assert!(first.text_content().contains("Stable fact"));
 
         let second = injector
-            .inject_for_turn(&identity()?, Some("session-a"), &content)
+            .inject_for_turn(&identity()?, Some("session-a"), &content, None)
             .await?;
         assert!(
             second.is_empty(),
@@ -2828,7 +2832,7 @@ mod tests {
         );
 
         let other_session = injector
-            .inject_for_turn(&identity()?, Some("session-b"), &content)
+            .inject_for_turn(&identity()?, Some("session-b"), &content, None)
             .await?;
         assert!(other_session.text_content().contains("Stable fact"));
         Ok(())
@@ -2851,7 +2855,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = injector
-            .inject_for_turn(&identity()?, None, &content)
+            .inject_for_turn(&identity()?, None, &content, None)
             .await?;
         let text = injected.text_content();
         let blocks = text.matches("<meta_memory_observation ").count();
@@ -2884,7 +2888,7 @@ mod tests {
         let mut saw_passthrough_at = None;
         for turn in 0..8 {
             let injected = injector
-                .inject_for_turn(&identity()?, Some("session-x"), &content)
+                .inject_for_turn(&identity()?, Some("session-x"), &content, None)
                 .await?;
             let overhead = injected.text_content().len();
             assert!(overhead <= MAX_INJECTED_ASSEMBLY_BYTES + 64);
@@ -4112,6 +4116,7 @@ memory = false
                 &identity,
                 Some("sess-1"),
                 &meerkat_core::ContentInput::Text("what is the deploy policy?".to_string()),
+                None,
             )
             .await?;
         let injected_text = injected

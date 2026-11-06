@@ -3402,6 +3402,211 @@ async fn memory_panel_enforces_scope_actions_end_to_end() {
     let _ = runtime.mob_handle().stop().await;
 }
 
+/// The Memory panel on a console with sign-in shows a person their own
+/// operator memory with `operator.memory.read`. Another person's operator
+/// memory needs `operator.memory.read_any` too: it is left out of listings
+/// and refused on detail without it. Admins read every person's.
+#[tokio::test]
+async fn reading_others_operator_memory_needs_read_any() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    const ISSUER: &str = "https://trusted.meta.localhost";
+    const ADMIN: &str = "root@example.test";
+    const ALICE: &str = "alice@example.test";
+    const CAROL: &str = "carol@example.test";
+
+    async fn person_rpc(app: &axum::Router, subject: &str, method: &str, params: Value) -> Value {
+        let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        jwt_header.kid = Some("kid-current".to_string());
+        let token = jsonwebtoken::encode(
+            &jwt_header,
+            &json!({
+                "iss": ISSUER,
+                "aud": "meerkat-console",
+                "sub": subject,
+                "email": subject,
+                "provider": "google_oauth",
+                "exp": chrono::Utc::now().timestamp() + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+        )
+        .expect("signed fixture token");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/console/rpc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({"jsonrpc": "2.0", "id": "operator-memory", "method": method, "params": params})
+                            .to_string(),
+                    ))
+                    .expect("person RPC request"),
+            )
+            .await
+            .expect("person RPC response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("person RPC body");
+        serde_json::from_slice(&body).expect("person RPC json")
+    }
+
+    async fn operator_ids(app: &axum::Router, subject: &str) -> Vec<String> {
+        let listing = person_rpc(
+            app,
+            subject,
+            "meta/memory/panel/records",
+            json!({ "scope": "operator" }),
+        )
+        .await;
+        assert_eq!(listing["error"], Value::Null, "{listing:#?}");
+        listing["result"]["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|row| row["id"].as_str().expect("record id").to_string())
+            .collect()
+    }
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store =
+        meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).expect("memory store");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ADMIN.to_string()],
+        rules: vec![AccessRule {
+            id: "people-read-operator-memory".to_string(),
+            subjects: vec![ALICE.to_string(), CAROL.to_string()],
+            actions: vec!["operator.memory.read".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    runtime.set_access_controller(controller.clone());
+    let mut decisions = decision_state(true);
+    decisions.trusted_oidc.discovery_json = json!({
+        "issuer": ISSUER,
+        "jwks_uri": format!("{ISSUER}/.well-known/jwks.json"),
+    })
+    .to_string();
+    let app = runtime.build_reference_app_router(decisions);
+
+    // A person's operator memory is keyed by the caller scope `whoami`
+    // reports to them.
+    let mut operator_records = BTreeMap::new();
+    for (subject, title) in [
+        (ALICE, "Alice operator fact"),
+        (CAROL, "Carol operator fact"),
+    ] {
+        let whoami = person_rpc(&app, subject, "meta/console/whoami", json!({})).await;
+        let caller_scope = whoami["result"]["caller_scope"]
+            .as_str()
+            .expect("caller scope")
+            .to_string();
+        let receipt = store
+            .remember_authored(
+                &MemoryScope::Operator {
+                    realm: "default".to_string(),
+                    operator: caller_scope,
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Preference,
+                    title: title.to_string(),
+                    description: String::new(),
+                    body: format!("{title} body"),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                MemoryAuthor::Operator,
+            )
+            .await
+            .expect("operator record");
+        operator_records.insert(subject, receipt.memory_id);
+    }
+    let alice_record = operator_records[ALICE].clone();
+    let carol_record = operator_records[CAROL].clone();
+
+    let alice_reads = operator_ids(&app, ALICE).await;
+    assert!(
+        !alice_reads.contains(&carol_record),
+        "A's listing leaves out B's operator memory: {alice_reads:?}"
+    );
+    assert!(
+        alice_reads.contains(&alice_record),
+        "A reads their own operator memory: {alice_reads:?}"
+    );
+    let unscoped = person_rpc(&app, ALICE, "meta/memory/panel/records", json!({})).await;
+    assert!(
+        unscoped["result"]["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .all(|row| row["id"] != json!(carol_record)),
+        "an unscoped listing leaves out B's operator memory too: {unscoped:#?}"
+    );
+    let denied = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": carol_record }),
+    )
+    .await;
+    assert_eq!(denied["error"]["code"], json!(-32030), "{denied:#?}");
+    assert_eq!(
+        denied["error"]["data"]["action"],
+        json!("operator.memory.read_any"),
+        "{denied:#?}"
+    );
+    let own = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": alice_record }),
+    )
+    .await;
+    assert_eq!(own["error"], Value::Null, "{own:#?}");
+
+    // The admin reads every person's operator memory.
+    let admin_reads = operator_ids(&app, ADMIN).await;
+    assert!(
+        admin_reads.contains(&alice_record) && admin_reads.contains(&carol_record),
+        "{admin_reads:?}"
+    );
+
+    // `operator.memory.read_any` opens another person's operator memory.
+    controller
+        .upsert_rule(AccessRule {
+            id: "alice-reads-any-operator-memory".to_string(),
+            subjects: vec![ALICE.to_string()],
+            actions: vec!["operator.memory.read_any".to_string()],
+            ..AccessRule::default()
+        })
+        .expect("live read_any grant");
+    let alice_reads = operator_ids(&app, ALICE).await;
+    assert!(
+        alice_reads.contains(&carol_record) && alice_reads.contains(&alice_record),
+        "{alice_reads:?}"
+    );
+    let detail = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": carol_record }),
+    )
+    .await;
+    assert_eq!(detail["error"], Value::Null, "{detail:#?}");
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
 /// §10.3 on the quarantine queue itself: `memory.quarantine.review` is the
 /// entry gate but never sufficient per row — each queue record and each
 /// pending promotion still needs the caller's read grant on its (target)

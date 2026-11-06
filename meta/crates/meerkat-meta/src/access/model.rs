@@ -22,6 +22,10 @@ pub const ACTION_AGENT_MEMORY_READ: &str = "agent.memory.read";
 /// by an unscoped `agent.memory.read` grant and never granted by the
 /// migration compat rewrite — always an explicit rule.
 pub const ACTION_OPERATOR_MEMORY_READ: &str = "operator.memory.read";
+/// Read another person's operator-scoped memory. `operator.memory.read`
+/// reads the caller's own operator scope only; reading anyone else's needs
+/// this action on top. Admins hold it, as they hold every action.
+pub const ACTION_OPERATOR_MEMORY_READ_ANY: &str = "operator.memory.read_any";
 /// Administrative memory operations on an identity's store (imports,
 /// re-keying, floor overrides). Reserved: no console RPC maps to it yet.
 pub const ACTION_AGENT_MEMORY_ADMIN: &str = "agent.memory.admin";
@@ -98,6 +102,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_AGENT_MEMORY_READ,
     ACTION_AGENT_MEMORY_ADMIN,
     ACTION_OPERATOR_MEMORY_READ,
+    ACTION_OPERATOR_MEMORY_READ_ANY,
     ACTION_MOB_MEMORY_READ,
     ACTION_MOB_MEMORY_PROPOSE,
     ACTION_MOB_MEMORY_COMMIT,

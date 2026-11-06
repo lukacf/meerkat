@@ -1365,6 +1365,29 @@ fn console_caller_scope(scope: &ConsoleSendScope) -> String {
     format!("console-caller:v1:{digest:x}")
 }
 
+/// The caller scope of the person a qualified principal names: a `Human` in
+/// the trust domain of a verified OIDC issuer, as the Console qualifies a
+/// person it authenticated
+/// ([`crate::runtime::AuthenticatedConsoleHuman::principal`]). It is the
+/// `caller_scope` `meta/console/whoami` reports to that person, a function of
+/// the issuer and the subject only. Any other principal names no person and
+/// has none.
+pub(crate) fn person_caller_scope(principal: &meerkat_core::PrincipalRef) -> Option<String> {
+    if principal.kind != meerkat_core::PrincipalKind::Human {
+        return None;
+    }
+    let meerkat_core::PrincipalQualification::Qualified(domain) = &principal.qualification else {
+        return None;
+    };
+    let issuer = domain
+        .as_str()
+        .strip_prefix(crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX)?;
+    Some(console_caller_scope(&ConsoleSendScope::Human {
+        issuer: issuer.to_string(),
+        subject: principal.id.as_str().to_string(),
+    }))
+}
+
 /// Storage keys are opaque projections of the authenticated runtime/principal.
 /// Anonymous consoles form an explicit shared local account. The browser also
 /// includes its gateway base URL, and custom hosts can supply a stricter scope.

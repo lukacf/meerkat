@@ -385,6 +385,10 @@ pub struct RecallCoordinator {
     // §7.2 identity→mob binding: consulted per composition. None (the
     // default) keeps mob scope out of read composition.
     mob_resolver: Option<Arc<dyn MobScopeResolver>>,
+    // Scaffold: today's rule behind the turn-requester seam. The console send
+    // path notes each person who speaks to an identity as its operator, and a
+    // build composes the last one noted.
+    last_speakers: Arc<ConsolePrincipalOperatorResolver>,
 }
 
 impl RecallCoordinator {
@@ -397,6 +401,7 @@ impl RecallCoordinator {
             nonces: Arc::new(Mutex::new(HashMap::new())),
             operator_resolver: None,
             mob_resolver: None,
+            last_speakers: Arc::new(ConsolePrincipalOperatorResolver::new()),
         }
     }
 
@@ -428,11 +433,12 @@ impl RecallCoordinator {
             .unwrap_or_default();
         let operator = match self.config.operator_scope {
             AgentMemoryOperatorScope::Off => None,
-            AgentMemoryOperatorScope::Provisional => {
-                self.operator_resolver.as_ref().and_then(|resolver| {
-                    resolver.active_operator(&self.config.realm, identity.as_str())
-                })
-            }
+            AgentMemoryOperatorScope::Provisional => match self.operator_resolver.as_ref() {
+                Some(resolver) => resolver.active_operator(&self.config.realm, identity.as_str()),
+                None => self
+                    .last_speakers
+                    .active_operator(&self.config.realm, identity.as_str()),
+            },
         };
         compose_identity_scope_set_with_bindings(
             &self.config.realm,
@@ -507,14 +513,18 @@ impl RecallCoordinator {
     /// what makes injection echo-safe (excluded from compaction indexing) and
     /// authenticated (a channel, not a text pattern) rather than the old
     /// fused-into-user-text behavior.
+    ///
+    /// `requester` is the requester of the turn this delivery starts, as
+    /// the host supplied it with the input.
     pub async fn inject_for_turn(
         &self,
         identity: &AgentIdentity,
         session_key: Option<&str>,
         content: &meerkat_core::ContentInput,
+        requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<Vec<meerkat_core::ContentInput>, AgentMemoryError> {
         match self
-            .inject_for_turn_classified(identity, session_key, content)
+            .inject_for_turn_classified(identity, session_key, content, requester)
             .await?
         {
             TurnInjection::Injected(bodies) => Ok(bodies),
@@ -574,7 +584,16 @@ impl RecallCoordinator {
         identity: &AgentIdentity,
         session_key: Option<&str>,
         content: &meerkat_core::ContentInput,
+        requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<TurnInjection, AgentMemoryError> {
+        // Scaffold: today's rule behind the new seam (see `last_speakers`).
+        if let Some(operator) = requester
+            .and_then(meerkat_core::TurnRequester::direct_principal)
+            .and_then(crate::http_console::person_caller_scope)
+        {
+            self.last_speakers
+                .note_interaction(identity.as_str(), &operator);
+        }
         if self.config.per_turn_injection == AgentMemoryPerTurnInjection::Off {
             return Ok(TurnInjection::Skipped(
                 TurnInjectionSkip::PerTurnInjectionOff,
@@ -2072,13 +2091,13 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         let nonce_a = extract_nonce(&first.text_content()).ok_or("nonce in session-a header")?;
         assert_eq!(nonce_a.len(), 32, "128-bit hex nonce");
 
         let second = coordinator
-            .inject_for_turn(&id, Some("session-b"), &content)
+            .inject_for_turn(&id, Some("session-b"), &content, None)
             .await?;
         let nonce_b = extract_nonce(&second.text_content()).ok_or("nonce in session-b header")?;
         assert_ne!(
@@ -2104,7 +2123,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         let nonce = extract_nonce(&injected.text_content()).ok_or("nonce in header")?;
 
@@ -2142,7 +2161,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(first.text_content().contains("Stable fact"));
         let injections = provider.captured_injections();
@@ -2153,7 +2172,7 @@ mod tests {
         assert_eq!(injections[0].identity, "identity:luka");
 
         let second = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(second.is_empty(), "deduped turn injects nothing new");
         assert_eq!(
@@ -2187,6 +2206,7 @@ mod tests {
                 &identity()?,
                 Some("s"),
                 &meerkat_core::ContentInput::Text("hello".into()),
+                None,
             )
             .await?;
         assert!(matches!(
@@ -2212,6 +2232,7 @@ mod tests {
                 &identity()?,
                 Some("s"),
                 &meerkat_core::ContentInput::Text("   ".into()),
+                None,
             )
             .await?;
         assert!(matches!(
@@ -2245,6 +2266,7 @@ mod tests {
                 &identity()?,
                 Some("spent"),
                 &meerkat_core::ContentInput::Text("hello".into()),
+                None,
             )
             .await?;
         assert!(matches!(
@@ -2270,6 +2292,7 @@ mod tests {
                 &identity()?,
                 Some("s"),
                 &meerkat_core::ContentInput::Text("hello".into()),
+                None,
             )
             .await?;
         assert!(matches!(
@@ -2297,11 +2320,11 @@ mod tests {
         let id = identity()?;
         let content = meerkat_core::ContentInput::Text("hello".into());
         let first = coordinator
-            .inject_for_turn_classified(&id, Some("s"), &content)
+            .inject_for_turn_classified(&id, Some("s"), &content, None)
             .await?;
         assert!(matches!(first, TurnInjection::Injected(ref bodies) if !bodies.is_empty()));
         let second = coordinator
-            .inject_for_turn_classified(&id, Some("s"), &content)
+            .inject_for_turn_classified(&id, Some("s"), &content, None)
             .await?;
         assert!(matches!(
             second,
@@ -2344,7 +2367,7 @@ mod tests {
         let id = identity()?;
         let content = meerkat_core::ContentInput::Text("hello".into());
         let out = coordinator
-            .inject_for_turn(&id, Some("s"), &content)
+            .inject_for_turn(&id, Some("s"), &content, None)
             .await?;
         assert!(out.is_empty());
         // and the first skip for this identity was noted exactly once
@@ -2375,7 +2398,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = coordinator
-            .inject_for_turn(&id, Some("s"), &content)
+            .inject_for_turn(&id, Some("s"), &content, None)
             .await?;
 
         assert!(injected.is_empty(), "nothing to inject this turn");
@@ -2439,14 +2462,14 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(first.text_content().contains("Stable fact"));
         coordinator
-            .inject_for_turn(&id, Some("session-b"), &content)
+            .inject_for_turn(&id, Some("session-b"), &content, None)
             .await?;
         let deduped = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(
             deduped.is_empty(),
@@ -2471,7 +2494,7 @@ mod tests {
         }
 
         let reinjected = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(
             reinjected.text_content().contains("Stable fact"),
@@ -2487,7 +2510,7 @@ mod tests {
 
         // Untouched session: still deduped.
         let still_deduped = coordinator
-            .inject_for_turn(&id, Some("session-b"), &content)
+            .inject_for_turn(&id, Some("session-b"), &content, None)
             .await?;
         assert!(
             still_deduped.is_empty(),
@@ -2584,7 +2607,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let first = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(first.text_content().contains("Stable fact"));
 
@@ -2592,7 +2615,7 @@ mod tests {
         // share) the same per-session dedup set, not a fresh one.
         let second = coordinator
             .clone()
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         assert!(
             second.is_empty(),
@@ -2604,7 +2627,7 @@ mod tests {
         // the passthrough above was dedup, not global suppression.
         let other = coordinator
             .clone()
-            .inject_for_turn(&id, Some("session-b"), &content)
+            .inject_for_turn(&id, Some("session-b"), &content, None)
             .await?;
         assert!(other.text_content().contains("Stable fact"));
         Ok(())
@@ -2632,7 +2655,7 @@ mod tests {
             // only reachable if the byte counter accumulates across clones.
             let injected = coordinator
                 .clone()
-                .inject_for_turn(&id, Some("session-x"), &content)
+                .inject_for_turn(&id, Some("session-x"), &content, None)
                 .await?;
             let overhead = injected.text_content().len();
             assert!(overhead <= MAX_INJECTED_ASSEMBLY_BYTES + 64);
@@ -2784,7 +2807,7 @@ mod tests {
         let content = meerkat_core::ContentInput::Text("hello".to_string());
 
         let injected = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?;
         let text = injected.text_content();
 
@@ -2823,7 +2846,7 @@ mod tests {
         let id = identity()?;
         let content = meerkat_core::ContentInput::Text("hello".to_string());
         let rendered = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?
             .text_content();
         assert!(rendered.contains(OBSERVATION_OPEN_MARKER), "{rendered}");
@@ -2882,7 +2905,7 @@ mod tests {
         let id = identity()?;
         let content = meerkat_core::ContentInput::Text("hello".to_string());
         let rendered = coordinator
-            .inject_for_turn(&id, Some("session-a"), &content)
+            .inject_for_turn(&id, Some("session-a"), &content, None)
             .await?
             .text_content();
         assert!(
@@ -2946,5 +2969,218 @@ mod tests {
             vec!["mob-alpha".to_string()]
         );
         assert!(binding.active_mobs("other-realm", "identity:x").is_empty());
+    }
+
+    /// Per-person operator memory. Each row models one member over a SQLite
+    /// store: its build (the memory its build instructions carry, which
+    /// stands for every run until the next build) and its turns (the memory
+    /// each delivery injects). What a turn recalls is the member's latest
+    /// build plus its own injection. The transcript a member keeps is shared
+    /// by design and is not recall.
+    mod person_operator_memory {
+        use super::*;
+        use crate::memory::SqliteAgentMemoryStore;
+        use crate::memory::records::{MemoryAuthor, NewMemoryRecord};
+        use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId, TurnRequester};
+
+        const REALM: &str = "default";
+        const ISSUER: &str = "https://issuer.example.test";
+        const ALICE_FACT: &str = "Alice prefers terse status notes";
+        const BOB_FACT: &str = "Bob wants every figure in metric units";
+        const PAT_FACT: &str = "Pat reviews releases on Fridays";
+
+        /// A person as a Console send names its requester: a `Human` with
+        /// the verified `sub`, in the trust domain of the verified issuer.
+        fn person(subject: &str) -> Result<PrincipalRef, Box<dyn Error>> {
+            let domain = TrustDomainId::new(format!(
+                "{}{ISSUER}",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))?;
+            Ok(PrincipalRef::in_domain(
+                PrincipalKind::Human,
+                subject,
+                domain,
+            )?)
+        }
+
+        struct Member {
+            coordinator: RecallCoordinator,
+            identity: AgentIdentity,
+            build: String,
+            _store_dir: tempfile::TempDir,
+        }
+
+        impl Member {
+            /// A member whose store holds one operator fact for each person
+            /// in `facts`, in that person's operator scope, with the operator
+            /// scope on. It is built once before any turn.
+            async fn new(facts: &[(&PrincipalRef, &str)]) -> Result<Self, Box<dyn Error>> {
+                let store_dir = tempfile::tempdir()?;
+                let store = SqliteAgentMemoryStore::open(store_dir.path())?;
+                for (person, title) in facts {
+                    let operator = crate::http_console::person_caller_scope(person)
+                        .ok_or("a person has a caller scope")?;
+                    store
+                        .remember_authored(
+                            &MemoryScope::Operator {
+                                realm: REALM.to_string(),
+                                operator,
+                            },
+                            NewMemoryRecord {
+                                kind: MemoryKind::Preference,
+                                title: (*title).to_string(),
+                                description: String::new(),
+                                body: format!("{title}."),
+                                tags: Vec::new(),
+                                evidence: Vec::new(),
+                                verification: None,
+                            },
+                            MemoryAuthor::Operator,
+                        )
+                        .await?;
+                }
+                let coordinator = RecallCoordinator::new(
+                    Arc::new(store),
+                    AgentMemoryConfig {
+                        realm: REALM.to_string(),
+                        operator_scope: AgentMemoryOperatorScope::Provisional,
+                        per_turn_injection: AgentMemoryPerTurnInjection::Budgeted,
+                        ..AgentMemoryConfig::default()
+                    },
+                );
+                let mut member = Self {
+                    coordinator,
+                    identity: AgentIdentity::parse("identity:shared")?,
+                    build: String::new(),
+                    _store_dir: store_dir,
+                };
+                member.rebuild().await?;
+                Ok(member)
+            }
+
+            /// The member is built again: a wake, a reload or a respawn.
+            async fn rebuild(&mut self) -> Result<(), Box<dyn Error>> {
+                self.build = self
+                    .coordinator
+                    .assemble_build_injection(
+                        &self.identity,
+                        Some("shared work".to_string()),
+                        Vec::new(),
+                    )
+                    .await?
+                    .unwrap_or_default();
+                Ok(())
+            }
+
+            /// What a turn whose input carries `requester` recalls: the
+            /// member's latest build and the memory its delivery injects.
+            async fn turn(
+                &self,
+                requester: Option<&TurnRequester>,
+            ) -> Result<String, Box<dyn Error>> {
+                let injected = self
+                    .coordinator
+                    .inject_for_turn(
+                        &self.identity,
+                        None,
+                        &meerkat_core::ContentInput::Text("What should we do next?".to_string()),
+                        requester,
+                    )
+                    .await?;
+                Ok(format!("{}\n{}", self.build, injected.text_content()))
+            }
+        }
+
+        /// A's turn, B's turn, a rebuild, then A's next turn: A's next turn
+        /// recalls A's operator facts and none of B's, B's turn recalls B's,
+        /// and no build carries operator facts (a build serves every run of
+        /// its member, whoever started it).
+        #[tokio::test]
+        async fn operator_scope_follows_turn_requester() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let bob = person("bob")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT), (&bob, BOB_FACT)]).await?;
+            let alice_turn = member
+                .turn(Some(&TurnRequester::direct(alice.clone())))
+                .await?;
+            let bob_turn = member.turn(Some(&TurnRequester::direct(bob))).await?;
+            member.rebuild().await?;
+            let alice_next = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            assert!(
+                !alice_next.contains(BOB_FACT),
+                "A's next turn recalls none of B's operator facts: {alice_next}"
+            );
+            assert!(
+                alice_next.contains(ALICE_FACT),
+                "A's next turn recalls A's operator facts: {alice_next}"
+            );
+            assert!(
+                alice_turn.contains(ALICE_FACT) && !alice_turn.contains(BOB_FACT),
+                "A's turn recalls A's operator facts only: {alice_turn}"
+            );
+            assert!(
+                bob_turn.contains(BOB_FACT) && !bob_turn.contains(ALICE_FACT),
+                "B's turn recalls B's operator facts only: {bob_turn}"
+            );
+            assert!(
+                !member.build.contains(ALICE_FACT) && !member.build.contains(BOB_FACT),
+                "a build carries no operator facts: {}",
+                member.build
+            );
+            Ok(())
+        }
+
+        /// After A's turn and a rebuild, a turn without a person requester
+        /// recalls no operator facts: a schedule fire or a peer message
+        /// (no requester), or a service (a principal that names no person).
+        #[tokio::test]
+        async fn no_human_requester_no_operator_scope() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT)]).await?;
+            let alice_turn = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            member.rebuild().await?;
+            let requester_less = member.turn(None).await?;
+            assert!(
+                !requester_less.contains(ALICE_FACT),
+                "a turn without a requester recalls no operator facts: {requester_less}"
+            );
+            let service = PrincipalRef::in_domain(
+                PrincipalKind::ServiceAccount,
+                "svc:reporter",
+                TrustDomainId::new("service-issuer:reporting")?,
+            )?;
+            let service_turn = member.turn(Some(&TurnRequester::direct(service))).await?;
+            assert!(
+                !service_turn.contains(ALICE_FACT),
+                "a service's turn recalls no operator facts: {service_turn}"
+            );
+            assert!(
+                alice_turn.contains(ALICE_FACT),
+                "A's own turn recalls A's operator facts: {alice_turn}"
+            );
+            Ok(())
+        }
+
+        /// A turn whose requester P was carried across a peer hop recalls
+        /// none of P's operator facts; P's own direct turn does.
+        #[tokio::test]
+        async fn carried_requester_recalls_no_operator_memory() -> Result<(), Box<dyn Error>> {
+            let pat = person("pat")?;
+            let mut member = Member::new(&[(&pat, PAT_FACT)]).await?;
+            let direct = member
+                .turn(Some(&TurnRequester::direct(pat.clone())))
+                .await?;
+            member.rebuild().await?;
+            let carried = member.turn(Some(&TurnRequester::carried(pat))).await?;
+            assert!(
+                !carried.contains(PAT_FACT),
+                "a carried requester recalls none of P's operator facts: {carried}"
+            );
+            assert!(
+                direct.contains(PAT_FACT),
+                "P's direct turn recalls P's operator facts: {direct}"
+            );
+            Ok(())
+        }
     }
 }

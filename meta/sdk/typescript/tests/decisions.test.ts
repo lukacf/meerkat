@@ -154,7 +154,7 @@ describe("MobHandle decision wrappers", () => {
     });
     assert.equal((caught as Error | undefined)?.name, "DecideInsideToolCallbackError");
     assert.equal((caught as { kind?: string } | undefined)?.kind, "decide_inside_tool_callback");
-    assert.deepEqual(calls, [], "nothing is sent from inside a tool callback");
+    assert.equal(calls.length, 0, "nothing is sent from inside a tool callback");
 
     // Outside a callback the host decides as before.
     await handle.decisionsDecide(DECISION_ID, { approve: true, presentedDigest: DIGEST });

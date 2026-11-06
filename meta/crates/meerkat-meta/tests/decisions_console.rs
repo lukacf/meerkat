@@ -532,6 +532,51 @@ async fn console_withdraw_needs_decisions_admin() {
 }
 
 #[tokio::test]
+async fn capabilities_list_the_decision_methods_the_caller_may_call() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let decision_methods = |answer: Value| -> Vec<String> {
+        let mut methods: Vec<String> = answer["result"]["methods"]
+            .as_array()
+            .unwrap_or_else(|| panic!("methods: {answer}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|method| method.starts_with("meta/decisions/"))
+            .map(str::to_string)
+            .collect();
+        methods.sort();
+        methods
+    };
+
+    let reader = decision_methods(rpc(&app, Some(ALICE), "meta/capabilities", json!({})).await);
+    assert_eq!(
+        reader,
+        [
+            "meta/decisions/get",
+            "meta/decisions/list",
+            "meta/decisions/rendering"
+        ]
+    );
+    let rule_admin = decision_methods(rpc(&app, Some(ERIN), "meta/capabilities", json!({})).await);
+    assert_eq!(rule_admin, ["meta/decisions/withdraw"]);
+    let admin = decision_methods(rpc(&app, Some(ADMIN), "meta/capabilities", json!({})).await);
+    assert_eq!(
+        admin,
+        [
+            "meta/decisions/get",
+            "meta/decisions/list",
+            "meta/decisions/rendering",
+            "meta/decisions/withdraw"
+        ]
+    );
+    let nobody = decision_methods(rpc(&app, Some(DAVE), "meta/capabilities", json!({})).await);
+    assert!(nobody.is_empty(), "{nobody:?}");
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn the_console_http_surface_refuses_an_attestation_field() {
     let dir = tempfile::tempdir().expect("dir");
     let state = dir.path().join("state");

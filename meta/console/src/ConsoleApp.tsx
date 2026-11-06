@@ -211,6 +211,7 @@ import {
 import { TimelinePanel } from "./panels/TimelinePanel";
 import { OperatorPanel } from "./panels/OperatorPanel";
 import { GatingInboxPanel } from "./panels/GatingInboxPanel";
+import { decisionCardsOf, renderingOf, wholeDecisionIds, type DecisionCardView } from "./panels/decision-cards";
 import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
@@ -303,6 +304,9 @@ type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
 type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
 /** The recorded approvals the Approvals panel reads: the newest 50. */
 const GATING_AUDIT_LIMIT = 50;
+/** How many open durable decisions the Approvals panel reads: one page,
+ *  of which it shows the ones the caller may see. */
+const DECISION_PAGE_LIMIT = 100;
 type RoutingReadState = {
   scope: string;
   loading: boolean;
@@ -3671,6 +3675,38 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   }), [baseUrl, panelRefreshFlight]);
 
+  // The durable decisions the caller may see, on the Approvals panel's
+  // Pending tab, read only: the open ones, with the rendering of each one the
+  // caller may read whole. They belong to the scope (principal and runtime)
+  // that read them. A gateway that lists no decision methods shows none.
+  const [decisionRead, setDecisionRead] = React.useState<{ scope: string; cards: DecisionCardView[] }>({ scope: "", cards: [] });
+  const refreshDecisions = React.useCallback(() => panelRefreshFlight("decisions", async () => {
+    const scope = accessScopeRef.current;
+    const target = controlWorkbenchTarget("gating");
+    try {
+      const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDecisions, target, { phase: "open", limit: DECISION_PAGE_LIMIT });
+      const renderings = new Map<string, string>();
+      await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
+        try {
+          const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.getDecisionRendering, target, { decision_id: decisionId }));
+          if (rendering !== undefined) renderings.set(decisionId, rendering);
+        } catch {
+          // A rendering that cannot be read leaves its card without one.
+        }
+      }));
+      if (scope !== accessScopeRef.current) return;
+      setDecisionRead({ scope, cards: decisionCardsOf(page, renderings) });
+    } catch (error) {
+      if (scope !== accessScopeRef.current) return;
+      setDecisionRead({ scope, cards: [] });
+      // No decision methods on this gateway, or none for this caller: no
+      // cards, and nothing to report.
+      if ((error as { kind?: unknown } | null)?.kind === "console-capability-unavailable") return;
+      throw error;
+    }
+  }), [baseUrl, panelRefreshFlight]);
+  const decisionCards = decisionRead.scope === accessScope ? decisionRead.cards : [];
+
   // Routing reads need routing access (runtime.admin): a refusal shows the
   // no-access state, never "no routes". The data belongs to the principal
   // and runtime it was read under and is cleared when either changes.
@@ -3733,9 +3769,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       openPanels.some((t) => t.kind === "gating" || t.kind === "gates")
     ) {
       refreshes.push(refreshGatingAudit());
+      refreshes.push(refreshDecisions());
     }
     await Promise.all(refreshes);
-  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
+  }, [baseUrl, visiblePanelTargets, hasMobControlSurface, panelRefreshFlight, refreshAccessData, refreshDecisions, refreshGatingAudit, refreshMemoryData, refreshRoutingData, refreshTopologyData, refreshWorkGraphData]);
 
   const refreshPanelDataRef = React.useRef(refreshPanelData);
   refreshPanelDataRef.current = refreshPanelData;
@@ -6000,7 +6037,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
-          onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefresh={() => {
+            void approvalResourceRef.current?.refresh();
+            void refreshDecisions().catch(() => {});
+          }}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
@@ -6011,6 +6051,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
+          decisions={decisionCards}
+          signedIn={Boolean(experience?.access?.subject)}
         />
       );
     if (target.kind === "topology") {
@@ -6109,7 +6151,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           pending={activeApprovals?.requests.map(request => request.raw) || []}
           resource={activeApprovals}
           selectedPendingId={selectedApprovalId}
-          onRefresh={() => void approvalResourceRef.current?.refresh()}
+          onRefresh={() => {
+            void approvalResourceRef.current?.refresh();
+            void refreshDecisions().catch(() => {});
+          }}
           onRefreshAudit={() => void refreshGatingAudit().catch(() => {})}
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
@@ -6120,6 +6165,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostAttention={hostAttention}
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
+          decisions={decisionCards}
+          signedIn={Boolean(experience?.access?.subject)}
         />
       );
     if (target.kind === "logs")

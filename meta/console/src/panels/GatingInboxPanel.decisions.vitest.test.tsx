@@ -56,4 +56,20 @@ describe("GatingInboxPanel decision cards", () => {
     expect(card.textContent).not.toContain("Release build 7");
     expect(within(card).queryByRole("button", { name: /approve/i })).toBeNull();
   });
+
+  it("a_status_card_says_whose_request_it_is_and_points_to_no_decision", () => {
+    const status = {
+      decisionId: HELD.decisionId,
+      kind: HELD.kind,
+      phase: "open",
+      deadlineAtMs: HELD.deadlineAtMs,
+      statusOnly: true,
+    };
+    const view = render(
+      <GatingInboxPanel pending={[]} audit={[]} onDecide={vi.fn()} decisions={[status]} signedIn />,
+    );
+    const card = view.getByTestId(`decision-card:${HELD.decisionId}`);
+    expect(within(card).getByText(/you asked for this decision/i)).toBeTruthy();
+    expect(within(card).queryByText(/decide where it was presented/i)).toBeNull();
+  });
 });

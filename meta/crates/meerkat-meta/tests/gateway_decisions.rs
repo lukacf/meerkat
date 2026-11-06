@@ -40,7 +40,7 @@ model = "gpt-5.5"
 
 const RENDERING: &str = "Release build 7 to production, with the change log attached.";
 const NOTICE_METHOD: &str = "meta/decisions/notice";
-const LINE_WAIT: Duration = Duration::from_secs(120);
+const LINE_WAIT: Duration = Duration::from_mins(2);
 
 // ---------------------------------------------------------------------------
 // The gateway process

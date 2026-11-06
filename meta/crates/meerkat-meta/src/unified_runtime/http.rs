@@ -466,6 +466,7 @@ impl UnifiedRuntime {
             self.console_governed_ingress.clone(),
             self.console_session_fences().clone(),
             self.mob_announcements_slot(),
+            self.durable_decisions().clone(),
         )
     }
 

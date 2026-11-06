@@ -1003,6 +1003,35 @@ pub trait PersistentMetadataStore: Send + Sync {
     /// writer stopped, under its own bound. The default runs no write off
     /// its callers, so it returns at once.
     async fn settle_detached_writes(&self) {}
+
+    /// Bind the attested decide event `event_ref` of the decision ingress
+    /// `ingress` to `decision_id`, durably and once: the first decision that
+    /// uses an event keeps it. Answers the id of the decision the event is
+    /// bound to, which is `decision_id` when it was bound now or before.
+    ///
+    /// The default keeps no such record and refuses, so an attested decide
+    /// never runs unrecorded on a store that cannot keep the binding.
+    async fn bind_decision_event(
+        &self,
+        mob_id: &str,
+        ingress: &str,
+        event_ref: &str,
+        decision_id: &str,
+    ) -> Result<String, MetadataStoreError> {
+        let _ = (mob_id, ingress, event_ref, decision_id);
+        Err(MetadataStoreError::Io(
+            "this metadata store keeps no decision events".to_string(),
+        ))
+    }
+}
+
+/// Key prefix of the decision events attested decides used, in the
+/// `meta_metadata` table: the ingress (an ingress name, free of `/`) and the
+/// event reference follow.
+const DECISION_EVENT_KEY_PREFIX: &str = "decision_event/";
+
+fn decision_event_key(ingress: &str, event_ref: &str) -> String {
+    format!("{DECISION_EVENT_KEY_PREFIX}{ingress}/{event_ref}")
 }
 
 /// In-memory persistent metadata store.
@@ -1022,6 +1051,7 @@ pub struct InMemoryMetadataStore {
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
     lifecycle_intents: RwLock<BTreeMap<(String, LifecycleIntentKey), LifecycleEffectIntent>>,
     lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
+    decision_events: RwLock<BTreeMap<(String, String), String>>,
 }
 
 impl InMemoryMetadataStore {
@@ -1032,6 +1062,22 @@ impl InMemoryMetadataStore {
 
 #[async_trait]
 impl PersistentMetadataStore for InMemoryMetadataStore {
+    async fn bind_decision_event(
+        &self,
+        mob_id: &str,
+        ingress: &str,
+        event_ref: &str,
+        decision_id: &str,
+    ) -> Result<String, MetadataStoreError> {
+        Ok(self
+            .decision_events
+            .write()
+            .await
+            .entry((mob_id.to_string(), decision_event_key(ingress, event_ref)))
+            .or_insert_with(|| decision_id.to_string())
+            .clone())
+    }
+
     async fn get_subscription_cursor(
         &self,
         mob_id: &str,
@@ -1406,6 +1452,32 @@ impl SqliteMetadataStore {
 
 #[async_trait]
 impl PersistentMetadataStore for SqliteMetadataStore {
+    async fn bind_decision_event(
+        &self,
+        mob_id: &str,
+        ingress: &str,
+        event_ref: &str,
+        decision_id: &str,
+    ) -> Result<String, MetadataStoreError> {
+        let key = decision_event_key(ingress, event_ref);
+        let _fence = self.operation_fence()?;
+        let conn = self.lock_conn()?;
+        // The first decision keeps the event: a later binding leaves the
+        // row as it is and reads it back.
+        conn.execute(
+            "INSERT INTO meta_metadata (mob_id, key, value) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(mob_id, key) DO NOTHING",
+            rusqlite::params![mob_id, key, decision_id],
+        )
+        .map_err(|err| MetadataStoreError::Io(format!("insert: {err}")))?;
+        conn.query_row(
+            "SELECT value FROM meta_metadata WHERE mob_id = ?1 AND key = ?2",
+            rusqlite::params![mob_id, key],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|err| MetadataStoreError::Io(format!("query: {err}")))
+    }
+
     async fn get_subscription_cursor(
         &self,
         mob_id: &str,

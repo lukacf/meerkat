@@ -459,6 +459,7 @@ async fn enforced_access_reads_the_roster_at_most_once_per_replay_page() {
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
     });
 
     let mut sse = open_stream(&app, "console:0")

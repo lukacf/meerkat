@@ -125,6 +125,9 @@ struct GatewayRuntimeOptions {
     console_read_only: Option<bool>,
     console_fetch_timeout_ms: Option<u64>,
     access: Option<crate::AccessController>,
+    /// `runtime_options.decisions`: the decision ingresses whose attested
+    /// people decide durable decisions on this stdio host.
+    decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
     demo_llm: bool,
     /// Bind each locally hosted member to a signed loopback TCP endpoint so
     /// peer-only external members in another process can return traffic.
@@ -488,6 +491,7 @@ impl Default for GatewayRuntimeOptions {
             console_read_only: None,
             console_fetch_timeout_ms: None,
             access: None,
+            decision_ingresses: None,
             demo_llm: false,
             member_comms_address: None,
             contacts: None,
@@ -9446,6 +9450,7 @@ fn parse_gateway_runtime_options(
         "identity_creation",
         "control_request_window_ms",
         "serve_keyed_inject",
+        "decisions",
     ];
     let unsupported = runtime_options
         .keys()
@@ -9592,6 +9597,17 @@ fn parse_gateway_runtime_options(
         parsed.console_ui = load_console_ui_config_from_path_for_realm(path, None)
             .map_err(|err| format!("runtime_options.console_config_path is invalid: {err}"))?;
     }
+    // The decision ingresses a declared host channel attests people
+    // through; absent or null declares none.
+    match runtime_options.get("decisions") {
+        None | Some(Value::Null) => {}
+        Some(value) => {
+            parsed.decision_ingresses = Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|err| format!("runtime_options.decisions is invalid: {err}"))?,
+            );
+        }
+    }
     // An explicit access path must be a path string; absent or null keeps
     // access control off.
     match runtime_options.get("access_config_path") {
@@ -9607,6 +9623,13 @@ fn parse_gateway_runtime_options(
             return Err("runtime_options.access_config_path must be a string".to_string());
         }
     }
+    // The approver map may list only the declared ingresses and the
+    // built-in operator.
+    crate::durable_decisions::check_approver_ingresses(
+        parsed.access.as_ref(),
+        &parsed.decision_ingresses.clone().unwrap_or_default(),
+    )
+    .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
     if let Some(value) = runtime_options.get("console_require_app_auth") {
         parsed.console_require_app_auth = Some(value.as_bool().ok_or_else(|| {
             "runtime_options.console_require_app_auth must be a boolean".to_string()
@@ -11183,6 +11206,9 @@ fn run_single_shot(args: &[String]) {
 
 struct GatewayStdoutLine {
     response: crate::SerializedRpcResponseDelivery,
+    /// Told, once the writer settles this line, whether it reached the pipe
+    /// (written and flushed); `false` when it is dropped unwritten.
+    acknowledgement: Option<oneshot::Sender<bool>>,
     #[cfg(feature = "openai-live")]
     public_observation_delivery: Option<oneshot::Sender<bool>>,
     #[cfg(feature = "openai-live")]
@@ -11199,6 +11225,7 @@ impl GatewayStdoutLine {
     fn plain(line: String) -> Self {
         Self {
             response: crate::SerializedRpcResponseDelivery::plain(line),
+            acknowledgement: None,
             #[cfg(feature = "openai-live")]
             public_observation_delivery: None,
             #[cfg(feature = "openai-live")]
@@ -11206,9 +11233,26 @@ impl GatewayStdoutLine {
         }
     }
 
+    /// A line whose sender learns whether it reached the pipe.
+    fn acknowledged(line: String) -> (Self, oneshot::Receiver<bool>) {
+        let (acknowledgement, written) = oneshot::channel();
+        (
+            Self {
+                response: crate::SerializedRpcResponseDelivery::plain(line),
+                acknowledgement: Some(acknowledgement),
+                #[cfg(feature = "openai-live")]
+                public_observation_delivery: None,
+                #[cfg(feature = "openai-live")]
+                public_observation_binding: None,
+            },
+            written,
+        )
+    }
+
     fn delivery(response: crate::SerializedRpcResponseDelivery) -> Self {
         Self {
             response,
+            acknowledgement: None,
             #[cfg(feature = "openai-live")]
             public_observation_delivery: None,
             #[cfg(feature = "openai-live")]
@@ -11226,6 +11270,7 @@ impl GatewayStdoutLine {
         (
             Self {
                 response: crate::SerializedRpcResponseDelivery::plain(line),
+                acknowledgement: None,
                 public_observation_delivery: Some(delivery),
                 public_observation_binding: Some(LivePublicObservationBinding { machine, binding }),
             },
@@ -11255,6 +11300,9 @@ impl GatewayStdoutLine {
 
     async fn settle_delivery(&mut self, delivered: bool) {
         let _ = self.response.settle_delivery(delivered).await;
+        if let Some(acknowledgement) = self.acknowledgement.take() {
+            let _ = acknowledgement.send(delivered);
+        }
         #[cfg(feature = "openai-live")]
         if let Some(public_observation_delivery) = self.public_observation_delivery.take() {
             let _ = public_observation_delivery.send(delivered);
@@ -11264,10 +11312,30 @@ impl GatewayStdoutLine {
 
 impl Drop for GatewayStdoutLine {
     fn drop(&mut self) {
+        if let Some(acknowledgement) = self.acknowledgement.take() {
+            let _ = acknowledgement.send(false);
+        }
         #[cfg(feature = "openai-live")]
         if let Some(public_observation_delivery) = self.public_observation_delivery.take() {
             let _ = public_observation_delivery.send(false);
         }
+    }
+}
+
+/// The stdio host's decision notices: each written as a stdout line of its
+/// own, answered once the writer has written and flushed it.
+struct GatewayDecisionNotices {
+    stdout_tx: mpsc::Sender<GatewayStdoutLine>,
+}
+
+#[async_trait::async_trait]
+impl crate::durable_decisions::DecisionNoticeSink for GatewayDecisionNotices {
+    async fn deliver(&self, line: String) -> bool {
+        let (line, written) = GatewayStdoutLine::acknowledged(line);
+        if self.stdout_tx.send(line).await.is_err() {
+            return false;
+        }
+        written.await.unwrap_or(false)
     }
 }
 
@@ -19104,6 +19172,8 @@ external_addressable = true
     // The identity runtime keeps its identity records (each build's tool
     // record, each rotation's intent) in the composition's metadata store.
     let identity_record_store = Arc::clone(&persistent_metadata);
+    // The durable decisions record their attested decide events there.
+    let decision_event_store = Arc::clone(&persistent_metadata);
     let bootstrap_plan = crate::gateway_composition::GatewayRuntimeBootstrapPlan::stdio_rpc(
         mob_spec,
         module_config,
@@ -19136,6 +19206,29 @@ external_addressable = true
         .as_mut()
         .expect("bootstrap installed");
     let runtime = composition.runtime_mut();
+    // The durable decisions of the launch's persistent state directory; a
+    // launch without one keeps none.
+    if let Some(state_dir) = persistent_state.as_ref()
+        && !storage_layout.is_declared_ephemeral()
+    {
+        let realm = storage_layout
+            .meerkat_level_realm()
+            .map_err(|error| fail_init(&request_id, STORAGE_RESOLUTION_CODE, error.to_string()))?
+            .clone();
+        let mob_id = runtime.mob_id();
+        let speaks_for_composition = runtime.speaks_for_composition();
+        runtime.set_durable_decisions(crate::durable_decisions::RuntimeDecisions::in_state_dir(
+            state_dir,
+            realm,
+            gateway_options
+                .decision_ingresses
+                .clone()
+                .unwrap_or_default(),
+            decision_event_store,
+            mob_id,
+            speaks_for_composition,
+        ));
+    }
     runtime.set_bootstrap_phase_observer(Arc::new(move |phase| {
         init_progress.enter(InitPhase::from(phase));
     }));
@@ -20535,6 +20628,13 @@ external_addressable = true
     // the same methods concurrently, so completion order is free.
     let identity_ctx = identity_ctx.map(Arc::new);
     let http_base_url_shared: Arc<str> = http_base_url.clone().into();
+    // The connection's `meta/decisions/*` verbs and their notices.
+    let decision_connection = Arc::new(crate::durable_decisions::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(GatewayDecisionNotices {
+            stdout_tx: stdout_tx.clone(),
+        }),
+    ));
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -20575,7 +20675,15 @@ external_addressable = true
             let live_rpc = live_rpc.clone();
             let gateway_detached_jobs = gateway_detached_jobs.clone();
             let callback_bridge = bridge.clone();
+            let decision_connection = Arc::clone(&decision_connection);
             inflight.spawn(async move {
+                if let Some(answer) = decision_connection
+                    .handle_line(&runtime, &request_line)
+                    .await
+                {
+                    let _ = stdout_tx.send(GatewayStdoutLine::plain(answer)).await;
+                    return;
+                }
                 let response = match handle_callback_job_rpc(
                     &request_line,
                     gateway_detached_jobs.as_ref(),
@@ -20604,6 +20712,9 @@ external_addressable = true
             // Reap completed handlers so the set does not grow unbounded.
             while inflight.try_join_next().is_some() {}
         };
+        // The connection ended: no operator decide on it is eligible any
+        // more, one in flight included when it commits.
+        decision_connection.close();
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`

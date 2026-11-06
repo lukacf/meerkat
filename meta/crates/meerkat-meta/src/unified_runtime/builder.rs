@@ -216,6 +216,7 @@ pub struct UnifiedRuntimeBuilder {
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
     persistent_metadata: Option<Arc<dyn PersistentMetadataStore>>,
     access_controller: Option<crate::access::AccessController>,
+    decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1358,6 +1359,19 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Declare the decision ingresses of this launch: the host channels
+    /// whose attested people decide durable decisions on the stdio host,
+    /// as `runtime_options.decisions` declares them on the gateway. The
+    /// approver map may list only declared ingresses (and the built-in
+    /// `operator`); the build refuses one that names another.
+    pub fn decision_ingresses(
+        mut self,
+        ingresses: crate::durable_decisions::DecisionIngressDeclarations,
+    ) -> Self {
+        self.decision_ingresses = Some(ingresses);
+        self
+    }
+
     /// Let the Flow Editor on the reference app router run `rkat` on this
     /// host for callers that no enforced access controller governs. Off by
     /// default; see [`UnifiedRuntime::allow_flow_editor_host_deploy`].
@@ -1483,6 +1497,13 @@ impl UnifiedRuntimeBuilder {
             })?;
 
         let has_persistent_state = self.persistent_state_path.is_some();
+        // The approver map may list only the decision ingresses this launch
+        // declares, and the built-in operator.
+        crate::durable_decisions::check_approver_ingresses(
+            self.access_controller.as_ref(),
+            &self.decision_ingresses.clone().unwrap_or_default(),
+        )
+        .map_err(|error| UnifiedRuntimeBuilderError::ConflictingConfiguration(error.to_string()))?;
         // Same-root pairing is a documented requirement of
         // `continuity_from_state_dir`; enforce it instead of letting two
         // different directories silently fork session authority from the
@@ -2152,6 +2173,8 @@ impl UnifiedRuntimeBuilder {
         // The identity runtime keeps its identity records (each build's tool
         // record, each rotation's intent) in the composition's metadata store.
         let identity_record_store = Arc::clone(&persistent_metadata);
+        // The durable decisions record their attested decide events there.
+        let decision_event_store = Arc::clone(&persistent_metadata);
         let module_agent_events = self.module_agent_events;
         let options = self.options;
         #[allow(unused_mut)]
@@ -2399,6 +2422,27 @@ impl UnifiedRuntimeBuilder {
             public_owner,
         );
         runtime.set_live_plan(live_plan);
+        // The durable decisions live in the persistent state directory; a
+        // runtime without one, or on a host store realm, keeps none.
+        if self.host_store.is_none()
+            && let Some(state_dir) = self.persistent_state_path.as_ref()
+        {
+            let realm = MetaStorageLayout::with_injected_roots(state_dir.clone(), None)
+                .meerkat_level_realm()?
+                .clone();
+            let mob_id = runtime.mob_id();
+            let speaks_for_composition = runtime.speaks_for_composition();
+            runtime.set_durable_decisions(
+                crate::durable_decisions::RuntimeDecisions::in_state_dir(
+                    state_dir,
+                    realm,
+                    self.decision_ingresses.clone().unwrap_or_default(),
+                    decision_event_store,
+                    mob_id,
+                    speaks_for_composition,
+                ),
+            );
+        }
         // The error hook lives in a late-bound shared slot created at
         // construction (runtime-owned tasks already hold it), so a
         // builder-supplied hook installs into the slot rather than

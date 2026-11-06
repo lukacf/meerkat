@@ -47,6 +47,17 @@ pub const ACTION_AGENT_RESET: &str = "agent.reset";
 pub const ACTION_GATING_VIEW: &str = "gating.view";
 /// Decide pending gating approvals.
 pub const ACTION_GATING_DECIDE: &str = "gating.decide";
+/// Read durable decisions on the console: the list, one decision and its
+/// rendering. It never widens what a caller sees of a decision: that is the
+/// decision kind's rule ([`crate::decisions`]), applied whatever the rules
+/// say.
+pub const ACTION_DECISIONS_VIEW: &str = "decisions.view";
+/// Decide durable decisions on the console. Reserved: no console route
+/// decides yet.
+pub const ACTION_DECISIONS_DECIDE: &str = "decisions.decide";
+/// Administer durable decisions on the console: read every decision whole
+/// while access control is enforced, and withdraw a decision as the host.
+pub const ACTION_DECISIONS_ADMIN: &str = "decisions.admin";
 /// Read WorkGraph state: snapshots, items, attention bindings, events.
 pub const ACTION_WORKGRAPH_VIEW: &str = "workgraph.view";
 /// Mutate WorkGraph state: goals, item lifecycle, attention operations.
@@ -108,6 +119,9 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_AGENT_RESET,
     ACTION_GATING_VIEW,
     ACTION_GATING_DECIDE,
+    ACTION_DECISIONS_VIEW,
+    ACTION_DECISIONS_DECIDE,
+    ACTION_DECISIONS_ADMIN,
     ACTION_WORKGRAPH_VIEW,
     ACTION_WORKGRAPH_MANAGE,
     ACTION_MOB_OBSERVE,
@@ -157,13 +171,112 @@ pub struct AccessControlConfig {
 }
 
 /// Who holds one approver identity: listed subjects and members of listed
-/// groups.
+/// groups, the people a declared decision ingress attests, the stdio
+/// operator, and people whose identities span ingresses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessApprover {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Holders as a declared decision ingress attests them
+    /// (`{ ingress = "chat", subject = "U123" }`), and the stdio operator,
+    /// the built-in ingress `operator` with no subject.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress_subjects: Vec<AccessIngressSubject>,
+    /// One entry per person whose identities span ingresses. The person
+    /// holds the approver id through any identity it lists, and a decision
+    /// one of them requested is that person's own: the others cannot
+    /// approve it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<AccessApproverPerson>,
+}
+
+/// The built-in ingress name of the stdio operator in an approver's
+/// `ingress_subjects`.
+pub const OPERATOR_INGRESS: &str = "operator";
+
+/// One identity a decision ingress attests: the ingress's name and the
+/// subject it attests, or the built-in `operator` ingress, which names no
+/// subject (one operator per gateway).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessIngressSubject {
+    pub ingress: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// One person in an approver's `people`: the console subjects and the
+/// ingress identities that are this one person.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessApproverPerson {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress_subjects: Vec<AccessIngressSubject>,
+}
+
+impl AccessApprover {
+    /// Whether anything holds the approver id.
+    fn has_holders(&self) -> bool {
+        self.subjects
+            .iter()
+            .any(|subject| !subject.trim().is_empty())
+            || !self.groups.is_empty()
+            || !self.ingress_subjects.is_empty()
+            || self.people.iter().any(AccessApproverPerson::names_anyone)
+    }
+
+    /// Every ingress identity the approver id lists, directly or in a
+    /// person.
+    pub(crate) fn all_ingress_subjects(&self) -> impl Iterator<Item = &AccessIngressSubject> {
+        self.ingress_subjects.iter().chain(
+            self.people
+                .iter()
+                .flat_map(|person| person.ingress_subjects.iter()),
+        )
+    }
+}
+
+impl AccessApproverPerson {
+    fn names_anyone(&self) -> bool {
+        !self.subjects.is_empty() || !self.ingress_subjects.is_empty()
+    }
+}
+
+/// Whether `name` is an ingress name: 1 to 64 of `a-z`, `0-9`, `.`, `_`
+/// and `-`.
+pub(crate) fn is_ingress_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Refuse an approver map that names an ingress outside `declared`, the
+/// decision ingresses a launch declares. The built-in `operator` is always
+/// known.
+///
+/// # Errors
+/// [`AccessConfigError::UnknownIngress`] for the first such ingress.
+pub(crate) fn check_declared_ingresses(
+    config: &AccessControlConfig,
+    declared: &std::collections::BTreeSet<String>,
+) -> Result<(), AccessConfigError> {
+    for (approver, holders) in &config.approvers {
+        for identity in holders.all_ingress_subjects() {
+            if identity.ingress != OPERATOR_INGRESS && !declared.contains(&identity.ingress) {
+                return Err(AccessConfigError::UnknownIngress {
+                    approver: approver.clone(),
+                    ingress: identity.ingress.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A named set of subjects.
@@ -234,16 +347,52 @@ pub enum AccessConfigError {
     EmptyRuleId,
     DuplicateRuleId(String),
     EmptyActions(String),
-    UnknownAction { rule: String, action: String },
-    UnknownGroup { rule: String, group: String },
+    UnknownAction {
+        rule: String,
+        action: String,
+    },
+    UnknownGroup {
+        rule: String,
+        group: String,
+    },
     EmptyApproverId,
     ApproverWithoutHolders(String),
-    UnknownApproverGroup { approver: String, group: String },
+    UnknownApproverGroup {
+        approver: String,
+        group: String,
+    },
     UnknownRule(String),
     Parse(String),
     Io(String),
     RevisionExhausted,
     PaddedApproverId(String),
+    /// An approver's ingress identity names something that is not an
+    /// ingress name.
+    InvalidIngressName {
+        approver: String,
+        ingress: String,
+    },
+    /// An approver lists the stdio operator with a subject: one operator per
+    /// gateway, so it names none.
+    OperatorIngressWithSubject {
+        approver: String,
+    },
+    /// An approver's ingress identity names no subject, or an empty or
+    /// padded one.
+    InvalidIngressSubject {
+        approver: String,
+        ingress: String,
+    },
+    /// An approver's `people` entry names no identity.
+    ApproverPersonWithoutIdentity {
+        approver: String,
+    },
+    /// An approver's ingress identity names an ingress the launch does not
+    /// declare (`runtime_options.decisions`).
+    UnknownIngress {
+        approver: String,
+        ingress: String,
+    },
 }
 
 impl AccessConfigError {
@@ -266,6 +415,11 @@ impl AccessConfigError {
             Self::Parse(_) => "invalid_toml",
             Self::Io(_) => "io",
             Self::RevisionExhausted => "revision_exhausted",
+            Self::InvalidIngressName { .. } => "invalid_ingress_name",
+            Self::OperatorIngressWithSubject { .. } => "operator_ingress_with_subject",
+            Self::InvalidIngressSubject { .. } => "invalid_ingress_subject",
+            Self::ApproverPersonWithoutIdentity { .. } => "approver_person_without_identity",
+            Self::UnknownIngress { .. } => "unknown_ingress",
         }
     }
 }
@@ -304,6 +458,29 @@ impl std::fmt::Display for AccessConfigError {
             Self::Parse(message) => write!(f, "access config could not be parsed: {message}"),
             Self::Io(message) => write!(f, "access config io error: {message}"),
             Self::RevisionExhausted => write!(f, "access configuration revision exhausted"),
+            Self::InvalidIngressName { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: {ingress:?} is not an ingress name (1 to 64 of a-z, \
+                 0-9, '.', '_' and '-')"
+            ),
+            Self::OperatorIngressWithSubject { approver } => write!(
+                f,
+                "approver {approver:?}: the operator ingress names no subject (one operator \
+                 per gateway)"
+            ),
+            Self::InvalidIngressSubject { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: ingress {ingress:?} needs a subject that is not empty \
+                 and has no leading or trailing whitespace"
+            ),
+            Self::ApproverPersonWithoutIdentity { approver } => {
+                write!(f, "approver {approver:?}: a people entry names no identity")
+            }
+            Self::UnknownIngress { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: unknown ingress {ingress:?} (declare it in \
+                 runtime_options.decisions)"
+            ),
         }
     }
 }
@@ -446,12 +623,14 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
         if approver.trim() != approver {
             return Err(AccessConfigError::PaddedApproverId(approver.clone()));
         }
-        if holders
-            .subjects
-            .iter()
-            .all(|subject| subject.trim().is_empty())
-            && holders.groups.is_empty()
-        {
+        // An empty person entry is the more precise fault than an approver
+        // without holders, which it may also leave.
+        if holders.people.iter().any(|person| !person.names_anyone()) {
+            return Err(AccessConfigError::ApproverPersonWithoutIdentity {
+                approver: approver.clone(),
+            });
+        }
+        if !holders.has_holders() {
             return Err(AccessConfigError::ApproverWithoutHolders(approver.clone()));
         }
         for group in &holders.groups {
@@ -462,8 +641,38 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
                 });
             }
         }
+        for identity in holders.all_ingress_subjects() {
+            validate_ingress_subject(approver, identity)?;
+        }
     }
     Ok(())
+}
+
+/// One ingress identity of `approver`: an ingress name, and a subject
+/// exactly when the ingress is not the stdio operator.
+fn validate_ingress_subject(
+    approver: &str,
+    identity: &AccessIngressSubject,
+) -> Result<(), AccessConfigError> {
+    if !is_ingress_name(&identity.ingress) {
+        return Err(AccessConfigError::InvalidIngressName {
+            approver: approver.to_string(),
+            ingress: identity.ingress.clone(),
+        });
+    }
+    match identity.subject.as_deref() {
+        Some(_) if identity.ingress == OPERATOR_INGRESS => {
+            Err(AccessConfigError::OperatorIngressWithSubject {
+                approver: approver.to_string(),
+            })
+        }
+        None if identity.ingress == OPERATOR_INGRESS => Ok(()),
+        Some(subject) if !subject.is_empty() && subject.trim() == subject => Ok(()),
+        _ => Err(AccessConfigError::InvalidIngressSubject {
+            approver: approver.to_string(),
+            ingress: identity.ingress.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]

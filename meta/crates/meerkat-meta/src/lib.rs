@@ -39,6 +39,7 @@ pub mod detached_completion;
 #[cfg(test)]
 mod detached_delivery_route_tests;
 pub(crate) mod document_mcp_marker;
+pub mod durable_decisions;
 #[cfg(feature = "extension-state")]
 pub mod extension_state;
 pub(crate) mod fallback_wake;
@@ -116,10 +117,10 @@ pub(crate) mod workgraph_resume_gate;
 pub mod workgraph_wiring;
 
 pub use access::{
-    ACCESS_ACTIONS, AccessApprover, AccessConfigError, AccessControlConfig, AccessController,
-    AccessDecision, AccessEffect, AccessGroup, AccessPrincipal, AccessPublicationAlreadyJoined,
-    AccessResource, AccessRule, AccessView, AgentResourceAttributes, evaluate_access,
-    validate_access_config,
+    ACCESS_ACTIONS, AccessApprover, AccessApproverPerson, AccessConfigError, AccessControlConfig,
+    AccessController, AccessDecision, AccessEffect, AccessGroup, AccessIngressSubject,
+    AccessPrincipal, AccessPublicationAlreadyJoined, AccessResource, AccessRule, AccessView,
+    AgentResourceAttributes, evaluate_access, validate_access_config,
 };
 pub use actor_loop_health::{
     ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport, ActorLoopHealthState,
@@ -186,6 +187,12 @@ pub use decisions::{
     RuntimeOpsPolicy, enforce_console_route_access, load_trusted_meta_modules_from_toml,
     parse_release_metadata_json, validate_bigquery_naming, validate_release_metadata,
     validate_runtime_ops_policy,
+};
+pub use durable_decisions::{
+    DecisionAttestationRequest, DecisionIngressDeclaration, DecisionIngressDeclarations,
+    DecisionIngressError, DecisionNoticeSink, MetaDecisionDecideParams, MetaDecisionListResult,
+    MetaDecisionNotice, MetaDecisionNoticeEvent, MetaDecisionStatus, MetaDecisionView,
+    RuntimeDecisions, StdioDecisionConnection,
 };
 #[allow(deprecated)]
 pub use governance::validate_phase0_governance_contracts;

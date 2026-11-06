@@ -118,6 +118,8 @@ export const CONSOLE_COMMAND_NAMES = {
   listGatingPending: "listGatingPending",
   listGatingAudit: "listGatingAudit",
   decideGating: "decideGating",
+  listDecisions: "listDecisions",
+  getDecisionRendering: "getDecisionRendering",
   accessStatus: "accessStatus",
   getAccessConfig: "getAccessConfig",
   setAccessConfig: "setAccessConfig",
@@ -276,6 +278,14 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   },
   [CONSOLE_COMMAND_NAMES.decideGating]: {
     method: CONSOLE_RPC_METHODS.gatingDecide,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
+  },
+  [CONSOLE_COMMAND_NAMES.listDecisions]: {
+    method: CONSOLE_RPC_METHODS.decisionsList,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
+  },
+  [CONSOLE_COMMAND_NAMES.getDecisionRendering]: {
+    method: CONSOLE_RPC_METHODS.decisionsRendering,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>(["meta/gating"]),
   },
   [CONSOLE_COMMAND_NAMES.accessStatus]: {

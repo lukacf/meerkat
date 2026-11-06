@@ -1536,6 +1536,144 @@ Return the gating audit log (most recent entries, bounded by retention limit).
 
 ---
 
+## Durable decision methods
+
+A durable decision holds one operation until a person with standing decides
+it, it is withdrawn, or its deadline passes. Meerkat owns the decisions, their
+wire shapes and their refusals (see [durable
+decisions](https://docs.rkat.ai/api/rpc#durable-decisions)); Meta serves them
+as `meta/decisions/*` on the stdio gateway and, read only, on
+`POST /console/rpc`, and decides who may decide and who may see what. A
+runtime keeps its decisions in `approval_decisions.sqlite3` under its
+persistent state directory. A runtime without one answers every decision
+method capability unavailable (`-32020`, `data.kind = "no_decision_store"`),
+and a candidate launch (see `mob_composition` in [SDK and gateway runtime
+options](/reference/configuration#sdk-and-gateway-runtime-options)) reads its
+decisions and refuses every write (`data.kind = "candidate_launch"`).
+
+| Method | Stdio gateway | Console |
+|--------|---------------|---------|
+| `meta/decisions/list` | Every decision, whole | Read access (`decisions.view`), as the caller may see them |
+| `meta/decisions/get` | Whole | Read access, as the caller may see it |
+| `meta/decisions/rendering` | Whole | Read access, for a caller that reads the decision whole |
+| `meta/decisions/present` | The host records a presentation it made | Not served |
+| `meta/decisions/withdraw` | The host withdraws | `decisions.admin`, on a writable Console |
+| `meta/decisions/decide` | The operator, or a person a declared ingress attests | Not served (`-32601`) |
+
+`list`, `get`, `rendering`, `present` and `withdraw` take Core's
+`decision/*` params. The list answer is
+`{decisions, statuses, unreadable, next_after?}`: `decisions` holds the rows
+the caller reads whole (Core's decision shape), `statuses` the rows it may see
+the status of only, `unreadable` the rows the server cannot read. A get
+answers `{"decision": {...}}` or `{"status": {...}}`. A status is
+`{decision_id, kind, phase, deadline_at_ms, decided_at_ms?, ended_at_ms?}` and
+never holds what the decision is about. On the stdio gateway every row reads
+whole and `statuses` is empty.
+
+### Notices on the stdio gateway
+
+Before a `meta/decisions/list` answers, the gateway writes one
+`meta/decisions/notice` notification for each open decision of the page this
+connection has not noticed yet. A host that never lists decisions receives no
+notices.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "meta/decisions/notice",
+  "params": {
+    "notice_id": "6f2c3f0e-5b8e-4a5f-9d43-3c1f8f0b6a10",
+    "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+    "kind": "release",
+    "event": "held",
+    "phase": "open",
+    "approver_id": "team:owners",
+    "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+    "rendering_ref": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3"
+  }
+}
+```
+
+A `held` notice shows nothing of what the decision holds; `rendering_ref` is
+the digest of its rendering. A decision that waits for a person and whose
+approver id the approver map lets the stdio operator hold
+(`ingress_subjects = [{ ingress = "operator" }]`, see [approver
+identities](/concepts/access-control#approver-identities)) is presented
+instead: the notice's `event` is `presented` and its `presentation` carries the
+whole rendering and its parts. The gateway records that presentation once the
+notice is written to the pipe, on the connection's own channel and under the
+notice's id.
+
+### `meta/decisions/decide`
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `decision_id` | `string` | yes | The decision to decide |
+| `approve` | `bool` | yes | `true` approves, `false` rejects |
+| `presented_digest` | `string` | yes | The digest of the rendering the person saw (the decision's `subject_digest`) |
+| `reason` | `string` | no | The decision's reason |
+| `attestation` | `object` | no | A declared ingress's attestation of the person who decided |
+
+The request names no approver, actor or assurance. Without `attestation` the
+stdio operator decides: the operating-system user that started the gateway,
+named in the runtime's realm, device trusted, in the connection's own
+authentication scope. Only a decision this connection presented to the
+operator is eligible, while the approver map lists the operator for its
+approver id when the decision commits and while the connection is open; a
+presentation recorded any other way never makes the operator eligible. A
+gateway whose operator cannot be named answers such a decide method not found.
+
+With `attestation`, the person a declared ingress authenticated decides:
+
+| Field | Description |
+|-------|-------------|
+| `ingress` | An ingress declared in `runtime_options.decisions`; never `operator` |
+| `subject` | The person the ingress authenticated |
+| `scope` | The ingress's authentication scope, such as a chat session |
+| `event_ref` | The ingress's reference of the decide event. An event decides one decision: an event already used for another decision is refused, and the same decision may repeat its own event |
+| `observed_at_ms` | When the ingress observed the event; at most the ingress's `max_clock_skew_ms` ahead of the gateway's clock |
+| `presentation` | What the ingress showed the person, in the `meta/decisions/present` shape, when it showed the decision itself |
+
+The approver map must list that person for the decision's approver id, read
+again when the decision commits. An attestation the launch does not accept (an
+undeclared ingress, the `operator` ingress, an event used for another decision,
+a time beyond the clock skew) is refused invalid params (`-32602`) with no
+`data`; the message names the cause. A decision that refuses the decider is
+Core's typed refusal (`-32602`, `data.kind = "decision_refused"`). A person an
+approver's `people` entry lists decides as one person across its identities:
+a decision one of those identities requested is the person's own, and its
+approval by any of them is refused as self approval.
+
+Each event an ingress attests is recorded in the runtime's metadata store
+before the decision is decided, and the record survives a restart.
+
+### On the Console
+
+The Console serves `list`, `get` and `rendering`, and the administrator's
+`withdraw`. Who sees what follows the decision's kind, whether or not access
+control is enforced, and no access rule widens it:
+
+- a caller who holds the decision's approver id in the approver map reads it
+  whole, and so, while access control is enforced, does a caller allowed
+  `decisions.admin`;
+- the requester, a signed-in person matched by principal, reads the status of
+  its own request, and reads it whole only for the `tool_grant.issue` kind;
+- anyone else reads it as a decision that is not there
+  (`data.kind = "decision_not_found"`); an anonymous caller on an open Console
+  sees no decision.
+
+While access control is enforced, the reads need `decisions.view` and the
+withdraw `decisions.admin`; a caller without them is refused `-32030`
+(`data.kind = "access_denied"`). `meta/decisions/rendering` for a caller that
+may see only the status is refused `-32030`
+(`data.kind = "content_not_visible"`). Unreadable rows are listed only to a
+caller allowed `decisions.admin`. While the runtime keeps decisions,
+`meta/capabilities` lists the decision methods the caller may call. The
+Approvals panel lists the open decisions on its Pending tab, read only: each
+one is decided where it was presented.
+
+---
+
 ## Memory methods
 
 ### `meta/memory/index`

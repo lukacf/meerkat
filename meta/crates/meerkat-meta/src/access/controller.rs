@@ -14,7 +14,7 @@ use super::engine::{
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    validate_access_config,
+    check_declared_ingresses, validate_access_config,
 };
 
 /// Cached resource attributes for one agent, keyed by console identity.
@@ -131,6 +131,10 @@ struct AccessControllerInner {
     /// The revision of the configuration last committed, sent after the
     /// commit is visible ([`AccessController::subscribe_revision`]).
     revision_signal: watch::Sender<u64>,
+    /// The decision ingresses the launch declared, once it declared them
+    /// ([`AccessController::declare_decision_ingresses`]): every edit may
+    /// name no other ingress in the approver map.
+    decision_ingresses: RwLock<Option<BTreeSet<String>>>,
 }
 
 /// These access facts already joined an authorization publication; they
@@ -197,6 +201,7 @@ impl AccessController {
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
                 revision_signal: watch::Sender::new(0),
+                decision_ingresses: RwLock::new(None),
             }),
         })
     }
@@ -326,6 +331,34 @@ impl AccessController {
         self.mutate(AccessMutation::SetEnabled(enabled))
     }
 
+    /// Bind the decision ingresses the launch declares
+    /// (`runtime_options.decisions`): the approver map may name no other
+    /// ingress, the built-in `operator` aside, now and in every later edit,
+    /// which is refused [`AccessConfigError::UnknownIngress`] otherwise.
+    ///
+    /// # Errors
+    /// [`AccessConfigError::UnknownIngress`] when the current configuration
+    /// names another ingress; nothing is bound then.
+    pub fn declare_decision_ingresses<I, S>(&self, ingresses: I) -> Result<(), AccessConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let declared: BTreeSet<String> = ingresses.into_iter().map(Into::into).collect();
+        let _mutation = self
+            .inner
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        check_declared_ingresses(&self.snapshot().0, &declared)?;
+        *self
+            .inner
+            .decision_ingresses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(declared);
+        Ok(())
+    }
+
     pub(crate) fn edit_identity(&self) -> Option<&str> {
         self.inner.owner_instance.as_deref()
     }
@@ -424,6 +457,15 @@ impl AccessController {
         mutation.apply(&mut config)?;
         super::model::normalize_access_config_for_memory_actions(&mut config);
         validate_access_config(&config)?;
+        if let Some(declared) = self
+            .inner
+            .decision_ingresses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            check_declared_ingresses(&config, declared)?;
+        }
         self.commit(config)
     }
 
@@ -809,8 +851,9 @@ impl AccessView {
     }
 
     /// The approver identities this principal holds in this snapshot of the
-    /// configuration's `approvers` bindings, directly or through a group. An
-    /// unauthenticated principal holds none.
+    /// configuration's `approvers` bindings, directly, through a group, or
+    /// as a person the binding's `people` names. An unauthenticated
+    /// principal holds none.
     pub fn held_approver_ids(&self) -> BTreeSet<String> {
         let Some(subject) = self.principal.subject.as_deref() else {
             return BTreeSet::new();
@@ -824,6 +867,10 @@ impl AccessView {
                         .groups
                         .iter()
                         .any(|group| self.principal.groups.contains(group))
+                    || holders
+                        .people
+                        .iter()
+                        .any(|person| person.subjects.iter().any(|holder| holder == subject))
             })
             .map(|(approver, _)| approver.clone())
             .collect()

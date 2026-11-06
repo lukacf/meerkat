@@ -454,6 +454,12 @@ pub struct UnifiedRuntimeCore {
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
 
+    // The runtime's durable decisions: the decision owner of its persistent
+    // state directory, the decision ingresses its launch declares, and its
+    // record of attested decide events. A runtime without a persistent
+    // state directory keeps none.
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
+
     // The Console's session fence record, shared by every console and SSE
     // route; it exists whether or not access control is installed.
     console_session_fences: crate::auth::session_fence::ConsoleSessionFences,
@@ -917,6 +923,7 @@ impl UnifiedRuntime {
                 identity_first_context: None,
                 bootstrap_member_build_wiring: None,
                 access_controller: None,
+                durable_decisions: crate::durable_decisions::RuntimeDecisions::unavailable(),
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
                 flow_editor_host_deploy: false,
@@ -2203,6 +2210,42 @@ impl UnifiedRuntime {
     /// Borrow the shared access controller if one was installed.
     pub fn access_controller(&self) -> Option<&crate::access::AccessController> {
         self.access_controller.as_ref()
+    }
+
+    /// The runtime's durable decisions: the decision owner of its
+    /// persistent state directory (`approval_decisions.sqlite3`), and the
+    /// decision ingresses its launch declares. A runtime without a
+    /// persistent state directory, or on a host store realm, keeps none.
+    pub fn durable_decisions(&self) -> &crate::durable_decisions::RuntimeDecisions {
+        &self.durable_decisions
+    }
+
+    /// The runtime's durable decision owner. A host composition holds its
+    /// own kinds' decisions through it; a runtime that keeps none answers
+    /// every call unavailable.
+    pub fn decision_owner(&self) -> &meerkat_runtime::decision::DurableDecisionService {
+        self.durable_decisions.owner()
+    }
+
+    /// Install the runtime's durable decisions. The builder and the stdio
+    /// gateway install those of a persistent state directory at their build.
+    pub fn set_durable_decisions(&mut self, decisions: crate::durable_decisions::RuntimeDecisions) {
+        self.durable_decisions = decisions;
+    }
+
+    /// Meta's answer to whether the party that decided a decision may still
+    /// do so, for a host's decision executor: `Eligible` while the live
+    /// approver map (the access controller's `approvers`) lists the identity
+    /// that decided (the stdio operator, or a person a declared ingress
+    /// attests) for the decision's approver id, re-read when the execution
+    /// commits; `Refused` once it no longer does. A runtime without an
+    /// access controller has no map and refuses.
+    pub fn decision_approver_currentness(
+        &self,
+    ) -> Arc<dyn meerkat_runtime::decision::DecisionApproverCurrentness> {
+        Arc::new(crate::durable_decisions::MapApproverCurrentness::new(
+            self.access_controller.clone(),
+        ))
     }
 
     /// Optional topology control-plane policy and durable intent store.

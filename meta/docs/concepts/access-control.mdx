@@ -32,6 +32,9 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 | `agent.retire` | Retire / force-cancel / delete the agent |
 | `agent.reset` | Reset durable agent state |
 | `gating.view` / `gating.decide` | Read and decide approval gates |
+| `decisions.view` | Read the durable decisions the caller may see on the Console: `meta/decisions/list`, `get` and `rendering` (see [durable decision methods](/api/rpc#durable-decision-methods)) |
+| `decisions.decide` | Reserved for deciding durable decisions on the Console; the Console decides none yet |
+| `decisions.admin` | Read every durable decision whole on the Console, and withdraw one (`meta/decisions/withdraw`) |
 | `workgraph.view` | Read WorkGraph snapshots, items, attention, events, and facts; observe the wake stream |
 | `workgraph.manage` | Mutate WorkGraph items, goals, links, and attention bindings |
 | `mob.observe` | Subscribe to whole-mob raw event streams |
@@ -173,6 +176,25 @@ groups = ["release-managers"]
 
 Holders are read from the live configuration when a decision is made, so removing a subject from a binding or from a holding group revokes the identity for the next request. An approver id must not be empty or carry surrounding whitespace, must have at least one holder, and may only reference defined groups. A binding grants no permission by itself: deciding still requires `gating.decide`. Bindings apply only to authenticated console decisions; an open console (no app authentication) takes the approver id from the request and is for trusted local use only. The console re-checks `gating.decide`, the request's origin and the held approver ids against the live configuration while it records the decision, so a revocation published while a decision waits is honored.
 
+The same map is the only approver source for durable decisions (see [durable decision methods](/api/rpc#durable-decision-methods)). Besides console subjects and groups, a binding lists the people a host channel attests and the stdio operator:
+
+```toml
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [
+  { ingress = "chat", subject = "U123" },   # a person the "chat" ingress attests
+  { ingress = "operator" },                 # the stdio operator of the gateway
+]
+people = [
+  # One person across ingresses: these identities are one decider.
+  { subjects = ["owner@example.org"], ingress_subjects = [{ ingress = "chat", subject = "U123" }] },
+]
+```
+
+- `ingress_subjects` lists holders as a declared decision ingress attests them. An ingress must be declared in the launch's `runtime_options.decisions` (see [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); a configuration that names another ingress is refused at load (`unknown_ingress`), and so is a later edit from the Console. The built-in ingress `operator`, the operating-system user that started the stdio gateway, names no subject and decides only the decisions of the approver ids that list it.
+- `people` holds one entry per person whose identities span ingresses. The person holds the approver id through any identity the entry lists, and a decision one of those identities requested is the person's own: its approval by any of them is refused as self approval. Identities that no entry links cannot be recognised as one person.
+- A Console caller who holds a decision's approver id reads the decision whole; see [On the Console](/api/rpc#on-the-console) for who else sees what.
+
 ## Live administration from the console
 
 ### Configure the owner and the connection
@@ -307,7 +329,9 @@ for example `"reason": "unknown_group"` with
 `enabled_without_admins`, `empty_rule_id`, `duplicate_rule_id`,
 `empty_actions`, `unknown_action`, `unknown_group`, `empty_approver_id`,
 `padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
-`unknown_rule` and `invalid_toml` (a configuration the owner could not write
+`unknown_rule`, `invalid_ingress_name`, `operator_ingress_with_subject`,
+`invalid_ingress_subject`, `approver_person_without_identity`,
+`unknown_ingress` and `invalid_toml` (a configuration the owner could not write
 as TOML), and the list can grow. Map the reasons you know to your own words.
 Only an administrator receives this refusal, and `detail` names only entries
 of the configuration that was saved, so an access editor may show it, also

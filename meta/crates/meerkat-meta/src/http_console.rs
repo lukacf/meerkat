@@ -146,6 +146,10 @@ pub struct ConsoleJsonState {
     /// read it at each request: the owner attaches after the console router
     /// may be built. Empty when announcements are off.
     pub(crate) mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    /// The runtime's durable decisions, which `meta/decisions/*` read
+    /// (`crate::durable_decisions::console`). A Console without a runtime,
+    /// or over a runtime that keeps none, answers `no_decision_store`.
+    pub(crate) durable_decisions: crate::durable_decisions::RuntimeDecisions,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +590,7 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
     })
 }
 
@@ -631,6 +636,7 @@ pub fn console_json_router_with_aggregator_and_access(
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
     })
 }
 
@@ -696,6 +702,7 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         Default::default(),
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
+        Default::default(),
     )
 }
 
@@ -724,6 +731,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
 ) -> Router {
     let console_aggregator = shared_aggregator.or_else(|| {
         console_events.clone().map(|events| {
@@ -786,6 +794,7 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         job_health_projection,
         governed_ingress,
         mob_announcements,
+        durable_decisions,
     })
 }
 
@@ -1331,6 +1340,12 @@ pub async fn console_rpc_handler(
         .await;
         return (StatusCode::OK, Json::<Value>(response));
     }
+    if request_method.starts_with(crate::durable_decisions::DECISIONS_METHOD_PREFIX)
+        && let Some(response) =
+            console_decision_rpc(&state, &auth_context, read_only, &parsed_request)
+    {
+        return (StatusCode::OK, Json::<Value>(response));
+    }
     let Some(runtime) = &state.runtime else {
         let response_value = Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
@@ -1379,6 +1394,13 @@ pub async fn console_rpc_handler(
         &request_method,
         state.job_health_projection.as_ref(),
     );
+    let response_value = decorate_console_decision_capabilities(
+        response_value,
+        &request_method,
+        &state,
+        &auth_context,
+        read_only,
+    );
     (StatusCode::OK, Json::<Value>(response_value))
 }
 
@@ -1387,6 +1409,74 @@ pub async fn console_rpc_handler(
 /// `voice_readiness_timed_out` answer (retry, keep what was known) instead
 /// of a transport timeout. Exceeding it is logged with the active stage.
 const VOICE_READINESS_SERVER_BUDGET: Duration = Duration::from_secs(4);
+
+/// `meta/decisions/*` on the Console: the reads and the administrator's
+/// withdraw ([`crate::durable_decisions::console`]), for the caller this
+/// request authenticated. `None` for a decision method the Console does
+/// not serve, which it then answers as any other unknown method.
+fn console_decision_rpc(
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    read_only: bool,
+    request: &JsonRpcRequest,
+) -> Option<Value> {
+    let id = request.id.clone().unwrap_or(Value::Null);
+    if read_only && request.method == "meta/decisions/withdraw" {
+        return Some(console_read_only_rpc_error(id));
+    }
+    crate::durable_decisions::console::handle_console_decision_rpc(
+        &state.durable_decisions,
+        &console_decision_caller(auth_context),
+        &request.method,
+        &id,
+        request.params.clone(),
+    )
+}
+
+/// The Console caller of a decision request: its access snapshot, and the
+/// verified human's principal as a requester key.
+fn console_decision_caller(
+    auth_context: &ConsoleHttpAuthContext,
+) -> crate::durable_decisions::console::ConsoleDecisionCaller<'_> {
+    crate::durable_decisions::console::ConsoleDecisionCaller {
+        access_view: auth_context.access_view.as_ref(),
+        requester: auth_context
+            .human
+            .as_ref()
+            .and_then(|human| human.principal().ok())
+            .and_then(|principal| {
+                meerkat_core::approval::decision::DecisionPrincipalKey::of(&principal).ok()
+            }),
+    }
+}
+
+/// `meta/capabilities` lists the Console's decision methods while the
+/// runtime keeps a decision store, as far as the caller may call them.
+fn decorate_console_decision_capabilities(
+    mut response: Value,
+    method: &str,
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    read_only: bool,
+) -> Value {
+    if method != "meta/capabilities" || !state.durable_decisions.is_available() {
+        return response;
+    }
+    if let Some(methods) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("methods"))
+        .and_then(Value::as_array_mut)
+    {
+        let caller = console_decision_caller(auth_context);
+        methods.extend(
+            crate::durable_decisions::console::advertised_methods(&caller, read_only)
+                .into_iter()
+                .map(Value::from),
+        );
+    }
+    response
+}
+
 /// A readiness answer slower than this is logged at warn even when positive:
 /// the client's own bound is 5 s and it gates the voice button on the answer.
 const VOICE_READINESS_SLOW_BUDGET: Duration = Duration::from_secs(1);
@@ -6669,6 +6759,11 @@ fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> Str
         | AccessConfigError::ApproverWithoutHolders(_)
         | AccessConfigError::UnknownApproverGroup { .. }
         | AccessConfigError::UnknownRule(_)
+        | AccessConfigError::InvalidIngressName { .. }
+        | AccessConfigError::OperatorIngressWithSubject { .. }
+        | AccessConfigError::InvalidIngressSubject { .. }
+        | AccessConfigError::ApproverPersonWithoutIdentity { .. }
+        | AccessConfigError::UnknownIngress { .. }
         | AccessConfigError::RevisionExhausted => error.to_string(),
         AccessConfigError::Parse(_) => {
             "access configuration could not be written as TOML".to_string()
@@ -20190,6 +20285,7 @@ message = "review"
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
         };
         let authenticate = |subject: &str| {
             let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -29313,6 +29409,7 @@ mod console_viewer_resolver_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
         }
     }
 
@@ -29812,6 +29909,7 @@ mod console_human_admission_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
         }
     }
 

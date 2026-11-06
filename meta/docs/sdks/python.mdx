@@ -622,6 +622,7 @@ rt = await (
 | `.console_fetch_timeout_ms(ms)` | Bundled-console JSON fetch timeout override (positive integer) |
 | `.console_config(path)` | Console UI TOML (`ConsoleUiConfig`) forwarded as `runtime_options.console_config_path` |
 | `.fork_instruction_policy(policy)` | What a fork of a member with activated instructions does with them, forwarded as `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when unset), `"reactivate_inherited"` or `"refuse"`. Another value raises `ValueError`. See [Fork instruction policy](/reference/configuration#fork-instruction-policy) |
+| `.decision_ingresses(ingresses)` | The decision ingresses the host attests people through, forwarded as `runtime_options.decisions`: each a mapping with `ingress`, `attests` (`"person"`) and `max_clock_skew_ms`. The gateway refuses the init when an entry is malformed or the access configuration's approver map names an undeclared ingress. See [durable decision methods](/api/rpc#durable-decision-methods) |
 | `.mob_announcements(config=True)` | Enable [mob announcements](#mob-announcements): sends `runtime_options.mob_announcements`, `{"enabled": true}` for `True` and a mapping unchanged (batch, retention and limit options; see [Configuration](/reference/configuration#mob-announcements)). Needs `.persistent_state(...)` and `.roster(...)` |
 | `.gateway(bin_path)` | Path to rpc_gateway binary |
 | `.gateway_transport(transport)` | Run the gateway through a host transport instead of spawning `.gateway(...)`: an `AdoptedGatewayTransport` over a gateway child the host started and keeps, or a factory taking no arguments that every connect calls once. The SDK then never spawns, even with `.gateway(...)` set. A transport serves one connect; one already started or stopped raises `GatewayTransportConflictError`. See [Adopting a gateway child the host started](#adopting-a-gateway-child-the-host-started). TypeScript twin `gatewayTransport(factory)`, which also requires `gateway()` |
@@ -1391,6 +1392,42 @@ as permission. Escalation returns `pending_approval` with a successor
 Approval records a decision and does not execute the action. These methods expose
 [Meta gating](/concepts/gating); native retained-action consent and model-review
 configuration are separate contracts.
+
+### Durable decisions
+
+`MobHandle` calls the [durable decision methods](/api/rpc#durable-decision-methods)
+of the stdio gateway: `decisions_list(kind=, phase=, approver_id=, requester=,
+after=, limit=)`, `decisions_get(decision_id, include_request=False)`,
+`decisions_rendering(decision_id, max_part_bytes=None)`,
+`decisions_present(decision_id, presentation)`, `decisions_withdraw(decision_id)`
+and `decisions_decide(decision_id, approve=, presented_digest=, reason=None,
+attestation=None)`. Each answers the gateway's result as a `dict`.
+
+```python
+from meerkat_meta import DecisionAttestation
+
+runtime.on_decision_notice(lambda notice: print(notice["event"], notice["decision_id"]))
+page = await mob.decisions_list(phase="open")  # notices arrive before the answer
+await mob.decisions_decide(
+    decision_id,
+    approve=True,
+    presented_digest=subject_digest,
+    attestation=DecisionAttestation(
+        ingress="chat",
+        subject="U123",
+        scope="chat-session-1",
+        event_ref="chat:event-1",
+        observed_at_ms=observed_at_ms,
+    ),
+)
+```
+
+`MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`
+the gateway writes before a list answers. Without an `attestation` the stdio
+operator decides, eligible only for a decision presented to it on this
+connection. A decide called while the SDK serves a host tool callback raises
+`DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`) and
+sends nothing: an agent's tool call never decides.
 
 ## Mobpack authoring
 

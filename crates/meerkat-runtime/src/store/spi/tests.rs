@@ -3932,3 +3932,6 @@ mod poison_radius;
 
 /// An acquire the realm gave up on, which the store grants anyway (H0).
 mod abandoned_acquire;
+
+/// A commit sends nothing past its token's self-fence deadline (#1550).
+mod settle_deadline;

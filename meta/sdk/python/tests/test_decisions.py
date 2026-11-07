@@ -5,12 +5,24 @@ carries a typed host attestation, and ``decide`` refuses inside a host tool
 callback: an agent's tool call must never become the operator's decision.
 """
 
+import asyncio
+
 import pytest
 from meerkat_meta.agent_builder import CallbackDispatcher
 from meerkat_meta.models import SessionBuildOptions
 
 DECISION_ID = "decision:" + "a" * 64
 DIGEST = "sha256:" + "b" * 64
+NOTICE = {
+    "notice_id": "notice-1",
+    "decision_id": DECISION_ID,
+    "kind": "release",
+    "event": "held",
+    "phase": "open",
+    "approver_id": "team:owners",
+    "requester": 'principal:["personal_agent","example.org","builder"]',
+    "rendering_ref": DIGEST,
+}
 
 
 def make_handle():
@@ -154,3 +166,73 @@ async def test_decide_inside_a_tool_callback_is_refused():
     # Outside a callback the host decides as before.
     await handle.decisions_decide(DECISION_ID, approve=True, presented_digest=DIGEST)
     assert [method for method, _ in calls] == ["meta/decisions/decide"]
+
+
+def _runtime():
+    from meerkat_meta.builder import Meta
+    from meerkat_meta.runtime import MetaRuntime
+
+    return MetaRuntime(Meta.builder().gateway("/nonexistent/rpc_gateway")._config)
+
+
+@pytest.mark.asyncio
+async def test_on_decision_notice_receives_a_notice_through_the_dispatcher():
+    runtime = _runtime()
+    received = []
+
+    async def handler(notice):
+        received.append(notice)
+
+    runtime.on_decision_notice(handler)
+    answer = await runtime._dispatcher.handle_callback("meta/decisions/notice", NOTICE)
+    assert answer is None, "a notice is a notification: nothing answers it"
+    assert received == [NOTICE]
+
+    # A plain function receives it too.
+    plain = []
+    runtime.on_decision_notice(plain.append)
+    await runtime._dispatcher.handle_callback("meta/decisions/notice", NOTICE)
+    assert plain == [NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_notice_with_no_handler_answers_nothing():
+    dispatcher = CallbackDispatcher()
+    answer = await dispatcher.handle_callback("meta/decisions/notice", NOTICE)
+    assert answer is None
+
+
+@pytest.mark.asyncio
+async def test_decide_is_refused_inside_a_task_the_tool_handler_starts():
+    from meerkat_meta.errors import DecideInsideToolCallbackError
+
+    handle, calls = make_handle()
+    started = []
+
+    class Builder:
+        async def build_agent(self, opts: SessionBuildOptions) -> None:
+            opts.profile_name = "test"
+
+            async def approve_later(args):
+                # The tool handler returns at once; the task decides later.
+                started.append(
+                    asyncio.create_task(
+                        handle.decisions_decide(
+                            DECISION_ID, approve=True, presented_digest=DIGEST
+                        )
+                    )
+                )
+                return "started"
+
+            opts.register_tool("approve_later", approve_later)
+
+    dispatcher = CallbackDispatcher()
+    dispatcher.register_builder(Builder())
+    await dispatcher.handle_callback("callback/build_agent", {"options": {"scope_id": "s1"}})
+    await dispatcher.handle_callback(
+        "callback/call_tool", {"scope_id": "s1", "tool": "approve_later", "arguments": {}}
+    )
+    assert len(started) == 1
+    with pytest.raises(DecideInsideToolCallbackError):
+        await started[0]
+    assert calls == [], "nothing is sent from a task the tool handler started"

@@ -164,3 +164,61 @@ describe("MobHandle decision wrappers", () => {
     );
   });
 });
+
+const NOTICE = {
+  notice_id: "notice-1",
+  decision_id: DECISION_ID,
+  kind: "release",
+  event: "held",
+  phase: "open",
+  approver_id: "team:owners",
+  requester: 'principal:["personal_agent","example.org","builder"]',
+  rendering_ref: DIGEST,
+};
+
+describe("decision notices and later turns", () => {
+  it("onDecisionNotice receives a notice through the dispatcher", async () => {
+    const rt = new MetaRuntime(runtimeConfig());
+    const received: unknown[] = [];
+    rt.onDecisionNotice(async (notice) => {
+      received.push(notice);
+    });
+    const answer = await (rt as any)._dispatcher.handleCallback("meta/decisions/notice", NOTICE);
+    assert.equal(answer, null, "a notice is a notification: nothing answers it");
+    assert.deepEqual(received, [NOTICE]);
+  });
+
+  it("a notice with no handler answers nothing", async () => {
+    const dispatcher = new CallbackDispatcher();
+    const answer = await dispatcher.handleCallback("meta/decisions/notice", NOTICE);
+    assert.equal(answer, null);
+  });
+
+  it("decide is refused in a later promise turn the tool handler starts", async () => {
+    const { handle, calls } = mockHandle();
+    let later: Promise<unknown> | undefined;
+    const dispatcher = new CallbackDispatcher();
+    dispatcher.registerBuilder({
+      async buildAgent(options: SessionBuildOptions): Promise<void> {
+        options.profileName = "test";
+        options.registerTool("approve_later", async () => {
+          // The tool handler returns at once; the decide runs in a later turn.
+          later = new Promise((resolve) => setTimeout(resolve, 0)).then(() =>
+            handle.decisionsDecide(DECISION_ID, { approve: true, presentedDigest: DIGEST }),
+          );
+          later.catch(() => undefined);
+          return "started";
+        });
+      },
+    });
+    await dispatcher.handleCallback("callback/build_agent", { options: { scope_id: "s1" } });
+    await dispatcher.handleCallback("callback/call_tool", {
+      scope_id: "s1",
+      tool: "approve_later",
+      arguments: {},
+    });
+    assert.ok(later !== undefined, "the tool handler started the decide");
+    await assert.rejects(later, (error: Error) => error.name === "DecideInsideToolCallbackError");
+    assert.equal(calls.length, 0, "nothing is sent from a later turn of a tool callback");
+  });
+});

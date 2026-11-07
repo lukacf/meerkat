@@ -1105,3 +1105,124 @@ ingress_subjects = [{{ ingress = "chat", subject = "{subject}" }}]
         assert_init_refused(&refused, "team:owners");
     }
 }
+
+#[test]
+fn an_ingress_skew_above_one_hour_is_refused_at_launch() {
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let one_hour = init_answer(
+        scratch.path(),
+        json!({"decisions": {"ingresses": [
+            {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 3_600_000},
+        ]}}),
+    );
+    assert!(
+        one_hour["result"]["contract_version"].is_string(),
+        "a skew of one hour is accepted: {one_hour}"
+    );
+    for skew in [3_600_001_u64, u64::MAX] {
+        let refused = init_answer(
+            scratch.path(),
+            json!({"decisions": {"ingresses": [
+                {"ingress": "chat", "attests": "person", "max_clock_skew_ms": skew},
+            ]}}),
+        );
+        assert_init_refused(&refused, "max_clock_skew_ms");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One person across the operator and an ingress
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_operator_linked_in_people_cannot_approve_its_persons_request() {
+    let state = tempfile::tempdir().expect("state dir");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let owner = decisions_of(state.path());
+    // The stdio operator and the chat person U123 are one person.
+    let map = r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+people = [
+  { ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U123" }] },
+]
+"#;
+    let mut gateway = attested_gateway(scratch.path(), state.path(), map);
+    // A decision the operator may approve, which shows the operator's key.
+    let other = hold(&owner, "build-0", "team:owners");
+    // The person asked by chat.
+    let by_chat = hold_for(
+        &owner,
+        "build-7",
+        "team:owners",
+        ingress_person_key("chat", "U123"),
+    );
+    let (listed, notices) = gateway.call("meta/decisions/list", json!({}));
+    assert!(listed["error"].is_null(), "{listed}");
+    for decision in [&other, &by_chat] {
+        assert!(
+            notices.iter().any(|notice| notice["decision_id"]
+                == json!(decision.decision_id.to_string())
+                && notice["event"] == json!("presented")),
+            "presented to the operator: {notices:?}"
+        );
+    }
+    let decided = gateway.rpc(
+        "meta/decisions/decide",
+        json!({
+            "decision_id": other.decision_id.to_string(),
+            "approve": true,
+            "presented_digest": subject_digest(),
+        }),
+    );
+    assert!(decided["error"].is_null(), "{decided}");
+    let operator_key = decided["result"]["decision"]["outcome"]["evidence"]["decider"]
+        .as_str()
+        .expect("the operator's key")
+        .to_string();
+
+    // Operator to ingress: the operator cannot approve the person's chat
+    // request.
+    let own_chat_request = gateway.rpc(
+        "meta/decisions/decide",
+        json!({
+            "decision_id": by_chat.decision_id.to_string(),
+            "approve": true,
+            "presented_digest": subject_digest(),
+        }),
+    );
+    assert_refused(&own_chat_request, "self_approval");
+    assert_eq!(
+        stored(&owner, &by_chat.decision_id).state.phase,
+        DecisionPhase::Open
+    );
+
+    // Ingress to operator: the chat identity cannot approve what the
+    // operator asked for.
+    let by_operator = hold_for(
+        &owner,
+        "build-9",
+        "team:owners",
+        DecisionPrincipalKey::new(operator_key).expect("principal key"),
+    );
+    let at_ms = now_ms();
+    let presented = gateway.rpc(
+        "meta/decisions/present",
+        json!({
+            "decision_id": by_operator.decision_id.to_string(),
+            "presentation": host_presentation("team:owners", "chat:owners", "message-9", at_ms),
+        }),
+    );
+    assert!(presented["error"].is_null(), "{presented}");
+    let own_operator_request = gateway.rpc(
+        "meta/decisions/decide",
+        attested_decide(&by_operator, attestation("U123", "chat:event-9", at_ms + 1)),
+    );
+    assert_refused(&own_operator_request, "self_approval");
+    assert_eq!(
+        stored(&owner, &by_operator.decision_id).state.phase,
+        DecisionPhase::Open
+    );
+}

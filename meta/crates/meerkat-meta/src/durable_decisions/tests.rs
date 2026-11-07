@@ -3,7 +3,9 @@
 //! attested decide events.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
+use meerkat_core::approval::consent::ConsentEligibility;
 use meerkat_core::approval::decision::{
     ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPrincipalKey,
     DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionSubjectKey, Sha256Digest,
@@ -12,10 +14,13 @@ use meerkat_core::approval::decision::{
 use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 use serde_json::json;
 
-use super::approvers::{DeciderIdentity, decider_principal, holding, ingress_person};
+use super::approvers::{
+    DeciderIdentity, LiveHolderEligibility, decider_principal, holding, ingress_person,
+};
 use super::ingress::{
     DecisionIngressDeclaration, DecisionIngressDeclarations, check_approver_ingresses,
 };
+use super::wire::{MetaDecisionNotice, MetaDecisionNoticeEvent};
 use crate::access::{AccessConfigError, AccessControlConfig, AccessController};
 use crate::runtime::metadata::{
     InMemoryMetadataStore, PersistentMetadataStore, SqliteMetadataStore,
@@ -362,35 +367,44 @@ fn an_ingress_person_is_a_human_in_the_ingress_domain() {
 #[tokio::test]
 async fn the_first_decision_keeps_an_attested_event() {
     let dir = tempfile::tempdir().expect("dir");
-    let stores: Vec<Arc<dyn PersistentMetadataStore>> = vec![
-        Arc::new(InMemoryMetadataStore::new()),
-        Arc::new(
-            SqliteMetadataStore::open(dir.path().join("metadata.sqlite3")).expect("sqlite store"),
-        ),
-    ];
-    for store in stores {
-        let bind = |decision: &'static str, event: &'static str| {
-            let store = Arc::clone(&store);
-            async move {
-                store
-                    .bind_decision_event("mob", "chat", event, decision)
-                    .await
-                    .expect("bind")
-            }
-        };
-        assert_eq!(bind("decision:a", "chat:event-1").await, "decision:a");
-        assert_eq!(bind("decision:a", "chat:event-1").await, "decision:a");
-        assert_eq!(bind("decision:b", "chat:event-1").await, "decision:a");
-        assert_eq!(bind("decision:b", "chat:event-2").await, "decision:b");
-        // Another ingress's event of the same reference is another event.
-        assert_eq!(
+    let store: Arc<dyn PersistentMetadataStore> = Arc::new(
+        SqliteMetadataStore::open(dir.path().join("metadata.sqlite3")).expect("sqlite store"),
+    );
+    let bind = |decision: &'static str, event: &'static str| {
+        let store = Arc::clone(&store);
+        async move {
             store
-                .bind_decision_event("mob", "mail", "chat:event-1", "decision:b")
+                .bind_decision_event("mob", "chat", event, decision)
                 .await
-                .expect("bind"),
-            "decision:b"
-        );
-    }
+                .expect("bind")
+        }
+    };
+    assert_eq!(bind("decision:a", "chat:event-1").await, "decision:a");
+    assert_eq!(bind("decision:a", "chat:event-1").await, "decision:a");
+    assert_eq!(bind("decision:b", "chat:event-1").await, "decision:a");
+    assert_eq!(bind("decision:b", "chat:event-2").await, "decision:b");
+    // Another ingress's event of the same reference is another event.
+    assert_eq!(
+        store
+            .bind_decision_event("mob", "mail", "chat:event-1", "decision:b")
+            .await
+            .expect("bind"),
+        "decision:b"
+    );
+}
+
+#[tokio::test]
+async fn an_in_memory_metadata_store_keeps_no_decision_events() {
+    // A record that a restart forgets cannot keep an event to one decision:
+    // the in-memory store refuses to bind, and the attested decide with it.
+    let store = InMemoryMetadataStore::new();
+    let refused = store
+        .bind_decision_event("mob", "chat", "chat:event-1", "decision:a")
+        .await;
+    assert!(
+        refused.is_err(),
+        "the in-memory store binds no decision event: {refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -415,4 +429,171 @@ async fn a_restarted_store_keeps_the_events_it_bound() {
             .expect("bind"),
         "decision:a"
     );
+}
+
+fn chat(subject: &str) -> DeciderIdentity {
+    DeciderIdentity::Ingress {
+        ingress: "chat".to_string(),
+        subject: subject.to_string(),
+    }
+}
+
+/// The stdio operator's principal, as a connection names it in its realm.
+fn operator_principal() -> PrincipalRef {
+    PrincipalRef::in_domain(
+        PrincipalKind::Human,
+        "uid-1000",
+        TrustDomainId::new("rkat-realm-meta").expect("domain"),
+    )
+    .expect("operator")
+}
+
+/// The eligibility a stdio operator's decide on `team:owners` builds for
+/// `row`, presented on an open connection, whose decide input carries
+/// `operator`.
+fn operator_eligibility(
+    controller: &AccessController,
+    row: &StoredDecision,
+    operator: &PrincipalRef,
+) -> LiveHolderEligibility {
+    // This version's eligibility reads the holder only.
+    let _ = (row, operator);
+    LiveHolderEligibility::operator(
+        Some(controller.clone()),
+        "team:owners".to_string(),
+        true,
+        Arc::new(AtomicBool::new(true)),
+    )
+}
+
+/// The eligibility an attested decide on `team:owners` builds for
+/// `identity` and `row`, whose decide input carries `decides_as`.
+fn attested_eligibility(
+    controller: &AccessController,
+    identity: DeciderIdentity,
+    row: &StoredDecision,
+    decides_as: &PrincipalRef,
+) -> LiveHolderEligibility {
+    // This version's eligibility reads the holder only.
+    let _ = (row, decides_as);
+    LiveHolderEligibility::attested(
+        Some(controller.clone()),
+        "team:owners".to_string(),
+        identity,
+    )
+}
+
+#[test]
+fn live_holder_eligibility_reads_the_map_at_commit() {
+    let listed = r#"
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U123" }]
+"#;
+    let controller = AccessController::new(map(listed)).expect("controller");
+    let row = requested_by(&ingress_person("mail", "someone").expect("requester"));
+    let operator = operator_principal();
+    let person = ingress_person("chat", "U123").expect("person");
+    let operator_decides = operator_eligibility(&controller, &row, &operator);
+    let person_decides = attested_eligibility(&controller, chat("U123"), &row, &person);
+    assert!(
+        operator_decides.check_current().is_ok(),
+        "the map lists the operator"
+    );
+    assert!(
+        person_decides.check_current().is_ok(),
+        "the map lists the person"
+    );
+
+    // Built while the map listed them; the commit reads the map it finds.
+    controller
+        .replace_config(map(r#"
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+"#))
+        .expect("the edit lists neither");
+    assert!(
+        operator_decides.check_current().is_err(),
+        "the operator's eligibility reads the map again at commit"
+    );
+    assert!(
+        person_decides.check_current().is_err(),
+        "the person's eligibility reads the map again at commit"
+    );
+
+    controller
+        .replace_config(map(listed))
+        .expect("listed again");
+    assert!(operator_decides.check_current().is_ok());
+    assert!(person_decides.check_current().is_ok());
+}
+
+#[test]
+fn a_link_added_between_the_read_and_the_commit_is_not_eligible() {
+    // The decide reads a map that links the chat person U123 to nobody: its
+    // input carries their own key.
+    let controller = AccessController::new(map(r#"
+[approvers."team:owners"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#))
+    .expect("controller");
+    let requester = ingress_person("mail", "owner").expect("requester");
+    let row = requested_by(&requester);
+    let own = ingress_person("chat", "U123").expect("decider");
+    let read = holding(&controller.snapshot().0, "team:owners", &chat("U123"));
+    let decides_as = decider_principal(&row, read.as_ref(), own.clone(), None);
+    assert_eq!(decides_as, own, "the read links the decider to nobody");
+    let eligibility = attested_eligibility(&controller, chat("U123"), &row, &decides_as);
+    assert!(eligibility.check_current().is_ok());
+
+    // Before the commit, an edit makes the decider and the requester one
+    // person.
+    controller
+        .replace_config(map(r#"
+[approvers."team:owners"]
+people = [
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "mail", subject = "owner" }] },
+]
+"#))
+        .expect("the edit links them");
+    assert!(
+        eligibility.check_current().is_err(),
+        "a decide that carries the decider's own key is not eligible once the map links the \
+         decider to the requester"
+    );
+
+    // The ordinary path: a decide that reads the linked map carries the
+    // requester's key, stays eligible, and the machine refuses it as self
+    // approval.
+    let read_now = holding(&controller.snapshot().0, "team:owners", &chat("U123"));
+    let decides_now = decider_principal(&row, read_now.as_ref(), own, None);
+    assert_eq!(decides_now, requester);
+    let read_after = attested_eligibility(&controller, chat("U123"), &row, &decides_now);
+    assert!(read_after.check_current().is_ok());
+}
+
+#[test]
+fn an_unknown_notice_event_decodes_as_unknown() {
+    // Later notices name events this version does not know: a host decodes
+    // them, as Core's notice vocabulary is decoded.
+    let event: MetaDecisionNoticeEvent = serde_json::from_value(json!("decided_elsewhere"))
+        .expect("a notice event this version does not know decodes");
+    assert_eq!(format!("{event:?}"), "Unknown");
+    let notice: MetaDecisionNotice = serde_json::from_value(json!({
+        "notice_id": "notice-1",
+        "decision_id": format!("decision:{}", "a".repeat(64)),
+        "kind": "release",
+        "event": "decided_elsewhere",
+        "phase": "open",
+        "approver_id": "team:owners",
+        "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+        "rendering_ref": Sha256Digest::of(b"Release build 7.").to_string(),
+    }))
+    .expect("a notice with a later event decodes");
+    assert_eq!(format!("{:?}", notice.event), "Unknown");
+    for known in ["held", "presented"] {
+        let event: MetaDecisionNoticeEvent =
+            serde_json::from_value(json!(known)).expect("a known event");
+        assert_eq!(serde_json::to_value(event).expect("encode"), json!(known));
+    }
 }

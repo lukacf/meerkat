@@ -24,9 +24,9 @@ use meerkat_core::approval::decision::{
 };
 use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_meta::{
-    ACCESS_ACTIONS, AccessControlConfig, AccessController, AuthPolicy, BigQueryNaming,
-    ConsolePolicy, RuntimeDecisionInputs, RuntimeOpsPolicy, TrustedOidcRuntimeConfig,
-    UnifiedRuntime, build_runtime_decision_state,
+    ACCESS_ACTIONS, AccessApprover, AccessControlConfig, AccessController, AuthPolicy,
+    BigQueryNaming, ConsolePolicy, GatingOrigin, RuntimeDecisionInputs, RuntimeOpsPolicy,
+    TrustedOidcRuntimeConfig, UnifiedRuntime, build_runtime_decision_state,
 };
 use meerkat_mob::MobDefinition;
 use meerkat_runtime::decision::DurableDecisionService;
@@ -91,6 +91,17 @@ async fn console(
     access: Option<&str>,
     require_app_auth: bool,
 ) -> (UnifiedRuntime, axum::Router) {
+    console_with(state, access, require_app_auth, None).await
+}
+
+/// [`console`], declaring the decision ingresses `ingresses`
+/// (`runtime_options.decisions`).
+async fn console_with(
+    state: &Path,
+    access: Option<&str>,
+    require_app_auth: bool,
+    ingresses: Option<Value>,
+) -> (UnifiedRuntime, axum::Router) {
     static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
     let definition = MobDefinition::from_toml(&format!(
         r#"
@@ -110,6 +121,10 @@ model = "gpt-5.5"
     if let Some(access) = access {
         let config: AccessControlConfig = toml::from_str(access).expect("access TOML");
         builder = builder.access_controller(AccessController::new(config).expect("controller"));
+    }
+    if let Some(ingresses) = ingresses {
+        builder =
+            builder.decision_ingresses(serde_json::from_value(ingresses).expect("declarations"));
     }
     let runtime = Box::pin(builder.build()).await.expect("persistent runtime");
     let app = runtime.build_console_json_router(decision_state(require_app_auth));
@@ -583,6 +598,8 @@ async fn the_console_http_surface_refuses_an_attestation_field() {
     let (runtime, app) = console(&state, Some(ENFORCED), true).await;
     let owner = decisions_of(&state);
     let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+    let digest = Sha256Digest::of(RENDERING.as_bytes()).to_string();
+    let at_ms = now_ms();
 
     let attested = rpc(
         &app,
@@ -591,18 +608,28 @@ async fn the_console_http_surface_refuses_an_attestation_field() {
         json!({
             "decision_id": held.decision_id.to_string(),
             "approve": true,
-            "presented_digest": Sha256Digest::of(RENDERING.as_bytes()).to_string(),
+            "presented_digest": digest,
             "attestation": {
                 "ingress": "chat",
                 "subject": "U123",
                 "scope": "chat-session-1",
                 "event_ref": "chat:event-1",
-                "observed_at_ms": 1,
+                "observed_at_ms": at_ms,
+                // What the person was shown, whole: a surface that took the
+                // field would decide with it.
+                "presentation": {
+                    "audience": {"kind": "approver", "approver_id": "team:owners"},
+                    "subject_digest": digest,
+                    "parts_shown": [{"index": 0, "count": 1, "part_digest": digest}],
+                    "channel_ref": "chat:owners",
+                    "message_ref": "message-1",
+                    "at_ms": at_ms,
+                },
             },
         }),
     )
     .await;
-    assert!(attested["error"].is_object(), "{attested}");
+    assert_eq!(attested["error"]["code"], json!(-32601), "{attested}");
     // Nothing was applied: the Console still reads the decision open and
     // undecided.
     let read = rpc(
@@ -644,4 +671,636 @@ actions = ["{pattern}"]
         let outsider = controller.view_for_subject(Some(DAVE));
         assert!(!outsider.allows("decisions.view"));
     }
+}
+
+const WITHDRAW: &str = "meta/decisions/withdraw";
+
+const ACCESS_OFF: &str = r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["alice@example.test"]
+"#;
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("milliseconds")
+}
+
+/// Make the stored row of `decision` one the store cannot decode.
+fn make_unreadable(state: &Path, decision: &StoredDecision) {
+    let store = rusqlite::Connection::open(state.join("approval_decisions.sqlite3"))
+        .expect("open the decision store");
+    store
+        .busy_timeout(Duration::from_secs(10))
+        .expect("busy timeout");
+    let changed = store
+        .execute(
+            "UPDATE approval_decisions SET row_json = ?1 WHERE decision_id = ?2",
+            rusqlite::params![b"not a decision".to_vec(), decision.decision_id.to_string()],
+        )
+        .expect("overwrite the row");
+    assert_eq!(changed, 1, "one row is made unreadable");
+}
+
+/// What one caller's walk over every list page read.
+#[derive(Debug, Default)]
+struct Listed {
+    whole: Vec<String>,
+    statuses: Vec<String>,
+    unreadable: Vec<String>,
+}
+
+/// Every page of `meta/decisions/list` with `limit`, signed in as
+/// `subject`. Each cursor must name the last row of its page, a row the
+/// caller was given.
+async fn walk(app: &axum::Router, subject: Option<&str>, limit: u64) -> Listed {
+    let mut listed = Listed::default();
+    let mut after: Option<String> = None;
+    for _ in 0..64 {
+        let mut params = json!({ "limit": limit });
+        if let Some(after) = &after {
+            params["after"] = json!(after);
+        }
+        let page = rpc(app, subject, "meta/decisions/list", params).await;
+        assert!(page["error"].is_null(), "{page}");
+        let result = &page["result"];
+        let whole = ids(&result["decisions"]);
+        let statuses = ids(&result["statuses"]);
+        let unreadable = ids(&result["unreadable"]);
+        let mut given: Vec<String> = whole
+            .iter()
+            .chain(&statuses)
+            .chain(&unreadable)
+            .cloned()
+            .collect();
+        given.sort();
+        listed.whole.extend(whole);
+        listed.statuses.extend(statuses);
+        listed.unreadable.extend(unreadable);
+        match result.get("next_after").and_then(Value::as_str) {
+            None => {
+                listed.whole.sort();
+                listed.statuses.sort();
+                listed.unreadable.sort();
+                return listed;
+            }
+            Some(cursor) => {
+                assert_eq!(
+                    given.last().map(String::as_str),
+                    Some(cursor),
+                    "the cursor names the last row the caller was given: {page}"
+                );
+                after = Some(cursor.to_string());
+            }
+        }
+    }
+    panic!("the listing did not end");
+}
+
+/// A withdraw the Console refused with `code`: the answer holds no part of
+/// the decision, and the decision is as it was.
+fn assert_withdraw_refused(
+    answer: &Value,
+    code: i64,
+    owner: &DurableDecisionService,
+    decision: &StoredDecision,
+) {
+    assert_eq!(answer["error"]["code"], json!(code), "{answer}");
+    assert!(answer["result"].is_null(), "{answer}");
+    let text = answer.to_string();
+    for field in [
+        "\"decision\"",
+        "operation_id",
+        "subject_digest",
+        decision.descriptor.operation_id.as_str(),
+        decision.descriptor.approver_id.as_str(),
+    ] {
+        assert!(!text.contains(field), "{field} in {answer}");
+    }
+    let row = owner.get(&decision.decision_id).expect("row");
+    assert_eq!(row.state.phase, DecisionPhase::Open, "{answer}");
+    assert!(row.outcome.is_none());
+    assert!(row.state.ended_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn the_console_list_cursor_never_names_a_decision_the_caller_cannot_see() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let owner = decisions_of(&state);
+    let owners: Vec<StoredDecision> = (0..3)
+        .map(|n| {
+            hold(
+                &owner,
+                "release",
+                &format!("owners-{n}"),
+                "team:owners",
+                agent_requester(),
+            )
+        })
+        .collect();
+    for n in 0..3 {
+        hold(
+            &owner,
+            "release",
+            &format!("ops-{n}"),
+            "team:ops",
+            agent_requester(),
+        );
+    }
+    let carol_release = hold(
+        &owner,
+        "route.release",
+        "carol-1",
+        "team:ops",
+        console_requester(CAROL),
+    );
+    let broken = hold(
+        &owner,
+        "release",
+        "owners-broken",
+        "team:owners",
+        agent_requester(),
+    );
+    make_unreadable(&state, &broken);
+
+    // The administrator reads the store's own pages, the unreadable row too.
+    let admin = walk(&app, Some(ADMIN), 1).await;
+    assert_eq!(
+        admin.unreadable,
+        [broken.decision_id.to_string()],
+        "the store holds one unreadable row"
+    );
+    assert_eq!(admin.whole.len(), 7, "{admin:?}");
+
+    // A reader with `decisions.view` pages over what it may see only.
+    let alice_rows: Vec<&StoredDecision> = owners.iter().collect();
+    for limit in [1, 2, 100] {
+        let alice = walk(&app, Some(ALICE), limit).await;
+        assert_eq!(alice.whole, sorted(&alice_rows), "limit {limit}");
+        assert!(alice.statuses.is_empty(), "limit {limit}: {alice:?}");
+        assert!(alice.unreadable.is_empty(), "limit {limit}: {alice:?}");
+        let carol = walk(&app, Some(CAROL), limit).await;
+        assert!(carol.whole.is_empty(), "limit {limit}: {carol:?}");
+        assert_eq!(carol.statuses, sorted(&[&carol_release]), "limit {limit}");
+        assert!(carol.unreadable.is_empty(), "limit {limit}: {carol:?}");
+    }
+    drop(app);
+    runtime.shutdown().await;
+
+    // An Open Console with access control off: the anonymous caller holds
+    // no approver id and asked for nothing, so it reads nothing, and no
+    // cursor names a decision.
+    let open = dir.path().join("open");
+    let (runtime, app) = console(&open, Some(ACCESS_OFF), false).await;
+    let owner = decisions_of(&open);
+    for n in 0..3 {
+        hold(
+            &owner,
+            "release",
+            &format!("owners-{n}"),
+            "team:owners",
+            agent_requester(),
+        );
+    }
+    let broken = hold(
+        &owner,
+        "release",
+        "owners-broken",
+        "team:owners",
+        agent_requester(),
+    );
+    make_unreadable(&open, &broken);
+    for limit in [1, 100] {
+        let page = rpc(&app, None, "meta/decisions/list", json!({ "limit": limit })).await;
+        assert!(page["error"].is_null(), "{page}");
+        assert_eq!(page["result"]["decisions"], json!([]), "{page}");
+        assert_eq!(page["result"]["statuses"], json!([]), "{page}");
+        assert_eq!(page["result"]["unreadable"], json!([]), "{page}");
+        assert!(
+            page["result"].get("next_after").is_none(),
+            "no cursor names a decision: {page}"
+        );
+    }
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn console_withdraw_with_access_control_off_is_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ACCESS_OFF), true).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    // The holder, a would-be administrator and anyone else: with access
+    // control off the Console withdraws nothing.
+    for subject in [ALICE, ADMIN, CAROL] {
+        let answer = rpc(
+            &app,
+            Some(subject),
+            WITHDRAW,
+            json!({"decision_id": held.decision_id.to_string()}),
+        )
+        .await;
+        assert_withdraw_refused(&answer, -32601, &owner, &held);
+    }
+    let capabilities = rpc(&app, Some(ALICE), "meta/capabilities", json!({})).await;
+    let methods = capabilities["result"]["methods"]
+        .as_array()
+        .unwrap_or_else(|| panic!("methods: {capabilities}"));
+    assert!(
+        !methods.contains(&json!(WITHDRAW)),
+        "the Console offers no withdraw: {capabilities}"
+    );
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_open_console_anonymous_caller_cannot_withdraw() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ACCESS_OFF), false).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    let answer = rpc(
+        &app,
+        None,
+        WITHDRAW,
+        json!({"decision_id": held.decision_id.to_string()}),
+    )
+    .await;
+    assert_withdraw_refused(&answer, -32601, &owner, &held);
+    // The same answer for an id that names no decision.
+    let absent = rpc(
+        &app,
+        None,
+        WITHDRAW,
+        json!({"decision_id": format!("decision:{}", "0".repeat(64))}),
+    )
+    .await;
+    assert_eq!(absent["error"], answer["error"], "{absent}");
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn console_withdraw_without_an_access_controller_is_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, None, false).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    let answer = rpc(
+        &app,
+        None,
+        WITHDRAW,
+        json!({"decision_id": held.decision_id.to_string()}),
+    )
+    .await;
+    assert_withdraw_refused(&answer, -32601, &owner, &held);
+    let absent = rpc(
+        &app,
+        None,
+        WITHDRAW,
+        json!({"decision_id": format!("decision:{}", "0".repeat(64))}),
+    )
+    .await;
+    assert_eq!(absent["error"], answer["error"], "{absent}");
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_requester_cannot_withdraw_its_own_route_release_or_grant_child_from_the_console() {
+    for (access, code) in [(ACCESS_OFF, -32601), (ENFORCED, -32030)] {
+        let dir = tempfile::tempdir().expect("dir");
+        let state = dir.path().join("state");
+        let (runtime, app) = console(&state, Some(access), true).await;
+        let owner = decisions_of(&state);
+        let release = hold(
+            &owner,
+            "route.release",
+            "answer-1",
+            "team:owners",
+            console_requester(CAROL),
+        );
+        let child = hold(
+            &owner,
+            "grant.child",
+            "child-1",
+            "team:owners",
+            console_requester(CAROL),
+        );
+        for decision in [&release, &child] {
+            let answer = rpc(
+                &app,
+                Some(CAROL),
+                WITHDRAW,
+                json!({"decision_id": decision.decision_id.to_string()}),
+            )
+            .await;
+            assert_withdraw_refused(&answer, code, &owner, decision);
+        }
+        drop(app);
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_console_operator_form_decide_is_method_not_found_and_applies_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    // The holder and the administrator alike: the Console decides nothing.
+    for subject in [ALICE, ADMIN] {
+        let answer = rpc(
+            &app,
+            Some(subject),
+            "meta/decisions/decide",
+            json!({
+                "decision_id": held.decision_id.to_string(),
+                "approve": true,
+                "presented_digest": Sha256Digest::of(RENDERING.as_bytes()).to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(answer["error"]["code"], json!(-32601), "{answer}");
+    }
+    let row = owner.get(&held.decision_id).expect("row");
+    assert_eq!(row.state.phase, DecisionPhase::Open);
+    assert!(row.outcome.is_none());
+    drop(app);
+    runtime.shutdown().await;
+}
+
+/// Dave holds `team:owners` only as the Console subject of a `people`
+/// entry.
+const PEOPLE_SUBJECT: &str = r#"
+enabled = true
+admins = ["admin@example.test"]
+
+[[rules]]
+id = "people-holder"
+subjects = ["dave@example.test"]
+actions = ["decisions.view", "agent.view", "gating.decide"]
+
+[approvers."team:owners"]
+people = [{ subjects = ["dave@example.test"], ingress_subjects = [{ ingress = "operator" }] }]
+"#;
+
+#[tokio::test]
+async fn a_people_subject_holds_the_approver_id_on_the_console() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(PEOPLE_SUBJECT), true).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+
+    // Console reads: the person reads the decision whole.
+    let listed = rpc(&app, Some(DAVE), "meta/decisions/list", json!({})).await;
+    assert_eq!(
+        ids(&listed["result"]["decisions"]),
+        sorted(&[&held]),
+        "{listed}"
+    );
+    assert_eq!(listed["result"]["statuses"], json!([]), "{listed}");
+    let rendering = rpc(
+        &app,
+        Some(DAVE),
+        "meta/decisions/rendering",
+        json!({"decision_id": held.decision_id.to_string()}),
+    )
+    .await;
+    assert_eq!(
+        rendering["result"]["rendering"],
+        json!(RENDERING),
+        "{rendering}"
+    );
+
+    // Gating decide: the person decides a gate that names the approver id.
+    let evaluated = runtime
+        .evaluate_gating_action_with_origin(
+            serde_json::from_value(json!({
+                "action": "release the reviewed artifact",
+                "actor_id": "requester",
+                "risk_tier": "r3",
+                "requested_approver": "team:owners",
+            }))
+            .expect("gating request"),
+            Some(GatingOrigin {
+                identity: "router".to_string(),
+                conversation_id: None,
+                interaction_id: None,
+            }),
+        )
+        .await;
+    let pending_id = evaluated.pending_id.clone().expect("a pending gate");
+    let decided = rpc(
+        &app,
+        Some(DAVE),
+        "meta/gating/decide",
+        json!({
+            "pending_id": pending_id,
+            "decision": "approve",
+            "approver_id": "team:owners",
+        }),
+    )
+    .await;
+    assert!(decided["error"].is_null(), "{decided}");
+    assert_eq!(decided["result"]["approver_id"], json!("team:owners"));
+    drop(app);
+    runtime.shutdown().await;
+}
+
+/// The decision ingresses `chat` and `mail`.
+fn chat_and_mail() -> Value {
+    json!({"ingresses": [
+        {"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000},
+        {"ingress": "mail", "attests": "person", "max_clock_skew_ms": 5000},
+    ]})
+}
+
+/// The ENFORCED configuration with `team:owners` held as `approver` (TOML).
+fn enforced_with_owners(approver: &str) -> AccessControlConfig {
+    let mut config: AccessControlConfig = toml::from_str(ENFORCED).expect("access TOML");
+    let owners: AccessApprover = toml::from_str(approver).expect("approver TOML");
+    config.approvers.insert("team:owners".to_string(), owners);
+    config
+}
+
+#[tokio::test]
+async fn an_identity_in_two_people_entries_of_one_binding_is_refused() {
+    // At load: the operator, an ingress subject and a Console subject, each
+    // listed in two people entries of one binding.
+    for (case, identity) in [
+        (
+            r#"
+[approvers."team:owners"]
+people = [
+  { ingress_subjects = [{ ingress = "operator" }] },
+  { ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U1" }] },
+]
+"#,
+            "operator",
+        ),
+        (
+            r#"
+[approvers."team:owners"]
+people = [
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }] },
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "mail", subject = "owner" }] },
+]
+"#,
+            "U123",
+        ),
+        (
+            r#"
+[approvers."team:owners"]
+people = [
+  { subjects = ["dave@example.test"] },
+  { subjects = ["dave@example.test"], ingress_subjects = [{ ingress = "chat", subject = "U9" }] },
+]
+"#,
+            "dave@example.test",
+        ),
+    ] {
+        let config: AccessControlConfig = toml::from_str(case).expect("access TOML");
+        let refused = AccessController::new(config)
+            .expect_err("an identity in two people entries of one binding is refused at load");
+        let text = refused.to_string();
+        assert!(
+            text.contains("team:owners") && text.contains(identity),
+            "the refusal names the binding and the identity: {text}"
+        );
+    }
+    // Linking is per binding: one person is linked in each binding it holds.
+    let per_binding: AccessControlConfig = toml::from_str(
+        r#"
+[approvers."team:owners"]
+people = [{ ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "operator" }] }]
+
+[approvers."team:ops"]
+people = [{ ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "operator" }] }]
+"#,
+    )
+    .expect("access TOML");
+    AccessController::new(per_binding).expect("one entry per binding is accepted");
+
+    // A Console save is refused the same way, and saves nothing.
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console_with(&state, Some(ENFORCED), true, Some(chat_and_mail())).await;
+    let before = runtime.access_controller().expect("controller").snapshot();
+    let config = enforced_with_owners(
+        r#"
+subjects = ["alice@example.test"]
+people = [
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }] },
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "mail", subject = "owner" }] },
+]
+"#,
+    );
+    let saved = rpc(
+        &app,
+        Some(ADMIN),
+        "meta/access/set",
+        json!({"config": config}),
+    )
+    .await;
+    assert_eq!(saved["error"]["code"], json!(-32602), "{saved}");
+    assert_eq!(
+        saved["error"]["data"]["kind"],
+        json!("invalid_access_config"),
+        "{saved}"
+    );
+    assert_eq!(
+        saved["error"]["data"]["reason"],
+        json!("duplicate_person_identity"),
+        "{saved}"
+    );
+    let after = runtime.access_controller().expect("controller").snapshot();
+    assert_eq!(after.1, before.1, "nothing was saved");
+    assert_eq!(after.0, before.0);
+    drop(app);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_console_access_save_naming_an_undeclared_ingress_is_refused_unknown_ingress() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console_with(&state, Some(ENFORCED), true, Some(chat_and_mail())).await;
+    let before = runtime.access_controller().expect("controller").snapshot();
+
+    let undeclared = enforced_with_owners(
+        r#"
+subjects = ["alice@example.test"]
+ingress_subjects = [{ ingress = "sms", subject = "+15550100" }]
+"#,
+    );
+    let refused = rpc(
+        &app,
+        Some(ADMIN),
+        "meta/access/set",
+        json!({"config": undeclared}),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("invalid_access_config"),
+        "{refused}"
+    );
+    assert_eq!(
+        refused["error"]["data"]["reason"],
+        json!("unknown_ingress"),
+        "{refused}"
+    );
+    assert!(
+        refused["error"]["data"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("\"sms\"")),
+        "the detail names the ingress: {refused}"
+    );
+    let after = runtime.access_controller().expect("controller").snapshot();
+    assert_eq!(after.1, before.1, "nothing was saved");
+
+    // A declared ingress saves.
+    let declared = enforced_with_owners(
+        r#"
+subjects = ["alice@example.test"]
+ingress_subjects = [{ ingress = "chat", subject = "U123" }]
+"#,
+    );
+    let saved = rpc(
+        &app,
+        Some(ADMIN),
+        "meta/access/set",
+        json!({"config": declared}),
+    )
+    .await;
+    assert!(saved["error"].is_null(), "{saved}");
+    let saved_revision = runtime
+        .access_controller()
+        .expect("controller")
+        .snapshot()
+        .1;
+    assert!(saved_revision > before.1, "the declared ingress was saved");
+    drop(app);
+    runtime.shutdown().await;
 }

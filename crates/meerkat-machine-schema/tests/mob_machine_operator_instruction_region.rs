@@ -16,9 +16,10 @@ use meerkat_machine_schema::catalog::dsl::dsl_mob_machine;
 use meerkat_machine_schema::catalog::dsl::mob_machine::{
     AgentIdentity, AgentRuntimeId, FenceToken, Generation, HostId, InstructionEffect,
     InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
-    MemberSessionDisposal, MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput,
-    MobMachineMutator, MobMachineSignal, MobMachineState, MobMachineTransition,
-    MobMachineTransitionError, MobPhase, OperatorInstructionRefusal,
+    MemberMaterializationPhase, MemberPeerEndpoint, MemberSessionDisposal, MobId,
+    MobMachineAuthority, MobMachineEffect, MobMachineInput, MobMachineMutator, MobMachineSignal,
+    MobMachineState, MobMachineTransition, MobMachineTransitionError, MobPhase,
+    OperatorInstructionRefusal, PeerAddress, PeerId, PeerName, PeerSigningKey,
     PlacedCompletionLifecycleIntentKind, SessionId, SpawnExecPhase, SpawnPolicyRuntimeMode,
     operator_instruction_target_applies,
 };
@@ -654,10 +655,29 @@ fn a_delivery_is_prepared_for_the_bound_session_and_wakes_nothing() {
 fn a_placed_member_is_prepared_like_a_local_member() {
     let mut authority = Authority::new();
     seat(&mut authority, "placed", "alpha");
+    // A placed member's committed residency: its host, the owner bridge
+    // every placement needs, the peer endpoint its spawn ack carried, and
+    // its host's live materialization (a placed member is never Dormant).
     let mut state = authority.state().clone();
     state
         .member_placement
         .insert(identity("placed"), HostId("host-1".to_string()));
+    state
+        .member_materialization
+        .insert(identity("placed"), MemberMaterializationPhase::Live);
+    state.owner_bridge_session_id = Some(SessionId("owner-bridge".to_string()));
+    state
+        .member_peer_ids
+        .insert(identity("placed"), PeerId("peer-placed".to_string()));
+    state.member_peer_endpoints.insert(
+        identity("placed"),
+        MemberPeerEndpoint::new(
+            PeerName("placed".to_string()),
+            PeerId("peer-placed".to_string()),
+            PeerAddress("tcp://127.0.0.1:4100".to_string()),
+            PeerSigningKey([7; 32]),
+        ),
+    );
     let mut authority = Authority::recover_from_state(state)
         .unwrap_or_else(|error| panic!("a placed member's state: {error}"));
     signal(&mut authority, set(SLOT, 1, DIGEST_A, 10, Target::Mob));

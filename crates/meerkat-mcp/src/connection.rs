@@ -4088,6 +4088,15 @@ const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
 /// for the request id, once, from a task: the caller is never held while
 /// the notice is sent. A request settled by its response or an error sends
 /// nothing.
+///
+/// Known limit: rmcp writes every outbound message from a task of its own, so
+/// a cancellation sent in the same tick as its request's handoff (a deadline
+/// that expires during a slow entry step, or one that had already expired)
+/// can reach the server before the request does. The server cannot match it
+/// and keeps working; this was seen in about 3 of 1500 immediate abandons on
+/// a multi-threaded runtime. Ordinary deadlines fire long after the request
+/// was written. A real fix needs rmcp to write a request before later
+/// messages. Without this guard no cancellation is sent at all.
 struct AbandonedRequest {
     peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
     id: rmcp::model::RequestId,

@@ -32,14 +32,14 @@ use std::time::Duration;
 use meerkat_core::types::SessionId;
 use meerkat_core::{
     InstructionEffect, InstructionKey, InstructionNamespace, InstructionRecordDisposition,
-    InstructionRevision, InstructionSlot, InstructionTargetOwner,
+    InstructionRevision, InstructionSetErrorCode, InstructionSlot, InstructionTargetOwner,
 };
 use meerkat_mob::runtime::bridge_protocol::{
     BridgeCommand, BridgeInstructionTarget, BridgeInstructionTargetRecordedResponse,
     BridgeInstructionTargetReleasedResponse, BridgeInstructionTargetSlot, BridgeProtocolVersion,
     BridgeRecordInstructionTargetPayload, BridgeRejectionCause,
     BridgeReleaseInstructionTargetPayload, BridgeReply, HOST_FEATURE_ADOPTED_FIRST_TURN,
-    HOST_FEATURE_PROMPT_CONTEXT_FORK,
+    HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode,
 };
 use meerkat_mob::{
     AgentIdentity, MemberInstructionBlockReason, MemberInstructionDeliveryState,
@@ -49,10 +49,11 @@ use meerkat_mob::{
 use support::{
     HostDaemonFixture, HostFixtureOptions, PeerCommsEndpoint, REAL_COMMS_TEST_LOCK,
     RecordedInstructionRecord, ScriptedHostPeer, ScriptedV7Mode, bind_then_materialize,
-    create_controlling_mob, member_incarnation_from_ack, placed_spawn_spec,
-    raw_host_status_command, raw_release_member_command,
-    scripted_member_client_completing_recorded, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint, spawn_scripted_host_peer, supervisor_spec_for_endpoint, wait_until,
+    create_controlling_mob, member_incarnation_from_ack, placed_spawn_spec, raw_bind_host_command,
+    raw_host_status_command, raw_release_member_command, sample_materialize_payload,
+    sample_portable_member_spec, scripted_member_client_completing_recorded,
+    spawn_host_daemon_fixture, spawn_peer_comms_endpoint, spawn_scripted_host_peer,
+    supervisor_spec_for_endpoint, wait_until,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1067,6 +1068,144 @@ async fn a_release_admitted_after_a_record_fences_the_record_off() {
         generations,
         vec![1],
         "only the first record reached the session service: the fenced one wrote nothing"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A governed member host takes no placed member's snapshot at birth
+/// either. It lists no birth feature, so a mob with an instruction places
+/// the member with a materialize that carries none: the spawn commits, the
+/// session the host mints holds none of the snapshot, and the member's
+/// delivery is refused, blocking it `member_host_unsupported`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_governed_member_host_is_sent_no_birth_snapshot() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let governed = governed_peer_support::GovernedMember::new();
+    let mut options = HostFixtureOptions::named("oi-governed-spawn-host").with_member_build();
+    options.member_llm_client = Some(governed.client());
+    options.governed_member = Some(governed.clone());
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("spawn the governed member host");
+    let controlling = create_controlling_mob("oi-governed-spawn").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let written = controlling
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL))
+        .await
+        .expect("the ungoverned controller commits the write");
+
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits on the governed host");
+    let member = AgentIdentity::from("b2");
+    let session_id = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .materialized
+        .get("b2")
+        .map(|row| SessionId::parse(&row.session_id).expect("a session id"))
+        .expect("b2 is materialized on its host");
+    let status = settle_member(
+        &controlling.handle,
+        &member,
+        "the governed host's refusal blocks the member member_host_unsupported",
+        blocked_member_host_unsupported,
+    )
+    .await;
+    assert_eq!(
+        status.delivery.recorded_generation, None,
+        "the mob recorded nothing for the member"
+    );
+    let held = fixture
+        .member_service
+        .as_ref()
+        .expect("the member-build fixture composes a member session service")
+        .read_member_instructions(std::slice::from_ref(&session_id))
+        .await
+        .into_iter()
+        .next()
+        .expect("one read per session")
+        .expect("the host session's operator-instruction state reads")
+        .target;
+    assert!(
+        held.as_ref()
+            .is_none_or(|target| target.target_generation() != written.generation),
+        "the governed host's session was born with none of the snapshot: {held:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A governed member host refuses a Fresh materialize that carries a
+/// member's snapshot, `prepared_authorization_required`, before anything is
+/// minted: it records no snapshot without prepared authorization, at birth
+/// as by delivery. A mob never sends it one (the host lists no birth
+/// feature); the host refuses the field anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_governed_member_host_refuses_a_materialize_carrying_a_snapshot() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let governed = governed_peer_support::GovernedMember::new();
+    let mut options = HostFixtureOptions::named("oi-governed-birth-host").with_member_build();
+    options.member_llm_client = Some(governed.client());
+    options.governed_member = Some(governed.clone());
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("spawn the governed member host");
+    let probe = spawn_peer_comms_endpoint("oi-governed-birth-supervisor", true, None).await;
+    probe.trust(fixture.host_peer_descriptor()).await;
+    let mob_id = format!("mob-oi-governed-birth-{}", uuid::Uuid::new_v4().simple());
+    let host = fixture.host_peer_descriptor();
+    let bound = probe
+        .send_bridge_command_raw(
+            &host,
+            &raw_bind_host_command(&probe, &mob_id, &fixture.current_descriptor(), 1),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("the host answers the bind");
+    assert!(matches!(bound, BridgeReply::BindHost(_)), "{bound:?}");
+
+    let mut payload = sample_materialize_payload(
+        &probe,
+        1,
+        sample_portable_member_spec(&mob_id, "b2", "worker"),
+        1,
+        1,
+        MaterializeLaunchMode::Fresh {},
+    );
+    payload.protocol_version = BridgeProtocolVersion::V7;
+    payload.instruction_target = Some(BridgeInstructionTarget {
+        generation: 1,
+        slots: vec![BridgeInstructionTargetSlot {
+            slot: slot("tone"),
+            revision: revision(1),
+            body: Some(FORMAL.to_string()),
+        }],
+    });
+    let reply = probe
+        .send_bridge_command_raw(
+            &host,
+            &BridgeCommand::MaterializeMember(payload),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("the host answers the materialize");
+    assert_rejected(
+        &reply,
+        &BridgeRejectionCause::InstructionTargetRefused {
+            code: InstructionSetErrorCode::PreparedAuthorizationRequired,
+        },
+    );
+    assert!(
+        !fixture
+            .host_binding_record(&mob_id)
+            .await
+            .materialized
+            .contains_key("b2"),
+        "nothing is minted for the refused member"
     );
 
     fixture.shutdown().await;

@@ -27353,6 +27353,13 @@ function classifyConsoleSendFailure(error48) {
       message: "Not sent: this browser is now signed in as someone else. Nothing was sent."
     };
   }
+  if (typed.transportFailure === "caller_unknown") {
+    return {
+      state: "definitely-rejected",
+      kind: "caller_unknown",
+      message: "Not sent: the console could not confirm whom this browser is signed in as. Nothing was sent."
+    };
+  }
   if (typed.transportFailure === "sign_in_redirect") {
     return {
       state: "definitely-rejected",
@@ -27495,6 +27502,8 @@ function describeConsolePendingRow(attempt, names) {
           return "Sign in again or check this connection's authentication. Then review your saved message before choosing Send again.";
         case "caller_changed":
           return "This browser is now signed in as someone else, so the console did not send it.";
+        case "caller_unknown":
+          return "The console couldn't confirm whom you're signed in as, so it didn't send it. Try again in a moment.";
         case "access_denied":
           return "You don't have permission to message ".concat(names.agent, ".");
         case "read_only":
@@ -54795,7 +54804,14 @@ function createNativeMcpAppsHost(options) {
         body: JSON.stringify({ ...locator, ...params })
       });
       controller.signal.throwIfAborted();
-      if (!response.ok) throw new Error("MCP App request failed (HTTP ".concat(response.status, ")"));
+      if (!response.ok) {
+        const failure = Object.assign(new Error("MCP App request failed (HTTP ".concat(response.status, ")")), { httpStatus: response.status });
+        const body = await response.json().catch(() => null);
+        const kind = body && typeof body === "object" ? body.error : void 0;
+        if (typeof kind === "string") failure.kind = kind;
+        options.reportFailure?.(failure);
+        throw failure;
+      }
       const result = await response.json();
       controller.signal.throwIfAborted();
       return result;
@@ -54845,7 +54861,8 @@ function createNativeMcpAppsHost(options) {
         ...resolved.canCallTools === true && !options.readOnly ? {
           async callTool(name2, toolArgs, requestSignal) {
             current(requestSignal);
-            const expectedCallerScope = options.callerScope?.();
+            const expectedCallerScope = await options.callerScope?.();
+            current(requestSignal);
             return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS2.mcpAppsCallTool, original, {
               name: name2,
               arguments: toolArgs,
@@ -60052,6 +60069,11 @@ function signInRedirectFailure(label2) {
   failure.transportFailure = "sign_in_redirect";
   return failure;
 }
+function consoleCallerUnknownFailure2() {
+  const failure = new Error("The console does not know who it acts for yet, so it sent nothing");
+  failure.transportFailure = "caller_unknown";
+  return failure;
+}
 function jsonRpcErrorFromText(text14) {
   try {
     const parsed = JSON.parse(text14);
@@ -60264,12 +60286,13 @@ async function uploadConsoleBlobMultipart2(baseUrl, input, timeoutMs = DEFAULT_C
     timeoutMs
   );
   if (!response.ok) {
-    const preview = await responseErrorPreview(response);
-    throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart failed ").concat(response.status).concat(preview ? ": ".concat(preview) : ""));
+    throw await consoleResponseFailure("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart failed"), response);
   }
-  const result = await response.json();
+  const result = await consoleResponseJson("".concat(CONSOLE_RPC_METHODS2.blobUpload, " multipart"), response);
   if (result.error) {
-    throw new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " RPC error: ").concat(result.error.message || JSON.stringify(result.error)));
+    const error48 = new Error("".concat(CONSOLE_RPC_METHODS2.blobUpload, " RPC error: ").concat(result.error.message || JSON.stringify(result.error)));
+    error48.rpcError = result.error;
+    throw error48;
   }
   const record10 = result.result && typeof result.result === "object" ? result.result : {};
   const blobId = typeof record10.blob_id === "string" ? record10.blob_id : "";
@@ -60801,17 +60824,15 @@ function createHttpConsoleTransport2({
   fetchTimeoutMs
 }) {
   const timeout2 = () => typeof fetchTimeoutMs === "function" ? fetchTimeoutMs() : fetchTimeoutMs;
-  let known;
+  let bound;
   let reading;
-  let reads = 0;
   let unsupported = false;
   const whoami = () => {
-    const sequence = ++reads;
     const read = callConsoleRpc2(baseUrl, CONSOLE_RPC_METHODS2.whoami, {}, timeout2()).then(normalizeWhoami2);
     reading = read;
     void read.then(
       (value) => {
-        if (sequence === reads) known = value;
+        bound ?? (bound = value);
       },
       (error48) => {
         if (isJsonRpcMethodNotFoundError(error48)) unsupported = true;
@@ -60821,11 +60842,12 @@ function createHttpConsoleTransport2({
     });
     return read;
   };
-  const callerScope = async () => {
+  const callerScope = async (named) => {
+    if (named !== void 0) return named ?? void 0;
+    if (!bound && !unsupported) await (reading ?? whoami()).catch(() => void 0);
+    if (bound) return bound.callerScope;
     if (unsupported) return void 0;
-    const pending = reading ?? (known ? void 0 : whoami());
-    if (pending) await pending.catch(() => void 0);
-    return known?.callerScope;
+    throw consoleCallerUnknownFailure2();
   };
   return {
     loadExperience: () => fetchJson2(baseUrl, CONSOLE_REST_PATHS2.experience, timeout2()),
@@ -60842,7 +60864,7 @@ function createHttpConsoleTransport2({
     }),
     send: async (input) => {
       const handlingMode = input.handlingMode ?? "queue";
-      const scope = await callerScope();
+      const scope = await callerScope(input.expectedCallerScope);
       if (input.attachments?.length) {
         return sendConsoleMultipart2(
           baseUrl,
@@ -60877,7 +60899,7 @@ function createHttpConsoleTransport2({
         }
         params.identity = identity;
       }
-      Object.assign(params, callerScopeParam2(await callerScope()));
+      Object.assign(params, callerScopeParam2(await callerScope(input.expectedCallerScope)));
       input.signal?.throwIfAborted();
       let result;
       try {
@@ -60894,7 +60916,7 @@ function createHttpConsoleTransport2({
         result
       };
     },
-    upload: async (input) => uploadConsoleBlobMultipart2(baseUrl, input, timeout2(), await callerScope()),
+    upload: async (input) => uploadConsoleBlobMultipart2(baseUrl, input, timeout2(), await callerScope(input.expectedCallerScope)),
     readBlob: (input) => readConsoleBlob2(baseUrl, input.blobId, timeout2(), input.signal),
     blobUrl: (blobId) => "".concat(baseUrl).concat(CONSOLE_BLOB_PATH_PREFIX2).concat(encodeURIComponent(blobId))
   };
@@ -61143,12 +61165,58 @@ function subscribeConsoleCaller(baseUrl, onAnnouncement) {
 function consoleCallerFailure(error48) {
   if (!error48 || typeof error48 !== "object") return null;
   const typed = error48;
-  const kind = typed.rpcError?.data?.kind ?? typed.responseRpcError?.data?.kind;
+  const kind = typed.rpcError?.data?.kind ?? typed.responseRpcError?.data?.kind ?? typed.kind;
   if (kind === "caller_changed") return "caller_changed";
   if (typed.httpStatus === 401 || typed.transportFailure === "sign_in_redirect" || kind === "unauthenticated" || kind === "caller_not_current") {
     return "sign_in";
   }
   return null;
+}
+function createConsoleInstanceCaller(whoami) {
+  let bound;
+  let first;
+  let firstFailed = false;
+  let again;
+  const readOnce = async () => {
+    if (!whoami) return null;
+    try {
+      return await whoami();
+    } catch (error48) {
+      if (error48?.rpcError?.code === -32601) return null;
+      throw error48;
+    }
+  };
+  const caller = {
+    read() {
+      if (!first) {
+        first = readOnce();
+        void first.then((answer) => caller.bind(answer), () => {
+          firstFailed = true;
+        });
+      }
+      return first;
+    },
+    async forChange() {
+      if (!bound) await caller.read().catch(() => void 0);
+      if (!bound) throw consoleCallerUnknownFailure2();
+      return bound.answer?.callerScope ?? null;
+    },
+    readAgain() {
+      if (bound || !firstFailed) return void 0;
+      if (!again) {
+        const read = readOnce();
+        again = read;
+        void read.then(() => void 0, () => void 0).finally(() => {
+          if (again === read) again = void 0;
+        });
+      }
+      return again;
+    },
+    bind(answer) {
+      bound ?? (bound = { answer });
+    }
+  };
+  return caller;
 }
 
 // src/lib/preference-scope.ts
@@ -82008,6 +82076,20 @@ function LogsPanel({
 // src/panels/Topbar.tsx
 var import_react92 = __toESM(require("react"));
 var import_jsx_runtime117 = require("react/jsx-runtime");
+function signOutThen(event, onSignOut, leave) {
+  const pending = onSignOut?.();
+  if (!pending) return;
+  event.preventDefault();
+  void pending.then(leave, leave);
+}
+function postSignOut(href) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = href;
+  form.hidden = true;
+  document.body.append(form);
+  form.submit();
+}
 function PanelGlyph({ side, open }) {
   const dividerLeft = side === "left";
   const cx6 = dividerLeft ? 16.5 : 7.5;
@@ -82165,7 +82247,24 @@ function IdentityChip({ identity }) {
         children: [
           /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("p", { className: "meta-topbar__identity-name", children: identity.label }),
           /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("p", { className: "meta-topbar__identity-detail", children: identity.detail }),
-          signOut?.method === "post" ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("form", { method: "post", action: signOut.href, className: "meta-topbar__identity-sign-out", onSubmit: () => identity.onSignOut?.(), children: /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(Button, { type: "submit", size: "sm", children: "Sign out" }) }) : signOut ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)("a", { className: "cc-btn cc-btn--sm meta-topbar__identity-sign-out", href: signOut.href, onClick: () => identity.onSignOut?.(), children: "Sign out" }) : null
+          signOut?.method === "post" ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(
+            "form",
+            {
+              method: "post",
+              action: signOut.href,
+              className: "meta-topbar__identity-sign-out",
+              onSubmit: (event) => signOutThen(event, identity.onSignOut, () => postSignOut(signOut.href)),
+              children: /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(Button, { type: "submit", size: "sm", children: "Sign out" })
+            }
+          ) : signOut ? /* @__PURE__ */ (0, import_jsx_runtime117.jsx)(
+            "a",
+            {
+              className: "cc-btn cc-btn--sm meta-topbar__identity-sign-out",
+              href: signOut.href,
+              onClick: (event) => signOutThen(event, identity.onSignOut, () => window.location.assign(signOut.href)),
+              children: "Sign out"
+            }
+          ) : null
         ]
       }
     )
@@ -82466,9 +82565,9 @@ function writeSidebarTime(storage2, key, atMs) {
   } catch {
   }
 }
-function pendingApprovalCount(snapshot) {
+function pendingApprovalCount(snapshot, viewer) {
   if (!snapshot || snapshot.status !== "ready") return 0;
-  return snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled").length;
+  return snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled" && (!viewer || approvalAudience(request, viewer).kind === "you")).length;
 }
 function healthNavAttention(agents) {
   const byWord = /* @__PURE__ */ new Map();
@@ -84314,7 +84413,8 @@ var Sidebar = import_react94.default.memo(function Sidebar2({
     [logsSeenAtMs, logsShown, recentActivity]
   );
   const healthAttention = import_react94.default.useMemo(() => healthNavAttention(agents), [agents]);
-  const pendingApprovals = pendingApprovalCount(approvals);
+  const approvalViewer = useApprovalViewer();
+  const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = import_react94.default.useMemo(() => {
     const out = { ...navAttention };
     if (pendingApprovals > 0) {
@@ -89769,9 +89869,11 @@ function readPredecessorConsoleQueue(storage2, namespace, destination, now3 = Da
 }
 var legacyConsoleQueueKey = (destination) => "mobkit-pending-stack:".concat(destination);
 function removeOlderConsoleQueues(storage2, namespace, destination, hostOnlyNamespace) {
+  const older = [predecessorConsoleSendStorageKey(namespace, destination)];
+  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) older.push(consoleSendStorageKey(hostOnlyNamespace, destination));
   storage2.removeItem(legacyConsoleQueueKey(destination));
-  storage2.removeItem(predecessorConsoleSendStorageKey(namespace, destination));
-  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) storage2.removeItem(consoleSendStorageKey(hostOnlyNamespace, destination));
+  for (const key of older) storage2.removeItem(key);
+  return forgetConsoleQueueLockRecords(older, []);
 }
 function removeKeysWithPrefixes(storage2, prefixes) {
   if (!storage2) return;
@@ -89787,8 +89889,41 @@ function removeKeysWithPrefixes(storage2, prefixes) {
 }
 function purgeConsoleSendScope(local, session, namespace) {
   const scope = encodeURIComponent(namespace);
-  removeKeysWithPrefixes(local, ["meta-send-attempts:v1:".concat(scope, ":"), "mobkit-send-attempts:v1:".concat(scope, ":")]);
+  const queues = ["meta-send-attempts:v1:".concat(scope, ":"), "mobkit-send-attempts:v1:".concat(scope, ":")];
+  removeKeysWithPrefixes(local, queues);
   removeKeysWithPrefixes(session, ["meta-composer-draft:v1:".concat(scope, ":"), "meta-composer-draft:v2:".concat(scope, ":")]);
+  return forgetConsoleQueueLockRecords([], queues);
+}
+async function forgetConsoleQueueLockRecords(keys2, prefixes) {
+  if (typeof indexedDB === "undefined" || !indexedDB) return;
+  const database = await new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open("meta-console-queue-locks");
+    } catch {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+  if (!database) return;
+  try {
+    if (!database.objectStoreNames.contains("locks")) return;
+    await new Promise((resolve) => {
+      const transaction = database.transaction("locks", "readwrite");
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => resolve();
+      const store = transaction.objectStore("locks");
+      for (const key of keys2) store.delete(key);
+      for (const prefix of prefixes) store.delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(65535)));
+    });
+  } catch {
+  } finally {
+    database.close();
+  }
 }
 function parseConsoleSendDocument(raw, namespace, destination, now3) {
   try {
@@ -90223,7 +90358,19 @@ function isTransientRpcFailure(error48) {
   if (status !== null) return status === 429 || status >= 500;
   return true;
 }
-function browserEnvironment2(baseUrl, callerScope) {
+function createVoiceRpc(baseUrl, callerScope, reportFailure) {
+  let named;
+  return async (method, params, timeoutMs) => {
+    named ?? (named = { scope: await callerScope?.() });
+    try {
+      return await callConsoleRpc2(baseUrl, method, { ...params, ...callerScopeParam2(named.scope) }, timeoutMs);
+    } catch (error48) {
+      reportFailure?.(error48);
+      throw error48;
+    }
+  };
+}
+function browserEnvironment2(baseUrl, callerScope, reportFailure) {
   return {
     voiceAvailable: (identity) => queryVoiceAvailability(baseUrl, identity),
     createAudioContext: () => {
@@ -90244,9 +90391,7 @@ function browserEnvironment2(baseUrl, callerScope) {
     createPeerConnection: () => new RTCPeerConnection(),
     createMediaStream: (tracks) => new MediaStream(tracks ?? []),
     createAudioElement: () => document.createElement("audio"),
-    // Every voice request names the caller the console acts as; the gateway
-    // refuses a voice open made for another caller (`caller_changed`).
-    rpc: (method, params, timeoutMs) => callConsoleRpc2(baseUrl, method, { ...params, ...callerScopeParam2(callerScope?.()) }, timeoutMs),
+    rpc: createVoiceRpc(baseUrl, callerScope, reportFailure),
     pagehideClose: (params) => {
       void fetch("".concat(baseUrl).concat(CONSOLE_RPC_PATHS2.jsonRpc), {
         method: "POST",
@@ -90333,8 +90478,8 @@ function voiceError(error48, stage) {
   }
   return "Voice could not connect. Check your network and gateway configuration, then try again.";
 }
-function createVoiceSession(baseUrl, environment, callerScope) {
-  const env2 = environment ?? browserEnvironment2(baseUrl, callerScope);
+function createVoiceSession(baseUrl, environment, callerScope, reportFailure) {
+  const env2 = environment ?? browserEnvironment2(baseUrl, callerScope, reportFailure);
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = {
     phase: "idle",
@@ -91463,12 +91608,14 @@ var IDLE = {
 var idleSnapshot = () => IDLE;
 var idleSubscribe = () => () => {
 };
-function useVoiceController(baseUrl, callerScope) {
+function useVoiceController(baseUrl, callerScope, reportFailure) {
   const [voice, setVoice] = import_react101.default.useState(null);
   const callerScopeRef = import_react101.default.useRef(callerScope);
   callerScopeRef.current = callerScope;
+  const reportFailureRef = import_react101.default.useRef(reportFailure);
+  reportFailureRef.current = reportFailure;
   import_react101.default.useEffect(() => {
-    const owned = createVoiceSession(baseUrl, void 0, () => callerScopeRef.current?.());
+    const owned = createVoiceSession(baseUrl, void 0, () => callerScopeRef.current?.(), (error48) => reportFailureRef.current?.(error48));
     setVoice(owned);
     return () => owned.dispose();
   }, [baseUrl]);
@@ -91912,6 +92059,7 @@ function ConsoleApp(props) {
   const instanceKey = import_react103.default.useMemo(() => createConsoleId("console-instance"), [props.baseUrl, props.transport, props.storageNamespace, props.panelService, props.mcpAppsHost]);
   return /* @__PURE__ */ (0, import_jsx_runtime125.jsx)(ConsoleAppAuthority, { ...props }, instanceKey);
 }
+var SIGN_OUT_PURGE_WAIT_MS = 1500;
 function ConsoleAppAuthority(props) {
   const observedScope = import_react103.default.useRef(null);
   const [generation, setGeneration] = import_react103.default.useState(0);
@@ -91923,6 +92071,8 @@ function ConsoleAppAuthority(props) {
   const lifetimeRef = import_react103.default.useRef(null);
   const storageScopeRef = import_react103.default.useRef(null);
   const signingOutRef = import_react103.default.useRef(false);
+  const stagedAttachmentsReaderRef = import_react103.default.useRef(null);
+  const carriedAttachmentsRef = import_react103.default.useRef(null);
   const retireInstance = import_react103.default.useCallback(() => {
     const lifetime = lifetimeRef.current;
     if (lifetime) {
@@ -91933,9 +92083,10 @@ function ConsoleAppAuthority(props) {
   }, []);
   const forgetSignedOutUser = import_react103.default.useCallback(() => {
     signingOutRef.current = true;
+    carriedAttachmentsRef.current = null;
     retireInstance();
     const namespace = storageScopeRef.current;
-    if (namespace) purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace);
+    return namespace ? purgeConsoleSendScope(browserLocalStorage(), browserComposerStorage(), namespace) : Promise.resolve();
   }, [retireInstance]);
   const restart = import_react103.default.useCallback((callerChanged) => {
     retireInstance();
@@ -91959,6 +92110,10 @@ function ConsoleAppAuthority(props) {
   const handlers2 = import_react103.default.useMemo(() => ({
     observeScope,
     onCaller: (callerScope) => {
+      if (callerRef.current !== void 0 && callerRef.current !== callerScope) {
+        restart(true);
+        return;
+      }
       callerRef.current = callerScope;
       lastCallerRef.current = callerScope;
       announceConsoleCaller(browserLocalStorage(), props.baseUrl, callerScope);
@@ -91968,23 +92123,38 @@ function ConsoleAppAuthority(props) {
     },
     onSignInRequired: () => {
       if (signedOutRef.current) return;
+      const namespace = storageScopeRef.current;
+      const staged = Object.entries(stagedAttachmentsReaderRef.current?.() ?? {}).filter(([, items]) => items.length > 0).map(([identity, items]) => [identity, items.map((item) => item.file)]);
+      carriedAttachmentsRef.current = namespace && staged.length > 0 ? { namespace, files: Object.fromEntries(staged) } : null;
       retireInstance();
       setSignedOut("ended");
     },
     onCallerChanged: () => restart(true),
     onSignOut: () => {
-      forgetSignedOutUser();
+      const purged = Promise.race([
+        forgetSignedOutUser(),
+        new Promise((resolve) => window.setTimeout(resolve, SIGN_OUT_PURGE_WAIT_MS))
+      ]);
       announceConsoleCaller(browserLocalStorage(), props.baseUrl, null);
-      window.setTimeout(() => setSignedOut("signed_out"), 100);
+      void purged.then(() => window.setTimeout(() => setSignedOut("signed_out"), 100));
+      return purged;
     },
     signingOut: () => signingOutRef.current,
     registerLifetime: (lifetime) => {
       lifetimeRef.current = lifetime;
+    },
+    registerStagedAttachments: (read) => {
+      stagedAttachmentsReaderRef.current = read;
+    },
+    takeCarriedAttachments: (namespace) => {
+      const carried = carriedAttachmentsRef.current;
+      carriedAttachmentsRef.current = null;
+      return carried?.namespace === namespace ? carried.files : null;
     }
   }), [forgetSignedOutUser, observeScope, props.baseUrl, restart, retireInstance]);
   import_react103.default.useEffect(() => subscribeConsoleCaller(props.baseUrl, (announcement) => {
     if (announcement.caller === null) {
-      forgetSignedOutUser();
+      void forgetSignedOutUser();
       setSignedOut("signed_out");
       return;
     }
@@ -92043,7 +92213,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     };
   }, []);
   const consoleFetchTimeoutMsRef = import_react103.default.useRef(DEFAULT_CONSOLE_FETCH_TIMEOUT_MS2);
-  const consoleTransport = import_react103.default.useMemo(
+  const reportCallerFailure = import_react103.default.useCallback((error49, generation = lifetimeRef.current.generation) => {
+    if (!lifetimeRef.current.active || lifetimeRef.current.generation !== generation) return;
+    const failure = consoleCallerFailure(error49);
+    if (failure === "sign_in") callerHandlersRef.current.onSignInRequired();
+    else if (failure === "caller_changed") callerHandlersRef.current.onCallerChanged();
+  }, []);
+  const consoleConnection = import_react103.default.useMemo(
     () => {
       const source = transport ?? createHttpConsoleTransport2({
         baseUrl,
@@ -92054,12 +92230,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           throw new DOMException("Console authority lifetime ended", "AbortError");
         }
       };
-      const report = (error49, generation) => {
-        if (!lifetimeRef.current.active || lifetimeRef.current.generation !== generation) return;
-        const failure = consoleCallerFailure(error49);
-        if (failure === "sign_in") callerHandlersRef.current.onSignInRequired();
-        else if (failure === "caller_changed") callerHandlersRef.current.onCallerChanged();
-      };
       const call = async (operation2) => {
         const generation = lifetimeRef.current.generation;
         current(generation);
@@ -92067,21 +92237,36 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         try {
           value = await operation2();
         } catch (error49) {
-          report(error49, generation);
+          reportCallerFailure(error49, generation);
           throw error49;
         }
         current(generation);
         return value;
       };
+      const caller2 = createConsoleInstanceCaller(source.whoami ? async () => {
+        try {
+          return await source.whoami();
+        } catch (error49) {
+          reportCallerFailure(error49);
+          throw error49;
+        }
+      } : void 0);
+      const change = (operation2) => {
+        const generation = lifetimeRef.current.generation;
+        return call(async () => {
+          const callerScope = await caller2.forChange();
+          current(generation);
+          return operation2(callerScope);
+        });
+      };
       const scoped = {
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules()) : void 0,
         capabilities: () => call(() => source.capabilities()),
-        whoami: source.whoami ? () => call(() => source.whoami()) : void 0,
         queryTimeline: (input) => call(() => source.queryTimeline(input)),
-        send: (input) => call(() => source.send(input)),
-        executeCommand: source.executeCommand ? (input) => call(() => source.executeCommand(input)) : void 0,
-        upload: source.upload ? (input) => call(() => source.upload(input)) : void 0,
+        send: (input) => change((expectedCallerScope) => source.send({ ...input, expectedCallerScope })),
+        executeCommand: source.executeCommand ? (input) => change((expectedCallerScope) => source.executeCommand({ ...input, expectedCallerScope })) : void 0,
+        upload: source.upload ? (input) => change((expectedCallerScope) => source.upload({ ...input, expectedCallerScope })) : void 0,
         readBlob: source.readBlob ? (input) => call(() => source.readBlob(input)) : void 0,
         blobUrl: source.blobUrl ? (id) => {
           current();
@@ -92113,10 +92298,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           );
         }
       };
-      return scoped;
+      return { transport: scoped, caller: caller2 };
     },
-    [baseUrl, transport]
+    [baseUrl, transport, reportCallerFailure]
   );
+  const consoleTransport = consoleConnection.transport;
+  const instanceCaller = consoleConnection.caller;
   const consoleController = import_react103.default.useMemo(
     () => createMetaConsoleController2({ transport: consoleTransport }),
     [consoleTransport]
@@ -92125,8 +92312,30 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     () => consoleTransport.readBlob ? (input) => consoleTransport.readBlob(input) : void 0,
     [consoleTransport]
   );
-  const callerScopeRef = import_react103.default.useRef(void 0);
-  const { voice, state: voiceState } = useVoiceController(baseUrl, () => callerScopeRef.current);
+  const callerForRequest = import_react103.default.useCallback(
+    () => instanceCaller.forChange().then((callerScope) => callerScope ?? void 0),
+    [instanceCaller]
+  );
+  const { voice, state: voiceState } = useVoiceController(baseUrl, callerForRequest, reportCallerFailure);
+  const [caller, setCaller] = import_react103.default.useState();
+  const adoptCaller = import_react103.default.useCallback((whoami) => {
+    setCaller(whoami);
+    if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
+  }, []);
+  import_react103.default.useEffect(() => {
+    let active = true;
+    void instanceCaller.read().then(
+      (whoami) => {
+        if (active) adoptCaller(whoami);
+      },
+      () => {
+        if (active) setCaller(null);
+      }
+    );
+    return () => {
+      active = false;
+    };
+  }, [instanceCaller, adoptCaller]);
   const sampleVoiceWaveform = import_react103.default.useCallback(
     (source, samples) => voice?.sampleWaveform(source, samples),
     [voice]
@@ -92303,24 +92512,24 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [sidebarAgentPinsStorageKey]);
+  const pinnedAgentIdsRef = import_react103.default.useRef(pinnedAgentIds);
+  pinnedAgentIdsRef.current = pinnedAgentIds;
   const togglePinnedAgent = import_react103.default.useCallback((agent, renderedFamilyPinIds) => {
     const pinId = sidebarAgentPinId2(agent);
-    setPinnedAgentIds((current) => {
-      const next = new Set(readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey) ?? current);
-      const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0 ? renderedFamilyPinIds : sidebarPinnedFamilyPinIds(agent, agents);
-      const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
-      if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
-        for (const id of familyPinIds) next.delete(id);
-      } else {
-        next.add(pinId);
-      }
-      writeSidebarStringSet(
-        browserLocalStorage(),
-        sidebarAgentPinsStorageKey,
-        next
-      );
-      return next;
-    });
+    const next = new Set(readSidebarStringSet(browserLocalStorage(), sidebarAgentPinsStorageKey) ?? pinnedAgentIdsRef.current);
+    const familyPinIds = renderedFamilyPinIds && renderedFamilyPinIds.size > 0 ? renderedFamilyPinIds : sidebarPinnedFamilyPinIds(agent, agents);
+    const familyPinned = Array.from(familyPinIds).some((id) => next.has(id));
+    if (next.has(pinId) || next.has(agent.member_id) || familyPinned) {
+      for (const id of familyPinIds) next.delete(id);
+    } else {
+      next.add(pinId);
+    }
+    writeSidebarStringSet(
+      browserLocalStorage(),
+      sidebarAgentPinsStorageKey,
+      next
+    );
+    setPinnedAgentIds(next);
   }, [agents, sidebarAgentPinsStorageKey]);
   const [, setRenderTick] = import_react103.default.useState(0);
   const liveFramesRef = import_react103.default.useRef([]);
@@ -92403,6 +92612,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   import_react103.default.useEffect(() => {
     stagedAttachmentsRef.current = stagedAttachmentsByIdentity;
   }, [stagedAttachmentsByIdentity]);
+  import_react103.default.useEffect(() => {
+    callerHandlersRef.current.registerStagedAttachments(() => stagedAttachmentsRef.current);
+  }, []);
   import_react103.default.useEffect(
     () => () => {
       for (const items of Object.values(stagedAttachmentsRef.current)) {
@@ -92991,6 +93203,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   persistentSendScopeRef.current = persistentSendScope;
   import_react103.default.useEffect(() => {
     callerHandlersRef.current.onStorageScope(persistentSendScope);
+    if (!persistentSendScope) return;
+    const carried = callerHandlersRef.current.takeCarriedAttachments(persistentSendScope);
+    if (!carried) return;
+    const restored = {};
+    for (const [identity, files] of Object.entries(carried)) {
+      if (stagedAttachmentsRef.current[identity]?.length) continue;
+      restored[identity] = files.map((file2, index3) => ({
+        id: "restored-".concat(Date.now().toString(36), "-").concat(index3),
+        file: file2,
+        previewUrl: URL.createObjectURL(file2)
+      }));
+    }
+    setStagedAttachmentsByIdentity((current) => ({ ...restored, ...current }));
   }, [persistentSendScope]);
   const hostOnlyQueueNamespaceRef = import_react103.default.useRef(null);
   hostOnlyQueueNamespaceRef.current = serverStorageScope && hostStorageNamespace ? hostStorageNamespace : null;
@@ -93386,6 +93611,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
     let request;
     request = (async () => {
+      const callerAgain = instanceCaller.readAgain();
+      const answeredAgain = callerAgain ? await callerAgain.then((whoami) => ({ whoami }), () => void 0) : void 0;
       const logVersionsAtRequest = new Map(
         Object.entries(identityLogRef.current).map(([identity, log]) => [identity, log.version])
       );
@@ -93394,6 +93621,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         consoleTransport.loadModules?.() ?? Promise.resolve({ modules: [] })
       ]);
       if (!observeScope(experienceJson.storage_scope?.trim() || void 0)) return [];
+      if (answeredAgain) {
+        instanceCaller.bind(answeredAgain.whoami);
+        adoptCaller(answeredAgain.whoami);
+      }
       const configuredTimeoutMs = experienceJson.console_policy?.fetch_timeout_ms;
       if (typeof configuredTimeoutMs === "number" && Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0) {
         consoleFetchTimeoutMsRef.current = configuredTimeoutMs;
@@ -93415,7 +93646,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     experienceLoadInFlightRef.current = request;
     experienceLoadGenerationRef.current = lifetimeRef.current.generation;
     return request;
-  }, [consoleTransport]);
+  }, [consoleTransport, instanceCaller, adoptCaller]);
   import_react103.default.useEffect(() => {
     let mounted = true;
     setLoading(true);
@@ -93469,23 +93700,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = import_react103.default.useState(0);
   const approvalResourceRef = import_react103.default.useRef(null);
   const approvalScope = "".concat(sendScope, ":").concat(experience?.runtime_id || "loading");
-  const [callerRead, setCallerRead] = import_react103.default.useState();
-  import_react103.default.useEffect(() => {
-    let active = true;
-    const scope = sendScope;
-    void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
-      if (!active) return;
-      setCallerRead({ scope, whoami });
-      if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
-    }).catch(() => {
-      if (active) setCallerRead({ scope, whoami: null });
-    });
-    return () => {
-      active = false;
-    };
-  }, [consoleTransport, sendScope]);
-  const caller = callerRead?.scope === sendScope ? callerRead.whoami : void 0;
-  callerScopeRef.current = caller?.callerScope;
   const approvalsDecidable = caller === void 0 ? void 0 : caller?.actorKind === "person";
   const signInToDecide = Boolean(caller) && caller?.actorKind !== "person";
   const approvalViewer = import_react103.default.useMemo(
@@ -93494,9 +93708,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   );
   const workGraphClaimant = caller && caller.actorKind !== "anonymous" ? caller.principal : void 0;
   const workGraphAdmin = caller?.canAdminister === true;
-  const signOutOfConsole = import_react103.default.useCallback(() => {
-    callerHandlersRef.current.onSignOut();
-  }, []);
+  const signOutOfConsole = import_react103.default.useCallback(() => callerHandlersRef.current.onSignOut(), []);
   const signOutHref = experience?.console_config?.sign_out?.href;
   const signOutMethod = experience?.console_config?.sign_out?.method === "post" ? "post" : "get";
   const identityChip = import_react103.default.useMemo(() => caller ? {
@@ -94967,7 +95179,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         ...(hostOnly?.attempts ?? []).map((attempt) => ({ ...attempt, scope: namespace }))
       ];
       const saved = await setPendingStack(identity, (previous3) => [...previous3, ...imported.filter((item) => !previous3.some((old) => old.id === item.id))], true);
-      if (saved) removeOlderConsoleQueues(storage2, namespace, identity, hostOnlyNamespace);
+      if (saved) await removeOlderConsoleQueues(storage2, namespace, identity, hostOnlyNamespace);
     } catch (error49) {
       setActionError(errorMessage(error49));
     }
@@ -95205,12 +95417,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         runtimeId: experience?.runtime_id,
         readOnly: consoleReadOnly,
         requestTimeoutMs: consoleFetchTimeoutMsRef.current,
-        callerScope: () => callerScopeRef.current
+        callerScope: callerForRequest,
+        reportFailure: reportCallerFailure
       });
     } catch {
       return void 0;
     }
-  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly]);
+  }, [mcpAppsHost, baseUrl, experience?.console_config?.mcp_apps_sandbox_url, experience?.runtime_id, sendScope, consoleReadOnly, callerForRequest, reportCallerFailure]);
   const canManageWorkGraph = experience?.workgraph?.can_manage === true && !consoleReadOnly;
   const runWorkGraphCommand = import_react103.default.useCallback(
     async (command, params, cardIdentity) => {

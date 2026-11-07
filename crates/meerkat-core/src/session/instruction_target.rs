@@ -430,7 +430,9 @@ pub struct InstructionTargetRecord {
     pub slots: Vec<InstructionTargetRecordSlot>,
 }
 
+/// What a mob's record did to the member session's target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionRecordDisposition {
     /// The snapshot replaced the target.
@@ -449,6 +451,7 @@ pub struct InstructionRecordReceipt {
 
 /// What a release by a member's mob did to the member session's target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InstructionReleaseDisposition {
     /// The mob's target is now empty and unowned; the next fresh run start

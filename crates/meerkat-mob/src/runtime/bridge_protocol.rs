@@ -23,23 +23,25 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeHostCapabilityRequirements, BridgeHostFeaturesPayload, BridgeHostFeaturesResponse,
     BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
     BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
-    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeInterruptPayload,
-    BridgeIssueHostBindingDescriptorPayload, BridgeLiveChannelPayload, BridgeLiveControlOutcome,
-    BridgeLiveControlPayload, BridgeLiveControlVerb, BridgeLiveControlledResponse,
-    BridgeLiveOpenPayload, BridgeLiveOpenedResponse, BridgeLiveStatusPayload,
-    BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberEventsPage,
-    BridgeMemberHistoryPage, BridgeMemberIncarnation, BridgeMemberOperatorPayload,
-    BridgeMemberReleasedResponse, BridgeMemberRunStopResponse, BridgeMemberRuntimeState,
-    BridgeMemberVisibleToolsResponse, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
-    BridgeOutboundTaintPayload, BridgeOutboundTaintTarget, BridgeOutcomeTracking,
-    BridgePeerConnectivity, BridgePeerSpec, BridgePeerTrustPayload, BridgePeerWiringPayload,
-    BridgePollEventsPayload, BridgePromptContextFork, BridgeProtocolVersion,
-    BridgeReadHistoryPayload, BridgeReadVisibleToolsPayload, BridgeRejectionCause,
-    BridgeRejectionReply, BridgeReleasePayload, BridgeReply, BridgeRetireOutcome,
-    BridgeRetirePayload, BridgeRetireResponse, BridgeRevokeForkedParticipantPayload,
-    BridgeRunStartHoldPayload, BridgeRunStartHoldResponse, BridgeRunStartReleasePayload,
-    BridgeStopMemberRunPayload, BridgeSupervisorDelivery, BridgeSupervisorPayload,
-    BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
+    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeInstructionTarget,
+    BridgeInstructionTargetRecordedResponse, BridgeInstructionTargetReleasedResponse,
+    BridgeInstructionTargetSlot, BridgeInterruptPayload, BridgeIssueHostBindingDescriptorPayload,
+    BridgeLiveChannelPayload, BridgeLiveControlOutcome, BridgeLiveControlPayload,
+    BridgeLiveControlVerb, BridgeLiveControlledResponse, BridgeLiveOpenPayload,
+    BridgeLiveOpenedResponse, BridgeLiveStatusPayload, BridgeMaterializePayload,
+    BridgeMaterializedResponse, BridgeMemberEventsPage, BridgeMemberHistoryPage,
+    BridgeMemberIncarnation, BridgeMemberOperatorPayload, BridgeMemberReleasedResponse,
+    BridgeMemberRunStopResponse, BridgeMemberRuntimeState, BridgeMemberVisibleToolsResponse,
+    BridgeMobPeerOverlayHandoff, BridgeObservationResponse, BridgeOutboundTaintPayload,
+    BridgeOutboundTaintTarget, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerTrustPayload, BridgePeerWiringPayload, BridgePollEventsPayload,
+    BridgePromptContextFork, BridgeProtocolVersion, BridgeReadHistoryPayload,
+    BridgeReadVisibleToolsPayload, BridgeRecordInstructionTargetPayload, BridgeRejectionCause,
+    BridgeRejectionReply, BridgeReleaseInstructionTargetPayload, BridgeReleasePayload, BridgeReply,
+    BridgeRetireOutcome, BridgeRetirePayload, BridgeRetireResponse,
+    BridgeRevokeForkedParticipantPayload, BridgeRunStartHoldPayload, BridgeRunStartHoldResponse,
+    BridgeRunStartReleasePayload, BridgeStopMemberRunPayload, BridgeSupervisorDelivery,
+    BridgeSupervisorPayload, BridgeSupervisorRotationObservation, BridgeSupervisorRotationObserve,
     BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
     BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
     BridgeSupervisorRotationState, BridgeSupervisorRotationSubmit,
@@ -317,6 +319,16 @@ impl_from_bridge_reply!(
     "member_visible_tools"
 );
 impl_from_bridge_reply!(
+    BridgeInstructionTargetRecordedResponse,
+    MemberInstructionTargetRecorded,
+    "member_instruction_target_recorded"
+);
+impl_from_bridge_reply!(
+    BridgeInstructionTargetReleasedResponse,
+    MemberInstructionTargetReleased,
+    "member_instruction_target_released"
+);
+impl_from_bridge_reply!(
     BridgeHostBindingDescriptorIssuedResponse,
     HostBindingDescriptorIssued,
     "host_binding_descriptor_issued"
@@ -431,6 +443,8 @@ enum ExpectedBridgeReply {
     ForkedParticipantRevoked,
     HostFeatures,
     MemberVisibleTools,
+    MemberInstructionTargetRecorded,
+    MemberInstructionTargetReleased,
     Rejected,
     Unknown,
 }
@@ -466,6 +480,8 @@ impl ExpectedBridgeReply {
             Self::ForkedParticipantRevoked => "forked_participant_revoked",
             Self::HostFeatures => "host_features",
             Self::MemberVisibleTools => "member_visible_tools",
+            Self::MemberInstructionTargetRecorded => "member_instruction_target_recorded",
+            Self::MemberInstructionTargetReleased => "member_instruction_target_released",
             Self::Rejected => "rejected",
             Self::Unknown => "unknown",
         }
@@ -525,6 +541,12 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         BridgeCommand::RevokeForkedParticipant(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
         BridgeCommand::HostFeatures(_) => ExpectedBridgeReply::HostFeatures,
         BridgeCommand::ReadMemberVisibleTools(_) => ExpectedBridgeReply::MemberVisibleTools,
+        BridgeCommand::RecordMemberInstructionTarget(_) => {
+            ExpectedBridgeReply::MemberInstructionTargetRecorded
+        }
+        BridgeCommand::ReleaseMemberInstructionTarget(_) => {
+            ExpectedBridgeReply::MemberInstructionTargetReleased
+        }
         _ => ExpectedBridgeReply::Unknown,
     }
 }
@@ -565,6 +587,12 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         BridgeReply::ForkedParticipantRevoked(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
         BridgeReply::HostFeatures(_) => ExpectedBridgeReply::HostFeatures,
         BridgeReply::MemberVisibleTools(_) => ExpectedBridgeReply::MemberVisibleTools,
+        BridgeReply::MemberInstructionTargetRecorded(_) => {
+            ExpectedBridgeReply::MemberInstructionTargetRecorded
+        }
+        BridgeReply::MemberInstructionTargetReleased(_) => {
+            ExpectedBridgeReply::MemberInstructionTargetReleased
+        }
         BridgeReply::Rejected { .. } => ExpectedBridgeReply::Rejected,
         _ => ExpectedBridgeReply::Unknown,
     }

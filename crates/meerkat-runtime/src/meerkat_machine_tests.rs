@@ -53651,6 +53651,36 @@ fn v7_fork_child_commands_are_classified() {
     );
 }
 
+/// Protocol V7 (a placed member's operator instructions): the record and the
+/// release of a member session's target are host-addressed, admitted and
+/// served off the member drain by the host daemon, as `ReleaseMember` is; a
+/// member drain that receives one keeps its fail-closed reply.
+#[test]
+fn v7_operator_instruction_target_commands_are_classified() {
+    use crate::meerkat_machine_types::{
+        OffDrainResponder, SupervisorBridgeCommandAdmissionRoute, SupervisorBridgeCommandKind,
+        SupervisorBridgeCommandRealization,
+    };
+
+    for kind in [
+        SupervisorBridgeCommandKind::RecordMemberInstructionTarget,
+        SupervisorBridgeCommandKind::ReleaseMemberInstructionTarget,
+    ] {
+        assert_eq!(
+            kind.admission_route(),
+            SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed,
+            "{kind:?} is host-addressed: MobHostBindingAuthority admits it"
+        );
+        assert_eq!(
+            kind.realization(),
+            SupervisorBridgeCommandRealization::RealizedOffDrain {
+                by: OffDrainResponder::HostDaemon,
+            },
+            "{kind:?} is served by the mob host daemon"
+        );
+    }
+}
+
 /// Multi-host mobs phase 6 (§7.4, DEC-P6E-1): the observation pair and
 /// member-input cancellation commands are served by member-drain arms and the
 /// manifest says so; the live-channel family stays fail-closed until phase 6b.

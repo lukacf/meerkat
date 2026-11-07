@@ -5456,6 +5456,10 @@ where
     /// the gated names a live grant admits. The dispatch gate carries the
     /// same binding and adjudicates every gated call again.
     pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
+    /// The run a dropped-run cancel ended whose run-scoped tool grants are
+    /// still to be ended: the cancel is synchronous, so its caller ends them
+    /// after it ([`Agent::end_dropped_run_tool_grants`]).
+    dropped_run_tool_grants_owed: Option<crate::RunId>,
     store: Arc<S>,
     session: Session,
     budget: Budget,

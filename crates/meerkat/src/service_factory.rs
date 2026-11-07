@@ -775,6 +775,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel_dropped_run()
     }
 
+    async fn end_dropped_run_tool_grants(&mut self) {
+        self.agent.end_dropped_run_tool_grants().await;
+    }
+
     fn suspend_dropped_run(&mut self) -> Option<meerkat_core::DroppedRunSuspension> {
         self.agent.suspend_dropped_run()
     }

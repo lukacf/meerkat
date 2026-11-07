@@ -4127,6 +4127,13 @@ pub trait SessionAgent: Send {
         None
     }
 
+    /// End the run-scoped tool grants of the run
+    /// [`Self::cancel_dropped_run`] just cancelled. The cancel is
+    /// synchronous, so the session task awaits this right after it. The
+    /// default ends nothing, which is right only for an agent without a tool
+    /// grant gate.
+    async fn end_dropped_run_tool_grants(&mut self) {}
+
     /// End a turn whose run future a graceful requeue stop's suspension has
     /// dropped, with no terminal and no closing write, and say how the run
     /// ended: resumable from its last round commit, or past its final save.
@@ -12187,7 +12194,12 @@ async fn session_task<A: SessionAgent>(
                         | None => (None, interrupted),
                     };
                     let mut dropped_run_terminal = if cancel_dropped {
-                        agent.cancel_dropped_run()
+                        let terminal = agent.cancel_dropped_run();
+                        // The cancel realized the run's end: its run-scoped
+                        // tool grants end with it, before its terminal is
+                        // published.
+                        agent.end_dropped_run_tool_grants().await;
+                        terminal
                     } else {
                         None
                     };

@@ -3461,6 +3461,28 @@ where
         owed.stream.then_some(event)
     }
 
+    /// End the run-scoped tool grants of the run [`Self::cancel_dropped_run`]
+    /// ended, through the build's grant gate, once. The cancel is
+    /// synchronous and the gate's end is not, so the caller awaits this right
+    /// after the cancel, as the session task does after a hard interrupt.
+    /// Best effort, as at any run's end: a failure is logged, and the grants
+    /// still admit no use of a later run, whose first use ends them. Without
+    /// a cancelled run or a gate it ends nothing.
+    pub async fn end_dropped_run_tool_grants(&mut self) {
+        let Some(run_id) = self.dropped_run_tool_grants_owed.take() else {
+            return;
+        };
+        let Some(gate) = self.tool_grant_gate.clone() else {
+            return;
+        };
+        if let Err(refusal) = gate.end_run(&run_id).await {
+            tracing::warn!(
+                error = %refusal,
+                "the dropped run's end could not end its run-scoped tool grants"
+            );
+        }
+    }
+
     /// End a run whose execution future the host dropped to suspend it, for
     /// a stop that keeps the session's queued work (a host draining and
     /// requeueing, for a deploy) or for a store fence gap (the session
@@ -3531,6 +3553,7 @@ where
                     self.apply_turn_input(TurnExecutionInput::CancellationObserved { run_id })?;
                 for effect in &transition.effects {
                     self.execute_turn_terminal_effect(effect)?;
+                    self.owe_dropped_run_tool_grant_end(effect);
                 }
             }
             None => {
@@ -3727,6 +3750,7 @@ impl Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore> {
             tools: Arc::clone(&self.tools),
             tool_scope: self.tool_scope.clone(),
             tool_grant_gate: self.tool_grant_gate.clone(),
+            dropped_run_tool_grants_owed: None,
             store: Arc::clone(&self.store),
             session: snapshot,
             budget: self.budget.fork_shared_accounting(),

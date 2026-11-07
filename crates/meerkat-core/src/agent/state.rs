@@ -4536,10 +4536,7 @@ where
     /// logged, and the grants still admit no use of a later run, whose first
     /// use ends them.
     async fn end_run_scoped_tool_grants(&self, effect: &TurnExecutionEffect) {
-        let (TurnExecutionEffect::RunCompleted { run_id }
-        | TurnExecutionEffect::RunFailed { run_id, .. }
-        | TurnExecutionEffect::RunCancelled { run_id }) = effect
-        else {
+        let Some(run_id) = Self::run_ended_by(effect) else {
             return;
         };
         let Some(gate) = self.tool_grant_gate.as_ref() else {
@@ -4551,6 +4548,30 @@ where
                 "the run's end could not end its run-scoped tool grants"
             );
         }
+    }
+
+    /// Record the run a dropped run's terminal effect ended, whose
+    /// run-scoped tool grants the cancel's caller ends after it
+    /// ([`Self::end_dropped_run_tool_grants`]): the cancel that realizes the
+    /// effect is synchronous.
+    pub(super) fn owe_dropped_run_tool_grant_end(&mut self, effect: &TurnExecutionEffect) {
+        if self.tool_grant_gate.is_some()
+            && let Some(run_id) = Self::run_ended_by(effect)
+        {
+            self.dropped_run_tool_grants_owed = Some(run_id.clone());
+        }
+    }
+
+    /// The run a run's terminal effect (completed, failed or cancelled)
+    /// ends.
+    fn run_ended_by(effect: &TurnExecutionEffect) -> Option<&crate::RunId> {
+        let (TurnExecutionEffect::RunCompleted { run_id }
+        | TurnExecutionEffect::RunFailed { run_id, .. }
+        | TurnExecutionEffect::RunCancelled { run_id }) = effect
+        else {
+            return None;
+        };
+        Some(run_id)
     }
 
     /// Charge one compaction summary call to the session and the budget, and

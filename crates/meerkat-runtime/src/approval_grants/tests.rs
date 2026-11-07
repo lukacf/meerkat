@@ -11,13 +11,13 @@ use meerkat_authorization::clock::{
     LocalAuthorizationClock, LocalAuthorizationTime, LocalClockError,
 };
 use meerkat_authorization::grants::{
-    ChildApprovalRule, ChildGrantOutcome, ChildGrantValidity, GrantDeviceTrust,
+    ChildApprovalRule, ChildGrantOutcome, ChildGrantValidity, GrantDeviceTrust, GrantOwnerStore,
     LocalGrantAuthority, LocalGrantConfiguration,
 };
 use meerkat_authorization::publication::LocalAuthorizationPublication;
 use meerkat_authorization_contracts::constraints::{
-    DelegationDepth, ExactRestriction, ExecutionRestrictions, LifetimeRestriction, ProcessorRef,
-    ResourceDomain,
+    AudienceRef, DelegationDepth, ExactRestriction, ExecutionRestrictions, LifetimeRestriction,
+    ProcessorRef, ResourceDomain,
 };
 use meerkat_authorization_contracts::evidence::{
     EvidenceDigest, EvidenceId, HistoricalEvidenceRef,
@@ -170,12 +170,15 @@ impl ApprovalControllerCustody for Custody {
 
 /// The host's approval branches, recorded: which grantees it can branch
 /// (and on which controller lineage), which branches were opened and
-/// retired. It seats nothing: these rows stop before an approved work runs.
+/// retired, and every call Core made. It seats nothing (or refuses the seat
+/// for good, `seat_refused`): these rows stop before an approved work runs.
 #[derive(Default)]
 struct Branches {
     bases: Mutex<HashMap<String, ApprovalGranteeBasis>>,
     opened: Mutex<Vec<ApprovalBranchRequest>>,
     retired: Mutex<Vec<DecisionId>>,
+    calls: Mutex<Vec<&'static str>>,
+    seat_refused: AtomicBool,
 }
 
 impl Branches {
@@ -193,11 +196,21 @@ impl Branches {
     fn retired(&self) -> Vec<DecisionId> {
         self.retired.lock().expect("retired").clone()
     }
+
+    fn call(&self, call: &'static str) {
+        self.calls.lock().expect("calls").push(call);
+    }
+
+    /// Every call Core made of the host's branches, in order.
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls.lock().expect("calls").clone()
+    }
 }
 
 #[async_trait]
 impl ApprovalBranchHost for Branches {
     fn grantee_basis(&self, grantee: &PrincipalRef) -> Option<ApprovalGranteeBasis> {
+        self.call("grantee_basis");
         self.bases
             .lock()
             .expect("bases")
@@ -206,6 +219,7 @@ impl ApprovalBranchHost for Branches {
     }
 
     async fn open(&self, request: &ApprovalBranchRequest) -> Result<(), ApprovalBranchError> {
+        self.call("open");
         self.opened.lock().expect("opened").push(request.clone());
         Ok(())
     }
@@ -214,6 +228,12 @@ impl ApprovalBranchHost for Branches {
         &self,
         _decision: &DecisionId,
     ) -> Result<ApprovalBranchSeat, ApprovalBranchError> {
+        self.call("seat");
+        if self.seat_refused.load(Ordering::SeqCst) {
+            return Err(ApprovalBranchError::Refused(
+                "the branch cannot run the approved work".into(),
+            ));
+        }
         Err(ApprovalBranchError::Unavailable(
             "no seat in these rows".into(),
         ))
@@ -226,6 +246,7 @@ impl ApprovalBranchHost for Branches {
         Option<Box<dyn crate::input_admission_custody::NativeInputAdmissionCustody>>,
         ApprovalBranchError,
     > {
+        self.call("enroll");
         Err(ApprovalBranchError::Unavailable(
             "no enrollment in these rows".into(),
         ))
@@ -237,17 +258,20 @@ impl ApprovalBranchHost for Branches {
         _input: crate::input::Input,
         _custody: Option<Box<dyn crate::input_admission_custody::NativeInputAdmissionCustody>>,
     ) -> Result<ApprovedWorkAdmission, ApprovalBranchError> {
+        self.call("admit");
         Err(ApprovalBranchError::Unavailable(
             "no admission in these rows".into(),
         ))
     }
 
     async fn retire(&self, decision: &DecisionId) -> Result<(), ApprovalBranchError> {
+        self.call("retire");
         self.retired.lock().expect("retired").push(decision.clone());
         Ok(())
     }
 
     async fn open_branches(&self) -> Result<Vec<DecisionId>, ApprovalBranchError> {
+        self.call("open_branches");
         let retired = self.retired();
         Ok(self
             .opened()
@@ -338,9 +362,12 @@ struct Fixture {
     offering: Vec<GrantLineageRef>,
     /// The asking agent's controller grant.
     controller: Vec<GrantLineageRef>,
+    /// The grant owner's journal, when the owner is durable.
+    grant_store: Option<Arc<dyn GrantOwnerStore>>,
 }
 
-/// How the fixture's grants are issued.
+/// How the fixture's grants are issued, and which owners and seams it
+/// composes.
 struct Terms {
     /// The offering grant's subject.
     offering_subject: Option<PrincipalRef>,
@@ -348,10 +375,22 @@ struct Terms {
     rule: bool,
     /// The offering grant's lifetime.
     offering_lifetime: Option<LifetimeRestriction>,
+    /// The offering grant's processors and audiences bounds.
+    offering_processors: Option<ExactRestriction<ProcessorRef>>,
+    offering_audiences: Option<ExactRestriction<AudienceRef>>,
     /// The asking agent's controller grant's subject.
     controller_subject: Option<PrincipalRef>,
     /// The asking agent's controller grant's remaining depth.
     controller_depth: u32,
+    /// The native custody that revokes a branch's controller grant.
+    custody: Option<Arc<dyn ApprovalControllerCustody>>,
+    /// The decision store (the in-memory store by default).
+    store: Option<Arc<dyn DecisionStore>>,
+    /// The grant owner's journal: a durable owner over it, when set.
+    grant_store: Option<Arc<dyn GrantOwnerStore>>,
+    /// The host's approvers, composed into the grant owner's use-time
+    /// currentness ([`DecisionApprovalUseCurrentness`]), when set.
+    use_approvers: Option<Arc<dyn DecisionApproverCurrentness>>,
 }
 
 impl Default for Terms {
@@ -360,10 +399,88 @@ impl Default for Terms {
             offering_subject: None,
             rule: true,
             offering_lifetime: None,
+            offering_processors: None,
+            offering_audiences: None,
             controller_subject: None,
             controller_depth: 1,
+            custody: None,
+            store: None,
+            grant_store: None,
+            use_approvers: None,
         }
     }
+}
+
+fn grant_configuration() -> LocalGrantConfiguration {
+    LocalGrantConfiguration {
+        root: agent("grant-root"),
+        namespace: id("approval-grants"),
+        generation: 1,
+    }
+}
+
+/// The grant owner's journal, whose appends end uncertain while `uncertain`:
+/// nothing is written, and the owner becomes unavailable until it restarts.
+#[derive(Default)]
+struct UncertainJournal {
+    inner: meerkat_authorization::grants::InMemoryGrantOwnerStore,
+    uncertain: AtomicBool,
+}
+
+impl GrantOwnerStore for UncertainJournal {
+    fn load(
+        &self,
+    ) -> Result<
+        Option<meerkat_authorization::grants::DurableGrantOwner>,
+        meerkat_authorization::grants::GrantStoreError,
+    > {
+        self.inner.load()
+    }
+
+    fn create(
+        &self,
+        identity: &meerkat_authorization::grants::GrantOwnerIdentity,
+    ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
+        self.inner.create(identity)
+    }
+
+    fn append(
+        &self,
+        change: &meerkat_authorization::grants::GrantOwnerChange,
+    ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
+        if self.uncertain.load(Ordering::SeqCst) {
+            return Err(meerkat_authorization::grants::GrantStoreError::Uncertain);
+        }
+        self.inner.append(change)
+    }
+
+    fn release(&self) {
+        self.inner.release();
+    }
+}
+
+/// The host's composition of approval-carried grants over these owners and
+/// seams.
+fn compose(
+    decisions: &crate::decision::DurableDecisionService,
+    owner: &Arc<LocalGrantAuthority>,
+    branches: &Arc<Branches>,
+    route: &Arc<Route>,
+    custody: &Arc<dyn ApprovalControllerCustody>,
+    clock: &Arc<TestClock>,
+) -> ApprovalGrants {
+    ApprovalGrants::new(
+        ApprovalGrantsConfiguration::new(
+            decisions.clone(),
+            Arc::clone(owner),
+            branches.clone(),
+            route.clone(),
+            Arc::downgrade(custody),
+            agent("decision-ingress"),
+        )
+        .with_clock(clock.clone()),
+    )
+    .expect("approval-carried grants")
 }
 
 impl Fixture {
@@ -373,22 +490,41 @@ impl Fixture {
 
     fn with(terms: Terms) -> Self {
         let clock = Arc::new(TestClock::default());
-        let owner = Arc::new(
-            LocalGrantAuthority::new(
-                LocalGrantConfiguration {
-                    root: agent("grant-root"),
-                    namespace: id("approval-grants"),
-                    generation: 1,
-                },
+        let store: Arc<dyn DecisionStore> = terms
+            .store
+            .unwrap_or_else(|| Arc::new(InMemoryDecisionStore::new()));
+        let decisions = crate::decision::DurableDecisionService::with_clock(store, clock.clone());
+        let owner = match &terms.grant_store {
+            Some(grant_store) => LocalGrantAuthority::new_durable(
+                grant_configuration(),
+                Arc::clone(grant_store),
+                LocalAuthorizationPublication::new(),
+                clock.clone(),
+            )
+            .expect("durable grant owner"),
+            None => LocalGrantAuthority::new(
+                grant_configuration(),
                 LocalAuthorizationPublication::new(),
                 clock.clone(),
             )
             .expect("grant owner"),
-        );
+        };
+        let owner = Arc::new(match terms.use_approvers {
+            Some(approvers) => owner.with_approval_use_currentness(Arc::new(
+                DecisionApprovalUseCurrentness::new(decisions.clone(), approvers),
+            )),
+            None => owner,
+        });
         let mut offering_bounds = ExecutionRestrictions::unrestricted();
         offering_bounds.delegation_depth = DelegationDepth::remaining(1);
         if let Some(lifetime) = terms.offering_lifetime {
             offering_bounds.lifetime = lifetime;
+        }
+        if let Some(processors) = terms.offering_processors {
+            offering_bounds.processors = processors;
+        }
+        if let Some(audiences) = terms.offering_audiences {
+            offering_bounds.audiences = audiences;
         }
         let offering = if terms.rule {
             owner.issue_root_with_child_rule(
@@ -423,27 +559,15 @@ impl Fixture {
                 controller_bounds,
             )
             .expect("the asking agent's controller grant");
-        let store: Arc<dyn DecisionStore> = Arc::new(InMemoryDecisionStore::new());
-        let decisions = crate::decision::DurableDecisionService::with_clock(store, clock.clone());
         let branches = Arc::new(Branches::default());
         branches.can_branch(
             &data_agent(),
             ApprovalGranteeBasis::new(vec![controller.clone()], terms.controller_subject),
         );
         let route = Arc::new(Route::default());
-        let custody: Arc<dyn ApprovalControllerCustody> = Arc::new(Custody);
-        let grants = ApprovalGrants::new(
-            ApprovalGrantsConfiguration::new(
-                decisions.clone(),
-                owner.clone(),
-                branches.clone(),
-                route.clone(),
-                Arc::downgrade(&custody),
-                agent("decision-ingress"),
-            )
-            .with_clock(clock.clone()),
-        )
-        .expect("approval-carried grants");
+        let custody: Arc<dyn ApprovalControllerCustody> =
+            terms.custody.unwrap_or_else(|| Arc::new(Custody));
+        let grants = compose(&decisions, &owner, &branches, &route, &custody, &clock);
         Self {
             clock,
             owner,
@@ -454,6 +578,52 @@ impl Fixture {
             grants,
             offering: vec![offering],
             controller: vec![controller],
+            grant_store: terms.grant_store,
+        }
+    }
+
+    /// The same host after a restart: the grant owner restored from its
+    /// journal and the approval-carried grants composed again over the same
+    /// decision store, branches, route and custody. Nothing of the stopped
+    /// process's memory carries over, and the host's record of calls starts
+    /// empty.
+    fn restarted(self) -> Self {
+        let Self {
+            clock,
+            owner,
+            decisions,
+            branches,
+            route,
+            _custody: custody,
+            grants,
+            offering,
+            controller,
+            grant_store,
+        } = self;
+        drop(grants);
+        drop(owner);
+        let grant_store = grant_store.expect("a durable grant owner");
+        let owner = Arc::new(
+            LocalGrantAuthority::restore(
+                Arc::clone(&grant_store),
+                LocalAuthorizationPublication::new(),
+                clock.clone(),
+            )
+            .expect("the grant owner restored from its journal"),
+        );
+        branches.calls.lock().expect("calls").clear();
+        let grants = compose(&decisions, &owner, &branches, &route, &custody, &clock);
+        Self {
+            clock,
+            owner,
+            decisions,
+            branches,
+            route,
+            _custody: custody,
+            grants,
+            offering,
+            controller,
+            grant_store: Some(grant_store),
         }
     }
 
@@ -1151,9 +1321,120 @@ fn a_held_request_is_read_only_as_core_held_it() {
         meerkat_core::approval::decision::DecisionSubjectKey::new("another-subject")
             .expect("subject key");
     assert!(GrantChildRequest::of(&forged).is_err());
-    let mut forged = held;
+    let mut forged = held.clone();
     forged.descriptor.operation_id =
         meerkat_core::approval::decision::DecisionOperationId::new("grant.child:other")
             .expect("operation id");
     assert!(GrantChildRequest::of(&forged).is_err());
+    // A body held by another path, consistent with itself: its terms digest,
+    // subject key and rendering are the ones Core derives from it. The
+    // control is Core's own body, held again so: it is read.
+    assert!(GrantChildRequest::of(&reheld(&held, |_| {})).is_ok());
+    // It shows one query and binds the digest of another: the digest is not
+    // the digest of the arguments the approver saw.
+    let forged = reheld(&held, |request| {
+        request.operation.arguments = serde_json::json!({"query": "every customer's card numbers"});
+    });
+    let refused = GrantChildRequest::of(&forged)
+        .expect_err("a request digest that is not the shown arguments' is refused");
+    assert!(refused.to_string().contains("request digest"), "{refused}");
+    // Its reply goes to another person than the terms' requester.
+    let forged = reheld(&held, |request| {
+        request.origin.requester = principal(PrincipalKind::Human, "someone-else");
+    });
+    let refused =
+        GrantChildRequest::of(&forged).expect_err("a reply origin of another requester is refused");
+    assert!(refused.to_string().contains("requester"), "{refused}");
+    // Its terms name another work than the decision's approved work.
+    let forged = reheld(&held, |request| {
+        request.terms.work = OriginalWorkRef {
+            authority: host_ingress(),
+            work: id("another-work"),
+        };
+    });
+    let refused = GrantChildRequest::of(&forged)
+        .expect_err("terms of another work than the approved work are refused");
+    assert!(refused.to_string().contains("approved work"), "{refused}");
 }
+
+/// `held` with its request body edited by `edit`, held as consistently as a
+/// path other than `access_offer` could: the terms digest, the subject key
+/// and the rendering are the ones Core derives from the edited body.
+fn reheld(held: &StoredDecision, edit: impl FnOnce(&mut GrantChildRequest)) -> StoredDecision {
+    let mut request = GrantChildRequest::of(held).expect("Core's own request");
+    edit(&mut request);
+    let mut forged = held.clone();
+    forged.descriptor.request = request.body().expect("a request body");
+    forged.descriptor.request_digest =
+        meerkat_authorization::grants::grant_child_terms_digest(&request.terms)
+            .expect("the terms digest");
+    forged.descriptor.subject_key = super::body::grant_child_subject_key(
+        &request.parent_lineage.last().expect("a parent").grant_id,
+        &request.approval_branch_of,
+        &request.origin.work,
+        &request.operation.request_digest,
+    )
+    .expect("a subject key");
+    forged.descriptor.rendering =
+        super::body::render(&request, &forged.descriptor.approver_id).expect("a rendering");
+    forged
+}
+
+/// An offer of the data agent's peer work, approved by a person and executed
+/// by the loop's pass: the branch is opened and both grants are issued.
+async fn executed(fixture: &Fixture) -> DecisionId {
+    let held = fixture.offer(true).expect("held");
+    fixture.decide(&held, true);
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(held.decision_id.clone(), DecisionPassOutcome::Executed)),
+        "{pass:?}"
+    );
+    held.decision_id
+}
+
+/// Settle the Executed notice `decision` owes, as its delivery once did:
+/// these rows' host seats nothing, so its notice would stay owed.
+fn settle_the_notice(fixture: &Fixture, decision: &DecisionId) {
+    fixture
+        .decisions
+        .settle_notice(
+            decision,
+            &ApprovalConsentDeliveryState::Failed {
+                reason: "settled by the row".into(),
+            },
+        )
+        .expect("the notice settles");
+}
+
+/// The branch's controller lineage: the asking agent's controller grant and
+/// the branch's own, and the branch principal it serves.
+fn branch_controller_lineage(
+    fixture: &Fixture,
+    decision: &DecisionId,
+) -> (Vec<GrantLineageRef>, PrincipalRef) {
+    let mut lineage = fixture.controller.clone();
+    lineage.push(
+        fixture
+            .issued(branch_controller_grant_id(decision))
+            .expect("the branch's controller grant"),
+    );
+    (
+        lineage,
+        approval_branch_principal(&data_agent(), decision).expect("branch principal"),
+    )
+}
+
+/// Whether the branch's controller lineage still resolves: its controller
+/// grant is not revoked.
+fn controller_current(fixture: &Fixture, decision: &DecisionId) -> bool {
+    let (lineage, branch) = branch_controller_lineage(fixture, decision);
+    fixture
+        .owner
+        .resolve_controller_lineage(&lineage, &branch, None)
+        .is_ok()
+}
+
+mod binding;
+mod cleanup;

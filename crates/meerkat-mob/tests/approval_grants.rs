@@ -22,7 +22,7 @@
 mod support;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -116,6 +116,10 @@ const APPROVED_MARKER: &str = "Approved access: run exactly this operation once"
 const SOURCE_RESULT: &str = "revenue by region: north 42, south 17";
 const REPLY_TEXT: &str = "Last quarter's revenue: north 42, south 17.";
 const OTHER_REPLY: &str = "Another answer altogether.";
+/// A question whose answer would need a source no grant of the work covers.
+const LEDGER_PROMPT: &str = "The requester asks for the ledger's open invoices.";
+const LEDGER_OFFER_CALL: &str = "ledger-offer-call";
+const LEDGER_ANSWER: &str = "The ledger is not mine to offer.";
 const BOUND: Duration = Duration::from_mins(1);
 
 fn id(value: &str) -> EvidenceId {
@@ -550,7 +554,8 @@ struct BranchSnapshot {
 
 /// The host's approval branches over the mob: the owner's agent is the one
 /// grantee it branches; the branch's destination and pinned controller are
-/// the fixture's.
+/// the fixture's. It records the session of every branch it opened or
+/// found.
 struct Branches {
     handle: MobHandle,
     service: Arc<meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
@@ -558,6 +563,20 @@ struct Branches {
     grantee: AgentIdentity,
     basis: ApprovalGranteeBasis,
     snapshots: Mutex<Vec<BranchSnapshot>>,
+    opened_sessions: Mutex<Vec<SessionId>>,
+}
+
+impl Branches {
+    /// The distinct branch sessions opened or found, in order.
+    fn branch_sessions(&self) -> Vec<SessionId> {
+        let mut sessions = Vec::new();
+        for session in self.opened_sessions.lock().expect("sessions").iter() {
+            if !sessions.contains(session) {
+                sessions.push(session.clone());
+            }
+        }
+        sessions
+    }
 }
 
 fn unavailable(error: impl std::fmt::Display) -> ApprovalBranchError {
@@ -608,11 +627,13 @@ impl ApprovalBranchHost for Branches {
     }
 
     async fn open(&self, request: &ApprovalBranchRequest) -> Result<(), ApprovalBranchError> {
-        self.handle
+        let (_, session) = self
+            .handle
             .open_approval_branch(&self.grantee, &request.decision)
             .await
-            .map(drop)
-            .map_err(unavailable)
+            .map_err(unavailable)?;
+        self.opened_sessions.lock().expect("sessions").push(session);
+        Ok(())
     }
 
     async fn seat(&self, decision: &DecisionId) -> Result<ApprovalBranchSeat, ApprovalBranchError> {
@@ -701,12 +722,14 @@ impl ApprovalBranchHost for Branches {
     }
 }
 
-/// The host's requester reply route, recorded: one delivery per reply id.
+/// The host's requester reply route, recorded: one delivery per reply id,
+/// unless `no_dedupe` (a route that delivers every call it is handed).
 #[derive(Default)]
 struct Route {
     deliveries: Mutex<HashMap<String, (String, ReplyReceipt)>>,
     delivered: Mutex<Vec<String>>,
     notices: Mutex<Vec<(DecisionId, AccessOutcome)>>,
+    no_dedupe: AtomicBool,
 }
 
 #[async_trait]
@@ -722,7 +745,9 @@ impl RequesterReplyRoute for Route {
         text: &str,
     ) -> Result<ReplyReceipt, ReplyRouteError> {
         let mut deliveries = self.deliveries.lock().expect("deliveries");
-        if let Some((delivered, receipt)) = deliveries.get(reply.as_str()) {
+        if !self.no_dedupe.load(Ordering::SeqCst)
+            && let Some((delivered, receipt)) = deliveries.get(reply.as_str())
+        {
             return if delivered == text {
                 Ok(receipt.clone())
             } else {
@@ -879,6 +904,26 @@ impl LlmClient for ScriptedController {
         }
         if mentions(&messages, SECOND_QUESTION) {
             return text("nothing more");
+        }
+        if mentions(&messages, LEDGER_PROMPT) {
+            if tool_results(&messages)
+                .iter()
+                .any(|result| result.tool_use_id == LEDGER_OFFER_CALL)
+            {
+                return text(LEDGER_ANSWER);
+            }
+            return call(
+                LEDGER_OFFER_CALL,
+                "access_offer",
+                serde_json::json!({
+                    "operation": {
+                        "server": "ledger",
+                        "tool": TOOL,
+                        "arguments": query_arguments(),
+                    },
+                    "summary": "the ledger's open invoices, for the requester",
+                }),
+            );
         }
         if mentions(&messages, OWNER_PROMPT) {
             if tool_results(&messages)
@@ -1048,6 +1093,11 @@ struct Outcome {
 
 impl Flow {
     async fn new() -> Self {
+        Self::with_store(Arc::new(InMemoryDecisionStore::new())).await
+    }
+
+    /// The flow over the decision store `store`.
+    async fn with_store(store: Arc<dyn DecisionStore>) -> Self {
         let realm = support::member_realm();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
             Arc::new(meerkat_store::MemoryBlobStore::default());
@@ -1058,7 +1108,6 @@ impl Flow {
             controller.clone(),
             Arc::clone(&blob_store),
         );
-        let store: Arc<dyn DecisionStore> = Arc::new(InMemoryDecisionStore::new());
         let decisions = DurableDecisionService::new(store);
         let grants = Grants::new(&decisions);
         let originals = Arc::new(Originals::default());
@@ -1108,6 +1157,7 @@ impl Flow {
             grantee: owner_member.clone(),
             basis: ApprovalGranteeBasis::new(vec![grants.controller.clone()], Some(data_owner())),
             snapshots: Mutex::new(Vec::new()),
+            opened_sessions: Mutex::new(Vec::new()),
         });
         let route = Arc::new(Route::default());
         let custody: Arc<dyn ApprovalControllerCustody> = machine.clone();
@@ -1356,7 +1406,11 @@ async fn completed(turn: MemberTurnHandle, what: &str) {
 /// approves, the executor executes and admits the approved work, which
 /// runs in its branch and replies; the branch is then retired.
 async fn run() -> Outcome {
-    let mut flow = Flow::new().await;
+    run_on(Flow::new().await).await
+}
+
+/// The whole flow on `flow`.
+async fn run_on(mut flow: Flow) -> Outcome {
     completed(
         flow.ask_owner(OWNER_PROMPT, 1).await,
         "the requester's question",
@@ -1631,4 +1685,405 @@ async fn the_approved_work_queries_once_and_replies_once() {
         vec![REPLY_TEXT.to_owned()],
         "one reply reached the requester"
     );
+}
+
+/// The reply of an approved work is once, by its decision: a route that
+/// delivers every call it is handed never sees a second, other text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reply_once_holds_when_the_hosts_route_delivers_every_call() {
+    let flow = Flow::new().await;
+    flow.route.no_dedupe.store(true, Ordering::SeqCst);
+    let Outcome { flow, .. } = run_on(flow).await;
+    let other = flow.feedback("reply-3");
+    assert!(
+        other.is_error && other.text_content().contains("reply_already_delivered"),
+        "{}",
+        other.text_content()
+    );
+    let delivered = flow.route.delivered.lock().expect("delivered").clone();
+    assert!(
+        !delivered.iter().any(|text| text == OTHER_REPLY),
+        "another text never reaches the requester: {delivered:?}"
+    );
+    assert!(delivered.iter().all(|text| text == REPLY_TEXT));
+}
+
+/// The decision store, whose next settlement of an owed notice fails before
+/// it is written, as a store conflict or a crash would leave it.
+struct SettleFails {
+    inner: InMemoryDecisionStore,
+    failures: AtomicUsize,
+}
+
+impl DecisionStore for SettleFails {
+    fn get(
+        &self,
+        decision_id: &DecisionId,
+    ) -> Result<
+        Option<meerkat_core::approval::decision::DecisionRow>,
+        meerkat_core::approval::ApprovalStoreError,
+    > {
+        self.inner.get(decision_id)
+    }
+
+    fn insert_if_absent(
+        &self,
+        row: &StoredDecision,
+    ) -> Result<(), meerkat_core::approval::ApprovalStoreError> {
+        self.inner.insert_if_absent(row)
+    }
+
+    fn replace_if_revision(
+        &self,
+        expected_revision: u64,
+        row: &StoredDecision,
+    ) -> Result<(), meerkat_core::approval::ApprovalStoreError> {
+        let settles = row.notice_receipt.is_some()
+            && matches!(
+                self.inner.get(&row.decision_id),
+                Ok(Some(meerkat_core::approval::decision::DecisionRow::Readable(stored)))
+                    if stored.notice_receipt.is_none()
+            );
+        if settles
+            && self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(meerkat_core::approval::ApprovalStoreError::NotCommitted(
+                "the settlement was lost".into(),
+            ));
+        }
+        self.inner.replace_if_revision(expected_revision, row)
+    }
+
+    fn list(
+        &self,
+        filter: &DecisionListFilter,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<
+        meerkat_core::approval::decision::DecisionPage,
+        meerkat_core::approval::ApprovalStoreError,
+    > {
+        self.inner.list(filter, after, limit)
+    }
+
+    fn owed(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<
+        meerkat_core::approval::decision::DecisionPage,
+        meerkat_core::approval::ApprovalStoreError,
+    > {
+        self.inner.owed(after, limit)
+    }
+
+    fn due(
+        &self,
+        now_ms: u64,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<
+        meerkat_core::approval::decision::DecisionPage,
+        meerkat_core::approval::ApprovalStoreError,
+    > {
+        self.inner.due(now_ms, after, limit)
+    }
+
+    fn count(
+        &self,
+        filter: &DecisionListFilter,
+    ) -> Result<u64, meerkat_core::approval::ApprovalStoreError> {
+        self.inner.count(filter)
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    fn claim_executor_kind(
+        &self,
+        kind: &meerkat_core::approval::decision::DecisionKind,
+    ) -> Result<
+        meerkat_core::approval::decision::DecisionExecutorClaim,
+        meerkat_core::approval::ApprovalStoreError,
+    > {
+        self.inner.claim_executor_kind(kind)
+    }
+}
+
+/// The Executed notice delivered again after its work ran and its branch
+/// retired forks nothing: the branch the execution opened was the only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_redelivered_executed_notice_forks_nothing_and_settles() {
+    let mut flow = Flow::with_store(Arc::new(SettleFails {
+        inner: InMemoryDecisionStore::new(),
+        failures: AtomicUsize::new(1),
+    }))
+    .await;
+    completed(
+        flow.ask_owner(OWNER_PROMPT, 1).await,
+        "the requester's question",
+    )
+    .await;
+    let decision = flow.held();
+    flow.approve(&decision);
+    let pass = flow.executor.pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.decision_id.clone(), DecisionPassOutcome::Executed)),
+        "{pass:?}"
+    );
+    // The notice admits the approved work, and its settlement is lost.
+    let pass = flow.executor.pass().await;
+    assert!(
+        pass.outcomes
+            .iter()
+            .any(|(id, outcome)| id == &decision.decision_id
+                && matches!(outcome, DecisionPassOutcome::Failed(_))),
+        "{pass:?}"
+    );
+    // The approved work runs, replies and ends: its branch retires.
+    tokio::time::timeout(BOUND, async {
+        while flow.branch_seated(&decision.decision_id).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the branch is retired once its approved work ended");
+    // The notice is delivered again: it forks no new branch, and settles.
+    let pass = flow.executor.pass().await;
+    assert!(
+        pass.outcomes.contains(&(
+            decision.decision_id.clone(),
+            DecisionPassOutcome::NoticeSettled
+        )),
+        "{pass:?}"
+    );
+    assert_eq!(
+        flow.branches.branch_sessions().len(),
+        1,
+        "the redelivered notice forked no new branch"
+    );
+    assert_eq!(
+        flow.branches.snapshots.lock().expect("snapshots").len(),
+        1,
+        "the approved work was admitted once"
+    );
+    assert!(!flow.branch_seated(&decision.decision_id).await);
+}
+
+/// The refusal a reserved approval branch path answers, by its token.
+fn assert_reserved(error: &impl std::fmt::Display, path: &str) {
+    assert!(
+        error.to_string().contains("approval_branch_reserved"),
+        "{path}: {error}"
+    );
+}
+
+/// The id of a `grant.child` decision of the subject `subject`.
+fn a_decision(subject: &str) -> DecisionId {
+    DecisionId::derive(
+        &meerkat_core::approval::decision::DecisionKind::new("grant.child").expect("kind"),
+        &meerkat_core::approval::decision::DecisionSubjectKey::new(subject).expect("subject key"),
+    )
+}
+
+/// A member planted as the branch of a decision, by its identity or its
+/// label, is refused on every spawn path but `open_approval_branch`, which
+/// opens the branch itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
+    let flow = Flow::new().await;
+    let decision = a_decision("planted");
+    let identity = MobHandle::approval_branch_identity(&decision);
+    let label = BTreeMap::from([(
+        APPROVAL_BRANCH_LABEL.to_owned(),
+        decision.as_str().to_owned(),
+    )]);
+    let planted = SpawnMemberSpec::new("worker", identity.clone()).with_labels(label.clone());
+    assert_reserved(
+        &flow
+            .handle
+            .spawn_spec(planted.clone())
+            .await
+            .expect_err("a member planted with the branch identity and label is refused"),
+        "spawn",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .spawn_spec(SpawnMemberSpec::new("worker", identity.clone()))
+            .await
+            .expect_err("the branch identity prefix is reserved"),
+        "spawn (identity)",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .spawn_spec(
+                SpawnMemberSpec::new("worker", AgentIdentity::from("ordinary-member"))
+                    .with_labels(label.clone()),
+            )
+            .await
+            .expect_err("the branch label is reserved"),
+        "spawn (label)",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .ensure_member(planted.clone())
+            .await
+            .expect_err("ensure refuses the branch identity"),
+        "ensure",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .fork_member(&flow.owner_member, planted, None)
+            .await
+            .expect_err("a fork refuses the branch identity"),
+        "fork",
+    );
+    assert!(
+        flow.handle
+            .get_member(&identity)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "nothing was seated under the branch identity"
+    );
+    // `open_approval_branch` opens the branch itself: a fork of the grantee.
+    let (member, session) = flow
+        .handle
+        .open_approval_branch(&flow.owner_member, &decision)
+        .await
+        .expect("the branch opens");
+    assert_eq!(member, identity);
+    assert_ne!(session, flow.owner_session);
+}
+
+/// An open approval branch is wired to nobody and cannot be wired, unwired
+/// or respawned through the mob's controls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_approval_branch_cannot_be_wired_unwired_or_respawned() {
+    let flow = Flow::new().await;
+    let decision = a_decision("opened");
+    let (branch, _) = flow
+        .handle
+        .open_approval_branch(&flow.owner_member, &decision)
+        .await
+        .expect("the branch opens");
+    assert_reserved(
+        &flow
+            .handle
+            .wire(flow.owner_member.clone(), branch.clone())
+            .await
+            .expect_err("nothing is wired to an approval branch"),
+        "wire",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .wire(branch.clone(), flow.owner_member.clone())
+            .await
+            .expect_err("an approval branch is wired to nothing"),
+        "wire (from the branch)",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .unwire(flow.owner_member.clone(), branch.clone())
+            .await
+            .expect_err("an approval branch's wiring is not the mob's to change"),
+        "unwire",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .respawn(branch.clone(), None)
+            .await
+            .expect_err("an approval branch is never re-seeded"),
+        "respawn",
+    );
+    let entry = flow
+        .handle
+        .get_member(&branch)
+        .await
+        .expect("roster read")
+        .expect("the branch stays open");
+    assert!(entry.wired_to.is_empty(), "{:?}", entry.wired_to);
+}
+
+/// The JSON payload of the result of the call `id` in `messages`.
+fn payload_of(messages: &[Message], id: &str) -> serde_json::Value {
+    let result = tool_results(messages)
+        .into_iter()
+        .find(|result| result.tool_use_id == id)
+        .unwrap_or_else(|| panic!("a result for {id}"));
+    assert!(result.is_error, "{}", result.text_content());
+    serde_json::from_str(&result.text_content()).expect("a JSON error payload")
+}
+
+fn assert_no_parent_grant(payload: &serde_json::Value) {
+    assert_eq!(payload["error"], "execution_failed", "{payload}");
+    assert_eq!(
+        payload["data"],
+        serde_json::json!({"refusal": "no_child_approval_rule", "reason": "no_parent_grant"}),
+        "{payload}"
+    );
+}
+
+/// An offer of a source no grant of the work covers is refused when its
+/// plan resolves, and the model sees the typed refusal with its data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_model_sees_a_plan_time_offer_refusal_with_its_data() {
+    let flow = Flow::new().await;
+    completed(
+        flow.ask_owner(LEDGER_PROMPT, 1).await,
+        "the requester's ledger question",
+    )
+    .await;
+    let requests = flow.controller.requests.lock().expect("requests").clone();
+    let answered = requests
+        .iter()
+        .find(|messages| {
+            tool_results(messages)
+                .iter()
+                .any(|result| result.tool_use_id == LEDGER_OFFER_CALL)
+        })
+        .expect("the model saw the offer's result");
+    assert_no_parent_grant(&payload_of(answered, LEDGER_OFFER_CALL));
+    assert!(
+        flow.decisions
+            .list(&DecisionListFilter::default(), None, 10)
+            .expect("list")
+            .decisions
+            .is_empty(),
+        "nothing was held"
+    );
+}
+
+/// The same refusal as a client reads it: the session's committed
+/// transcript (`session/history`) carries the typed refusal with its data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_reads_a_plan_time_offer_refusal_with_its_data() {
+    use meerkat_core::SessionServiceHistoryExt as _;
+    use meerkat_core::service::SessionHistoryQuery;
+    let flow = Flow::new().await;
+    completed(
+        flow.ask_owner(LEDGER_PROMPT, 1).await,
+        "the requester's ledger question",
+    )
+    .await;
+    let history = flow
+        .service
+        .read_history(&flow.owner_session, SessionHistoryQuery::default())
+        .await
+        .expect("the session's history");
+    assert_no_parent_grant(&payload_of(&history.messages, LEDGER_OFFER_CALL));
 }

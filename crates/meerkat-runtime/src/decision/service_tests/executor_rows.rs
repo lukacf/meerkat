@@ -1081,3 +1081,30 @@ fn a_store_wrapper_forwards_claim_executor_kind() {
         .claim_executor_kind(&release_kind())
         .expect("nothing was claimed");
 }
+
+/// A kind that opens neither fact of an executed decision (a cleanup owed,
+/// a reply settled) runs as it did, and its rows never carry them.
+#[tokio::test]
+async fn a_kind_that_never_opens_the_executed_facts_keeps_its_rows() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let owner = ScriptedOwner::release();
+    let mut executor = start(&service, &[&owner], &Approvers::current()).expect("start");
+    let executed = executor.pass().await;
+    assert_eq!(
+        executed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)]
+    );
+    let noticed = executor.pass().await;
+    assert_eq!(
+        noticed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::NoticeSettled)]
+    );
+    let row = serde_json::to_value(store.stored(&decision_id)).expect("the row encodes");
+    let state = row["state"].as_object().expect("the machine state");
+    assert!(
+        !state.contains_key("cleanup") && !state.contains_key("reply_digest"),
+        "{state:?}"
+    );
+}

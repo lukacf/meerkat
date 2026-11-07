@@ -544,13 +544,14 @@ fn reply_to_requester_is_denied_outside_an_approved_work() {
         &reply
     ));
     // So is a work that names the approval's lineage but is not its work:
-    // another requester, another original, another executor, a contributor
-    // or a base lineage.
+    // another requester, another original, another executor, another
+    // represented subject, a contributor or a base lineage.
     let base = fixture.lineage.clone();
     let edits: Vec<Box<dyn FnOnce(&mut InputAuthorityAssociationCandidate)>> = vec![
         Box::new(|candidate| candidate.requester = who("another-requester")),
         Box::new(|candidate| candidate.original_work.work = id("another-work")),
         Box::new(|candidate| candidate.logical_executor = who("another-executor")),
+        Box::new(|candidate| candidate.represented_subject = Some(who("another-subject"))),
         Box::new(|candidate| {
             candidate.contributing_work = vec![OriginalWorkRef {
                 authority: who("ingress"),

@@ -906,3 +906,44 @@ fn the_in_memory_whole_store_claim_and_kind_claims_exclude_each_other() {
         .claim_executor_kind(&release)
         .expect("free once the whole-store claim drops");
 }
+
+/// The bytes of an executed, noticed row that carries neither fact of an
+/// executed decision (a cleanup owed, a reply settled): what a 0.9.10
+/// reader decodes. A kind that never opens the facts writes exactly these.
+const EXECUTED_ROW_WITHOUT_FACTS: &str = concat!(
+    r#"{"decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""descriptor":{"kind":"release","subject_key":"subject-a","operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"team:owners","deadline_at_ms":100,"created_at_ms":10,"#,
+    r#""request":{"build":7},"rendering":"Release build 7.","renderer":"render.v1","#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"},"#,
+    r#""state":{"phase":"executed","#,
+    r#""decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""deadline_at_ms":100,"#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"approver:team:owners","reviewer":null,"stage":"human","#,
+    r#""first_presented_to_approver_at_ms":null,"presented_to_reviewer":false,"#,
+    r#""evidence_digest":null,"decided_at_ms":null,"ended_at_ms":50,"permit_issued":false,"#,
+    r#""executed_request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""notice":"delivered"},"revision":1}"#,
+);
+
+#[test]
+fn a_row_without_the_executed_decisions_facts_keeps_its_bytes() {
+    let mut row = stored(
+        "subject-a",
+        DecisionPhase::Executed,
+        DecisionNotice::Delivered,
+        100,
+    );
+    row.state.executed_request_digest = Some(row.state.request_digest.clone());
+    row.state.ended_at_ms = Some(50);
+    assert_eq!(
+        serde_json::to_string(&row).expect("the row encodes"),
+        EXECUTED_ROW_WITHOUT_FACTS
+    );
+}

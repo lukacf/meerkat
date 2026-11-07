@@ -682,6 +682,92 @@ async fn a_redacted_private_reply_is_delivered_once() -> TestResult {
     Ok(())
 }
 
+/// A host's payload policy that rewrites a private reply's frame rewrites
+/// the attention item the reply becomes too: the item is stored and served
+/// in the form the reply's frame would be stored in, so the person never
+/// reads more in their attention list than in a thread.
+#[tokio::test]
+async fn a_redaction_policy_rewrites_the_attention_item_like_the_frame() -> TestResult {
+    const WITHHELD: &str = "[withheld by the host]";
+    struct WithholdReplies;
+    impl crate::console_aggregator::ConsoleVisibilityPolicy for WithholdReplies {
+        fn redact_payload(
+            &self,
+            frame: &crate::console_aggregator::NewConsoleFrame,
+        ) -> Option<Value> {
+            (frame.kind == "private_reply").then(|| json!({ "text": WITHHELD }))
+        }
+    }
+    let fixture = Fixture::with_host_policy(
+        "mu16-redacted-item",
+        true,
+        Some(everyone_drives_every_agent()),
+        Some(Arc::new(WithholdReplies)),
+    )
+    .await?;
+    let alice = alice();
+    let alice_scope = caller_scope(&fixture.app, &alice).await;
+    let sent = send(
+        &fixture.app,
+        Some(&alice),
+        "alpha",
+        "redacted-item-question",
+    )
+    .await;
+    let interaction = interaction_of(&sent);
+    let replies = fixture.replies();
+
+    let first = replies.deliver(&interaction, "reply-1", REPLY_TEXT).await;
+    let Ok(first) = first else {
+        panic!("the reply is delivered: {first:?}");
+    };
+    let ConsoleReplyDelivery::Attention { item_id } = &first.delivery else {
+        panic!("a reply to a request in a shared agent is an attention item: {first:?}");
+    };
+
+    let answer = console_rpc_as(
+        &fixture.app,
+        Some(&alice),
+        "meta/console/attention",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !carries_reply(&answer),
+        "the attention list serves none of the text the policy withheld: {answer:#}"
+    );
+    let items = answer["result"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(items.len(), 1, "{answer:#}");
+    assert_eq!(items[0]["text"], json!(WITHHELD), "{answer:#}");
+    assert_eq!(items[0]["redacted"], json!(true), "{answer:#}");
+    let stored = fixture
+        .owner
+        .console_attention()
+        .expect("the composition keeps an attention list")
+        .item(&alice_scope, item_id)
+        .await?;
+    assert!(
+        !format!("{stored:?}").contains(REPLY_TEXT),
+        "the item is stored redacted: {stored:?}"
+    );
+
+    assert_eq!(
+        replies.deliver(&interaction, "reply-1", REPLY_TEXT).await,
+        Ok(first.clone()),
+        "the same reply again answers the first delivery's receipt"
+    );
+    assert_eq!(
+        replies.delivered(&interaction, "reply-1").await,
+        Ok(Some(first)),
+        "the delivery is answered afterwards"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// A request whose sender names no person has no private reply route: a
 /// service's send on a console with sign-in and an anonymous send on an open
 /// console are refused `NoAddressee`, an interaction no send recorded is

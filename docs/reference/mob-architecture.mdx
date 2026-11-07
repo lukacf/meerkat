@@ -734,9 +734,11 @@ composition without the built-in identity and member store commits no change
   `MobHandle::export_created_identities` exports every row, each with its
   session reference, sealed with a digest (`CreatedIdentitySetExport`).
   `MobHandle::purge_created_identities` (the host operator, under held
-  identity changes) removes the rows in one transaction when their digest
-  is the export's, and nothing else; the mob then refuses identity changes
-  (`purged`) until it restarts. A start that reads no row of a store-owned
+  identity changes, of a mob that holds such rows: none is refused
+  `purge_refused`, `nothing_to_purge`) removes the rows in one transaction
+  when their digest is the export's, and nothing else; the mob then refuses
+  identity changes (`purged`) until it restarts.
+  A start that reads no row of a store-owned
   identity's name reserves the name (it reads unreadable, and nothing seats
   it). `MobHandle::import_created_identities` (the host operator, imported
   consent) restores each record and re-binds its session in one

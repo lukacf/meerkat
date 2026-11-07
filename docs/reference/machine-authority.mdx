@@ -410,19 +410,23 @@ custody map an import leaves is the one the next start reads.
 `AdoptIdentityIntoStore` takes a roster-owned identity (`Roster`: a Declared
 entry seated on a local member bound to a session, or owed its seat) or a
 worker member (`Worker`: seated, with no entry, local and bound to a session,
-at the generation its host observed) into store custody as a Created entry,
+spawned with no profile or model override (`spawn_overridden`), at the
+generation its host observed) into store custody as a Created entry,
 its member's runtime, generation and session untouched. A pure helper,
 `identity_adoption_verdict`, decides over the name's facts, one arm per
 verdict (`IdentityAdoptionVerdict`): a member step in flight is
 `AdmissionUnsettled`, an open declared apply `DeclaredApplyOpen`, a stale
 generation `PredecessorMismatch`, and any other shape no adoption takes
-`NotAdoptable`, with its reason (`IdentityNotAdoptableReason`); the shell
+`NotAdoptable`, with its reason (`IdentityNotAdoptableReason`, a worker's
+override among them: `ProfileOverride`); the shell
 then declares the member's current edges to identities owned edges of the
 adopted identity in the same step.
 
 `MobMachine` decides the downgrade cycle too (since 0.9.11).
 `PurgeIdentityRows` admits the host operator's purge of the mob's rows of
-schema version 2 and later only under held identity changes; the step's
+schema version 2 and later only under held identity changes, and only when
+the mob's scan read any such row (`rows_present`; none is
+`NothingToPurge`); the step's
 store transaction removes the rows when their digest is the export's, and
 the machine records only `identity_rows_purged`, which refuses every later
 identity change (`IdentityChangeAdmissionKind::RowsPurged`) until the mob

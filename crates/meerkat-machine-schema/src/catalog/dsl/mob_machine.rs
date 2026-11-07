@@ -3944,7 +3944,7 @@ macro_rules! mob_catalog_machine_dsl {
             if unsettled == true {
                 IdentityAdoptionVerdict::AdmissionUnsettled
             } else {
-            if placed == true || session_bound == false || (spawn_overridden == true && placed == true) {
+            if placed == true || session_bound == false || spawn_overridden == true {
                 IdentityAdoptionVerdict::NotAdoptable
             } else {
                 IdentityAdoptionVerdict::Adopted
@@ -4038,7 +4038,7 @@ macro_rules! mob_catalog_machine_dsl {
             if changes_held == false {
                 IdentityRowsPurgeVerdict::ChangesNotHeld
             } else {
-            if rows_present == false && rows_purged == true {
+            if rows_present == false {
                 IdentityRowsPurgeVerdict::NothingToPurge
             } else {
                 IdentityRowsPurgeVerdict::Purged

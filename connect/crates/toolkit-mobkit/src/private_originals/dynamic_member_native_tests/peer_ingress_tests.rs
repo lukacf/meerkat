@@ -364,15 +364,31 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
                     }
                 ))
     );
+    // A prepared check that read the grant publication during a concurrent
+    // owner change is refused ReprepareRequired and prepared again (Core's
+    // re-preparation, not a denial); the call above still dispatched. Any
+    // other refusal, or an unavailable authorization, fails the call.
     assert!(
         audit
             .iter()
             .all(|row| !operations.contains(&row.observation.operation_id)
-                || !matches!(
-                    row.observation.observation,
-                    AuditObservation::Refused { .. }
-                        | AuditObservation::AuthorizationUnavailable { .. }
-                ))
+                || match &row.observation.observation {
+                    AuditObservation::Refused { reason, .. } => matches!(
+                        reason,
+                        meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
+                    ),
+                    AuditObservation::AuthorizationUnavailable { .. } => false,
+                    _ => true,
+                }),
+        "{}",
+        serde_json::to_string(
+            &audit
+                .iter()
+                .filter(|row| operations.contains(&row.observation.operation_id))
+                .map(|row| &row.observation.observation)
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
     );
 }
 

@@ -215,21 +215,32 @@ impl MeerkatMachine {
     /// [`RetainedRunSettlement::Settled`](crate::RetainedRunSettlement::Settled)
     /// only from committed facts, read under the session's mutation gate once
     /// the settlement ended (the runtime loop holds the gate through the
-    /// settlement's commit and its tail repair): the registration is ready,
-    /// neither drains for its unregister nor owes one, no longer marks the
-    /// run, and every input bound to the run holds its committed terminal. A
-    /// settlement that did not commit is never answered `Settled`:
+    /// settlement's commit and its tail repair, and requires the reload of a
+    /// tail the repair left standing before it releases the gate): the
+    /// registration is ready, neither drains for its unregister nor owes one,
+    /// no longer marks the run, and every input bound to the run holds its
+    /// committed terminal, `Abandoned { Cancelled }` when this settle or a
+    /// stop ended the run, `Abandoned { Reset }` or `Abandoned { Retired }`
+    /// when a reset or a retire ended it first. The call never answers
+    /// `Settled` when:
     ///
-    /// - its write failed, so the registration needs a durability reload,
-    ///   which loses the stop: the reload refusal
+    /// - the settlement's write failed, so the registration needs a
+    ///   durability reload, which loses the stop: the reload refusal
     ///   ([`RuntimeDriverError::RecoveryRepairBlocked`]), and the reloaded
     ///   registration keeps the run again;
+    /// - the settlement committed but its tail repair left the run's
+    ///   provisional tail standing, so the registration needs a durability
+    ///   reload: the reload refusal too. The run's inputs keep their
+    ///   committed terminals, so the reloaded registration keeps no run, and
+    ///   the tail is left to the session's durable-tail recovery;
     /// - another writer took the session store's fence, or an unregister
-    ///   ended the run first (its inputs then end `Abandoned { Stopped }`):
-    ///   the refusal of a session that leaves this process
-    ///   ([`RuntimeDriverError::UnregisterInProgress`] while it drains, the
-    ///   unregister's own refusal while one is owed,
-    ///   [`RuntimeDriverError::NotReady`] once it is gone).
+    ///   ended the run first: the refusal of a session that leaves this
+    ///   process ([`RuntimeDriverError::UnregisterInProgress`] while it
+    ///   drains, the unregister's own refusal while one is owed,
+    ///   [`RuntimeDriverError::NotReady`] once it is gone). An unregister
+    ///   that keeps queued work (a mob Shutdown's default) ends the run's
+    ///   inputs `Abandoned { Stopped }`, whatever each input's state; one
+    ///   that stops ends them `Abandoned { Cancelled }`.
     ///
     /// A registration that replaced the one that accepted the settle (a
     /// reload) and keeps the run again is settled again within the call.

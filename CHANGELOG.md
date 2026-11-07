@@ -188,22 +188,28 @@ them.
   `RetainedRunSettleResolved` and the enum `RetainedRunSettleVerdict`):
   - `Settled { run_id, inputs }`, read under the session's mutation gate
     after the settlement committed: the registration no longer keeps the
-    run, which was closed as interrupted with its committed rounds kept, and
-    every input bound to it holds its committed terminal
-    (`RetainedRunSettledInput { input_id, terminal }`,
-    `Abandoned { Cancelled }`).
+    run, and every input bound to it holds its committed terminal
+    (`RetainedRunSettledInput { input_id, terminal }`):
+    `Abandoned { Cancelled }`, the run closed as interrupted with its
+    committed rounds kept, when the settle ended it, or the reason of a
+    stop, reset or retire that ended it first (`Cancelled`, `Reset`,
+    `Retired`).
   - `NotRetained` when nothing is kept, which is also the answer to a retry
     after the settle.
   - `Busy { current_run_id: Some(_) }` when a run is current, which is never
     stopped; `Busy { current_run_id: None }` when the registration cannot
     settle the run now (it initializes, drains for its unregister, retired
     or stopped): the host keeps its hold and settles again.
-  - A settlement that did not commit answers the registration's refusal,
-    never `Settled`: a durability reload refusal when its write failed (the
-    reload loses the stop, so the host keeps its hold, reloads and settles
-    again), and the refusal of a session that leaves the process when
-    another writer took its store fence, or when an unregister ended the run
-    first (its inputs then end `Abandoned { Stopped }`).
+  - A settlement that did not commit, or whose tail repair left the run's
+    tail standing, answers the registration's refusal, never `Settled`: a
+    durability reload refusal when its write failed (the reload loses the
+    stop, so the host keeps its hold, reloads and settles again) or its tail
+    repair failed (the reloaded registration keeps no run), and the refusal
+    of a session that leaves the process when another writer took its store
+    fence, or when an unregister ended the run first (its inputs then end
+    `Abandoned { Stopped }` when it keeps queued work, a mob Shutdown's
+    default, whatever their state, and `Abandoned { Cancelled }` when it
+    stops).
   A repeat that arrives while the settle is pending joins it. The mob verb
   never wakes a member, and answers typed refusals: `MemberNotFound`,
   `MemberSessionNotLive` (not live in this process: dormant, gone, or leaving

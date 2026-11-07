@@ -11312,9 +11312,11 @@ impl MobHandle {
     /// The member runtime's machine decides
     /// ([`meerkat_runtime::MeerkatMachine::settle_retained_run`]): the
     /// answer is [`meerkat_runtime::RetainedRunSettlement::Settled`] once the
-    /// settlement committed (the registration no longer keeps the run, every
-    /// input bound to it ended `Abandoned { Cancelled }`, its provisional tail
-    /// closed as an interrupted run);
+    /// settlement committed (the registration no longer keeps the run, and
+    /// every input bound to it holds its committed terminal:
+    /// `Abandoned { Cancelled }`, its provisional tail closed as an
+    /// interrupted run, when this settle ended the run, or the reason of a
+    /// stop, reset or retire that ended it first);
     /// [`meerkat_runtime::RetainedRunSettlement::NotRetained`] when the
     /// member's runtime keeps no run; and
     /// [`meerkat_runtime::RetainedRunSettlement::Busy`] when a run is current
@@ -11324,8 +11326,8 @@ impl MobHandle {
     /// (the run may still be open: keep the hold and settle again).
     /// Idempotent per run: a settle that arrives while the run's settlement
     /// is pending joins it, and a retry after the settlement (a lost reply)
-    /// answers `NotRetained`; the run's inputs then read
-    /// `Abandoned { Cancelled }` through
+    /// answers `NotRetained`; the run's inputs then read their committed
+    /// terminals through
     /// [`meerkat_runtime::MeerkatMachine::input_terminal_receipt`].
     ///
     /// The verb never wakes a member. A member the mob does not hold is
@@ -11335,8 +11337,9 @@ impl MobHandle {
     /// under the host's hold first, or read its stored work cold with
     /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A member
     /// whose runtime needs a durability reload, also when the settlement's
-    /// own write failed and the reload loses the settle, is refused with
-    /// [`MobError::MemberReloadRequired`]: reload it
+    /// own write failed (the reload loses the settle) or its tail repair
+    /// left the run's tail standing (the reloaded member keeps no run), is
+    /// refused with [`MobError::MemberReloadRequired`]: reload it
     /// ([`Self::reload_member_registration`]) under the hold and settle
     /// again. A placed member is refused with
     /// [`MobError::UnsupportedForMode`]. `Cancel`-scoped at chokepoint (a).

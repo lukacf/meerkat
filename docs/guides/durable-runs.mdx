@@ -278,7 +278,9 @@ Since 0.9.11 a host that must not let an open run continue (an app's
 Recover flow, for example) settles the run instead, with no model request.
 The run ends as a stopped run that never resumed does: its inputs end
 `cancelled`, and it is closed as interrupted with the rounds it committed
-kept. Four steps, per member:
+kept. A stop, reset or retire that ends the run first, while the settle
+waits, ends it its own way, and the settle reports the terminals that
+committed. Four steps, per member:
 
 1. **Hold the member before the start.** Stage the host's own recovery hold,
    `HostRunStartHoldReason::HostRecovery`, with
@@ -298,22 +300,26 @@ kept. Four steps, per member:
 3. **Settle the run.** `MobHandle::settle_member_retained_run` answers
    `RetainedRunSettlement::Settled { run_id, inputs }` once the settlement
    committed: the member's registration no longer keeps the run, and each
-   input holds its committed terminal. It answers `NotRetained` when the
-   member's runtime keeps no run, `Busy { current_run_id: Some(_) }` when a
-   run is current (it continued before the hold, or another run started:
-   the verb never stops a running run; `stop_member_run` does), and
+   input holds its committed terminal (`cancelled`, or `reset` or `retired`
+   when a reset or a retire ended the run first). It answers `NotRetained`
+   when the member's runtime keeps no run, `Busy { current_run_id: Some(_) }`
+   when a run is current (it continued before the hold, or another run
+   started: the verb never stops a running run; `stop_member_run` does), and
    `Busy { current_run_id: None }` when the registration cannot settle the
    run now (it is initializing, draining for its unregister, retired or
    stopped). A member that is not materialized in this process is refused
    with `MobError::MemberSessionNotLive`: the verb never wakes a member,
    since a wake without the hold would let the run continue. A settlement
-   that did not commit is refused too, and never answered `Settled`:
-   `MobError::MemberReloadRequired` when its write failed (the reload loses
-   the settle, so reload the member with
+   that did not commit, or that left the run's tail standing, is refused
+   too, and never answered `Settled`: `MobError::MemberReloadRequired` when
+   its write failed (the reload loses the settle, so reload the member with
    `MobHandle::reload_member_registration`, which applies the hold again,
-   and settle again), and `MobError::MemberSessionNotLive` when another
-   writer took the session's store fence, or when an unregister ended the
-   run first (its inputs then end `stopped`).
+   and settle again) or its tail repair failed (after the reload the member
+   keeps no run, and the next settle answers `NotRetained`), and
+   `MobError::MemberSessionNotLive` when another writer took the session's
+   store fence, or when an unregister ended the run first (its inputs then
+   end `stopped` when the unregister keeps queued work, as a mob Shutdown
+   does by default, whatever their state, and `cancelled` when it stops).
 4. **Release the hold on every path that leaves no open run.**
    `MobHandle::release_member_run_starts` with
    `HostRunStartHoldReason::HostRecovery`: after `Settled`, `NotRetained` and
@@ -388,16 +394,20 @@ or finds none kept, and then releases the hold.
 A retry is safe. A settle that arrives while an earlier one is still
 settling the same run joins it and gets the same answer. A retry after the
 run was settled (when a reply was lost, say) answers `NotRetained`; the
-proof is the run's inputs, which read `cancelled` through
+proof is the run's inputs, which read their committed terminals (`cancelled`
+when the settle ended the run) through
 `MeerkatMachine::input_terminal_receipt`.
 
 A runtime embedding with no mob takes the same steps on its
 `MeerkatMachine`: `stage_registration_run_start_hold_only` with
 `RunStartHoldReason::HostRecovery` before the session registers,
 `settle_retained_run`, then `release_run_starts` on the same paths. A
-settlement whose write failed answers `RuntimeDriverError::RecoveryRepairBlocked`:
-reload the registration (`recover_or_discard_reload_required_registration_if_current`),
-which applies the staged hold again, and settle again.
+settlement whose write failed, or whose tail repair left the run's tail
+standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
+registration (`recover_or_discard_reload_required_registration_if_current`),
+which applies the staged hold again, and settle again (after a failed tail
+repair the reloaded registration keeps no run, so that settle answers
+`NotRetained`).
 
 ## Tools That Run Again
 

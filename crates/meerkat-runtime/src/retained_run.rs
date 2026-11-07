@@ -18,9 +18,12 @@ use crate::input_state::InputTerminalOutcome;
 pub struct RetainedRunSettledInput {
     /// The input's id.
     pub input_id: InputId,
-    /// The input's committed terminal, `Abandoned { reason: Cancelled }`:
-    /// read from the live ledger, then the durable row of an archived input,
-    /// under the session's mutation gate once the settlement committed.
+    /// The input's committed terminal, read from the live ledger, then the
+    /// durable row of an archived input, under the session's mutation gate
+    /// once the settlement committed: `Abandoned { reason: Cancelled }` when
+    /// the settle or a stop ended the run, `Abandoned { reason: Reset }` or
+    /// `Abandoned { reason: Retired }` when a reset or a retire ended it
+    /// first.
     pub terminal: InputTerminalOutcome,
 }
 
@@ -32,14 +35,21 @@ pub enum RetainedRunSettlement {
     /// registration and not begun again), and it was settled without
     /// resuming: read under the session's mutation gate once the settlement
     /// committed, the registration no longer marks the run, every input
-    /// bound to it ended `Abandoned { reason: Cancelled }`, its provisional
-    /// tail was closed as an interrupted run (every committed round kept,
-    /// open calls answered as outcome-unknown, the interrupted notice
-    /// appended), and no model request was made. A settlement that did not
-    /// commit (its write failed, another writer took the session store's
-    /// fence, or an unregister ended the run first, its inputs then ending
-    /// `Abandoned { reason: Stopped }`) is never answered `Settled`: the call
-    /// answers the registration's refusal instead.
+    /// bound to it holds its committed terminal, and no model request was
+    /// made. When the settle ended the run, its inputs ended
+    /// `Abandoned { reason: Cancelled }` and its provisional tail was closed
+    /// as an interrupted run (every committed round kept, open calls
+    /// answered as outcome-unknown, the interrupted notice appended). A stop,
+    /// a reset or a retire that ended the run first ended its inputs with its
+    /// own reason (a stop's `Cancelled`, a reset's `Reset`, a retire's
+    /// `Retired`). The call never answers `Settled` when the settlement did
+    /// not commit (its write failed, or another writer took the session
+    /// store's fence), when the settle's tail repair left the run's tail
+    /// standing, or when an unregister ended the run first: it answers the
+    /// registration's refusal instead. An unregister that ends the run ends
+    /// its inputs `Abandoned { reason: Stopped }` when it keeps queued work
+    /// (a mob Shutdown's default), whatever each input's state, and
+    /// `Abandoned { reason: Cancelled }` when it stops.
     Settled {
         run_id: RunId,
         inputs: Vec<RetainedRunSettledInput>,

@@ -437,8 +437,17 @@ fn confinement_probe_process() {
                     std::ptr::addr_of_mut!(limits),
                 )
             });
+            // The launch has a pid namespace of its own: the host PID is not
+            // even visible here, so a read-only query cannot reach it either.
             let mut parameter = unsafe { std::mem::zeroed::<libc::sched_param>() };
-            assert_eq!(unsafe { libc::sched_getparam(host, &raw mut parameter) }, 0);
+            assert_eq!(
+                unsafe { libc::sched_getparam(host, &raw mut parameter) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
             refused(unsafe {
                 libc::syscall(
                     libc::SYS_sched_setparam,
@@ -804,10 +813,11 @@ async fn baseline_supports_declared_shell_commands_and_spawn_preserves_pid() {
                 .and_then(|value| value.parse::<u32>().ok())
         })
         .expect("probe pid");
-    assert_eq!(
-        launched_pid, final_pid,
-        "exec chain must retain custody's leader PID"
-    );
+    // Custody's PID relays the target, which runs as pid 2 of the launch's
+    // own pid namespace, under the backend's init: the exec chain keeps that
+    // PID through every exec.
+    assert_ne!(launched_pid, final_pid);
+    assert_eq!(final_pid, 2, "exec chain must retain the target's PID");
 }
 
 #[tokio::test]

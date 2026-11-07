@@ -4,6 +4,7 @@
 //! run chapters accept a Core that resumes as the contract says and refuse
 //! one that calls the model again for a committed round.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,8 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeKind, ScopeName, ScopeRef, ScopeUpdate, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeUpdate,
+    ScopeVersion, VersionedHead,
 };
 use meerkat_core::{RunId, ToolCallDedupeKey};
 use serde_json::value::RawValue;
@@ -93,6 +94,15 @@ enum Breaks {
     /// Answers a takeover with the newest token granted before it: a grant
     /// no higher than an earlier one.
     TokenOrder,
+    /// Takes a commit's place in the store's order when it is first polled,
+    /// and applies the batch only when the commit completes, even after a
+    /// higher acquire: a batch ordered before an acquire that a load right
+    /// after the acquire does not show yet.
+    LateVisibility,
+    /// Skips the fence check at commit: a batch under a superseded token is
+    /// acknowledged and never applied, as a store that fences only at load
+    /// answers it.
+    CommitFence,
 }
 
 struct Canary {
@@ -200,7 +210,151 @@ impl HostStore for Canary {
                 self.inner.commit(&rebatched).await
             }
             Breaks::TokenOrder => self.inner.commit(batch).await,
+            Breaks::LateVisibility => {
+                if self.inner.commit_point(batch)? {
+                    return Ok(());
+                }
+                YieldOnce::default().await;
+                self.inner.apply_unfenced(batch)
+            }
+            Breaks::CommitFence => {
+                if batch.fence().get() < self.newest.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                self.inner.commit(batch).await
+            }
         }
+    }
+}
+
+/// A handle that serves each kind's listing from its first full listing of
+/// that kind, forever, applying only its own commits to it: a listing kept
+/// from one granted acquire for the next.
+struct StaleRelist {
+    inner: Arc<InMemoryHostStore>,
+    listed: Mutex<BTreeMap<ScopeKind, BTreeMap<ScopeName, VersionedHead>>>,
+}
+
+impl StaleRelist {
+    fn listed(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<ScopeKind, BTreeMap<ScopeName, VersionedHead>>> {
+        self.listed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Hands out a new [`StaleRelist`] handle per open, over one store: each
+/// process keeps its own listing.
+struct StaleRelistFactory {
+    memory: Arc<InMemoryHostStore>,
+}
+
+#[async_trait]
+impl HostStoreFactory for StaleRelistFactory {
+    async fn open(&self) -> Result<Arc<dyn HostStore>, ConformanceFailure> {
+        Ok(Arc::new(StaleRelist {
+            inner: Arc::clone(&self.memory),
+            listed: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    async fn lapse_fence_leases(&self) -> Result<(), ConformanceFailure> {
+        self.memory.lapse_fence_leases();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl HostStore for StaleRelist {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        self.inner.acquire_fence(mode).await
+    }
+
+    async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+        self.inner.renew_fence(token).await
+    }
+
+    fn fence_timing(&self) -> FenceTiming {
+        self.inner.fence_timing()
+    }
+
+    async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        self.inner.load_head(scope).await
+    }
+
+    async fn list_heads(
+        &self,
+        kind: ScopeKind,
+        after: Option<&ScopeName>,
+        limit: usize,
+    ) -> Result<HeadPage, HostStoreError> {
+        let cached = self.listed().get(&kind).cloned();
+        let heads = match cached {
+            Some(heads) => heads,
+            None => {
+                let page = self.inner.list_heads(kind, None, usize::MAX).await?;
+                let heads: BTreeMap<ScopeName, VersionedHead> = page
+                    .heads
+                    .into_iter()
+                    .map(|entry| (entry.name, entry.head))
+                    .collect();
+                self.listed().insert(kind, heads.clone());
+                heads
+            }
+        };
+        let mut matching = heads
+            .into_iter()
+            .filter(|(name, _)| after.is_none_or(|after| name > after));
+        let page: Vec<ScopeHead> = matching
+            .by_ref()
+            .take(limit)
+            .map(|(name, head)| ScopeHead { name, head })
+            .collect();
+        let next = if matching.next().is_some() {
+            page.last().map(|last| last.name.clone())
+        } else {
+            None
+        };
+        Ok(HeadPage { heads: page, next })
+    }
+
+    async fn read_rows(
+        &self,
+        scope: &ScopeRef,
+        from: RowIndex,
+        limit: usize,
+    ) -> Result<Vec<Row>, HostStoreError> {
+        self.inner.read_rows(scope, from, limit).await
+    }
+
+    async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        self.inner.commit(batch).await?;
+        let mut listed = self.listed();
+        for update in batch.updates() {
+            let Some(heads) = listed.get_mut(&update.scope.kind) else {
+                continue;
+            };
+            if update.delete {
+                heads.remove(&update.scope.name);
+                continue;
+            }
+            let head = match &update.head {
+                Some(head) => head.clone(),
+                None => heads
+                    .get(&update.scope.name)
+                    .map(|known| known.head.clone())
+                    .unwrap_or_default(),
+            };
+            heads.insert(
+                update.scope.name.clone(),
+                VersionedHead {
+                    version: update.next,
+                    commit_id: batch.commit_id().clone(),
+                    head,
+                },
+            );
+        }
+        Ok(())
     }
 }
 
@@ -260,6 +414,42 @@ async fn store_answering_a_takeover_with_an_earlier_token_fails_the_host_store_c
         );
     assert_eq!(failure.chapter(), "host_store");
     assert_eq!(failure.step(), "token_order");
+}
+
+#[tokio::test]
+async fn store_showing_an_earlier_batch_only_after_an_acquire_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::LateVisibility))
+        .await
+        .expect_err(
+            "a store that shows a batch it ordered before an acquire only after the acquire \
+             returned must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "an_acquire_decides_the_cut");
+}
+
+#[tokio::test]
+async fn store_keeping_a_listing_across_acquires_fails_the_host_store_chapter() {
+    let factory = StaleRelistFactory {
+        memory: Arc::new(InMemoryHostStore::new()),
+    };
+    let failure = chapters::host_store(&factory).await.expect_err(
+        "a store whose handle serves the listing it made before another writer committed must \
+         fail",
+    );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "reacquire_lists_another_writers_commits");
+}
+
+// The canary passes every other row: the chapter runs its rows in order and
+// this one last.
+#[tokio::test]
+async fn store_acknowledging_a_superseded_token_fails_only_the_commit_fence_row() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::CommitFence))
+        .await
+        .expect_err("a store that answers Ok to a commit under a superseded token must fail");
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_superseded_token_is_refused_at_commit");
 }
 
 fn scope(name: &str) -> ScopeRef {

@@ -372,6 +372,51 @@ impl InMemoryHostStore {
         apply(&mut realm, update, batch.commit_id());
         Ok(())
     }
+
+    /// Decide `batch` as a commit decides it at its commit point, applying
+    /// nothing: `true` when its commit id already landed with the same
+    /// updates (a retry acts once), `false` when it may land, or the refusal
+    /// a commit would answer.
+    pub(crate) fn commit_point(&self, batch: &CommitBatch) -> Result<bool, HostStoreError> {
+        let realm = self.realm();
+        if let Some(landed) = realm.landed.get(batch.commit_id()) {
+            if *landed == fingerprint(batch) {
+                return Ok(true);
+            }
+            return Err(HostStoreError::Invalid(format!(
+                "commit id {} landed with different updates",
+                batch.commit_id()
+            )));
+        }
+        realm.check_acquired(batch.fence())?;
+        if batch.fence().get() < realm.fence {
+            return Err(HostStoreError::FencedOut {
+                current: FenceToken::new(realm.fence),
+            });
+        }
+        for update in batch.updates() {
+            check_update(&realm, update)?;
+        }
+        Ok(false)
+    }
+
+    /// Apply `batch`, checked as a commit checks it except for its fence: a
+    /// batch whose commit point came before a later acquire.
+    pub(crate) fn apply_unfenced(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        let print = fingerprint(batch);
+        let mut realm = self.realm();
+        if realm.landed.get(batch.commit_id()) == Some(&print) {
+            return Ok(());
+        }
+        for update in batch.updates() {
+            check_update(&realm, update)?;
+        }
+        for update in batch.updates() {
+            apply(&mut realm, update, batch.commit_id());
+        }
+        realm.landed.insert(batch.commit_id().clone(), print);
+        Ok(())
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

@@ -36634,9 +36634,19 @@ impl MobActor {
                     )
                 );
             }
+            // What the spawn customizer is told when it checks the profile
+            // this placed spawn resolves (`check_placed_profile`).
+            let placed_profile_check = super::handle::SpawnCustomizationContext {
+                mob_id: self.definition.id.clone(),
+                spawn_source,
+                spawner_identity: spawner.as_ref().map(|(identity, _)| identity.clone()),
+                spawner_runtime_id: spawner.as_ref().map(|(_, runtime_id)| runtime_id.clone()),
+                requested_profile: spec.role_name.clone(),
+            };
             boxed_arm_future(|| {
                 self.enqueue_spawn_remote(
                     spec,
+                    placed_profile_check,
                     owner_bridge_session_id,
                     ops_registry,
                     None,
@@ -38915,7 +38925,8 @@ impl MobActor {
         )
     }
 
-    /// Multi-host §7.3 remote spawn lane: compile → digest-authorized
+    /// Multi-host §7.3 remote spawn lane: the spawn customizer's check of the
+    /// resolved profile (`placed_profile_check`) → compile → digest-authorized
     /// ladder open (`BeginSpawnExecRemote` at enqueue) → durable operator
     /// authority → `RequestMemberMaterialization` realization as a bridge
     /// `MaterializeMember` dispatch in the pending-spawn task.
@@ -38924,6 +38935,7 @@ impl MobActor {
     async fn enqueue_spawn_remote(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
+        placed_profile_check: super::handle::SpawnCustomizationContext,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         respawn_origin: Option<RespawnOrigin>,
@@ -38936,6 +38948,7 @@ impl MobActor {
         let result = boxed_arm_future(|| {
             self.enqueue_spawn_remote_inner(
                 spec,
+                placed_profile_check,
                 owner_bridge_session_id,
                 ops_registry,
                 respawn_origin,
@@ -38988,6 +39001,7 @@ impl MobActor {
     async fn enqueue_spawn_remote_inner(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
+        placed_profile_check: super::handle::SpawnCustomizationContext,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         respawn_origin: Option<RespawnOrigin>,
@@ -39175,6 +39189,15 @@ impl MobActor {
             profile.model = model;
         }
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
+        // The host's spawn customizer checks the profile this placed spawn
+        // resolved, whichever source it came from, before the member host is
+        // asked anything and before compile: its refusal reaches the caller
+        // unchanged, with nothing compiled, recorded or sent.
+        if let Some(customizer) = self.spawn_member_customizer.as_ref()
+            && let Err(error) = customizer.check_placed_profile(&placed_profile_check, &profile)
+        {
+            fail!(error);
+        }
         let effective_profile_override = (full_profile_override_requested
             || tool_category_overrides != meerkat_core::ToolCategoryOverrides::default())
         .then(|| profile.clone());

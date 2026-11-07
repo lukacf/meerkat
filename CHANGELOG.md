@@ -370,6 +370,16 @@ them.
   absent, so a host that needs it supplies it on every build of the
   session.
 
+- `meerkat-mob`: a host checks the profile a placed spawn resolved before
+  the spawn compiles it into the member's portable spec:
+  `SpawnMemberCustomizer::check_placed_profile`, a provided method that
+  admits every profile. Every spawn and rebuild placed on another host asks
+  it with the definition's inline profile, the realm profile its role
+  names, or the spawn's own override profile, with the spawn's model and
+  tool category overrides applied, before it asks the member host anything.
+  An error refuses the spawn and reaches its caller unchanged, with nothing
+  compiled, recorded or sent. `SpawnMemberCustomizerChain` forwards it.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the

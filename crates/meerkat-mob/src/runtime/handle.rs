@@ -7170,6 +7170,17 @@ impl SpawnMemberCustomizer for SpawnMemberCustomizerChain {
         }
         Ok(())
     }
+
+    fn check_placed_profile(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        profile: &crate::profile::Profile,
+    ) -> Result<(), MobError> {
+        for customizer in &self.customizers {
+            customizer.check_placed_profile(ctx, profile)?;
+        }
+        Ok(())
+    }
 }
 
 /// Spawn request for first-class batch member provisioning.

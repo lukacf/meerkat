@@ -3858,6 +3858,40 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// A governed runtime's refusal of an operator-instruction write answers
+    /// like every other refusal: `INVALID_PARAMS` with its closed code in
+    /// `data.instruction_set_code`, so a client tells it from a transient
+    /// failure; a malformed instruction history is the server's fault
+    /// (`INTERNAL_ERROR`).
+    #[test]
+    fn prepared_authorization_required_answers_invalid_params_with_its_code() {
+        let response = operator_instruction_error_response(
+            Some(RpcId::Num(7)),
+            &meerkat_mob::OperatorInstructionError::Refused(
+                meerkat_core::InstructionWriteError::PreparedAuthorizationRequired,
+            ),
+        );
+        let refusal = response.error.expect("a typed refusal");
+        assert_eq!(refusal.code, error::INVALID_PARAMS);
+        assert_eq!(
+            refusal.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "prepared_authorization_required"
+            }))
+        );
+        let malformed = super::super::instruction_set_rpc_error(
+            meerkat_core::InstructionSetErrorCode::MalformedInstructionHistory,
+            "malformed".to_string(),
+        );
+        assert_eq!(malformed.code, error::INTERNAL_ERROR);
+        assert_eq!(
+            malformed.data,
+            Some(serde_json::json!({
+                "instruction_set_code": "malformed_instruction_history"
+            }))
+        );
+    }
+
     /// A spawn's override profile keeps its durable worker flag across the
     /// wire form, both ways.
     #[test]

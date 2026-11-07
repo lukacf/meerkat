@@ -3202,11 +3202,13 @@ pub enum AgentEvent {
     /// the instructions now in effect for the live session, not their
     /// durability: the delta entry a fresh run start appended is published
     /// once the run whose start appended it starts, and the snapshot entry a
-    /// compaction folded the session's entry rows into once that compaction's
-    /// rewrite is in the session (for a staged memory projection, before the
-    /// runtime commits it). A restart before the entry is durable (the run's
-    /// first checkpoint, or the projection's commit) applies the changes
-    /// again at the next fresh run start and publishes this event again.
+    /// compaction folded the session's entry rows into once that compaction
+    /// commits (for a staged memory projection, when the runtime commits it,
+    /// right after its `CompactionCompleted`; a compaction rolled back before
+    /// its commit is never observed, and its entry sequence goes to the next
+    /// entry). A restart before the entry is durable (the run's first
+    /// checkpoint, or the projection's commit) applies the changes again at
+    /// the next fresh run start and publishes this event again.
     ///
     /// An observation only, projected from the entry row's typed identity:
     /// the session's operator-instruction status read is the authority on

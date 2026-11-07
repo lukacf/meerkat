@@ -566,7 +566,7 @@ impl OperatorInstructionTarget {
     #[must_use]
     pub fn to_wire(&self) -> meerkat_contracts::WireInstructionTarget {
         match self {
-            Self::Mob => meerkat_contracts::WireInstructionTarget::Mob,
+            Self::Mob => meerkat_contracts::WireInstructionTarget::Mob {},
             Self::Profile { profile } => meerkat_contracts::WireInstructionTarget::Profile {
                 profile: profile.as_str().to_owned(),
             },
@@ -580,7 +580,7 @@ impl OperatorInstructionTarget {
     #[must_use]
     pub fn from_wire(target: meerkat_contracts::WireInstructionTarget) -> Self {
         match target {
-            meerkat_contracts::WireInstructionTarget::Mob => Self::Mob,
+            meerkat_contracts::WireInstructionTarget::Mob {} => Self::Mob,
             meerkat_contracts::WireInstructionTarget::Profile { profile } => Self::Profile {
                 profile: ProfileName::from(profile),
             },

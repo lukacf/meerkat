@@ -635,6 +635,8 @@ impl LocalApprovals {
                 presentation: ApprovalPresentation::AccessReview,
                 #[cfg(feature = "console")]
                 service_task: None,
+                #[cfg(all(test, feature = "console"))]
+                test_console_task: false,
                 shared: self.shared.clone(),
                 response: Some(response),
                 retired: retirement,
@@ -1338,6 +1340,11 @@ pub struct ApprovalPrompt {
     presentation: ApprovalPresentation,
     #[cfg(feature = "console")]
     service_task: Option<toolkit_mobkit::private_originals::InstalledServiceTask>,
+    // A row's stand-in for the Console task no unit fixture can build: the
+    // prompt passes `decide_console`'s Console task check without one. It
+    // is never a task, a login or a person.
+    #[cfg(all(test, feature = "console"))]
+    test_console_task: bool,
     shared: Arc<Shared>,
     response: Option<oneshot::Sender<ApprovalDecision>>,
     retired: watch::Receiver<bool>,
@@ -1492,7 +1499,11 @@ impl ApprovalPrompt {
         current: crate::installed_service_review::account_request::console::DecisionCheck,
         answerer: &ConsoleAnswerer,
     ) -> Result<(), ConnectError> {
-        if self.console_task().is_none() {
+        #[cfg(not(test))]
+        let console_task = self.console_task().is_some();
+        #[cfg(test)]
+        let console_task = self.test_console_task || self.console_task().is_some();
+        if !console_task {
             return Err(invalid("The software prompt has no Console task"));
         }
         self.decide_checked_answer(decision, current, answerer)
@@ -1790,6 +1801,8 @@ impl Shared {
                     presentation: ApprovalPresentation::ToolCall,
                     #[cfg(feature = "console")]
                     service_task: task.clone(),
+                    #[cfg(all(test, feature = "console"))]
+                    test_console_task: false,
                     shared: self.clone(),
                     response: Some(response),
                     retired: retirement,

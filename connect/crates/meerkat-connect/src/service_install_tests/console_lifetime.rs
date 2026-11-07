@@ -258,10 +258,12 @@ async fn exact_decision_refusal_does_not_record_or_wake_software_dispatch() {
     assert_eq!(f.count(), 0);
 }
 
-/// A software prompt answered in
-/// the Console, past its Console task check, is recorded as made by the
-/// person who answered: the approver in its provenance names the person,
-/// never this owner's presenter.
+/// A software prompt answered in the Console is recorded by `decide_console`
+/// as made by the person who answered: the decision's actor is the person's
+/// id and the approver in its provenance names the person, never this
+/// owner's presenter. No unit fixture builds a Console task, so the row
+/// stands one in (`test_console_task`); a prompt without one is refused
+/// (`exact_decision_refusal_does_not_record_or_wake_software_dispatch`).
 #[cfg(feature = "console")]
 #[tokio::test]
 async fn a_console_software_answer_records_the_answering_person() {
@@ -273,8 +275,9 @@ async fn a_console_software_answer_records_the_answering_person() {
     let run = f.install();
     let mut prompt = f.prompt().await;
     let id = prompt.record.approval_id.clone();
+    prompt.test_console_task = true;
     prompt
-        .decide_checked_answer(
+        .decide_console(
             ApprovalDecision::Approve,
             Arc::new(|| true),
             &fixture_answerer().unwrap(),

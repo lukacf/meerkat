@@ -339,10 +339,16 @@ fn host_admission_error(error: ToolAdmissionError) -> SetupError {
     }
 }
 
+/// A source owner's answer as a tool admission's: its refusal is a denial.
+/// Its unavailability, and a conflict in its facts (contention, which the
+/// admission's reads wait out through Core's owner-change waiter first), are
+/// retryable, never a denial.
 fn source_admission_error(error: PrivateOriginalError) -> ToolAdmissionError {
     match error {
-        PrivateOriginalError::Unavailable => ToolAdmissionError::Unavailable,
-        PrivateOriginalError::Denied | PrivateOriginalError::Conflict => ToolAdmissionError::Denied,
+        PrivateOriginalError::Denied => ToolAdmissionError::Denied,
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
+            ToolAdmissionError::Unavailable
+        }
     }
 }
 
@@ -411,7 +417,6 @@ impl SetupToolHost for CanonicalSetupHost {
         context: &ToolDispatchContext,
     ) -> Result<HostToolAdmission, ToolAdmissionError> {
         let original = self
-            .originals
             .acquisition_original(context)
             .await
             .map_err(source_admission_error)
@@ -448,6 +453,23 @@ impl SetupToolHost for CanonicalSetupHost {
 }
 
 impl CanonicalSetupHost {
+    /// The call's acquisition original, read through Core's owner-change
+    /// waiter with a fresh churn of the call, within Core's bound from now.
+    async fn acquisition_original(
+        &self,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::private_originals::acquisition::AcquisitionOriginal, PrivateOriginalError>
+    {
+        let churn = tokio::sync::Mutex::new(context.owner_change_churn());
+        self.originals
+            .acquisition_original_through_waiter(
+                context,
+                &churn,
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
+            .await
+    }
+
     async fn recheck_admission(
         &self,
         context: &ToolDispatchContext,
@@ -467,7 +489,6 @@ impl CanonicalSetupHost {
         // source change. Re-open the exact native-held original and canonical
         // row; neither a self-consistent digest nor a route alias is custody.
         let current = self
-            .originals
             .acquisition_original(context)
             .await
             .map_err(source_admission_error)?;

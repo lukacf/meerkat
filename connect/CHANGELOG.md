@@ -27,6 +27,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   dispatch's deadline (its request deadline or its remaining tool time,
   whichever ends first, within Core's owner-change bound), as every other
   wait of the launch.
+- A setup acquisition's admission that reads its original's source facts in
+  conflict (contention: another writer's change in flight) waits it out
+  through Core's owner-change waiter and reads again; a conflict that
+  outlasts the wait is answered as unavailable (retryable). It was answered
+  as `access_denied` ("not allowed by policy"), although no policy refused
+  it.
 
 ## [0.9.10] - 2026-11-05
 

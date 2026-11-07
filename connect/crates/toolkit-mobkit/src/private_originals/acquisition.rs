@@ -144,6 +144,54 @@ impl PrivateOriginals {
         .await
     }
 
+    /// [`Self::acquisition_original_until`] for a tool's admission, through
+    /// Core's owner-change waiter: a read that finds the source's facts in
+    /// conflict (contention: another writer's change in flight, a
+    /// contributor's binding not settled yet) is a stale read of the owners.
+    /// It is waited out with `churn` on the call's own work authorization
+    /// and made again, afresh, until `deadline`. A conflict that outlasts
+    /// the wait is answered as one, which an admission answers as
+    /// unavailable: retryable, never a denial. Nothing is held across a wait.
+    pub(crate) async fn acquisition_original_through_waiter(
+        &self,
+        context: &ToolDispatchContext,
+        churn: &tokio::sync::Mutex<meerkat_core::authorization::OwnerChangeChurn>,
+        deadline: tokio::time::Instant,
+    ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
+        loop {
+            let read = self
+                .acquisition_original_until(context, deadline.into_std())
+                .await;
+            if !matches!(read, Err(PrivateOriginalError::Conflict)) {
+                return read;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            let _ = crate::source_hold_probe::observe(
+                crate::source_hold_probe::Site::AcquisitionConflict,
+                "",
+            );
+            let Some(work) = context.work_authorization() else {
+                return read;
+            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero()
+                || !churn
+                    .lock()
+                    .await
+                    .wait_after_stale_read(
+                        work.authorization().as_ref(),
+                        Some(remaining),
+                        "toolkit.acquisition.original",
+                        None,
+                    )
+                    .await
+                    .settled()
+            {
+                return read;
+            }
+        }
+    }
+
     /// The call's acquisition original and its complete contributor set. A
     /// named-only contributor's admitted basis read meets a source collection
     /// held by another owner's short section as contention and waits for it

@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a council participant) still copies them, where they count for nothing.
 - Rust: `identity_creation::META_RESERVED_LABEL_KEYS` lists the four as
   well (`[&str; 11]`).
+- Rust: `MemoryStackSeams` gains `private_members`, the source of the
+  members private to a person, whose memory no Steward dream covers. A host
+  that builds the struct literally adds `private_members: None` to keep
+  today's behaviour.
 - A console request that names a member hidden from the caller by its
   private owner is answered as one naming a member that does not exist:
   each method gives its own answer for an absent member (for example

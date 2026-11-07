@@ -81,12 +81,12 @@ fn placed(identity: &str) -> Result<DurableAgentSpec, Box<dyn Error>> {
     Ok(spec)
 }
 
-/// A Console send to an externally bound member, and a schedule-fired
-/// dispatch to a placed and to an externally bound member, while Alice's
-/// operator scope holds a fact and the operator scope is on. Each delivery
-/// carries its member's own recalled memory (the ambient recall ran) and no
-/// operator memory anywhere in it. Alice's fact is recallable: her own
-/// request-only section holds it.
+/// Alice's Console send to an externally bound member (it names her as its
+/// requester), and a schedule-fired dispatch to a placed and to an
+/// externally bound member, while Alice's operator scope holds a fact and
+/// the operator scope is on. Each delivery carries its member's own
+/// recalled memory (the ambient recall ran) and no operator memory anywhere
+/// in it. Alice's fact is recallable: her own request-only section holds it.
 #[tokio::test]
 async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Error>> {
     let alice = person("alice")?;
@@ -188,7 +188,7 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
             HandlingMode::Queue,
             &[],
             &accepted,
-            None,
+            Some(&alice),
             None,
         )
         .await?;

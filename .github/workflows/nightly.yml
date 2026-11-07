@@ -59,6 +59,10 @@ name: Nightly
 # Minutes are from the 2026-10-01 run. Each chain is at most about 145
 # minutes, so nightly takes about three hours instead of about two and a
 # half. A new job joins the shortest chain; a new chain is a new slot.
+#
+# A red run on main opens or updates the "Nightly failures" issue through
+# nightly-failure-issue.yml, which starts once this workflow's run has
+# completed, so no job here waits for the others.
 on:
   schedule:
     - cron: "17 2 * * *"
@@ -961,32 +965,3 @@ jobs:
           python3 scripts/check-meta-docs-lag.py \
             --manifest docs/meta/_source.json \
             --max-lag 0
-
-  # A red nightly on main opens one tracking issue, or comments on it while
-  # it stays open (#1673). It follows the last chain and waits for the
-  # others there, since a nightly job may need only one job.
-  failure-issue:
-    name: Nightly failure issue
-    needs: wasm-contract
-    if: ${{ !cancelled() && !inputs.graph_only }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    permissions:
-      actions: read
-      issues: write
-    steps:
-      - name: Open or update the tracking issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          JOBS: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100
-        run: |
-          set -euo pipefail
-          others='[.jobs[] | select(.name != "Nightly failure issue")]'
-          until [[ "$(gh api "${JOBS}" --jq "${others} | map(select(.status != \"completed\")) | length")" == 0 ]]; do sleep 60; done
-          failed="$(gh api "${JOBS}" --jq "${others} | map(select(.conclusion == \"failure\" or .conclusion == \"timed_out\" or .conclusion == \"cancelled\") | .name) | join(\", \")")"
-          echo "failed jobs: ${failed:-none}"
-          [[ -n "${failed}" && "${GITHUB_REF}" == refs/heads/main ]] || exit 0
-          body="Run ${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID} failed: ${failed}"
-          issue="$(gh issue list --state open --search 'in:title "Nightly failures"' --json number,title --jq '[.[] | select(.title == "Nightly failures")][0].number // empty')"
-          if [[ -n "${issue}" ]]; then gh issue comment "${issue}" --body "${body}"; else gh issue create --title "Nightly failures" --body "${body}"; fi

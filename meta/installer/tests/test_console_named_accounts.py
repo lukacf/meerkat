@@ -906,7 +906,7 @@ def test_legacy_ordinary_source_keeps_one_shared_account():
     assert json.loads(_console_source("guide")["application/console.json"]) == {"authentication": "local-password"}
 
 
-# Review fix round. P1-1: the console's live access file is private state.
+# The console's live access file is private state.
 SECOND_ADMIN = ("# Meta access control. Managed by the console Access panel;\n"
                 "# hand edits are preserved until the next console save.\n\n"
                 'enabled = true\nadmins = ["' + OPERATOR + '", "' + ALICE + '"]\nrules = []\n\n[groups]\n').encode()
@@ -975,7 +975,7 @@ def test_supervise_ignores_the_consoles_live_access_file(tmp_path):
         operations.source_digest(root)
 
 
-# P2-1: an attempt counts before the password work.
+# An attempt counts before the password work.
 def concurrent_clients(app, console, count, address="192.0.2.50"):
     return [httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(address, 41000)),
                               base_url=console.origin) for _ in range(count)]
@@ -1015,7 +1015,7 @@ async def test_concurrent_wrong_passwords_for_one_account_stay_within_its_limit(
         await console.close()
 
 
-# P2-2: the address limit keys on the socket peer, and password checks are capped.
+# The address limit keys on the socket peer, and password checks are capped.
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1088,7 +1088,7 @@ async def test_password_checks_are_capped_across_accounts(tmp_path, monkeypatch)
         await console.close()
 
 
-# P3-3 and P3-4: one password check per account, invalid names hashed never.
+# One password check per account, invalid names hashed never.
 async def test_every_account_costs_one_password_check(tmp_path, monkeypatch):
     checks, original = [], console_auth.verify_console_password
     monkeypatch.setattr(console_auth, "verify_console_password",
@@ -1162,7 +1162,7 @@ def test_new_password_hashes_meet_the_scrypt_floor_and_name_their_parameters():
             console_auth.verify_console_password(stored_with(*weak), ALICE_PASSWORD)
 
 
-# P3-1: the review is an administrator's, from its start.
+# The review is an administrator's, from its start.
 async def started_reviews(console):
     for login in list(console._logins.values()):
         if login.controller_review_start is not None:
@@ -1323,7 +1323,7 @@ async def test_an_administrator_demoted_while_the_review_is_read_sees_nothing(tm
         await console.close()
 
 
-# P3-2: dot and empty path segments are refused before routing.
+# Dot and empty path segments are refused before routing.
 async def raw_request(port, request):
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(request)
@@ -1373,7 +1373,7 @@ async def test_consent_route_forms_on_the_listener(tmp_path):
                 assert answered == 404 and len(native.requests) == before
 
 
-# P3-5: the logout page says what is unconfirmed, all of it.
+# The logout page says what is unconfirmed, all of it.
 async def test_logout_reports_both_unconfirmed_parts(tmp_path, monkeypatch):
     def refused(identity):
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
@@ -1398,7 +1398,7 @@ async def test_logout_reports_both_unconfirmed_parts(tmp_path, monkeypatch):
         await asyncio.gather(console.close(), return_exceptions=True)
 
 
-# P3-6: a frontend approval proof belongs to the login that prepared it.
+# A frontend approval proof belongs to the login that prepared it.
 async def test_a_frontend_approval_proof_belongs_to_its_login(tmp_path):
     from test_frontend_management import CONFIG, HOST, PATH, Owner
     owner = Owner()
@@ -1427,7 +1427,7 @@ async def test_a_frontend_approval_proof_belongs_to_its_login(tmp_path):
         await console.close()
 
 
-# P3-7: signing in over a live session ends the earlier login.
+# Signing in over a live session ends the earlier login.
 async def test_signing_in_over_a_live_session_ends_the_earlier_login(tmp_path):
     native = ConsoleNative()
     console = front(tmp_path, native)
@@ -1448,7 +1448,7 @@ async def test_signing_in_over_a_live_session_ends_the_earlier_login(tmp_path):
         await console.close()
 
 
-# P3-8: setup refuses an installation account that is a named account.
+# Setup refuses an installation account that is a named account.
 def test_setup_refuses_an_installation_account_that_is_a_named_account(generated_setup, monkeypatch, capsys):
     module, root = generated_setup
     named_console_source(root)

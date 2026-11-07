@@ -1089,7 +1089,12 @@ printf '%s\n' \
   'echo "<C1OneRowRemoving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowArchiving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowUnreadable line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
-  'for wrapper in CycleRestoresInPlace CycleRestoresOwedSeat CycleRestoresPending CycleRestoresArchived CycleRestoresTombstone CycleRestoresByAdoption; do echo "<$wrapper line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"; done' \
+  'echo "<CycleRestoresInPlace line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresOwedSeat line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresPending line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresArchived line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresTombstone line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresByAdoption line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \

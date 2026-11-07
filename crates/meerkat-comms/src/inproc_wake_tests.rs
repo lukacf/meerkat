@@ -209,6 +209,7 @@ async fn a_send_to_a_dormant_member_wakes_it_once_then_delivers_once() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the wake answered ready and the envelope was handed off");
@@ -234,6 +235,7 @@ async fn a_send_to_a_dormant_member_wakes_it_once_then_delivers_once() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the live route serves the second send");
@@ -242,6 +244,61 @@ async fn a_send_to_a_dormant_member_wakes_it_once_then_delivers_once() {
         queued(&inbox),
         2,
         "each envelope was handed off exactly once"
+    );
+}
+
+/// A woken member receives the governed origin its sender carried: the
+/// envelope handed off after the wake keeps the origin, beside the
+/// in-process sender authentication, as a delivery to a live member does.
+#[tokio::test]
+async fn a_woken_member_receives_the_governed_origin_its_sender_carried() {
+    let registry = Arc::new(InprocRegistry::new());
+    let member = make_keypair();
+    let (inbox, inbox_sender) = open_inbox();
+    let owner = ScriptedOwner::new(OnWake::Materialize {
+        registry: Arc::clone(&registry),
+        namespace: "realm".to_string(),
+        name: "worker-1".to_string(),
+        pubkey: member.public_key(),
+        sender: std::sync::Mutex::new(Some(inbox_sender)),
+    });
+    assert!(registry.publish_wake_route("realm", member.public_key(), "worker-1", owner.weak()));
+    let origin =
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"));
+
+    registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm",
+            &make_keypair(),
+            &member.public_key(),
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            Some(origin.clone()),
+        )
+        .await
+        .expect("the wake answered ready and the envelope was handed off");
+    assert_eq!(owner.calls(), 1, "the member was dormant and was woken");
+
+    let claim = crate::runtime::comms_runtime::test_peer_ingress_queue_claim(
+        inbox
+            .try_claim_one_classified()
+            .expect("the envelope handed off after the wake"),
+    );
+    assert_eq!(
+        claim.sender_authentication(),
+        meerkat_core::PeerIngressSenderAuthentication::InProcess
+    );
+    assert!(
+        claim
+            .governed_send_origin()
+            .is_some_and(|received| Arc::ptr_eq(
+                received.__runtime_facts(),
+                origin.__runtime_facts()
+            )),
+        "the woken member's claim holds the sender's own origin: {:?}",
+        claim.governed_send_origin()
     );
 }
 
@@ -258,6 +315,7 @@ async fn a_key_with_no_route_at_all_is_peer_not_found() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
@@ -284,6 +342,7 @@ async fn a_refused_wake_is_typed_and_never_peer_not_found() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     match result {
@@ -328,6 +387,7 @@ async fn a_closed_stale_live_route_takes_the_wake_path() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the fresh generation receives the envelope");
@@ -358,6 +418,7 @@ async fn ready_without_a_route_twice_is_materialization_lost() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(
@@ -391,6 +452,7 @@ async fn a_pending_wake_ends_with_the_senders_budget_as_wake_timed_out() {
             message("hello"),
             true,
             Duration::from_secs(5),
+            None,
         )
         .await;
     assert!(matches!(
@@ -433,6 +495,7 @@ async fn a_waking_sender_never_waits_on_a_waking_recipient() {
             message("from inside a build"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(
@@ -468,6 +531,7 @@ async fn a_wake_route_never_crosses_namespaces() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
@@ -494,6 +558,7 @@ async fn a_route_whose_owner_is_gone_is_mob_unavailable() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(
@@ -502,6 +567,63 @@ async fn a_route_whose_owner_is_gone_is_mob_unavailable() {
             PeerWakeRefusal::MobUnavailable
         ))
     ));
+}
+
+/// A seated member whose owner is gone is still served by its live route,
+/// and that hand-off keeps the governed origin its sender carried, beside
+/// the in-process sender authentication.
+#[tokio::test]
+async fn an_owner_gone_member_served_by_its_live_route_receives_the_governed_origin() {
+    let registry = InprocRegistry::new();
+    let member = make_keypair();
+    let (inbox, inbox_sender) = open_inbox();
+    let outcome = registry.register_with_meta_in_namespace(
+        "realm",
+        "worker-1".to_string(),
+        member.public_key(),
+        inbox_sender,
+        PeerMeta::default(),
+    );
+    assert!(!outcome.is_rejected(), "{outcome:?}");
+    let owner = ScriptedOwner::new(OnWake::ReadyWithoutRoute);
+    assert!(registry.publish_wake_route("realm", member.public_key(), "worker-1", owner.weak()));
+    drop(owner);
+    let origin =
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"));
+
+    registry
+        .send_to_pubkey_in_namespace_with_id_wait(
+            "realm",
+            &make_keypair(),
+            &member.public_key(),
+            Uuid::new_v4(),
+            response(),
+            true,
+            BUDGET,
+            Some(origin.clone()),
+        )
+        .await
+        .expect("the live route serves the member whose owner is gone");
+
+    let claim = crate::runtime::comms_runtime::test_peer_ingress_queue_claim(
+        inbox
+            .try_claim_one_classified()
+            .expect("the envelope the live route took"),
+    );
+    assert_eq!(
+        claim.sender_authentication(),
+        meerkat_core::PeerIngressSenderAuthentication::InProcess
+    );
+    assert!(
+        claim
+            .governed_send_origin()
+            .is_some_and(|received| Arc::ptr_eq(
+                received.__runtime_facts(),
+                origin.__runtime_facts()
+            )),
+        "the owner-gone member's claim holds the sender's own origin: {:?}",
+        claim.governed_send_origin()
+    );
 }
 
 /// Retraction is owner-exact: another owner cannot retract a route it did not
@@ -590,6 +712,7 @@ async fn a_closed_live_route_routes_to_the_owner_until_reopened() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(
@@ -611,6 +734,7 @@ async fn a_closed_live_route_routes_to_the_owner_until_reopened() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the reopened route delivers");
@@ -646,6 +770,7 @@ async fn an_early_live_route_of_a_waking_member_joins_its_wake_first() {
             response(),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("delivered once the owner answered ready");
@@ -673,6 +798,7 @@ async fn a_stale_route_whose_owner_denies_membership_is_peer_not_found() {
             message("hello"),
             true,
             BUDGET,
+            None,
         )
         .await;
     assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
@@ -701,6 +827,7 @@ async fn a_silent_lifecycle_notice_to_a_dormant_member_is_consumed_by_its_owner(
             notice,
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the owner consumed the notice");
@@ -796,6 +923,7 @@ async fn a_re_wake_hands_an_admitted_message_off_with_its_id_and_it_is_deduplica
             message("admitted once"),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the live inbox admits the message");
@@ -830,6 +958,7 @@ async fn a_re_wake_hands_an_admitted_message_off_with_its_id_and_it_is_deduplica
             message("admitted once"),
             true,
             BUDGET,
+            None,
         )
         .await
         .expect("the re-wake hands the message off");

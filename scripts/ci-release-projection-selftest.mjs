@@ -800,7 +800,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // exact-profile lane ran.
   const runBudgetAt = (attemptStarts, jobs, extraEnv = {}) => {
     const run = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`;
-    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=100`]: [{ jobs }] };
+    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=30`]: [{ jobs }] };
     attemptStarts.forEach((start, index) => {
       pages[`${run}/attempts/${index + 1}`] = [{ run_started_at: start }];
     });
@@ -1068,7 +1068,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // delay. It fails an enforced measurement only after the last retry, and
   // any other error fails it at once, as before.
   assert.equal(budgetEnv.API_RETRY_DELAYS, "5 10 20", "the budget retries a server error three times");
-  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=100`;
+  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=30`;
   const failuresFile = join(scratch, "budget-failures.json");
   const callsFile = join(scratch, "budget-calls");
   const flaky = (count, message, extraEnv = {}) => {

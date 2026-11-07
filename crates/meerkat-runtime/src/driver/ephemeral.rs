@@ -1328,6 +1328,19 @@ impl EphemeralRuntimeDriver {
         // rejects.
         self.staged_retained_work.set(Some(identity.clone()));
         let context = context.with_retained_work(identity);
+        // The governed origin of the staged run, minted from the admitted
+        // associations of every original it stages: the work its comms
+        // tools' in-process deliveries are sent under. Core sets it, or none,
+        // whatever the host's context held.
+        let context = context.with_governed_send_origin(
+            crate::input_authority::GovernedPeerOrigin::from_associations(
+                batch
+                    .contributors
+                    .iter()
+                    .map(crate::input_authority::RetainedInputAuthority::association),
+            )
+            .map(|origin| origin.to_send_origin()),
+        );
         // The staged inputs that resume retained work, each with the run it
         // resumes: the consent owner moves parked custody into this run only
         // for an input its own committed notice receipt names.

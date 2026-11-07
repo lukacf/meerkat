@@ -429,6 +429,9 @@ struct ConsoleHumanSend<'a> {
     /// Selected skills for this exact console turn; carried only on the
     /// local host-human lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The sender's person principal, carried to the agent's run as its
+    /// original requester (only on the local host-human lane).
+    requester: Option<&'a meerkat_core::PrincipalRef>,
 }
 
 enum DeliveryPreparation {
@@ -11506,6 +11509,7 @@ impl IdentityRuntime {
         handling_mode: HandlingMode,
         skill_references: &[meerkat_core::skills::SkillKey],
         accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+        requester: Option<&meerkat_core::PrincipalRef>,
         governed: Option<Arc<dyn super::bridge::GovernedInputBinder>>,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         if let Some(binder) = governed {
@@ -11537,6 +11541,7 @@ impl IdentityRuntime {
         let skill_references = skill_references.to_vec();
         let interaction_id = accepted.interaction_id.clone();
         let expected_session = accepted.session_id.clone();
+        let requester = requester.cloned();
         self.run_tracked_foreground(async move {
             runtime
                 .send_core(
@@ -11552,6 +11557,7 @@ impl IdentityRuntime {
                             delivery_identity: &delivery_identity,
                             expected_session: expected_session.as_deref(),
                             skill_references: &skill_references,
+                            requester: requester.as_ref(),
                         }),
                         expected_spec_digest: None,
                         sender: None,
@@ -11961,6 +11967,9 @@ impl IdentityRuntime {
                                 .as_ref()
                                 .map(|human| human.skill_references.to_vec())
                                 .unwrap_or_default();
+                            delivery.requester = console_human
+                                .as_ref()
+                                .and_then(|human| human.requester.cloned());
                             bridge
                                 .deliver_host_human_input(rid, session, delivery)
                                 .await

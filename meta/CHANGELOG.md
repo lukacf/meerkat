@@ -87,6 +87,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+- Operator instructions for the gateway's mob: `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status` (Python
+  `set_instruction`, `revoke_instruction` and `instruction_status`;
+  TypeScript `setInstruction`, `revokeInstruction` and
+  `instructionStatus`). A host keeps standing System-plane instructions by
+  slot and revision for every member, the members of one profile or one
+  identity; each member applies them at its next run start, never inside a
+  run, and the status read names every member by its identity and wakes
+  none. They map onto Meerkat's mob operator instructions and keep no Meta
+  state. Host verbs: listed where an identity runtime is configured, never
+  agent tools; a candidate launch refuses the two writes with `-32047`
+  `candidate_launch` and answers the read.
+
+### Changed
+
+- Docs: `meta/member_activate_instruction` (and the SDKs'
+  `activate_member_instruction` / `activateMemberInstruction`) is
+  deprecated in favour of operator instructions (`meta/set_instruction`).
+  The method keeps working.
 
 ## [0.9.10] - 2026-11-04
 

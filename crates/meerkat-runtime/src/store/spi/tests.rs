@@ -4006,3 +4006,6 @@ mod token_order;
 
 /// A batch unsettled past its retry budget is judged by the reopen alone.
 mod unsettled_budget;
+
+/// A re-acquire compares a listing only with a baseline the open installed.
+mod open_listing;

@@ -19,8 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   grant owner refused when the setup finalized, while tasks of the closed
   conversation were still ending. The close now hands the realm's grant
   owner back, so the finalization and the continuation restore it at once.
-  An installed host's close hands its own grant owner back the same way,
-  once the host has settled.
+  An installed host's close hands its own grant owner and its originals
+  store back the same way, once the host has settled, so a host reopened
+  in the same process (the installer's setup followed by the ordinary
+  host) opens both at once instead of being refused while tasks of the
+  closed host are still ending. `SqliteStore::release_custody` (in
+  `toolkit-store`) ends a store's physical custody for every clone, after
+  any operation already running on it; `NativeHostLifetime::bind_native_store_custody`
+  (in `meerkat-toolkit`) names the store a host's settled close releases.
 
 ### Known limitations
 

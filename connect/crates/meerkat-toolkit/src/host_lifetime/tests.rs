@@ -1483,20 +1483,6 @@ async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held(
     drop(straggler);
 }
 
-/// RED stand-in for the store binding this change adds: before it, the
-/// host's close leaves the store's custody as it is.
-trait BindStoreCustodyAtBase {
-    fn bind_native_store_custody(&mut self, store: &Arc<toolkit_store::SqliteStore>) -> Result<()>;
-}
-impl BindStoreCustodyAtBase for NativeHostLifetime {
-    fn bind_native_store_custody(
-        &mut self,
-        _store: &Arc<toolkit_store::SqliteStore>,
-    ) -> Result<()> {
-        Ok(())
-    }
-}
-
 mod store_custody {
     use toolkit_store::{
         AdmissionRequest, RecordChangeGuard, RecordChangePublication, RecordData, SqliteStore,

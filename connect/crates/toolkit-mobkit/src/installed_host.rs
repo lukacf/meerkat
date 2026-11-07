@@ -351,6 +351,7 @@ impl InstalledToolkitHost {
         originals.bind_service_tool_policy(service_policy)?;
         owner.bind_native_authorization_publication(source.publication())?;
         owner.bind_native_grant_custody(&source.grants())?;
+        owner.bind_native_store_custody(&store)?;
         owner.validate_current_selection()?;
         Ok((
             owner,

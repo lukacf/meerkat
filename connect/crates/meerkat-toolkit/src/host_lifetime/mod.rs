@@ -1,8 +1,9 @@
 //! Toolkit activation/component lifetime. Native runtime work and grants have
 //! their own owners; this module retains only selected deployment/component
 //! close state and its physical settlement guards. The settled activation
-//! close ends the bound native grant owner's custody (see
-//! [`NativeHostLifetime::bind_native_grant_custody`]).
+//! close ends the custody of the bound native grant owner and of the bound
+//! native store (see [`NativeHostLifetime::bind_native_grant_custody`] and
+//! [`NativeHostLifetime::bind_native_store_custody`]).
 
 pub mod control;
 pub(crate) mod fence;
@@ -21,6 +22,7 @@ use toolkit_catalog::{
     ToolkitComponentLifetimeMachineMutator,
 };
 use toolkit_package::Id;
+use toolkit_store::SqliteStore;
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, HostLifetimeError>;
@@ -393,6 +395,9 @@ pub struct NativeHostLifetime {
     /// ends. Held weakly: this lifetime never keeps the owner alive, and an
     /// owner already dropped released its custody then.
     native_grant_custody: Option<Weak<LocalGrantAuthority>>,
+    /// The native host's published store whose custody the settled activation
+    /// close ends. Held weakly, as the grant owner is.
+    native_store_custody: Option<Weak<SqliteStore>>,
 }
 
 impl NativeHostLifetime {
@@ -446,6 +451,7 @@ impl NativeHostLifetime {
             closed: Notify::new(),
             native_publication: None,
             native_grant_custody: None,
+            native_store_custody: None,
         })
     }
 
@@ -554,6 +560,33 @@ impl NativeHostLifetime {
         match self.native_grant_custody.as_ref().and_then(Weak::upgrade) {
             Some(grants) => grants
                 .release_custody()
+                .map_err(|_| HostLifetimeError::Unavailable),
+            None => Ok(()),
+        }
+    }
+
+    /// Install the native host's published store whose custody this host's
+    /// close ends, before this lifetime is shared, beside the grant owner.
+    /// Once every component and the activation have settled, the close
+    /// releases the store's custody: a reference a task of this host still
+    /// holds can no longer read or change it, and its physical owner is
+    /// handed back, so a successor in this process opens the same store at
+    /// once. Rebinding is refused.
+    pub fn bind_native_store_custody(&mut self, store: &Arc<SqliteStore>) -> Result<()> {
+        self.validate_current_selection()?;
+        if self.native_store_custody.is_some() {
+            return Err(HostLifetimeError::Denied);
+        }
+        self.native_store_custody = Some(Arc::downgrade(store));
+        Ok(())
+    }
+
+    /// End the bound native store's custody at the settled close.
+    async fn release_native_store_custody(&self) -> Result<()> {
+        match self.native_store_custody.as_ref().and_then(Weak::upgrade) {
+            Some(store) => store
+                .release_custody()
+                .await
                 .map_err(|_| HostLifetimeError::Unavailable),
             None => Ok(()),
         }
@@ -819,7 +852,10 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
                     .join(handle, self.native_publication.as_ref())
                     .await?;
                 if observation.state == HostCloseState::Settled {
-                    self.release_native_grant_custody()?;
+                    // Both custodies end, whichever release fails.
+                    let grants = self.release_native_grant_custody();
+                    let store = self.release_native_store_custody().await;
+                    grants.and(store)?;
                 }
                 Ok(observation)
             }

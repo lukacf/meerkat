@@ -146,6 +146,18 @@ pub enum SpiError {
         attempts: u32,
         last: Option<HostStoreError>,
     },
+    /// A commit stopped settling its batch when its retry budget ran out,
+    /// the self-fence window of its fence token open throughout: every
+    /// attempt answered unknown or unavailable and no head read showed the
+    /// batch. The batch was sent `attempts` times, `last` answering the last
+    /// of them, so it may or may not have landed. The scopes it touched are
+    /// poisoned like those of any batch whose outcome stays unknown; the
+    /// realm keeps its fence.
+    #[error(
+        "host store batch is unsettled: its retry budget ran out (attempts sent: {attempts}; \
+         last answer: {last})"
+    )]
+    UnsettledPastRetryBudget { attempts: u32, last: HostStoreError },
     /// The host store failed.
     #[error("host store: {0}")]
     Host(#[from] HostStoreError),
@@ -171,9 +183,10 @@ pub enum SpiError {
 impl SpiError {
     /// The error a mutating store call answers. A poisoned realm or scope
     /// answers its typed refusal ([`RuntimeStoreError::RealmRefused`] or
-    /// [`RuntimeStoreError::ScopeRefused`]), and a batch left unsettled when
-    /// its fence window closed answers
-    /// [`RuntimeStoreError::UnsettledAtFenceWindow`].
+    /// [`RuntimeStoreError::ScopeRefused`]), and a batch left unsettled
+    /// answers its typed stop: [`RuntimeStoreError::UnsettledAtFenceWindow`]
+    /// when its fence window closed, [`RuntimeStoreError::UnsettledPastRetryBudget`]
+    /// when its retry budget ran out.
     #[must_use]
     pub fn into_write(self) -> RuntimeStoreError {
         match self.into_typed() {
@@ -190,8 +203,8 @@ impl SpiError {
     /// [`RuntimeStoreError::Corrupt`], so a reader can tell a refusal that
     /// lasts until the realm reopens and an outage a later read may get past
     /// from state that needs a repair. A read that changed memory commits
-    /// like a write, and a batch it left unsettled when its fence window
-    /// closed answers [`RuntimeStoreError::UnsettledAtFenceWindow`].
+    /// like a write, and a batch it left unsettled answers its typed stop, as
+    /// a write's does ([`Self::into_write`]).
     #[must_use]
     pub fn into_read(self) -> RuntimeStoreError {
         match self.into_typed() {
@@ -208,12 +221,18 @@ impl SpiError {
 
     /// The typed error a read and a write both answer: a refusal until the
     /// realm is reopened ([`Self::into_refusal`]), or a batch left unsettled
-    /// when its fence window closed. Any other error comes back unchanged.
+    /// when its fence window closed or its retry budget ran out. Any other
+    /// error comes back unchanged.
     fn into_typed(self) -> Result<RuntimeStoreError, Self> {
         match self.into_refusal() {
             Ok(refusal) => Ok(refusal),
             Err(error @ Self::UnsettledAtFenceWindow { .. }) => {
                 Ok(RuntimeStoreError::UnsettledAtFenceWindow {
+                    cause: error.to_string(),
+                })
+            }
+            Err(error @ Self::UnsettledPastRetryBudget { .. }) => {
+                Ok(RuntimeStoreError::UnsettledPastRetryBudget {
                     cause: error.to_string(),
                 })
             }

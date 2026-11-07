@@ -8,8 +8,8 @@
 //! nothing, and every retry of it and every head read `Unavailable`, so
 //! nothing the writer asks settles it. The settle ends at its retry budget
 //! and poisons the runtime's scope, and the executor fails the run as the
-//! session layer fails it on that write (an internal error naming the
-//! WholeBlob checkpoint). The process ends as a crash ends it. The restart,
+//! session layer answers that write (the teardown class: the live actor to be
+//! reloaded from what the store holds). The process ends as a crash ends it. The restart,
 //! once the store answers again and the old lease ran out, marks the run
 //! resumable at its registration, and the attachment settles it as a refused
 //! resume before it serves: the prompt's controller client did not survive
@@ -174,15 +174,17 @@ impl CoreExecutor for UnsettledRoundExecutor {
             faults.load_head_unavailable = 0;
         }
         let error = written.expect_err("the second round's commit never settles");
-        // As the session's checkpointer fails a run on a failed WholeBlob
-        // checkpoint write whose writer's window was open.
+        // As the session's checkpointer answers a WholeBlob checkpoint write
+        // whose batch stayed unsettled: the teardown class, the live actor to
+        // be reloaded from what the store holds.
         Err(CoreExecutorError::apply_failed_from_session_error(
-            meerkat_core::service::SessionError::Agent(meerkat_core::AgentError::InternalError(
-                format!(
-                    "failed to write WholeBlob provisional checkpoint for session {}: {error}",
+            meerkat_core::service::SessionError::Agent(
+                meerkat_core::AgentError::session_durable_projection_authority_unknown(format!(
+                    "session {}: its checkpoint may or may not have landed ({error}); live \
+                     actor reload required",
                     self.session
-                ),
-            )),
+                )),
+            ),
         ))
     }
 

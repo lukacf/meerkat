@@ -4,11 +4,12 @@
 //! An adapter may answer a commit `Indeterminate` (the batch may or may not
 //! have landed) and then, as its outage goes on, `Unavailable` to every retry
 //! and every head read. No answer settles the batch: the settle runs its whole
-//! retry budget while the writer's window stays open, then fails the write and
-//! poisons the scopes the batch touched, and the realm keeps its fence. The
-//! writer judges nothing itself, neither from the last answer nor once the
-//! store answers again: the poisoned scope refuses until a reopen loads what
-//! the store holds.
+//! retry budget while the writer's window stays open, then fails the write,
+//! typed (`RuntimeStoreError::UnsettledPastRetryBudget`), and poisons the
+//! scopes the batch touched, and the realm keeps its fence. The writer judges
+//! nothing itself, neither from the last answer nor once the store answers
+//! again: the poisoned scope refuses until a reopen loads what the store
+//! holds.
 //!
 //! The rows run on real time, as the realm's clock is the runtime's clock on
 //! this branch and the system clock before it, with a short retry budget.
@@ -86,9 +87,9 @@ async fn unsettled_past_its_budget(
         "the answers changed mid-settle: {commits} attempts, {head_reads} head reads"
     );
     assert!(
-        matches!(&written, Err(RuntimeStoreError::WriteFailed(text))
-            if text == "host store: unavailable: injected"),
-        "the write fails with the last answer: {written:?}"
+        matches!(&written, Err(RuntimeStoreError::UnsettledPastRetryBudget { cause })
+            if cause.ends_with("last answer: unavailable: injected)")),
+        "the write fails typed, its outcome unknown, with the last answer: {written:?}"
     );
     // The settle ends once its next pause (3.2 s at most) would pass the
     // budget; the writer's window, open throughout, never stopped it.

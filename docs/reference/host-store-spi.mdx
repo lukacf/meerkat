@@ -175,8 +175,12 @@ since Core sets no deadline on a commit: refusing it there with `FencedOut`
 side closes that case, a stricter one included (stopping at the first failed
 renew): obligation 5 at commit does.
 
-A commit that does not settle within its budget, or ends in another error,
-fails the call that made it with a write error, and every scope the batch
+A commit that does not settle within its budget fails the call that made it
+with the typed `RuntimeStoreError::UnsettledPastRetryBudget`
+(`SpiError::UnsettledPastRetryBudget` for a layer that commits through the
+realm directly): its outcome is unknown, as for one stopped at its fence
+window. A commit that ends in another error fails the call with a write
+error. Either way every scope the batch
 would have changed is poisoned; `FencedOut` poisons the whole realm. A
 poisoned scope refuses every later call on it, reads included, with a typed
 refusal (`RuntimeStoreError::ScopeRefused`, naming the scope and its cause;

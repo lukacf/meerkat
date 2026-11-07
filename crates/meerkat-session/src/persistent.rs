@@ -172,10 +172,11 @@ fn refusal_or_internal_error(
 }
 
 /// The error a failed WholeBlob checkpoint write (a round commit or a closing
-/// save) answers. A batch the host store left unsettled when its writer's
-/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) may or
-/// may not have landed, so the live actor and the store can no longer be
-/// proved to be one image: the write answers the teardown class, which the
+/// save) answers. A batch the host store left unsettled, when its writer's
+/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) or
+/// when its retry budget ran out ([`RuntimeStoreError::UnsettledPastRetryBudget`]),
+/// may or may not have landed, so the live actor and the store can no longer
+/// be proved to be one image: the write answers the teardown class, which the
 /// checkpoint returns at once, and the actor is reloaded from what the store
 /// holds (what a reopen of the realm loads). Such a write is never taken for
 /// one the stopped writer refused before it changed anything: it is not
@@ -186,7 +187,8 @@ fn whole_blob_checkpoint_write_error(
     error: RuntimeStoreError,
 ) -> AgentError {
     match error {
-        error @ RuntimeStoreError::UnsettledAtFenceWindow { .. } => {
+        error @ (RuntimeStoreError::UnsettledAtFenceWindow { .. }
+        | RuntimeStoreError::UnsettledPastRetryBudget { .. }) => {
             AgentError::session_durable_projection_authority_unknown(format!(
                 "session {session_id}: its checkpoint may or may not have landed ({error}); \
                  live actor reload required"

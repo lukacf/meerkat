@@ -89,6 +89,8 @@
 //! self-fence deadline of the token it carries; a settle still unknown at
 //! that deadline stops there, typed ([`SpiError::UnsettledAtFenceWindow`]),
 //! and poisons its scopes like any batch whose outcome stays unknown. A
+//! settle whose retry budget runs out first stops typed as well
+//! ([`SpiError::UnsettledPastRetryBudget`]). A
 //! batch whose outcome stays unknown is remembered as such, so a later
 //! re-acquire does not read it as another writer's. The realm keeps every
 //! poisoned scope with its cause ([`SpiRealm::poisoned_scopes`]), and a read
@@ -2414,7 +2416,10 @@ impl SpiRealm {
     /// soon after that deadline, and another writer may then acquire. Past
     /// it the settle stops with [`SpiError::UnsettledAtFenceWindow`]: the
     /// batch's outcome is unknown, never taken as landed. A head read that
-    /// shows the batch still settles it as landed, whenever it is made.
+    /// shows the batch still settles it as landed, whenever it is made. A
+    /// settle whose retry budget runs out first stops with
+    /// [`SpiError::UnsettledPastRetryBudget`], its outcome unknown the same
+    /// way.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
         // A local of this future: it drops on every return below, and with
@@ -2462,7 +2467,10 @@ impl SpiRealm {
             attempt = attempt.saturating_add(1);
             let backoff = commit_retry_pause(batch.commit_id(), attempt);
             if Instant::now() + backoff >= deadline {
-                return Err(SpiError::Host(error));
+                return Err(SpiError::UnsettledPastRetryBudget {
+                    attempts: attempt,
+                    last: error,
+                });
             }
             last = Some(error);
             tokio::time::sleep(backoff).await;

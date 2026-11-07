@@ -3023,6 +3023,19 @@ pub enum RuntimeStoreError {
         /// answer.
         cause: String,
     },
+    /// A host store write stopped settling its batch when its retry budget
+    /// ran out, the writer's fence window open throughout: every attempt
+    /// answered unknown or unavailable and no head read showed the batch.
+    /// The batch may or may not have landed, as one stopped at its fence
+    /// window ([`Self::UnsettledAtFenceWindow`]). The scopes it touched are
+    /// poisoned: a later call that needs one of them is refused
+    /// ([`Self::ScopeRefused`]) until the realm is reopened, and the reopened
+    /// realm shows the batch if it landed. The realm keeps its fence.
+    #[error("Store write left unsettled past its retry budget: {cause}")]
+    UnsettledPastRetryBudget {
+        /// The batch's account: the attempts sent and the last answer.
+        cause: String,
+    },
 }
 
 impl RuntimeStoreError {

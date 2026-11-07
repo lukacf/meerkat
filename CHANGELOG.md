@@ -75,6 +75,23 @@ them.
   where a failed checkpoint write answered `AgentError::InternalError`. See
   Fixed.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-session`, `meerkat-mob`: a host store commit whose batch is still
+  unsettled when its retry budget runs out, its writer's fence window open,
+  fails with `SpiError::UnsettledPastRetryBudget`, and through the runtime
+  store with `RuntimeStoreError::UnsettledPastRetryBudget`, for a write and
+  for a read that committed. Before, it failed with `SpiError::Host` carrying
+  the last answer (`RuntimeStoreError::WriteFailed`, or
+  `RuntimeStoreError::Unavailable` for a read whose last answer was
+  unavailable, which `meerkat-mob`'s host store reads answered as
+  `MobStoreError::Unavailable`; they now answer `ReadFailed`). Through the
+  session service, a checkpoint write (a round commit or a closing save)
+  that stops so answers the teardown class
+  (`AgentError::SessionDurableProjectionAuthorityUnknown`), as one stopped at
+  its fence window does, so the live actor is reloaded from what the store
+  holds; it answered `AgentError::InternalError`, which failed the run as an
+  internal error while the actor stayed loaded over a scope that refuses it.
+
 ### Added
 
 - `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
@@ -82,6 +99,11 @@ them.
   store commit that stopped at its fence token's self-fence deadline with
   its outcome unknown, so a caller classifies it by type. Both enums are
   `#[non_exhaustive]`.
+
+- `meerkat-runtime`: `SpiError::UnsettledPastRetryBudget { attempts, last }`
+  and `RuntimeStoreError::UnsettledPastRetryBudget { cause }`: a host store
+  commit whose retry budget ran out with its outcome unknown, typed the same
+  way.
 
 - `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`

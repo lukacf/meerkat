@@ -3927,10 +3927,10 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
     ));
 }
 
-/// A batch left unsettled when its fence window closed stays typed through
-/// the runtime store, for a write and for a read that committed, with its
-/// account; a batch whose retry budget ran out keeps answering a write
-/// failure.
+/// A batch left unsettled when its fence window closed, or when its retry
+/// budget ran out, stays typed through the runtime store, for a write and
+/// for a read that committed, with its account; a host error that is no
+/// such stop keeps answering a write failure.
 #[test]
 fn a_batch_unsettled_at_its_fence_window_stays_typed() {
     use meerkat_core::host_store::{FenceToken, HostStoreError};
@@ -3965,6 +3965,26 @@ fn a_batch_unsettled_at_its_fence_window_stays_typed() {
         never_sent.to_string().ends_with("(attempts sent: 0)"),
         "{never_sent}"
     );
+    let past_budget = SpiError::UnsettledPastRetryBudget {
+        attempts: 12,
+        last: HostStoreError::Unavailable("down".to_string()),
+    };
+    let account = past_budget.to_string();
+    assert_eq!(
+        account,
+        "host store batch is unsettled: its retry budget ran out (attempts sent: 12; \
+         last answer: unavailable: down)"
+    );
+    for typed in [past_budget.clone().into_write(), past_budget.into_read()] {
+        assert!(
+            matches!(
+                &typed,
+                RuntimeStoreError::UnsettledPastRetryBudget { cause } if *cause == account
+            ),
+            "{typed:?}"
+        );
+        assert!(!typed.is_refused_until_reopen());
+    }
     assert!(matches!(
         SpiError::Host(HostStoreError::Indeterminate("lost".to_string())).into_write(),
         RuntimeStoreError::WriteFailed(_)

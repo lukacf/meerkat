@@ -582,7 +582,11 @@ lists every read and the re-base rule.
   a failed batch; the realm keeps its fence. While renews fail, the retry
   budget is cut at the window.
 - **Failed batch.** A batch the store refuses, or whose outcome stays unknown
-  past the retry budget, poisons every scope it touched. Those scopes refuse
+  past the retry budget (typed: `RuntimeStoreError::UnsettledPastRetryBudget`),
+  poisons every scope it touched. A round commit or closing save stopped so,
+  or at its fence window, may or may not have landed: the session answers
+  the teardown class, so its live actor is reloaded from what the store
+  holds instead of the run failing as an internal error. Those scopes refuse
   every later call that needs them, with a typed refusal, until the realm is
   opened again, which reloads them from your store. Everything else keeps
   serving: other sessions and mobs, and the reads across sessions, which

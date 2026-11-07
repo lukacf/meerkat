@@ -3,10 +3,11 @@
 //! of a host store realm. Its first round commits; the store then answers the
 //! first commit of its second round `Indeterminate`, and every retry of that
 //! batch and every head read `Unavailable`, so nothing the writer asks
-//! settles it. The settle ends at its retry budget, the runtime's scope is
-//! poisoned and the realm keeps its fence. The run fails on the write, and
-//! the poisoned scope refuses to record that failure: the waiter is told the
-//! run's boundary rolled back, and the store keeps the run open. The process
+//! settles it. The settle ends at its retry budget, typed, the runtime's
+//! scope is poisoned and the realm keeps its fence. The checkpoint answers
+//! the teardown class: the live session is torn down for a reload from what
+//! the store holds, its waiter is told it was unregistered before the run's
+//! terminal, and the store keeps the run open. The process
 //! ends as a crash ends it (its runtime is shut down, and nothing of it runs
 //! or writes again), the store answers again, and a restart over the same
 //! store opens the session: its registration resumes the run from the last
@@ -269,15 +270,15 @@ async fn unsettled_then_restarted(
 
 /// What the first process must have done: the settle ended at its budget
 /// with the outcome unknown, the runtime's scope alone is poisoned, the
-/// realm keeps its fence, and the run's failure, which the poisoned scope
-/// refuses to record, rolls its boundary back for the waiter.
+/// realm keeps its fence, and the checkpoint's teardown class unregistered
+/// the live session before the run's terminal, which the waiter is told.
 fn assert_unsettled_past_its_budget(first: &FirstProcess) {
     assert!(
-        first
-            .answer
-            .as_deref()
-            .is_some_and(|answer| answer.starts_with("Err(BoundaryRolledBack")),
-        "the waiter is told the run's boundary rolled back: {first:#?}"
+        first.answer.as_deref().is_some_and(|answer| {
+            answer.starts_with("Err(AuthorityUnavailable")
+                && answer.contains("unregistered before terminal failure")
+        }),
+        "the waiter is told the session was unregistered before the run's terminal: {first:#?}"
     );
     assert_eq!(
         first.model_requests, 2,

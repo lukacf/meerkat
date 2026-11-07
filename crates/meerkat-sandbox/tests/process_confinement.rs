@@ -2143,3 +2143,66 @@ fn linux_refused_procfs_host_probe() {
         });
     println!("refused procfs launch passed");
 }
+
+/// The interface names of a `/proc/<pid>/net/dev` listing: one
+/// `name: counters` line per interface after two header lines.
+#[cfg(target_os = "linux")]
+fn interface_names(dev: &str) -> Vec<String> {
+    dev.lines()
+        .skip(2)
+        .filter_map(|line| line.split(':').next())
+        .map(|name| name.trim().to_owned())
+        .collect()
+}
+
+/// A launch's network namespace follows its IP access. Without IP access it
+/// is the launch's own: another namespace than the host's, with a loopback
+/// interface only and no route. With IP access the launch shares the host's
+/// namespace, which it needs to reach the network, and lists the host's
+/// interfaces.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_launch_network_namespace_follows_its_ip_access() {
+    let fixture = Fixture::new();
+    let host_namespace = std::fs::read_link("/proc/self/ns/net").unwrap();
+    let host_interfaces = interface_names(&std::fs::read_to_string("/proc/self/net/dev").unwrap());
+    for ip in [false, true] {
+        let mut spec = fixture.spec();
+        if ip {
+            spec.network = IpNetworkAccess::Unrestricted;
+        }
+        let output = fixture
+            .shell(
+                spec,
+                "readlink /proc/self/ns/net; echo END; cat /proc/self/net/dev; echo END; \
+                 cat /proc/self/net/route",
+                &[],
+            )
+            .await;
+        assert!(output.status.success(), "ip {ip}: {output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut parts = stdout.split("END\n");
+        let namespace = PathBuf::from(parts.next().unwrap().trim());
+        let interfaces = interface_names(parts.next().unwrap());
+        let routes: Vec<&str> = parts.next().unwrap().lines().collect();
+        if ip {
+            assert_eq!(namespace, host_namespace, "with IP, the host's namespace");
+            assert_eq!(interfaces, host_interfaces);
+        } else {
+            assert_ne!(
+                namespace, host_namespace,
+                "without IP, a namespace of its own"
+            );
+            assert_eq!(interfaces, ["lo"]);
+            // A header line at most: a fresh namespace has no route.
+            assert!(
+                routes.iter().all(|line| line.starts_with("Iface")),
+                "{routes:?}"
+            );
+        }
+    }
+}

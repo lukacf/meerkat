@@ -1546,6 +1546,74 @@ mod tests {
         ));
     }
 
+    /// A stream whose message completed and whose function call was added
+    /// and started its arguments, then ended without completing the call.
+    fn a_call_started_but_never_completed() -> Vec<Value> {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"});
+        vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":0,"item":answer}),
+            json!({"type":"response.output_item.added","output_index":1,"item":call}),
+            json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"q\":"}),
+        ]
+    }
+
+    /// Without a terminal response a stream commits only what it completed,
+    /// so on the Copilot route a slot the stream announced and never
+    /// completed (here a started tool call) ends the response with the
+    /// retryable mismatch, and nothing is committed. (Fails-old: the call
+    /// was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_slot() {
+        let events = copilot_events(a_call_started_but_never_completed(), true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "a started call at [DONE]",
+        );
+    }
+
+    /// The plain OpenAI route keeps the same rule: an item the stream added
+    /// that never completed before `[DONE]` ends the response as the
+    /// retryable incomplete response, and nothing is committed. (Fails-old:
+    /// the call was dropped and the turn ended as complete.)
+    #[tokio::test]
+    async fn plain_openai_done_without_a_terminal_response_refuses_an_uncompleted_item() {
+        let data: Vec<String> = a_call_started_but_never_completed()
+            .iter()
+            .map(Value::to_string)
+            .chain(["[DONE]".to_owned()])
+            .collect();
+        let (client, server) = raw_stub(data).await;
+        let request = LlmRequest::new("gpt-5.5", vec![]);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(LlmEvent::AssistantOutput { .. }))),
+            "nothing is committed"
+        );
+        let Some(Ok(LlmEvent::Done {
+            outcome: LlmDoneOutcome::Error { error },
+        })) = events.last()
+        else {
+            panic!("the request ends with an error, not {:?}", events.last());
+        };
+        assert!(
+            matches!(
+                error,
+                LlmError::IncompleteResponse { message }
+                    if message.contains("output_index 1 was announced but never completed")
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_retryable());
+    }
+
     /// Copilot rotates a function call's item id on every event while its
     /// call_id stays: the call keeps its call_id, and its argument deltas,
     /// whose item ids are those of the call's slot, stream live.

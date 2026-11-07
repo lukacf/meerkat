@@ -1227,6 +1227,7 @@ async fn signed_in_unified_runtime(
         crate::UnifiedRuntime::builder()
             .definition(meerkat_mob::MobDefinition::from_toml(&format!(
                 "[mob]\nid = '{mob_id}'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
+                 runtime_mode = 'turn_driven'\nexternal_addressable = true\n\
                  [profiles.worker.tools]\ncomms = true\n"
             ))?)
             .persistent_state(state_dir.path())

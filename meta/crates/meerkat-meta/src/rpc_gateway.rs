@@ -26656,6 +26656,7 @@ mod strict_live_private_owner_tests {
         };
         let access = crate::AccessController::new(crate::access::AccessControlConfig {
             enabled: true,
+            admins: vec!["root@example.test".to_string()],
             rules: vec![crate::access::AccessRule {
                 id: "everyone-drives-every-agent".to_string(),
                 subjects: vec!["*".to_string()],

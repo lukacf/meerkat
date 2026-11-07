@@ -9,10 +9,11 @@ program can use a committed native result to choose its next operation and
 arguments. Each required resource keeps its own observations and assessment.
 
 <Note>
-This guide describes the development Rust, Python and TypeScript APIs and
-private protocol 7. They are not part of the released 0.9.4 downloads. Native
-compilation, installed collection acceptance and production launcher integration
-remain pending. See [installation options](/availability) for released artifacts.
+This guide describes the Rust, Python and TypeScript APIs and private protocol 7.
+The 0.9.10 wheel and npm package include the protocol 7 collection clients, but
+no released binary serves protocol 7; a trusted host built from source must
+embed `run_with_service_collections`. See [installation options](/availability)
+for released artifacts.
 </Note>
 
 ## Select the source in the host

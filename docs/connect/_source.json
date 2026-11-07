@@ -5,10 +5,11 @@
   "destination_docs_path": "docs/connect",
   "source_repository": "lukacf/meerkat",
   "source_docs_path": "connect/docs/site",
-  "source_docs_tree": "9b9ed54b656285522da2960a1a6b0b1a379baca2",
-  "connect_source_commit": "c5b339a8d78f1a214a6fa7e5a995b750b0fbf857",
+  "source_docs_tree": "d232409533f796852eac648e0d59aa2dea1e578a",
+  "connect_source_commit": "7b4e3076bc285c34ce37dc2b00b936a6e210f134",
+  "connect_source_tree": "5c3b7a634851bc0f410db24831b1eae9df5c7424",
   "connect_source_state": "monorepo_sync",
-  "connect_source_version": "0.9.4",
+  "connect_source_version": "0.9.10",
   "existing_products_unchanged": true,
   "static_validation": "pass",
   "mirror_adjustments": [
@@ -36,8 +37,8 @@
     },
     {
       "path": "availability.mdx",
-      "source_sha256": "b7a7519ead9e9632e7ba184c94111432f5976d25347173b1f5113c24f5d9ced6",
-      "rendered_sha256": "91d0a12ae66755b7da22248bedb716e4753d211b771e9ca4da4fa7a00823fb02"
+      "source_sha256": "672d0f9b9fda225391ddaec8592e2bda08c29f08152ed2063acaee08cc77a127",
+      "rendered_sha256": "b4227542b840356a3f6b5d737298edbea189cecd825ceaa6a2e7ba1f771481b4"
     },
     {
       "path": "concepts/acquisition.mdx",
@@ -96,8 +97,8 @@
     },
     {
       "path": "guides/host-composition.mdx",
-      "source_sha256": "2f7ae3f6016577ce2fc560db15be921a818d5c33f5779b66073e970d9bd7ea7d",
-      "rendered_sha256": "cb16d25a1d7ac12d97348c0176f7555adc3185975f4c1b68784b060d0a649061"
+      "source_sha256": "3f4c713e2e0060e12a1610745211992f35eaf4cf5d61ed16ad0112f6fc1a9f6e",
+      "rendered_sha256": "5ce418cd4d86911c8a21015cea8b523ffb882d957da7be775ff7a71335d60d23"
     },
     {
       "path": "guides/manage-connections.mdx",
@@ -106,8 +107,8 @@
     },
     {
       "path": "guides/native-mcp.mdx",
-      "source_sha256": "bebc5a0c6ce26fa96d49b99c0b2837cb9fe13331806e31bd3df0d8caf0efe601",
-      "rendered_sha256": "4233f7e063de2dcf493ddfdecaef50e853e4430c9f19e24e14f46197ffc614f3"
+      "source_sha256": "1219eb97543dea8adc1599b4eba9f9a675a607ae7d6fcd9dafc1ab5dd0ea3907",
+      "rendered_sha256": "3f9208e13f4a8b78777aff19e59b128107b5160d5357a23cf5fba0130c6a2fd0"
     },
     {
       "path": "guides/port-an-integration.mdx",
@@ -126,8 +127,8 @@
     },
     {
       "path": "guides/service-collections.mdx",
-      "source_sha256": "00e5eb10ce5f0d9944bbd91026dfbb8c326ad0e7673e8b0f05c45b6f28748b6f",
-      "rendered_sha256": "2bf989b13dc6c8ad2ae9d9307431659f92403cdb0e551e8c2c207f2ab0321291"
+      "source_sha256": "0b217fbdb2b60420f629305f0e4ae1dbf3c8e325986ad8c526960551282d5862",
+      "rendered_sha256": "e227355db2ba24d8a00d8b74ca69ef42e2f1ce241834f9f43fb4a3e90e30d147"
     },
     {
       "path": "guides/service-connectors.mdx",
@@ -181,18 +182,18 @@
     },
     {
       "path": "operations/troubleshooting.mdx",
-      "source_sha256": "5f8901f38e459c148f4b3010fbb5afcf781202a63c7ac52a9b2aad73fc17e8a6",
-      "rendered_sha256": "a3b6a92ac55b2c096b33ed99789b55088c208ad07a10fbe53f6aed786a614c9b"
+      "source_sha256": "ac4d2c3ff99ade727c3f473d7f429fe0072102f6fa68951119d2b442fdcb97cd",
+      "rendered_sha256": "7c0027ae7497b99a79dc6296cbb88894987bd8dc14eb94cfaff4551ba62a3641"
     },
     {
       "path": "quickstart.mdx",
-      "source_sha256": "7a5bcfb98deb8b4e8249466363569147bfb6e2113c8fe3033b0ce360d743d5d2",
-      "rendered_sha256": "5a7ef5afd80df133527fda35a3cd43040d863280cbc0c4f78cf834123de159ed"
+      "source_sha256": "fc9d1160cf7ff1b5e4f5d6e9d12f9bec2dadcf8a8ef50ce6f001d4bb864fd462",
+      "rendered_sha256": "6c9ef6901c56c634346360cee9d7db95271be0929231d692fde5d1dadb7586ae"
     },
     {
       "path": "reference/access-control.mdx",
-      "source_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0",
-      "rendered_sha256": "358f131572b0fc533e7b8165bb841327c00613feb1f3f77b7b2d880c57524df0"
+      "source_sha256": "58af164a5999fa7f7389ece8d22560b199c3de098b630a8db84974b38928c6df",
+      "rendered_sha256": "58af164a5999fa7f7389ece8d22560b199c3de098b630a8db84974b38928c6df"
     },
     {
       "path": "reference/architecture.mdx",

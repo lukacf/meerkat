@@ -19035,6 +19035,17 @@
             "minimum": 0,
             "type": "integer"
           },
+          "instruction_target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeInstructionTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
+          },
           "launch": {
             "$ref": "#/$defs/MaterializeLaunchMode"
           },
@@ -24084,6 +24095,51 @@
         ],
         "type": "string"
       },
+      "BridgeInstructionTarget": {
+        "additionalProperties": false,
+        "description": "A member's whole operator-instruction snapshot at one mob generation:\nevery record of the mob, with its body where the record is Active for\nthe member (none where it is revoked or does not select the member).",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/$defs/BridgeInstructionTargetSlot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation",
+          "slots"
+        ],
+        "type": "object"
+      },
+      "BridgeInstructionTargetSlot": {
+        "additionalProperties": false,
+        "description": "One slot of a [`BridgeInstructionTarget`].",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "slot": {
+            "$ref": "#/$defs/InstructionSlot"
+          }
+        },
+        "required": [
+          "slot",
+          "revision"
+        ],
+        "type": "object"
+      },
       "BridgePeerSpec": {
         "additionalProperties": false,
         "description": "Minimal trusted peer identity for supervisor bridge wire messages.\n\nMirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is\nself-contained in the contracts crate so neither sender nor receiver\nneeds a cross-crate dependency for deserialization. Fields stay\nstringly at the wire boundary — `peer_id` is the canonical comms routing\nUUID, while raw Ed25519 public key material is carried only in `pubkey`.\nThe typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the\nreceiving side.",
@@ -24315,6 +24371,37 @@
         "required": [
           "secs",
           "nanos"
+        ],
+        "type": "object"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "InstructionSlot": {
+        "additionalProperties": false,
+        "description": "One standing instruction's name: the issuer partition and the key.\n\nOrdered by namespace bytes, then key bytes: the order every rendered\nsequence uses.",
+        "properties": {
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
         ],
         "type": "object"
       },
@@ -26308,6 +26395,17 @@
         "format": "uint64",
         "minimum": 0,
         "type": "integer"
+      },
+      "instruction_target": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BridgeInstructionTarget"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
       },
       "launch": {
         "$ref": "#/$defs/MaterializeLaunchMode"
@@ -62151,6 +62249,17 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "instruction_target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeInstructionTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
+              },
               "launch": {
                 "$ref": "#/$defs/MaterializeLaunchMode"
               },
@@ -78873,6 +78982,17 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "instruction_target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeInstructionTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
               },
               "launch": {
                 "$ref": "#/$defs/MaterializeLaunchMode"

@@ -4859,6 +4859,17 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "instruction_target": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BridgeInstructionTarget"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "V7: the operator-instruction snapshot of the member a `Fresh` launch\nmints, at its mob's generation. The host records it in the session it\nmints, before anything else, so the member's first run applies it,\nand the mob's delivery of that generation then finds it recorded.\nCarrying it is a V7 command, sent only to a host whose `HostFeatures`\nanswer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused\non any other launch, and a replay of the materialize at its tuple\nrecords nothing."
+              },
               "launch": {
                 "$ref": "#/$defs/MaterializeLaunchMode"
               },

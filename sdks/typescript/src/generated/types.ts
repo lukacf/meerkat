@@ -5683,6 +5683,7 @@ export interface BridgeCommandMaterializeMember {
   fence_token: number;
   forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
+  instruction_target?: Record<string, unknown> | null;
   launch: { mode: "fresh" } | Record<string, unknown>;
   prompt_context_fork?: Record<string, unknown> | null;
   protocol_version: BridgeProtocolVersion;

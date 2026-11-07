@@ -9785,6 +9785,7 @@ class BridgeCommandMaterializeMember(TypedDict, total=False):
     fence_token: Required[int]
     forked_participant_attachment: NotRequired[Optional[dict[str, Any]]]
     generation: Required[int]
+    instruction_target: NotRequired[Optional[dict[str, Any]]]
     launch: Required[dict[str, Literal['fresh']] | dict[str, Any]]
     prompt_context_fork: NotRequired[Optional[dict[str, Any]]]
     protocol_version: Required[BridgeProtocolVersion]

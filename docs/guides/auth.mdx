@@ -622,7 +622,12 @@ Choosing a model:
   entry states no endpoint list runs on `/chat/completions`, and one whose list
   is empty is refused. The session
   moves to the account's route of that protocol, whichever route of the
-  account it named. The model's limits come from the same list: its context
+  account it named. On the Chat Completions route such a model gets the
+  check every model gets there, so a reply that splits its output across
+  choices is refused as incomplete: for a model that answers that way (a
+  Claude model the account lists without `/v1/messages`, for one), add a
+  `[models.<id>]` entry, whose `provider` then picks the route (`anthropic`
+  for the Messages route). The model's limits come from the same list: its context
   window, prompt limit and output limit, and whether it takes images. Tool
   calls, streaming, structured outputs and thinking budgets are checked
   against the list on every request, as for every Copilot model. Nothing

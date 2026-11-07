@@ -456,8 +456,9 @@ settings, `.venv/bin/python setup.py` asks for named accounts to add, give a
 new password or remove (`:remove NAME`), and keeps only password hashes on the
 deployment computer. Changes apply at the next start. An installation built
 earlier with one shared Console password moves to named accounts at its next
-update, keeping its Console user and password; an application on the older
-ordinary route keeps the shared password. After that move the installation's
+update: the update's Build declares named accounts and keeps the Console user
+and password. An application on the older ordinary route, or on the MobKit
+runtime, keeps the shared password. After that move the installation's
 own account is the operator's personal account and the first administrator:
 if others know its Console password, change it with **Change private
 settings** and give each of them a named account. A single shared Console

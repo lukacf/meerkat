@@ -368,8 +368,11 @@ Access panel included, in `.mobkit/console-access.toml`. Its first start
 copies that file from the package's `config/access.toml`, which stays as
 installed. A package built by an earlier Forge reads `config/access.toml`
 instead, so after a rollback to such a package the administrators added in
-the Console are missing until they are added again. Access fails closed
-meanwhile.
+the Console are missing there and access fails closed. Do not add them again
+in that Console: that rewrites `config/access.toml`, and Forge then refuses
+to start, change or update the installation. Update forward instead. The
+rollback leaves `.mobkit/console-access.toml` as it was, and the updated
+Console reads it again.
 
 ### An update crosses into Meta 0.9.4
 

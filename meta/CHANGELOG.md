@@ -95,8 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
-- Forge: an installation built with one shared console account moves to
-  named accounts on its next update. That update changes only
+- Forge: a product application set up with one shared console account
+  moves to named accounts on its next update. Every later Build of its
+  source declares `local-accounts`, and the installation's owner accepts
+  that one change and no other: the update changes only
   `application/console.json` (`local-password` to `local-accounts`); the
   private fields, the installation's own account and password, and the
   operator stay as they are. The installation's own account then becomes
@@ -112,10 +114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Forge: the console keeps its access rules in
   `.mobkit/console-access.toml`, copied once from `config/access.toml` at
   the first start. An installation whose console already rewrote
-  `config/access.toml` needs its original bytes restored once. After a
-  rollback to a package built by an earlier Forge, the console reads
-  `config/access.toml` again, so administrators added in the console are
-  absent until you add them again: access fails closed.
+  `config/access.toml` needs its original bytes restored once. A rollback
+  to a package built by an earlier Forge leaves that copy as it is, but the
+  earlier package's console reads `config/access.toml`, so the
+  administrators added in the console are missing there and access fails
+  closed. Do not add them again in that console: it would rewrite
+  `config/access.toml`, and Forge would then refuse to start, change or
+  update the installation. Update forward instead; the console then reads
+  its kept copy again.
 
 ### Added
 
@@ -151,14 +157,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Forge: the controller review is open to every console administrator. It
-  starts at an administrator's first sign-in and stays open after that
-  person signs out, until their sign-in would have expired (8 hours).
+  starts at an administrator's first sign-in, or when an administrator
+  opens it if that start could not run, and stays open after that person
+  signs out, until their sign-in would have expired (8 hours).
 - Forge: the console keeps its access edits (a second administrator, rules,
   groups) in its own live copy, `.mobkit/console-access.toml`, so they no
   longer stop Forge from changing private settings, starting, updating,
   downloading or supervising the installation. `config/access.toml` stays
   the package's exact bytes and may list further admins after the
-  installation's own account.
+  installation's own account. The copy is published only once complete,
+  and an empty copy, which only a start stopped while copying can leave, is
+  copied again with a warning, so access control stays on.
 
 ### Known limitations
 

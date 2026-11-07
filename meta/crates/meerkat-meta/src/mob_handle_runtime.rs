@@ -12966,7 +12966,9 @@ where
 
 /// Console-only local human submission pinned to the member snapshot resolved
 /// before accepting the request. External members retain the existing remote
-/// send protocol; that compatibility path makes no local transcript-role claim.
+/// send protocol; that compatibility path makes no local transcript-role claim
+/// and carries no requester. `requester` is the sender's person principal,
+/// carried to the local member's run.
 pub(crate) async fn send_console_human_on_mob(
     handle: &MobHandle,
     member: &meerkat_mob::runtime::MobMemberListEntry,
@@ -12974,6 +12976,7 @@ pub(crate) async fn send_console_human_on_mob(
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+    requester: Option<&meerkat_core::PrincipalRef>,
 ) -> Result<String, MobRuntimeError> {
     let (runtime_id, fence_token) = member.binding_atoms().ok_or(MobRuntimeError::InvalidInput(
         "console human target has no current runtime binding",
@@ -13020,8 +13023,11 @@ pub(crate) async fn send_console_human_on_mob(
     .map_err(MobError::from)?;
     // Addressability was already checked by the console policy. Internal
     // origin preserves support for console-addressable internal workers.
-    let spec = meerkat_mob::WorkSpec::new(content, meerkat_mob::WorkOrigin::Internal)
+    let mut spec = meerkat_mob::WorkSpec::new(content, meerkat_mob::WorkOrigin::Internal)
         .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
+    if let Some(requester) = requester {
+        spec = spec.with_requester(requester.clone());
+    }
     let options = if skill_references.is_empty() {
         meerkat_mob::MemberTurnOptions::new()
     } else {

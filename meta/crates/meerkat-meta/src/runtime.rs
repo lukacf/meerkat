@@ -79,7 +79,7 @@ pub use console_ingress::{
 };
 pub(crate) use console_ingress::{
     ConsoleCallerVerification, ResolvedConsoleCaller, authorize_console_rest_json_route,
-    console_member_access_attributes, fold_console_member_attributes,
+    console_human_principal, console_member_access_attributes, fold_console_member_attributes,
     render_console_rest_json_route, resolve_authorized_console_caller_from_token,
     session_fence_first_accepted_iat,
 };

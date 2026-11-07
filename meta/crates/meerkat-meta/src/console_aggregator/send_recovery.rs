@@ -119,10 +119,14 @@ pub(crate) fn governed_delivery_key(interaction_id: &str, input_frame_id: &str) 
 }
 
 /// The namespace of the governed Console input ids, derived from each send's
-/// `console:{interaction}:{frame}` key.
-const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x6d, 0x6f, 0x62, 0x6b, 0x69, 0x74, 0x2d, 0x67, 0x6f, 0x76, 0x2d, 0x69, 0x6e, 0x70, 0x75, 0x74,
-]);
+/// `console:{interaction}:{frame}` key: a fixed random value that names
+/// nothing. A shipped id is permanent, so it never changes.
+const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x1dcf_20b2_1a1a_4913_b604_566d_e053_47ef);
+
+/// The payload field of a submitted send's frame naming the session its
+/// bind bound: its evidence is read there.
+pub(crate) const BOUND_SESSION_FIELD: &str = "bound_session_id";
 
 /// A governed console send's own input id, derived from its interaction and
 /// frame: every dispatch of the send submits this input, and a replay reads
@@ -243,18 +247,24 @@ impl SendAdmissionReader for meerkat_runtime::MeerkatMachine {
     }
 }
 
-/// Read a send's admission evidence in the session it recorded: under its
-/// host-human key (the input frame id), then by its governed input id
-/// ([`governed_input_id`]), all within one deadline `bound` from now:
-/// evidence the store has not given by then answers `unknown`, without
-/// reading on.
+/// Read a send's admission evidence in its session: the one its bind bound
+/// when its submission recorded one ([`BOUND_SESSION_FIELD`]), else the one
+/// it recorded at acceptance. Under its host-human key (the input frame id),
+/// then by its governed input id ([`governed_input_id`]), all within one
+/// deadline `bound` from now: evidence the store has not given by then
+/// answers `unknown`, without reading on.
 pub(crate) async fn observe_native_send(
     reader: &dyn SendAdmissionReader,
     frame: &ConsoleFrame,
     bound: Duration,
 ) -> NativeSendObservation {
     let deadline = tokio::time::Instant::now() + bound;
-    let Some(session_id) = frame.session_id.as_deref() else {
+    let session = frame
+        .payload
+        .get(BOUND_SESSION_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .or(frame.session_id.as_deref());
+    let Some(session_id) = session else {
         return NativeSendObservation::Unknown {
             cause: "the send recorded no session".to_string(),
         };

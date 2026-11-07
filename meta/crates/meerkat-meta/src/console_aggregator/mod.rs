@@ -469,6 +469,30 @@ impl ClassicResend<'_> {
     }
 }
 
+/// The payload field of a governed send's `user_input` frame recording that
+/// this Console reserved it as governed: `true`. A frame without it (an
+/// earlier version's) is settled from evidence only.
+pub(crate) const GOVERNED_SEND_FIELD: &str = "governed";
+
+/// Whether an unsettled governed send whose dispatch has no live owner
+/// submitted nothing, so a replay of its key may dispatch it again: it
+/// records a hold (a dispatch held before any submission), or this Console
+/// reserved it as governed ([`GOVERNED_SEND_FIELD`]) and it is not
+/// `submitted`. Every submission of such a send is recorded first
+/// (`submitted`), and with no live owner no runtime-owned operation can
+/// still submit it. A send an earlier version left unsettled carries
+/// neither and is settled from evidence only: its input may have been
+/// admitted under an id its replay cannot read.
+pub(crate) fn governed_send_submitted_nothing(frame: &ConsoleFrame) -> bool {
+    frame.status != ConsoleFrameStatus::Submitted
+        && (frame.payload.get("delivery_hold").is_some()
+            || frame
+                .payload
+                .get(GOVERNED_SEND_FIELD)
+                .and_then(Value::as_bool)
+                == Some(true))
+}
+
 /// An existing console send found for a replay.
 enum ExistingSend {
     /// Settled, or with a live dispatch owner: replayed, nothing dispatched.
@@ -3440,7 +3464,6 @@ impl MetaConsoleAggregator {
         scope: &ConsoleSendScope,
         governed: bool,
     ) -> Result<ScopedReservation, ConsoleSendError> {
-        let _ = governed;
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
         let (runtime_key, host_policy) =
@@ -3538,6 +3561,13 @@ impl MetaConsoleAggregator {
             caused_by_frame_id: None,
         };
         redact_frame(host_policy.as_ref(), &mut new_frame);
+        // A governed send's frame records that this Console reserved it as
+        // governed, kept over a redacted payload: its every submission is
+        // recorded first, so while unsettled with no owner it submitted
+        // nothing ([`governed_send_submitted_nothing`]).
+        if governed && let Some(payload) = new_frame.payload.as_object_mut() {
+            payload.insert(GOVERNED_SEND_FIELD.to_string(), Value::Bool(true));
+        }
         let outcome = append_frame(&self.inner, new_frame)
             .await
             .map_err(ConsoleSendError::Log)?;
@@ -3744,21 +3774,32 @@ impl MetaConsoleAggregator {
 
     /// A governed send's bind answered bound, before its input is
     /// submitted: `MarkSubmitted`, applied to the send's own state
-    /// (dispatching). From here the send is delivered or fails, and is never
-    /// held. `session_id` is the session the bind bound.
+    /// (dispatching), recording `session_id`, the session the bind bound
+    /// (its `bound_session_id`): the runtime's evidence of the send is read
+    /// there from now on. From here the send is delivered or fails, and is
+    /// never held.
     pub(crate) async fn mark_interaction_submitted(
         &self,
         input_frame_id: &str,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<(), ConsoleSendError> {
-        let _ = session_id;
         self.transition_send(
             input_frame_id,
             SendTransition::MarkSubmitted,
-            None,
+            Some((
+                send_recovery::BOUND_SESSION_FIELD,
+                json!(session_id.to_string()),
+            )),
             "only a dispatching send is submitted",
         )
         .await
+    }
+
+    /// Whether this Console's log store moves a send through the send
+    /// machine's own states, which a governed send needs
+    /// ([`ConsoleLogStore::supports_send_transitions`]).
+    pub(crate) fn supports_send_transitions(&self) -> bool {
+        self.inner.store.supports_send_transitions()
     }
 
     /// Apply `transition` to the send's own state, atomically in the store,

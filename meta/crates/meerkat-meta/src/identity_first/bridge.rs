@@ -3534,6 +3534,11 @@ pub trait GovernedInputBinder: Send + Sync {
     /// that records its send's state records the submission here, so nothing
     /// records the send held after it. An `Err` refuses the send: nothing is
     /// submitted. Answers `Ok` unless the door says otherwise.
+    ///
+    /// Every lifecycle operation of the identity waits while it runs, so it
+    /// answers within a bound of its own (a local store write, for example)
+    /// and never waits for the identity runtime, nor for an actor that may
+    /// wait for it.
     async fn submitting(
         &self,
         session_id: &meerkat_core::types::SessionId,

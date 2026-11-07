@@ -2141,15 +2141,11 @@ impl IdentityRuntimeError {
                     "retryable": true,
                 }))
             }
-            // The submission's outcome is unknown: its receipt says where it
-            // is read by key.
+            // The submission's outcome is unknown: the input may have run.
+            // Its receipt stays on Meta's internal seams.
             Self::GovernedInput(super::bridge::GovernedInputError::AdmissionUnresolved {
-                receipt,
                 ..
-            }) => Some(serde_json::json!({
-                "kind": "governed_admission_unresolved",
-                "receipt": receipt,
-            })),
+            }) => Some(serde_json::json!({ "kind": "governed_admission_unresolved" })),
             _ => None,
         }
     }
@@ -4541,8 +4537,14 @@ impl IdentityRuntime {
         &self,
         session_id: &SessionId,
     ) -> meerkat_core::authorization::OwnerChangeChurn {
-        let _ = (&self.operation_refusal_observer, session_id);
-        meerkat_core::authorization::OwnerChangeChurn::new()
+        match &self.operation_refusal_observer {
+            Some(observer) => meerkat_core::authorization::OwnerChangeChurn::reporting_to(
+                Arc::clone(observer),
+                session_id.clone(),
+                meerkat_core::OperationRefusalSurface::GovernedInput,
+            ),
+            None => meerkat_core::authorization::OwnerChangeChurn::new(),
+        }
     }
 
     pub fn with_reset_roster_provider(self, provider: Arc<dyn RosterProvider>) -> Self {
@@ -11184,7 +11186,9 @@ impl IdentityRuntime {
             };
             waited += wait.waited();
             if !wait.settled() {
-                return Err(held(waited));
+                // The wait ended at the door's budget: a wake past it (a busy
+                // host, a late timer) is no more waiting.
+                return Err(held(waited.min(within)));
             }
         };
         let super::bridge::BoundGovernedInput {

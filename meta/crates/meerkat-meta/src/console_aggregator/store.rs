@@ -155,6 +155,15 @@ pub trait ConsoleLogStore: Send + Sync {
         ))
     }
 
+    /// Whether this store implements [`Self::transition_send_frame`] and
+    /// [`Self::take_send_frame_hold`]: a governed Console send moves through
+    /// both, so a Console whose store answers `false` refuses every governed
+    /// send before anything is reserved. By default `false`; a store that
+    /// implements both answers `true`, and a wrapper forwards all three.
+    fn supports_send_transitions(&self) -> bool {
+        false
+    }
+
     /// Take a send frame's `delivery_hold`, as a compare-and-set on the
     /// hold: while the frame records one, clear it and answer the updated
     /// frame; when it records none (another dispatch took it, or none was
@@ -337,6 +346,10 @@ impl InMemoryConsoleLogStore {
 impl ConsoleLogStore for InMemoryConsoleLogStore {
     fn send_dedupe_durability(&self) -> ConsoleSendDedupeDurability {
         ConsoleSendDedupeDurability::ProcessLifetime
+    }
+
+    fn supports_send_transitions(&self) -> bool {
+        true
     }
 
     async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
@@ -1102,6 +1115,10 @@ impl SqliteConsoleLogStore {
 impl ConsoleLogStore for SqliteConsoleLogStore {
     fn send_dedupe_durability(&self) -> ConsoleSendDedupeDurability {
         self.dedupe_durability
+    }
+
+    fn supports_send_transitions(&self) -> bool {
+        true
     }
 
     async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {

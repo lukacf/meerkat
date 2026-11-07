@@ -2266,25 +2266,29 @@ impl UnifiedRuntimeBuilder {
                 ));
             };
             let bridge = session_bridge.clone();
-            let identity_runtime = Arc::new(
-                IdentityRuntime::new(IdentityRuntimeConfig {
-                    continuity_store,
-                    lease_provider,
-                    runtime_instance_id: self
-                        .identity_runtime_instance_id
-                        .clone()
-                        .unwrap_or_else(|| format!("meta-{}", std::process::id())),
-                    has_runtime_store: true,
-                    durability_policy: DurabilityPolicy::SyncWriteThrough,
-                    bridge,
-                    default_timeout: None,
-                })
-                .with_runtime_services(AgentRuntimeServices::new(runtime.mob_runtime.handle()))
-                .with_reset_roster_provider_context(
-                    roster_provider.clone(),
-                    Some(runtime.mob_runtime.handle().definition().clone()),
-                ),
+            let identity_runtime = IdentityRuntime::new(IdentityRuntimeConfig {
+                continuity_store,
+                lease_provider,
+                runtime_instance_id: self
+                    .identity_runtime_instance_id
+                    .clone()
+                    .unwrap_or_else(|| format!("meta-{}", std::process::id())),
+                has_runtime_store: true,
+                durability_policy: DurabilityPolicy::SyncWriteThrough,
+                bridge,
+                default_timeout: None,
+            })
+            .with_runtime_services(AgentRuntimeServices::new(runtime.mob_runtime.handle()))
+            .with_reset_roster_provider_context(
+                roster_provider.clone(),
+                Some(runtime.mob_runtime.handle().definition().clone()),
             );
+            // A governed send's "not now" waits are reported where the
+            // agents' operation refusals are.
+            let identity_runtime = Arc::new(match self.operation_refusal_observer.clone() {
+                Some(observer) => identity_runtime.with_operation_refusal_observer(observer),
+                None => identity_runtime,
+            });
             identity_runtime
                 .set_agent_customizer(agent_customizer.clone())
                 .await;

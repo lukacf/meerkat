@@ -447,16 +447,24 @@ them.
   a Chat Completions client GitHub Copilot's stream discipline (a finish
   reason is required, only choice 0 is read); both Copilot Chat Completions
   routes set it.
-- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
-  tokens one request may carry on the client's account and model, when the
-  provider states one (default `None`; wrappers delegate). A GitHub Copilot
-  route states the account model's prompt limit (the tighter of
-  `max_prompt_tokens` and `max_context_window_tokens`).
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit(output_budget)` states
+  the most input tokens one request that asks for `output_budget` output
+  tokens may carry on the client's account and model, when the provider
+  states a limit (default `None`; wrappers delegate). The factory passes the
+  session's own output budget, through a prepared controller too, and a
+  GitHub Copilot route states the account model's prompt limit for it (the
+  tighter of `max_prompt_tokens` and `max_context_window_tokens` less that
+  budget): the limit its gate enforces on the session's requests, also when
+  the account states no output limit.
 - `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
   model, state }` refuses a model the account lists under a policy that is
   not `enabled`, naming the state.
 - `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
   refuses a model the account lists with an empty endpoint list.
+- `meerkat-llm-core`: `streaming::SseEventReader` reads a Server-Sent Events
+  body as the format defines its events (an event ends at its blank line,
+  its `data:` lines join with a line break, and the end of the body reads
+  the last line and the last event), one `streaming::SseStep` per line.
 
 - `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
   last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
@@ -534,13 +542,31 @@ them.
   again later, as before.
 - GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
   network failure or timeout, is tried once more at once, both attempts
-  within the listing's existing 30-second bound; any other answer is final,
-  as before.
+  within the listing's existing 30-second bound (the first within 15
+  seconds, so a first attempt that does not answer leaves the second the
+  rest); any other answer is final, as before.
 - GitHub Copilot: when a temporary token exchange failure leaves no valid
   token and the exchange sent `Retry-After`, every turn until then fails
   with the outage's retryable error without calling the exchange (for at
   most an hour); the first turn after it tries the exchange again. Without
   `Retry-After` the next turn tries it at once, as before.
+- `Retry-After` given as an HTTP date (IMF-fixdate, or the obsolete RFC 850
+  and asctime forms) is read as the delay until that date, none once it is
+  past: by every provider's error classification (a rate limit's retry hint,
+  `LlmError::parse_retry_after`) and by GitHub Copilot's transport (the token
+  exchange's pacing and outage, GitHub's rate limits). Before, only a number
+  of seconds was read.
+- `meerkat-openai`: the OpenAI Responses stream (every Responses route,
+  GitHub Copilot's included) is read as the SSE format defines its events:
+  an event ends at its blank line and the `data:` lines of one event join
+  with a line break, so an event whose data spans several lines is one event
+  instead of a parse error, and at the end of the body its last line counts
+  even without a line break, as does an event whose blank line never came.
+  A body that ends inside an event (its data cut) still ends the response
+  with the retryable incomplete-response error; a complete event whose data
+  does not parse, an empty `data:` field included, is a parse error.
+  A body that writes events on consecutive lines with no blank line between
+  them is read as one event.
 - GitHub Copilot: a session's default compaction threshold stays below the
   account model's prompt limit. The model-aware default (four-fifths of the
   model's context window or input ceiling) now also takes the selected
@@ -780,6 +806,18 @@ them.
   the retryable incomplete-response error, so the turn is tried again and
   nothing of the response is committed. A finish reason still completes a
   turn with or without `[DONE]`. Other routes are unchanged.
+- `meerkat-llm-core`: a `Retry-After` number of seconds too large for
+  milliseconds is the largest delay instead of an overflow
+  (`LlmError::parse_retry_after`).
+- `meerkat-openai`: an OpenAI Responses stream that ends at `[DONE]` without
+  a terminal response no longer drops an item it added
+  (`response.output_item.added` at an `output_index`) and never completed
+  (no `response.output_item.done` at that index), a started tool call
+  included, while the turn ends as complete, on the plain route and on
+  GitHub Copilot's, an item no event names with an id included: the
+  response fails with the retryable incomplete-response error naming the
+  item's `output_index`, nothing of it is committed, and the turn is tried
+  again.
 
 - `meerkat-runtime`: a host store commit no longer sends its batch past its
   fence token's lease. A commit whose outcome stayed unknown or unavailable

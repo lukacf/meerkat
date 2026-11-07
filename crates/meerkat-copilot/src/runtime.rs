@@ -364,12 +364,14 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 return Err(CopilotHttpTransportError::ResponseTooLarge);
             }
             let status = response.status().as_u16();
+            // A number of seconds or an HTTP date, read as every provider
+            // answer's `Retry-After` is.
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(StdDuration::from_secs);
+                .and_then(meerkat_llm_core::LlmError::parse_retry_after)
+                .map(StdDuration::from_millis);
             let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
                 .and_then(|value| value.parse::<u64>().ok());
             let header_rate_limited = github_rate_limited(
@@ -1207,9 +1209,9 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().output_token_limit()
     }
 
-    /// The current route's account prompt limit.
-    fn prompt_token_limit(&self) -> Option<u32> {
-        self.sync_client().prompt_token_limit()
+    /// The current route's account prompt limit for `output_budget`.
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        self.sync_client().prompt_token_limit(output_budget)
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1495,6 +1497,22 @@ impl CopilotCapabilityGatedClient {
     }
 }
 
+/// The most input tokens one request that asks for `output_budget` output
+/// tokens may carry on an account model: the tighter of its stated prompt
+/// limit and its context window less that budget, either alone when only
+/// one is stated. The gate's check of a measured prompt (for the request's
+/// own budget) and the limit stated to the factory (for the session's
+/// budget, the compaction threshold) both read it.
+fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) -> Option<u32> {
+    let window_room = limits
+        .max_context_window_tokens
+        .map(|window| window.saturating_sub(output_budget));
+    match (limits.max_prompt_tokens, window_room) {
+        (Some(prompt), Some(room)) => Some(prompt.min(room)),
+        (prompt, room) => prompt.or(room),
+    }
+}
+
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1509,15 +1527,12 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .or_else(|| self.inner.output_token_limit())
     }
 
-    /// The account model's own prompt limit: the tighter of its prompt
-    /// limit and its context window, either alone when only one is stated.
-    fn prompt_token_limit(&self) -> Option<u32> {
-        let limits = &self.capabilities.limits;
-        match (limits.max_prompt_tokens, limits.max_context_window_tokens) {
-            (Some(prompt), Some(window)) => Some(prompt.min(window)),
-            (prompt, window) => prompt.or(window),
-        }
-        .or_else(|| self.inner.prompt_token_limit())
+    /// The account model's own prompt limit ([`account_prompt_limit`]) for
+    /// `output_budget`, the session's output budget: the limit the gate
+    /// enforces on the session's requests, which ask for that budget.
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        account_prompt_limit(&self.capabilities.limits, output_budget)
+            .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
     fn project_replay_messages(
@@ -1538,17 +1553,8 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
                 .provider_issued_input_tokens
                 .map(|tokens| (tokens, value))
         }) {
-            let prompt_limit = self
-                .capabilities
-                .limits
-                .max_prompt_tokens
-                .or_else(|| {
-                    self.capabilities
-                        .limits
-                        .max_context_window_tokens
-                        .map(|context| context.saturating_sub(request.max_tokens))
-                })
-                .map(u64::from);
+            let prompt_limit =
+                account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
             // A prompt the provider measured over the account's limit is a
             // context refusal, the class the agent compacts on. Copilot's own
             // answer to such a prompt is not known, so none is assumed.
@@ -2444,29 +2450,48 @@ impl CopilotAuthorizer {
 /// The account's model list. An answer the next try may change (a 408,
 /// 502, 503 or 504, or a network failure or timeout) gets one immediate
 /// second attempt, inside the listing's one HTTP bound: both attempts
-/// together take at most [`COPILOT_HTTP_TIMEOUT`].
+/// together take at most [`COPILOT_HTTP_TIMEOUT`], the first at most half of
+/// it.
 async fn fetch_copilot_models(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
     api_base: &str,
     token: &str,
 ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
+    fetch_copilot_models_within(transport, config, api_base, token, COPILOT_HTTP_TIMEOUT).await
+}
+
+/// [`fetch_copilot_models`] inside `bound`: the first attempt gets half of
+/// it, so one that does not answer leaves the second attempt the rest.
+async fn fetch_copilot_models_within(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    api_base: &str,
+    token: &str,
+    bound: StdDuration,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let attempts = async {
-        match list_copilot_models_once(transport, config, &url, token).await {
-            Err(error) if error.worth_an_immediate_retry() => {
-                list_copilot_models_once(transport, config, &url, token).await
-            }
-            answer => answer,
-        }
+    let deadline = tokio::time::Instant::now() + bound;
+    let timed_out = || {
+        Err(CopilotModelDiscoveryError::Transport(
+            CopilotHttpTransportError::Timeout,
+        ))
     };
-    tokio::time::timeout(COPILOT_HTTP_TIMEOUT, attempts)
+    let first = tokio::time::timeout(
+        bound / 2,
+        list_copilot_models_once(transport, config, &url, token),
+    )
+    .await
+    .unwrap_or_else(|_| timed_out());
+    match first {
+        Err(error) if error.worth_an_immediate_retry() => tokio::time::timeout_at(
+            deadline,
+            list_copilot_models_once(transport, config, &url, token),
+        )
         .await
-        .unwrap_or_else(|_| {
-            Err(CopilotModelDiscoveryError::Transport(
-                CopilotHttpTransportError::Timeout,
-            ))
-        })
+        .unwrap_or_else(|_| timed_out()),
+        answer => answer,
+    }
 }
 
 /// One `GET {api_base}/models` with `token`.
@@ -4488,6 +4513,44 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());
     }
 
+    /// The production transport reads a `Retry-After` given as an HTTP date
+    /// as the delay until that date, as it reads a number of seconds: an
+    /// exchange outage paces its retry by it, and a 403 that carries one is a
+    /// rate limit. (Fails-old: only a number of seconds was read, so the date
+    /// gave no delay and the 403 was no rate limit.)
+    #[tokio::test]
+    async fn an_http_date_retry_after_is_read_from_a_real_answer() {
+        let at = (Utc::now() + Duration::seconds(120)).format("%a, %d %b %Y %H:%M:%S GMT");
+        let header = format!("retry-after: {at}\r\n");
+        let (base, hits) = spawn_github_answers(vec![
+            github_answer(503, &header, r#"{"message":"service unavailable"}"#),
+            github_answer(403, &header, r#"{"message":"slow down"}"#),
+        ])
+        .await;
+        let transport = ReqwestCopilotHttpTransport::new();
+
+        let outage = transport
+            .get(
+                &format!("{base}/copilot_internal/v2/token"),
+                HeaderMap::new(),
+            )
+            .await
+            .expect("the outage answer");
+        assert!(
+            outage
+                .retry_after
+                .is_some_and(|delay| (100..=120).contains(&delay.as_secs())),
+            "{:?}",
+            outage.retry_after
+        );
+        let limited = transport
+            .get(&format!("{base}/copilot_internal/user"), HeaderMap::new())
+            .await
+            .expect("the rate limit answer");
+        assert!(limited.rate_limited, "{:?}", limited.retry_after);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     use meerkat_core::auth::TokenStore;
     use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
     use meerkat_core::{
@@ -5293,6 +5356,243 @@ mod tests {
         }
     }
 
+    /// The routed client states the account limits of the route it serves:
+    /// the gated route's prompt limit and output limit reach the factory
+    /// through it (the prompt limit bounds the session's compaction
+    /// threshold). The route's model states a context window and no prompt
+    /// limit, so its prompt limit is the window less the session's output
+    /// budget, which the routed client hands on.
+    #[tokio::test]
+    async fn a_routed_client_states_its_routes_account_limits() {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (env, _) = resolver_environment(&auth_binding).await;
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: crate::CopilotModelCapabilities {
+                limits: crate::CopilotModelLimits {
+                    max_context_window_tokens: Some(128_000),
+                    max_output_tokens: Some(16_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let authorizer = Arc::new(CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding: binding.clone(),
+            env,
+            transport: Arc::new(ScriptedTransport::new([])),
+        });
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: binding.backend(),
+            backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    authorizer,
+                    AuthMetadata::default(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                ),
+            ),
+        };
+        runtime.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: binding.credential_identity().clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        let factory: CopilotRouteClientFactory = Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+        let client = routed_client(
+            Arc::clone(&runtime),
+            connection,
+            Provider::OpenAI,
+            "gpt-test".to_string(),
+            factory,
+        )
+        .expect("routed client");
+        assert_eq!(
+            client.prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        assert_eq!(client.output_token_limit(), Some(16_000));
+    }
+
+    /// A recorded exchange outage answers in place of the exchange until its
+    /// `Retry-After`, kept between one second and one hour from now.
+    #[test]
+    fn an_outage_not_before_stays_between_a_second_and_an_hour() {
+        let now = Utc::now();
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_mins(1)),
+            now + Duration::seconds(60)
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_hours(2)),
+            now + Duration::seconds(3_600),
+            "an hour at most"
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::ZERO),
+            now + Duration::seconds(1),
+            "a second at least"
+        );
+    }
+
+    /// A device sign-in account holding `token` (and a model list) since
+    /// `now`, for a background model listing to answer about.
+    async fn discovery_account(
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> (
+        Arc<CopilotAccountState>,
+        ResolverEnvironment,
+        AuthCredentialIdentity,
+    ) {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (mut env, _) = resolver_environment(&auth_binding).await;
+        env.now = Arc::new(move || now);
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: Default::default(),
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 2,
+            token: token.to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: now + Duration::hours(1),
+            expires_at: now + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        (state, env, binding.credential_identity().clone())
+    }
+
+    /// A background model listing answers only for the token it was asked
+    /// with: once the account holds a newer token, the listing's refusal of
+    /// the older one changes nothing, and the newer token and its list keep
+    /// serving.
+    #[tokio::test]
+    async fn a_background_listing_for_an_older_token_leaves_the_newer_one() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("newer", now).await;
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            )])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            token: "older".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(current.token, "newer");
+        assert_eq!(
+            current.expires_at,
+            now + Duration::hours(2),
+            "the newer token is not refused"
+        );
+        assert!(current.models.is_some(), "its list keeps serving");
+    }
+
+    /// A device sign-in's background listing that fails without refusing
+    /// the token (here a 503, on both attempts) is tried again only after
+    /// the listing's `Retry-After`, not after the default 30 seconds.
+    #[tokio::test]
+    async fn a_failed_background_listing_waits_for_its_retry_after() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("derived", now).await;
+        let unavailable = || CopilotHttpResponse {
+            retry_after: Some(StdDuration::from_mins(2)),
+            ..json_response(503, serde_json::json!({"message": "unavailable"}))
+        };
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([unavailable(), unavailable()])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            token: "derived".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(
+            current.model_discovery_refresh_at,
+            Some(now + Duration::seconds(120))
+        );
+        assert!(current.models.is_some(), "the last list keeps serving");
+    }
+
     /// Structured output on every Copilot route: the routed client (and the
     /// account capability gate in front of the adapter) hands the adapter the
     /// exact request the agent loop composed, schema section and native
@@ -5515,21 +5815,24 @@ mod tests {
             )
         };
         assert_eq!(
-            gated(Some(64_000), Some(128_000)).prompt_token_limit(),
+            gated(Some(64_000), Some(128_000)).prompt_token_limit(0),
             Some(64_000)
         );
         assert_eq!(
-            gated(Some(200_000), Some(128_000)).prompt_token_limit(),
+            gated(Some(200_000), Some(128_000)).prompt_token_limit(0),
             Some(128_000)
         );
-        assert_eq!(gated(Some(64_000), None).prompt_token_limit(), Some(64_000));
         assert_eq!(
-            gated(None, Some(128_000)).prompt_token_limit(),
+            gated(Some(64_000), None).prompt_token_limit(0),
+            Some(64_000)
+        );
+        assert_eq!(
+            gated(None, Some(128_000)).prompt_token_limit(0),
             Some(128_000)
         );
-        assert_eq!(gated(None, None).prompt_token_limit(), None);
+        assert_eq!(gated(None, None).prompt_token_limit(0), None);
         assert_eq!(
-            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(),
+            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(0),
             None
         );
     }
@@ -5608,6 +5911,102 @@ mod tests {
             "{refused:?}"
         );
         assert!(gated(64_000).request_pressure(&request).is_ok());
+    }
+
+    /// The gate and the compaction threshold read one prompt limit: the
+    /// tighter of the stated prompt limit and the context window less the
+    /// request's output budget. The gate takes the request's own budget; the
+    /// limit stated to the factory takes the session's budget, which the
+    /// session's requests ask for, so it is the limit the gate enforces on
+    /// them. (Fails-old: with only the window stated the factory read the
+    /// whole window, above the gate's limit; with both stated the gate read
+    /// the prompt limit alone, above the window.)
+    #[test]
+    fn the_gate_and_the_compaction_threshold_read_one_prompt_limit() {
+        let gated = |input_tokens, limits| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits,
+                    supports: Default::default(),
+                }),
+            )
+        };
+        let window_only = crate::CopilotModelLimits {
+            max_context_window_tokens: Some(128_000),
+            max_output_tokens: Some(32_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            gated(0, window_only.clone()).prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        assert!(matches!(
+            gated(96_001, window_only).request_pressure(&request),
+            Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+        ));
+
+        let prompt_above_window = crate::CopilotModelLimits {
+            max_prompt_tokens: Some(200_000),
+            max_context_window_tokens: Some(128_000),
+            ..Default::default()
+        };
+        request.max_tokens = 8_000;
+        let refused = gated(125_000, prompt_above_window.clone()).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 120_000, .. })
+            ),
+            "the window less the request's output budget binds: {refused:?}"
+        );
+        assert!(
+            gated(120_000, prompt_above_window)
+                .request_pressure(&request)
+                .is_ok()
+        );
+    }
+
+    /// A model whose account states a context window and no output limit:
+    /// the limit stated for a session's output budget is the window less
+    /// that budget, the limit the gate enforces on the session's requests.
+    /// A 128_000 window with a 32_000 budget states 96_000, and the gate
+    /// refuses a measured 96_001-token prompt of a 32_000-token request at
+    /// 96_000. (Fails-old: without an output limit the stated limit took a
+    /// budget of 0, the whole window, so the session's default compaction
+    /// threshold sat above what the gate admits.)
+    #[test]
+    fn a_window_without_an_output_limit_states_the_limit_for_the_session_budget() {
+        let gated = |input_tokens| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        assert_eq!(
+            gated(0).prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        let refused = gated(96_001).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+            ),
+            "{refused:?}"
+        );
     }
 
     /// A model the account lists with a policy state other than `enabled`
@@ -9425,6 +9824,102 @@ mod tests {
                 );
                 assert_eq!(transport.request_count(), 1, "{label}: no second attempt");
             }
+        }
+
+        /// A transport whose answers to the listing take `delays[n]` for the
+        /// n-th request (the last delay for every later one), each then the
+        /// model list. A delay is never ready on its first poll, as the
+        /// network is not.
+        struct DelayedListing {
+            delays: Vec<StdDuration>,
+            requests: std::sync::atomic::AtomicUsize,
+        }
+
+        impl DelayedListing {
+            fn new(delays: impl IntoIterator<Item = StdDuration>) -> Self {
+                Self {
+                    delays: delays.into_iter().collect(),
+                    requests: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for DelayedListing {
+            async fn get(
+                &self,
+                _url: &str,
+                _headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                let request = self.requests.fetch_add(1, Ordering::SeqCst);
+                let delay = self
+                    .delays
+                    .get(request)
+                    .or(self.delays.last())
+                    .copied()
+                    .unwrap_or_default();
+                tokio::time::sleep(delay).await;
+                Ok(models_response())
+            }
+        }
+
+        /// A first listing attempt that does not answer within its half of
+        /// the listing's bound is cut there, and the second attempt answers
+        /// within the rest of the bound, here after 100 ms of its 400.
+        /// (Fails-old: the first attempt used the whole bound, so the second
+        /// had no time to answer and the listing timed out.)
+        #[tokio::test]
+        async fn a_listing_whose_first_attempt_hangs_is_answered_by_the_second() {
+            let transport =
+                DelayedListing::new([StdDuration::from_secs(5), StdDuration::from_millis(100)]);
+            let started = std::time::Instant::now();
+            let snapshot = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the second attempt lists the models: {error}"));
+            assert!(snapshot.model("gpt-test").is_some());
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                started.elapsed() < StdDuration::from_secs(5),
+                "the first attempt was cut within the bound"
+            );
+        }
+
+        /// Two listing attempts that both hang end with the listing's bound,
+        /// not past it: the second attempt gets only what is left of the
+        /// bound.
+        #[tokio::test]
+        async fn a_listing_whose_attempts_both_hang_ends_at_its_bound() {
+            let transport = DelayedListing::new([StdDuration::from_secs(5)]);
+            let started = std::time::Instant::now();
+            let failed = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    failed,
+                    Err(CopilotModelDiscoveryError::Transport(
+                        CopilotHttpTransportError::Timeout
+                    ))
+                ),
+                "{failed:?}"
+            );
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                elapsed < StdDuration::from_millis(1_100),
+                "the listing ends at its 800 ms bound, not past it: {elapsed:?}"
+            );
         }
 
         /// T8: a GitHub App installation token (server-to-server) has no

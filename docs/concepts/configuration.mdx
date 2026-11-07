@@ -251,7 +251,8 @@ context window and separate input ceiling, when one is declared. For
 `gpt-6-astra`, the 922,000-token input ceiling gives a 737,600-token default
 trigger; its shared input-plus-output context window remains 1,050,000 tokens.
 When the selected account states a smaller prompt limit for the model (a
-GitHub Copilot account model's `max_prompt_tokens`), the trigger is 80 percent
+GitHub Copilot account model's `max_prompt_tokens`, or its context window less
+the session's output budget, `max_tokens`), the trigger is 80 percent
 of that limit instead. An explicit `auto_compact_threshold`, or a per-build
 override, above the account's prompt limit is lowered to the limit, with a
 warning: the account refuses a longer prompt whatever the threshold.

@@ -4106,8 +4106,11 @@ const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
 /// can reach the server before the request does. The server cannot match it
 /// and keeps working; this was seen in about 3 of 1500 immediate abandons on
 /// a multi-threaded runtime. Ordinary deadlines fire long after the request
-/// was written. A real fix needs rmcp to write a request before later
-/// messages. Without this guard no cancellation is sent at all.
+/// was written. On a streamable-HTTP connection this cannot happen: the
+/// guard abandons the request in the registry before it sends the notice, so
+/// a request not yet posted is never posted. Over stdio and legacy SSE it
+/// can; a real fix needs rmcp to write a request before later messages.
+/// Without this guard no cancellation is sent at all.
 struct AbandonedRequest {
     peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
     abandoned: crate::transport::abandoned::AbandonedRequests,

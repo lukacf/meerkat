@@ -73,17 +73,30 @@ impl AbandonedRequests {
 
     /// The caller stopped waiting for `id`: its HTTP exchange ends now, or as
     /// soon as it starts.
+    ///
+    /// An abandon that arrives after the exchange already ended (the response
+    /// was read, but the caller's deadline fired before it saw it) is
+    /// remembered like an early one. Request ids are unique per connection,
+    /// so it never matches; it only holds one of the bounded slots, and a
+    /// burst of them can push out a genuinely early abandon, whose request is
+    /// then posted and told by the cancellation notice alone.
     pub(crate) fn abandon(&self, id: &RequestId) {
         let key = self.key(id);
-        let mut state = self.state();
-        if let Some((_, token)) = state.in_flight.remove(&key) {
+        let in_flight = {
+            let mut state = self.state();
+            let in_flight = state.in_flight.remove(&key);
+            if in_flight.is_none() {
+                if state.abandoned.len() == REMEMBERED_ABANDONED {
+                    state.abandoned.pop_front();
+                }
+                state.abandoned.push_back(key);
+            }
+            in_flight
+        };
+        // Fired with the registry unlocked: its waiters never run under it.
+        if let Some((_, token)) = in_flight {
             token.cancel();
-            return;
         }
-        if state.abandoned.len() == REMEMBERED_ABANDONED {
-            state.abandoned.pop_front();
-        }
-        state.abandoned.push_back(key);
     }
 
     /// Registers `id` as in flight until the returned guard is dropped. Its

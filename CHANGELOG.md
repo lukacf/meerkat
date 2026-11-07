@@ -175,6 +175,14 @@ them.
   `MobError::UnsupportedForMode` unless it is host human input to a local
   runtime-backed member, so the requester is never dropped on the way.
 
+- `meerkat-core`: `service::SessionBuildOptions` gains the public field
+  `mcp_auth_resolver_override` (see Added), so a struct literal needs it;
+  `Default` fills it with `None`, which keeps every existing build
+  unchanged. Behaviour-only (not measured by the gate): `meerkat`:
+  `AgentBuildConfig::apply_session_build_options` sets
+  `AgentBuildConfig::mcp_auth_resolver` from the options, as it sets the
+  other fields, so it is `None` after options without an override.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -347,6 +355,20 @@ them.
   directly, never one carried across a peer hop). `Input::requester` is the
   one accessor: a governed input's requester is its work association's, any
   other input's is the one its host supplied.
+
+- `meerkat-core`, `meerkat`: a session build can carry its own MCP
+  credential source, `SessionBuildOptions::mcp_auth_resolver_override`: an
+  `Arc<dyn McpAuthResolver>` erased as `llm_client_override` is, set with
+  `meerkat::encode_mcp_auth_resolver_override_for_service` and read with
+  `decode_mcp_auth_resolver_override_from_service`.
+  `AgentBuildConfig::from_create_session_request` places it in
+  `AgentBuildConfig::mcp_auth_resolver`, so every MCP connection of that
+  build reads its OAuth bearer and its stdio service secrets through it,
+  never through the factory's source. A payload that is not a credential
+  source refuses every credential and never falls back to the factory's.
+  It is process-local: never serialized, and session recovery leaves it
+  absent, so a host that needs it supplies it on every build of the
+  session.
 
 ### Changed
 

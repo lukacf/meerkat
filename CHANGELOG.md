@@ -232,17 +232,39 @@ them.
   itself (see Changed). The struct is `#[non_exhaustive]`, so the field is
   additive.
 
+- `meerkat-mob`: `MobHandle::start_governed_input_with_custody_at` and
+  `start_internal_governed_input_with_custody_at` submit a bound governed
+  input at the member incarnation the caller read (the runtime id and
+  fence token of a `RosterEntry`, and the session it bound the input for),
+  where the unpinned forms submit to whichever incarnation is current when
+  they run: a member rotated, respawned or retired since the read is
+  refused (`MobError::StaleFenceToken`, or `MemberNotFound` once no
+  incarnation of it is live), one whose session moved under the same
+  incarnation `MobError::StaleDeliveryScope`, and nothing is admitted, so a
+  check the caller made of the incarnation it read (its addressability,
+  say) holds for the work admitted.
+
 ### Changed
 
-- `meerkat-mob`: external work (a member send from outside the mob,
-  `MemberHandle::send`, or a submit of `WorkOrigin::External`) addressed to
-  an identity entry, or to a member whose name is reserved unreadable, is
-  refused `MobError::IdentityMember` (structured kind `identity_member`)
-  before anything is submitted, whatever its profile's
-  `external_addressable` says, where MobMachine admitted it to an entry
-  whose runtime is externally addressable. The entry's host delivers to it
-  through its own door, as internal work, which MobMachine admits as for
-  any member. Behaviour-only: the signatures keep their shape.
+- `meerkat-mob`: external work addressed to an identity entry, or to a
+  member whose name is reserved unreadable, is refused
+  `MobError::IdentityMember` (structured kind `identity_member`) before
+  anything is submitted, whatever its profile's `external_addressable` says
+  and whatever session a scope-bound submit names, where MobMachine
+  admitted it to an entry whose runtime is externally addressable. External
+  work is every member send from outside the mob: `MemberHandle::send`, a
+  submit of `WorkOrigin::External` (`mob/submit_work` with the default
+  origin), the unkeyed `mob/member_send` (`send_mob_member_content` in the
+  Python SDK, `sendMobMemberContent` in the TypeScript SDK),
+  `mob/ingress_interaction`, MCP `meerkat_mob_member_send`, the web
+  runtime's `mob_member_send` (`Mob.send` in the Web SDK),
+  `MobHandle::start_governed_input*`, and `start_host_human_input*` with an
+  External spec. The entry's host delivers to it through its own door, as
+  internal work, which MobMachine admits as for any member. MobMachine's
+  stale session refusal answers no such work, so an external submit to an
+  entry whose session moved is refused as an identity member, never as a
+  stale scope that a retry would not clear. Behaviour-only: the signatures
+  keep their shape.
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
   composition reports in `DeclaredEntryRefusal::NonAuthoritative`, is a

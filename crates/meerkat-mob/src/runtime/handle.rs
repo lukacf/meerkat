@@ -13159,7 +13159,7 @@ impl MobHandle {
         identity: &AgentIdentity,
         input: meerkat_runtime::Input,
     ) -> Result<MemberTurnHandle, MobError> {
-        self.start_governed_input_inner(identity, input, None, WorkOrigin::External)
+        self.start_governed_input_inner(identity, input, None, WorkOrigin::External, None)
             .await
     }
 
@@ -13178,7 +13178,7 @@ impl MobHandle {
     ) -> impl std::future::Future<Output = Result<MemberTurnHandle, MobError>> + Send + 'a {
         // Construct before returning: even a never-polled future owns it.
         let custody = GovernedInputCustody::new(custody);
-        self.start_governed_input_inner(identity, input, Some(custody), WorkOrigin::External)
+        self.start_governed_input_inner(identity, input, Some(custody), WorkOrigin::External, None)
     }
 
     /// [`Self::start_governed_input_with_custody`] as internal work, for the
@@ -13209,9 +13209,73 @@ impl MobHandle {
     ) -> impl std::future::Future<Output = Result<MemberTurnHandle, MobError>> + Send + 'a {
         // Construct before returning: even a never-polled future owns it.
         let custody = GovernedInputCustody::new(custody);
-        self.start_governed_input_inner(identity, input, Some(custody), WorkOrigin::Internal)
+        self.start_governed_input_inner(identity, input, Some(custody), WorkOrigin::Internal, None)
     }
 
+    /// [`Self::start_governed_input_with_custody`] at the member incarnation
+    /// the caller read: `runtime_id` and `fence_token` (a [`RosterEntry`]'s,
+    /// say), bound to `session_id`. The submission names that incarnation,
+    /// where the unpinned form submits to whichever incarnation is current
+    /// when it runs: a member rotated, respawned or retired since the read
+    /// is refused ([`MobError::StaleFenceToken`], or
+    /// [`MobError::MemberNotFound`] once no incarnation of it is live), one
+    /// whose session moved under the same incarnation
+    /// [`MobError::StaleDeliveryScope`], and nothing is admitted: the custody
+    /// settles `NotAdmitted`. A check the caller made of the incarnation it
+    /// read, its addressability for one, therefore holds for the work
+    /// admitted.
+    ///
+    /// The custody is guarded before the future is returned, so dropping the
+    /// future before it is first polled still settles it `NotAdmitted`.
+    #[cfg(feature = "runtime-adapter")]
+    pub fn start_governed_input_with_custody_at<'a>(
+        &'a self,
+        runtime_id: &'a AgentRuntimeId,
+        fence_token: FenceToken,
+        session_id: &SessionId,
+        input: meerkat_runtime::Input,
+        custody: Box<dyn meerkat_runtime::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> impl std::future::Future<Output = Result<MemberTurnHandle, MobError>> + Send + 'a {
+        // Construct before returning: even a never-polled future owns it.
+        let custody = GovernedInputCustody::new(custody);
+        self.start_governed_input_inner(
+            &runtime_id.identity,
+            input,
+            Some(custody),
+            WorkOrigin::External,
+            Some((runtime_id.clone(), fence_token, session_id.clone())),
+        )
+    }
+
+    /// [`Self::start_internal_governed_input_with_custody`] at the member
+    /// incarnation the caller read, as
+    /// [`Self::start_governed_input_with_custody_at`] submits external work:
+    /// a member rotated, respawned, retired or rebound since the read is
+    /// refused and nothing is admitted. For the trusted host composition
+    /// only, as the unpinned form is.
+    #[cfg(feature = "runtime-adapter")]
+    pub fn start_internal_governed_input_with_custody_at<'a>(
+        &'a self,
+        runtime_id: &'a AgentRuntimeId,
+        fence_token: FenceToken,
+        session_id: &SessionId,
+        input: meerkat_runtime::Input,
+        custody: Box<dyn meerkat_runtime::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> impl std::future::Future<Output = Result<MemberTurnHandle, MobError>> + Send + 'a {
+        // Construct before returning: even a never-polled future owns it.
+        let custody = GovernedInputCustody::new(custody);
+        self.start_governed_input_inner(
+            &runtime_id.identity,
+            input,
+            Some(custody),
+            WorkOrigin::Internal,
+            Some((runtime_id.clone(), fence_token, session_id.clone())),
+        )
+    }
+
+    /// `incarnation`, when the caller pinned one, is the runtime id, fence
+    /// token and session the input is submitted at; otherwise the member's
+    /// current ones are read from the published machine state.
     #[cfg(feature = "runtime-adapter")]
     async fn start_governed_input_inner(
         &self,
@@ -13219,6 +13283,7 @@ impl MobHandle {
         input: meerkat_runtime::Input,
         custody: Option<GovernedInputCustody>,
         origin: WorkOrigin,
+        incarnation: Option<(AgentRuntimeId, FenceToken, SessionId)>,
     ) -> Result<MemberTurnHandle, MobError> {
         let header = input.header();
         if header.authority_association.is_none() || header.ingress_context.is_none() {
@@ -13227,28 +13292,37 @@ impl MobHandle {
             });
         }
         let handling_mode = input.handling_mode().unwrap_or(HandlingMode::Queue);
-        let domain_identity = AgentIdentity::from(identity.as_str());
-        let machine_state = self.machine_state_watch_rx.borrow().clone();
-        let Some((runtime_id, fence_token)) = machine_state
-            .member_runtime_material_for_identity(&mob_dsl::AgentIdentity::from_domain(
-                &domain_identity,
-            ))
-            .map(|material| material.to_domain_for_identity(&domain_identity))
-        else {
-            let context = match origin {
-                WorkOrigin::External => "start_governed_input",
-                WorkOrigin::Internal => "start_internal_governed_input",
-            };
-            return Err(self
-                .resolve_submit_work_missing_runtime_rejection(identity, origin, context)
-                .await);
+        let (runtime_id, fence_token, session_id) = match incarnation {
+            // The incarnation the caller read: MobMachine's admission
+            // refuses it if the member moved since.
+            Some(incarnation) => incarnation,
+            None => {
+                let domain_identity = AgentIdentity::from(identity.as_str());
+                let machine_state = self.machine_state_watch_rx.borrow().clone();
+                let Some((runtime_id, fence_token)) = machine_state
+                    .member_runtime_material_for_identity(&mob_dsl::AgentIdentity::from_domain(
+                        &domain_identity,
+                    ))
+                    .map(|material| material.to_domain_for_identity(&domain_identity))
+                else {
+                    let context = match origin {
+                        WorkOrigin::External => "start_governed_input",
+                        WorkOrigin::Internal => "start_internal_governed_input",
+                    };
+                    return Err(self
+                        .resolve_submit_work_missing_runtime_rejection(identity, origin, context)
+                        .await);
+                };
+                let session_id =
+                    Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state)
+                        .ok_or_else(|| MobError::UnsupportedForMode {
+                            mode: crate::MobRuntimeMode::TurnDriven,
+                            reason: "governed input requires a local session-backed member"
+                                .to_string(),
+                        })?;
+                (runtime_id, fence_token, session_id)
+            }
         };
-        let session_id =
-            Self::machine_bridge_session_id_for_identity(&domain_identity, &machine_state)
-                .ok_or_else(|| MobError::UnsupportedForMode {
-                    mode: crate::MobRuntimeMode::TurnDriven,
-                    reason: "governed input requires a local session-backed member".to_string(),
-                })?;
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
         // The same SubmitWork admission, member lane and settlement as any

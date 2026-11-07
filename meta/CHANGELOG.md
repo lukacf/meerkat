@@ -197,6 +197,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Operator memory is not injected on governed sends: a Console send to an
   agent whose input is governed (its host binds every input) recalls none
   of the sender's operator memory.
+- Operator memory reaches only this gateway's own session-backed members:
+  the person a turn is for does not cross the supervisor bridge. A turn of
+  a member placed on another host, or of an externally bound member,
+  recalls no operator memory, a turn that a person's schedule fires
+  included.
 
 ## [0.9.10] - 2026-11-04
 

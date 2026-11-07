@@ -269,7 +269,14 @@ def test_initial_hook_joins_original_protected_inputs_and_exact_wheels(selected,
     assert project.read_file("config/mob.toml") == original_definition
     original_inputs = {**selected.protected, "application/tool-policy.json": selected.policy}
     for name, pin in original_inputs.items():
-        assert project.read_file(name).encode() == pin.read()
+        if name == "application/console.json":
+            # The pin declares one shared console account; every Build of
+            # this source declares named accounts instead, the one change
+            # its installation's update accepts.
+            assert json.loads(pin.read()) == {"authentication": "local-password"}
+            assert project.read_file(name) == '{"authentication":"local-accounts"}\n'
+        else:
+            assert project.read_file(name).encode() == pin.read()
         with pytest.raises(WorkspaceError, match="read-only"):
             project.write_file(name, "unselected builder override\n")
     for wheel in (selected.target.meta_wheel, selected.target.toolkit_wheel, *selected.target.dependency_wheels):

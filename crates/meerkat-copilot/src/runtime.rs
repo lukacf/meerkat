@@ -5448,6 +5448,146 @@ mod tests {
         assert_eq!(client.output_token_limit(), Some(16_000));
     }
 
+    /// A recorded exchange outage answers in place of the exchange until its
+    /// `Retry-After`, kept between one second and one hour from now.
+    #[test]
+    fn an_outage_not_before_stays_between_a_second_and_an_hour() {
+        let now = Utc::now();
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_secs(60)),
+            now + Duration::seconds(60)
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_secs(7_200)),
+            now + Duration::seconds(3_600),
+            "an hour at most"
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::ZERO),
+            now + Duration::seconds(1),
+            "a second at least"
+        );
+    }
+
+    /// A device sign-in account holding `token` (and a model list) since
+    /// `now`, for a background model listing to answer about.
+    async fn discovery_account(
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> (
+        Arc<CopilotAccountState>,
+        ResolverEnvironment,
+        AuthCredentialIdentity,
+    ) {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (mut env, _) = resolver_environment(&auth_binding).await;
+        env.now = Arc::new(move || now);
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: Default::default(),
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 2,
+            token: token.to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: now + Duration::hours(1),
+            expires_at: now + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        (state, env, binding.credential_identity().clone())
+    }
+
+    /// A background model listing answers only for the token it was asked
+    /// with: once the account holds a newer token, the listing's refusal of
+    /// the older one changes nothing, and the newer token and its list keep
+    /// serving.
+    #[tokio::test]
+    async fn a_background_listing_for_an_older_token_leaves_the_newer_one() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("newer", now).await;
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            )])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            token: "older".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(current.token, "newer");
+        assert_eq!(
+            current.expires_at,
+            now + Duration::hours(2),
+            "the newer token is not refused"
+        );
+        assert!(current.models.is_some(), "its list keeps serving");
+    }
+
+    /// A device sign-in's background listing that fails without refusing
+    /// the token (here a 503, on both attempts) is tried again only after
+    /// the listing's `Retry-After`, not after the default 30 seconds.
+    #[tokio::test]
+    async fn a_failed_background_listing_waits_for_its_retry_after() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("derived", now).await;
+        let unavailable = || CopilotHttpResponse {
+            retry_after: Some(StdDuration::from_secs(120)),
+            ..json_response(503, serde_json::json!({"message": "unavailable"}))
+        };
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([unavailable(), unavailable()])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            token: "derived".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(
+            current.model_discovery_refresh_at,
+            Some(now + Duration::seconds(120))
+        );
+        assert!(current.models.is_some(), "the last list keeps serving");
+    }
+
     /// Structured output on every Copilot route: the routed client (and the
     /// account capability gate in front of the adapter) hands the adapter the
     /// exact request the agent loop composed, schema section and native

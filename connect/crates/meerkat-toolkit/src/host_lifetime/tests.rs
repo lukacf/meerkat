@@ -1382,6 +1382,107 @@ async fn admitted_native_setup_issuance_finishes_before_close_and_close_first_re
     store.release();
 }
 
+/// The settled activation close ends the bound native grant owner's custody
+/// while a task of the closed host still holds the owner: that reference can
+/// no longer use or change the owner, and the same grant store restores at
+/// once in this process, with every acknowledged grant.
+#[tokio::test]
+async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held() {
+    use meerkat_authorization::{
+        clock::HostAuthorizationClock,
+        grants::{
+            FileGrantOwnerStore, GrantDurabilityError, GrantOwnerStore, GrantRefusal,
+            LocalGrantAuthority, LocalGrantConfiguration,
+        },
+    };
+
+    let mut f = Fixture::new();
+    let path = f._directory.path().join("close-release-grants");
+    let store = || -> Arc<dyn GrantOwnerStore> { Arc::new(FileGrantOwnerStore::new(&path)) };
+    let restore = || {
+        LocalGrantAuthority::restore(
+            store(),
+            LocalAuthorizationPublication::new(),
+            Arc::new(HostAuthorizationClock),
+        )
+    };
+    let publication = LocalAuthorizationPublication::new();
+    let root = principal(PrincipalKind::Human, "operator");
+    let application = principal(PrincipalKind::ServiceAccount, "application");
+    let grants = Arc::new(
+        LocalGrantAuthority::new_durable(
+            LocalGrantConfiguration {
+                root: root.clone(),
+                namespace: id("close-release-test"),
+                generation: 1,
+            },
+            store(),
+            publication.clone(),
+            Arc::new(HostAuthorizationClock),
+        )
+        .unwrap(),
+    );
+    let kept = grants
+        .issue_root(
+            &root,
+            id("kept"),
+            application.clone(),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+        .unwrap();
+    {
+        let owner = Arc::get_mut(&mut f.owner).unwrap();
+        owner
+            .bind_native_authorization_publication(publication)
+            .unwrap();
+        owner.bind_native_grant_custody(&grants).unwrap();
+        assert_eq!(
+            owner.bind_native_grant_custody(&grants),
+            Err(HostLifetimeError::Denied),
+            "the bound owner is never replaced"
+        );
+    }
+    f.open();
+    // Stands in for a task of the host that outlives its close; the host's
+    // own reference is gone.
+    let straggler = Arc::clone(&grants);
+    drop(grants);
+
+    let closing = f.owner.host_lost().unwrap();
+    straggler
+        .resolve_lineage(std::slice::from_ref(&kept), &application, None)
+        .expect("custody holds until the close settles");
+    assert!(
+        matches!(restore(), Err(GrantDurabilityError::StoreUnavailable)),
+        "the lease is held until the close settles"
+    );
+    assert_eq!(
+        f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+
+    assert!(matches!(
+        straggler.resolve_lineage(std::slice::from_ref(&kept), &application, None),
+        Err(GrantRefusal::Unavailable)
+    ));
+    assert_eq!(
+        straggler.issue_root(
+            &root,
+            id("late"),
+            application.clone(),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        ),
+        Err(GrantRefusal::Unavailable)
+    );
+    let successor = restore().expect("the settled close handed the lease back");
+    successor
+        .resolve_lineage(std::slice::from_ref(&kept), &application, None)
+        .expect("the successor keeps every acknowledged grant");
+    drop(straggler);
+}
+
 #[test]
 fn schema7_operator_is_explicit_and_cannot_be_inferred_from_application() {
     let fixture = Fixture::new();

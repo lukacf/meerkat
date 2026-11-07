@@ -1050,6 +1050,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd is violated."' \
   'echo "Error: Action property AuditOwnedEdgeKeepsItsOwner is violated."' \
   'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
+  'echo "Error: Invariant owned_edge_owner_is_a_store_owned_end is violated."' \
   'for action in DeclareOwnedIdentityEdgeDeclared DeclareOwnedIdentityEdgeAlreadyOwned DeclareOwnedIdentityEdgePeerUnknown DeclareOwnedIdentityEdgeOwnerInvalid DeclareOwnedIdentityEdgeMobNotRunningStopped EndOwnedIdentityEdgeEnded EndOwnedIdentityEdgeNotOwner EndOwnedIdentityEdgeAbsent EndOwnedIdentityEdgeNonAuthoritative EndOwnedIdentityEdgeChangesHeld EndOwnedIdentityEdgeMobNotRunningStopped AdmitMemberUnwireAdmittedRunning AdmitMemberUnwireAdmittedStopped AdmitMemberUnwireOwnedEdgeRunning AdmitMemberUnwireOwnedEdgeStopped RecoverOwnedIdentityEdgeRecoveredRunning RecoverOwnedIdentityEdgeRecoveredStopped RecoverOwnedIdentityEdgeSkippedRunning RecoverOwnedIdentityEdgeSkippedStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "<C1RecoverInBootOrder line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \

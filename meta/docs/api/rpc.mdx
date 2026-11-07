@@ -1208,7 +1208,9 @@ another caller's). On a console that requires sign-in, a person's send also
 carries the person's qualified principal to the agent's run as its original
 requester; the frame keeps it in storage and no view returns it. A
 service's, a token principal's and an anonymous caller's sends carry none,
-and on an Open console no send does.
+and on an Open console no ungoverned send does. The agent's model reads a
+person's message on a console that requires sign-in with a sender label, an
+injected-context row "Message from" and the display name right before it.
 
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 

@@ -758,6 +758,9 @@ fn scheduled_sender(
         display_name: sender.principal().map(ToString::to_string),
         caller_scope: console_caller_scope(&sender.scope()),
         requester,
+        // A schedule's fire is no human message: its turn carries no sender
+        // label, although it may act for the schedule's person.
+        model_label: None,
     }
 }
 

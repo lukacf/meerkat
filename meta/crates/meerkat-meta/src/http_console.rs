@@ -201,16 +201,24 @@ impl ConsoleHttpAuthContext {
     /// included.
     fn sender(&self, decisions: &RuntimeDecisionState) -> crate::console_aggregator::ConsoleSender {
         let kind = self.actor_kind();
+        let requester = self
+            .human
+            .as_ref()
+            .filter(|_| console_sends_name_requesters(decisions))
+            .and_then(|human| human.principal().ok());
+        // The model reads a person's message with its sender label exactly
+        // where the send names the person as requester.
+        let model_label = requester
+            .as_ref()
+            .and(self.principal.as_deref())
+            .map(|name| format!("Message from {name}"));
         crate::console_aggregator::ConsoleSender {
             kind,
             assurance: kind.assurance(),
             display_name: self.principal.clone(),
             caller_scope: self.caller_scope(),
-            requester: self
-                .human
-                .as_ref()
-                .filter(|_| console_sends_name_requesters(decisions))
-                .and_then(|human| human.principal().ok()),
+            requester,
+            model_label,
         }
     }
 
@@ -3318,12 +3326,11 @@ async fn console_send_identity_first_governed(
         &identity,
         &crate::console_governed_ingress::ConsoleSendContext::for_request(&request),
     )?;
-    // The sender's person principal, carried to the agent's run as its
-    // original requester (a governed send's requester is its association's).
-    let requester = governance
-        .sender
-        .as_ref()
-        .and_then(|sender| sender.requester.clone());
+    // What the send carries for its person: the original requester of the
+    // agent's run (a governed send's requester is its association's) and the
+    // sender label its model reads.
+    let attribution =
+        crate::console_aggregator::ConsoleHumanAttribution::of_sender(governance.sender.as_ref());
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
@@ -3438,7 +3445,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &request.selected_skill_keys(),
                 &accepted,
-                requester.as_ref(),
+                &attribution,
                 governed,
             )
             .await;
@@ -3496,7 +3503,7 @@ async fn console_send_identity_first_governed(
     let dispatch_skill_references = request.selected_skill_keys();
     let dispatch_origin = request.origin.clone();
     let dispatch_accepted = accepted.clone();
-    let dispatch_requester = requester;
+    let dispatch_attribution = attribution;
     let dispatch_expected_alias =
         if crate::member_comms_id::is_reserved_generated_alias(&requested_identity) {
             Some(requested_identity)
@@ -3521,7 +3528,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &dispatch_skill_references,
                 &dispatch_accepted,
-                dispatch_requester.as_ref(),
+                &dispatch_attribution,
                 governed,
             )
             .await;

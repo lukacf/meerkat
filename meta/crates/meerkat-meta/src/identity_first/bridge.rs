@@ -2518,6 +2518,9 @@ struct InternalBridgeWork<'a> {
     /// The original requester of the explicit human lane's turn, carried to
     /// the member's admitted input. Absent on every other lane.
     requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The sender label of the explicit human lane's message, which the
+    /// member's model reads right before it. Absent on every other lane.
+    sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
 /// Which lane a submission runs in.
@@ -2665,10 +2668,14 @@ async fn submit_internal_bridge_work(
         work.injected_context,
         work.interaction_id,
     );
-    // The original requester rides only the explicit human lane (refused on
-    // every other lane before this), onto the member's admitted input.
+    // The original requester and the sender label ride only the explicit
+    // human lane (refused on every other lane before this), onto the
+    // member's admitted input.
     if let Some(requester) = work.requester {
         spec = spec.with_requester(requester.clone());
+    }
+    if let Some(label) = work.sender_label {
+        spec = spec.with_sender_label(label.clone());
     }
     if let Some(expected_session) = work.host_human_session {
         if entry.bridge_session_id() != Some(expected_session) {
@@ -3774,6 +3781,11 @@ pub struct BridgeDelivery {
     /// the member's admitted input; every other lane refuses one typed
     /// instead of delivering the turn without it.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The sender label of this turn's message, which the member's model
+    /// reads right before it (see [`meerkat_mob::SenderLabel`]). Only the
+    /// explicit local host-human lane carries it; every other lane refuses
+    /// one typed instead of delivering the turn without it.
+    pub sender_label: Option<meerkat_mob::SenderLabel>,
 }
 
 impl BridgeDelivery {
@@ -3787,6 +3799,7 @@ impl BridgeDelivery {
             delivery_identity: None,
             skill_references: Vec::new(),
             requester: None,
+            sender_label: None,
         }
     }
 }
@@ -9617,6 +9630,12 @@ impl MobSessionBridge {
                 "a requester is carried only on the local host-human lane".to_string(),
             ));
         }
+        let sender_label = delivery.sender_label.as_ref();
+        if sender_label.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a sender label is carried only on the local host-human lane".to_string(),
+            ));
+        }
         let mid = self.member_id_for_runtime_id(runtime_id).await?;
         // One admission budget for the whole attempt, shared by every actor
         // round trip below: the serialized hops must not each cost a budget.
@@ -9667,6 +9686,7 @@ impl MobSessionBridge {
                 host_human_session,
                 skill_references,
                 requester,
+                sender_label,
             },
             handling_mode,
             &deadline,

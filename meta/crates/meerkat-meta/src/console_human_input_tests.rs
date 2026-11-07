@@ -1098,7 +1098,7 @@ async fn console_human_reset_refuses_old_prepared_session_and_old_worker_fence()
             &[],
             HandlingMode::Queue,
             &accepted,
-            None,
+            &crate::console_aggregator::ConsoleHumanAttribution::default(),
         )
         .await
         .is_err()

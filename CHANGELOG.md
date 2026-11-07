@@ -351,6 +351,15 @@ them.
   one accessor: a governed input's requester is its work association's, any
   other input's is the one its host supplied.
 
+- `meerkat-mob`: a host labels the person who sent host human input for the
+  member's model with `SenderLabel` (`WorkSpec::with_sender_label`), such as
+  "Message from" and the person's name. The member's turn receives it as an
+  injected-context row of its own right before the message, on a steer too,
+  whether the steer joins the running turn or runs as its own; ordinary
+  injected context on a steer is still refused. Work that is not host human
+  input refuses a label (`MobError::UnsupportedForMode`). The label is
+  attribution the model reads, never control data.
+
 - `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
   `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
   host-plane operator releases a work item's claim it does not own, bound

@@ -42,8 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/console/send` (JSON and multipart RPC) answers invalid params
   (`-32602`). Nothing is recorded for a refused send. `operator` and
   `operator_probe` are accepted as before.
-- Rust: `BridgeDelivery` gains the public field `requester`, so code that
-  builds it literally sets it (`None` keeps the previous behaviour).
+- Rust: `BridgeDelivery` gains the public fields `requester` and
+  `sender_label`, so code that builds it literally sets them (`None` keeps
+  the previous behaviour).
 - The console's `meta/gating/decide` decides as the signed-in person on the
   connection. A request that names `approver_id` is refused (`-32602`), and
   a caller that is not a verified, current person (no token on an open
@@ -162,8 +163,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its original requester, which Meerkat stores with the admitted input and
   hands to tool dispatch. The stored frame keeps it; no view returns it. A
   service's, a token principal's and an anonymous caller's sends carry none,
-  no send on an Open console does, and neither does a send to an external
-  member.
+  no ungoverned send on an Open console does (a governed send carries its
+  host-bound association's requester, which may be a person who volunteered
+  a verified token), and neither does a send to an external member.
+- On a console that requires sign-in, the agent's model reads each person's
+  message with a sender label, "Message from" and the person's display name,
+  on an injected-context row of its own right before the message, a steer
+  included. A service's, a token principal's and an anonymous caller's
+  messages, a schedule's fire, every message on an Open console and a send
+  to an external member carry none.
 - An access admin releases anyone's WorkGraph claim from the console. The
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).

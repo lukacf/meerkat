@@ -768,8 +768,12 @@ async def test_oidc_start_answers_with_a_page_that_moves_on_to_the_provider(tmp_
             nonce = alice.cookies[console.cookie + "_login"]
             started = await alice.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
             assert started.status_code == 200 and "location" not in started.headers
+            # The page's whole policy: nothing loads or frames it, and it sends no referrer.
+            directives = [part.strip() for part in started.headers["content-security-policy"].split(";")]
+            assert directives == ["default-src 'none'", "style-src 'unsafe-inline'", "frame-ancestors 'none'"]
             assert started.headers["cache-control"] == "no-store"
             assert started.headers["referrer-policy"] == "no-referrer"
+            assert started.headers["x-content-type-options"] == "nosniff"
             target = onward_target(started)
             parsed = urlsplit(target)
             assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == ISSUER_URL + "/authorize"

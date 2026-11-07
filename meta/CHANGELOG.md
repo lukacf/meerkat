@@ -157,6 +157,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Side chats opened before this release keep their audience, and consoles
   without sign-in keep side chats shared.
 
+### Known limitations
+
+- Personal accounts on MCP servers: in a private side chat, an MCP App
+  that a personal server serves cannot read its resources or call its tools
+  from the console yet. The console's app path does not carry the person as
+  the requester, so the owner check refuses those uses
+  (`personal_account_not_owner`).
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

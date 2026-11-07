@@ -585,6 +585,11 @@ accounts = "personal"
   (`personal_accounts_unsupported`), and so is the rebuild of such a member,
   whichever profile it resolves: one of the mob definition's, a realm
   profile, the spawn's own, or a profile of a child mob an agent creates.
+- **Known limitation.** In a private side chat, an MCP App that a personal
+  server serves cannot read its resources or call its tools from the
+  console yet: the console's app path does not carry the person as the
+  requester, so the owner check refuses those uses
+  (`personal_account_not_owner`).
 
 Each refusal reaches the model as the tool call's policy denial, whose code
 is the refusal's kind.

@@ -28,6 +28,9 @@ const RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-recovery-work";
 /// none, and a store that does not answer per runtime refuses the whole
 /// listing while one runtime scope is poisoned.
 const UNAVAILABLE_RUNTIME: &str = "forwarding-probe-unavailable";
+/// The runtime the probe refuses until a reopen: the trait default refuses
+/// none.
+const REFUSED_RUNTIME: &str = "forwarding-probe-refused";
 
 /// The listing the probe answers per runtime: one unavailable runtime.
 fn probe_delivery_listing() -> RuntimeDeliveryAuthorityListing {
@@ -217,6 +220,11 @@ pub(crate) async fn assert_forwards_to(
         Some(SELF_FENCE_WINDOW),
         "the inner store's self-fence"
     );
+    assert!(
+        store.refuses_runtime_until_reopen(&LogicalRuntimeId::new(REFUSED_RUNTIME)),
+        "the inner store's refusal until a reopen: a decorator that keeps the default answers \
+         that no runtime is refused, so a member its store refuses reads as a failed read"
+    );
     assert_eq!(
         store
             .load_continuation_key_binding("owner", "key")
@@ -349,6 +357,7 @@ pub(crate) async fn assert_forwards_to(
             "try_controller_mutation_custody",
             "hosting_capability",
             "self_fence",
+            "refuses_runtime_until_reopen",
             "load_continuation_key_binding",
             "compare_and_swap_runtime_delivery_authority_with_key_binding",
             "load_continuation_admission",
@@ -443,6 +452,11 @@ mod store_impl {
         fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
             self.record("self_fence");
             Some(Arc::new(ProbeSelfFence))
+        }
+
+        fn refuses_runtime_until_reopen(&self, _runtime_id: &LogicalRuntimeId) -> bool {
+            self.record("refuses_runtime_until_reopen");
+            true
         }
 
         async fn load_continuation_key_binding(

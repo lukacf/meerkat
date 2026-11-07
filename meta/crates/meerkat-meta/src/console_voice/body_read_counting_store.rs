@@ -42,6 +42,10 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         self.inner.self_fence()
     }
 
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.inner.refuses_runtime_until_reopen(runtime_id)
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
         self.inner.session_persistence_profile()
     }

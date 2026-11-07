@@ -1090,7 +1090,13 @@ function ConsoleAppAuthority(props: ConsoleAppProps): React.JSX.Element {
       restart(announcement.caller !== lastCallerRef.current);
       return;
     }
-    if (callerRef.current !== undefined && announcement.caller !== callerRef.current) restart(true);
+    // An instance that knows no caller (its whoami read failed or has not
+    // answered) loads again for the caller another tab learned.
+    if (callerRef.current === undefined) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (announcement.caller !== callerRef.current) restart(true);
   }), [forgetSignedOutUser, props.baseUrl, restart]);
   // While signed out, coming back to the tab tries the login again.
   React.useEffect(() => {
@@ -1259,6 +1265,11 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [caller, setCaller] = React.useState<ConsoleWhoami | null>();
   const adoptCaller = React.useCallback((whoami: ConsoleWhoami | null) => {
     setCaller(whoami);
+    // A queued message the drain kept while no caller was known drains now:
+    // its finished requests are forgotten, so the next render tries again.
+    for (const [key, request] of autoDrainRequestedRef.current) {
+      if (!request.inFlight) autoDrainRequestedRef.current.delete(key);
+    }
     if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
   }, []);
   React.useEffect(() => {
@@ -5052,14 +5063,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       // browser's login changed, the experience names another scope and the
       // instance ends before anything is sent; a failed read sends nothing.
       const scope = sendScopeRef.current;
+      let keptBack = false;
       void (async () => {
         try { await loadExperience(); } catch { return false; }
         if (!lifetimeRef.current.active || scope !== sendScopeRef.current) return false;
+        // No caller known yet (the whoami read failed or has not answered):
+        // the message stays queued, and the drain runs again once a read
+        // binds the caller (adoptCaller).
+        if (!instanceCaller.known()) {
+          keptBack = true;
+          return false;
+        }
         return dispatchPendingAttempt(identity, head.id, "queue");
       })().finally(() => {
         if (autoDrainRequestedRef.current.get(key) !== request) return;
         const current = getPendingStack(identity).find((item) => item.id === head.id);
-        if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
+        if (keptBack && instanceCaller.known()) {
+          // The caller was bound while this drain stood back: try again now.
+          autoDrainRequestedRef.current.delete(key);
+          maybeDrainHead(identity);
+        } else if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
         else autoDrainRequestedRef.current.delete(key);
       });
     }

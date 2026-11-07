@@ -112,6 +112,8 @@ export interface ConsoleInstanceCaller {
   readAgain(): Promise<ConsoleWhoami | null> | undefined;
   /** Bind an answer of `readAgain`; the first bound answer stays. */
   bind(answer: ConsoleWhoami | null): void;
+  /** Whether a caller is bound (a connection without whoami included). */
+  known(): boolean;
 }
 
 export function createConsoleInstanceCaller(
@@ -156,6 +158,7 @@ export function createConsoleInstanceCaller(
     bind(answer) {
       bound ??= { answer };
     },
+    known: () => bound !== undefined,
   };
   return caller;
 }

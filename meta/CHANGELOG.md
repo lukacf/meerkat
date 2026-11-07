@@ -158,12 +158,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `IdentityRuntimeError::HostRejectedBuild`, as before. Both enums are
   `#[non_exhaustive]`.
 
-- `SessionBridge::members_holding_run_starts_for_published_tools` and
+- `SessionBridge::members_holding_run_starts_for_published_tools`,
+  `SessionBridge::member_holds_run_starts_for_published_tools` and
   `SessionBridge::resolve_member_build_preparation`, each a call of Core's
-  (`MobHandle::members_holding_run_starts` with `ToolsNotPublished`, and
-  `MobHandle::resolve_member_build_preparation`). Both have defaults: a
-  bridge without run-start holds holds none, and one without build
-  preparation records no cause.
+  (`MobHandle::members_holding_run_starts` with `ToolsNotPublished`, the
+  same for one member with `MobHandle::member_holds_run_starts`, and
+  `MobHandle::resolve_member_build_preparation`). All have defaults: a
+  bridge without run-start holds holds none (the one-member read answers
+  from the list read), and one without build preparation records no
+  cause.
 
 ### Changed
 
@@ -240,9 +243,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The members Core holds for unpublished customizer tools, and a build
   preparation the host asked to retry, are read from Core: the composition
   publishes and releases the members Core holds, and a wake Core refused
-  for the retry reports the customizer's failure, typed. The door retries
-  the preparation once (`resolve_member_build_preparation`) and wakes, or
-  delivers, once more; a second refusal surfaces typed.
+  for the retry reports the customizer's failure, typed. A status sweep
+  (`statuses`, `roster_inspect`) reads Core's held members once for every
+  identity, and one identity's status and a delivery read that member's
+  hold alone. A read that fails is never "none held": a status read
+  fails typed (`MemberHistoryUnavailable` for a sweep,
+  `IdentityHistoryUnavailable` for one identity), a delivery is refused
+  retryable, and a publication keeps the identity pending. The door
+  retries the preparation once (`resolve_member_build_preparation`) and
+  wakes, or delivers, once more; a second refusal surfaces typed.
 
 - The door answers Core's host preparation: on Core's
   `HostPreparationPending` refusal it declares the identity once and
@@ -300,6 +309,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   told apart by Core (`BuildPreparationRetry`, `HostPreparationPending`): a
   retry is no longer reported as Core's first-boot preparation, nor a
   first-boot preparation as the customizer's failure.
+
+- A materialization, and every door that wakes a member itself (the
+  background warm, a compaction rebuild, a wake onto the last session, a
+  respawn), reads Core's refusal of the wake typed, as a delivery does: a
+  final refusal (a retiring incarnation, a host-owned member, a
+  composition that is not authoritative) answers `AdmissionFailed`
+  instead of `IdentityWakeRetryable`.
 
 ## [0.9.10] - 2026-11-04
 

@@ -257,6 +257,13 @@ them.
   the member's next wake asks its build preparer again. A member with no
   such cause is a no-op. A host command: the agent lane never runs it.
 
+- `meerkat-mob`: `MobHandle::member_holds_run_starts(agent_identity,
+  reason)`: whether the host holds one member's run starts for `reason`,
+  `members_holding_run_starts` for that member alone, read the same way
+  (the published machine state and the runtime's hold registry, with no
+  actor command and no wake; the `List` scope). A member the mob does not
+  seat, a placed member and a mob without the runtime adapter hold none.
+
 ### Changed
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate

@@ -277,6 +277,143 @@ run that names another run keeps the run's tail held for reconciliation
 The rules for every kind of durable tail are in
 [Session contracts: durable-tail recovery](/reference/session-contracts#durable-tail-recovery).
 
+### Settling An Open Run Without A Model Request
+
+Since 0.9.11 a host that must not let an open run continue (an app's
+Recover flow, for example) settles the run instead, with no model request.
+The run ends as a stopped run that never resumed does: its inputs end
+`cancelled`, and it is closed as interrupted with the rounds it committed
+kept. A stop, reset or retire that ends the run first, while the settle
+waits, ends it its own way, and the settle reports the terminals that
+committed. Four steps, per member:
+
+1. **Hold the member before the start.** Stage the host's own recovery hold,
+   `HostRunStartHoldReason::HostRecovery`, with
+   `MobBuilder::hold_restored_member_run_starts`. No mob or Meta code stages
+   or releases this hold, so it stands until the host releases it; a retire
+   or destroy of the member drops it with the member. A hold lives in the
+   process only: stage it at every start until the recovery is done.
+2. **Wake the member.** The start materializes every member whose store
+   holds an open run; wake a member it left dormant with
+   `MobHandle::ensure_member_live`. The member's registration keeps the
+   open run, and the hold keeps it from continuing: no model request is
+   made. To find the members that hold work without waking any, read each
+   session cold with `MeerkatMachine::session_work_state`: `HoldsWork` names
+   one whose store holds work, `Idle` one that holds none, and `Unobserved`
+   a store that cannot tell (never read it as idle). The read loads no
+   session body and registers nothing.
+3. **Settle the run.** `MobHandle::settle_member_retained_run` answers
+   `RetainedRunSettlement::Settled { run_id, inputs }` once the settlement
+   committed: the member's registration no longer keeps the run, and each
+   input holds its committed terminal (`cancelled`, or `reset` or `retired`
+   when a reset or a retire ended the run first). It answers `NotRetained`
+   when the member's runtime keeps no run, `Busy { current_run_id: Some(_) }`
+   when a run is current (it continued before the hold, or another run
+   started: the verb never stops a running run; `stop_member_run` does), and
+   `Busy { current_run_id: None }` when the registration cannot settle the
+   run now (it is initializing, draining for its unregister, retired or
+   stopped). A member that is not materialized in this process is refused
+   with `MobError::MemberSessionNotLive`: the verb never wakes a member,
+   since a wake without the hold would let the run continue. A settlement
+   that did not commit, or that left the run's tail standing, is refused
+   too, and never answered `Settled`: `MobError::MemberReloadRequired` when
+   its write failed (the reload loses the settle, so reload the member with
+   `MobHandle::reload_member_registration`, which applies the hold again,
+   and settle again) or its tail repair failed (after the reload the member
+   keeps no run, and the next settle answers `NotRetained`), and
+   `MobError::MemberSessionNotLive` when another writer took the session's
+   store fence, or when an unregister ended the run first (its inputs then
+   end `stopped` when the unregister keeps queued work, as a mob Shutdown
+   does by default, whatever their state, and `cancelled` when it stops).
+4. **Release the hold on every path that leaves no open run.**
+   `MobHandle::release_member_run_starts` with
+   `HostRunStartHoldReason::HostRecovery`: after `Settled`, `NotRetained` and
+   `Busy { current_run_id: Some(_) }`, and for a member that holds no work. A
+   hold left staged keeps the member from ever starting a run, even at its
+   next wake days later. While the run may still be open
+   (`Busy { current_run_id: None }`, or a refusal), keep the hold and settle
+   that member again; releasing it there would let the run continue.
+
+```rust
+use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobHandle};
+use meerkat_runtime::{MeerkatMachine, RetainedRunSettlement, SessionWorkState};
+
+/// What a member's recovery leaves.
+enum Recovered {
+    /// No open run is kept: release the hold.
+    Done,
+    /// The run may still be open: keep the hold, settle again later.
+    StillOpen,
+}
+
+async fn recover(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    identity: &AgentIdentity,
+) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+    if handle.member_unmaterialized(identity) {
+        // A dormant member whose store holds no work keeps no run.
+        let Some(session_id) = handle.resolve_bridge_session_id(identity).await else {
+            return Ok(Recovered::Done);
+        };
+        if machine.session_work_state(&session_id).await? == SessionWorkState::Idle {
+            return Ok(Recovered::Done);
+        }
+        handle.ensure_member_live(identity).await?;
+    }
+    Ok(match handle.settle_member_retained_run(identity).await? {
+        RetainedRunSettlement::Busy { current_run_id: None } => Recovered::StillOpen,
+        // Settled, NotRetained, or a run is current.
+        _ => Recovered::Done,
+    })
+}
+
+// `machine` is the MeerkatMachine the mob's session service runs on.
+let handle = MobBuilder::for_resume(storage)
+    .with_session_service(service)
+    .hold_restored_member_run_starts(HostRunStartHoldReason::HostRecovery, members.clone())
+    .resume()
+    .await?;
+let mut settle_again = Vec::new();
+for identity in &members {
+    match recover(&handle, &machine, identity).await {
+        Ok(Recovered::Done) => {
+            let released = handle
+                .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
+                .await;
+            if released.is_err() {
+                settle_again.push(identity.clone());
+            }
+        }
+        // The run may still be open, or the member needs a reload first:
+        // the hold keeps the run from continuing until a later round.
+        Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
+    }
+}
+```
+
+Run the loop again over `settle_again` (after reloading a member refused
+`MemberReloadRequired`) until it is empty: each round either settles the run
+or finds none kept, and then releases the hold.
+
+A retry is safe. A settle that arrives while an earlier one is still
+settling the same run joins it and gets the same answer. A retry after the
+run was settled (when a reply was lost, say) answers `NotRetained`; the
+proof is the run's inputs, which read their committed terminals (`cancelled`
+when the settle ended the run) through
+`MeerkatMachine::input_terminal_receipt`.
+
+A runtime embedding with no mob takes the same steps on its
+`MeerkatMachine`: `stage_registration_run_start_hold_only` with
+`RunStartHoldReason::HostRecovery` before the session registers,
+`settle_retained_run`, then `release_run_starts` on the same paths. A
+settlement whose write failed, or whose tail repair left the run's tail
+standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
+registration (`recover_or_discard_reload_required_registration_if_current`),
+which applies the staged hold again, and settle again (after a failed tail
+repair the reloaded registration keeps no run, so that settle answers
+`NotRetained`).
+
 ## Tools That Run Again
 
 Delivery is at least once. After a crash between the two commits of a round,
@@ -372,9 +509,13 @@ This applies to:
 - a call that would run as a detached job under a runner that declares it
   cannot resume or repeat work.
 
-Process custody still stops the earlier process before the agent is rebuilt,
-and the transcript still gets its tool-process recovery notice, as in earlier
-releases.
+Process custody still stops the earlier process before the agent is rebuilt.
+A foreground shell call is answered by its `outcome_uncertain` result,
+whether the run continues or is closed as interrupted, so the transcript
+gets no `tool_process_interrupted` block for it. A background shell job, a
+monitor or a command hook the run started keeps its tool-process recovery
+notice: its process outlives the call that started it, so that call's
+result does not say how the process ended.
 
 Meerkat does not provide exactly-once external effects. A tool whose effect
 must not happen twice deduplicates on the key above.

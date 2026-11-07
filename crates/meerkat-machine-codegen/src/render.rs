@@ -556,6 +556,30 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     // or a stop (0.9.10).
     "CompleteUntilChangedSwitchTurnReconfigureRetired",
     "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    // A host's settle of the run its session retained (0.9.11).
+    "SettleRetainedRunAcceptedIdle",
+    "SettleRetainedRunAcceptedAttached",
+    "SettleRetainedRunBusyRunCurrentInitializing",
+    "SettleRetainedRunBusyRunCurrentIdle",
+    "SettleRetainedRunBusyRunCurrentAttached",
+    "SettleRetainedRunBusyRunCurrentRunning",
+    "SettleRetainedRunBusyRunCurrentRetired",
+    "SettleRetainedRunBusyRunCurrentStopped",
+    "SettleRetainedRunBusyDrainingIdle",
+    "SettleRetainedRunBusyDrainingAttached",
+    "SettleRetainedRunBusyStaleRunIdle",
+    "SettleRetainedRunBusyStaleRunAttached",
+    "SettleRetainedRunBusyNotServingInitializing",
+    "SettleRetainedRunBusyNotServingRunning",
+    "SettleRetainedRunBusyNotServingRetired",
+    "SettleRetainedRunBusyNotServingStopped",
+    "SettleRetainedRunNotRetainedInitializing",
+    "SettleRetainedRunNotRetainedIdle",
+    "SettleRetainedRunNotRetainedAttached",
+    "SettleRetainedRunNotRetainedRunning",
+    "SettleRetainedRunNotRetainedRetired",
+    "SettleRetainedRunNotRetainedStopped",
+    "SettleRetainedRunInertDestroyed",
 ];
 
 // Append-only emission tails for the other machines, whose public

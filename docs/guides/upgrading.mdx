@@ -118,6 +118,30 @@ While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
 - A host that took a second loop's start refusal as the sign of another
   executor reads `DecisionExecutorPass::unclaimed` instead.
 
+### Tool grant run scopes and grant requests
+
+A grant can be scoped to one run of its session, and a person can approve a
+grant that a host (`tool_grants/request`) or a gated session's agent
+(`request_tool_grant`) asked for. Both write grant rows a 0.9.10 binary
+cannot read: it reads a run-scoped grant, and the grant an approved request
+issued (its id is a version 5 UUID), as unreadable, so it opens nothing there
+and lists it under `unreadable`. A 0.9.10 client decodes the statuses
+`run_ended`, `requested` and `declined`, and a scope kind it does not know,
+as `unknown`.
+
+`rkat-rpc` runs the executor of `tool_grant.issue` decisions on its store and
+claims that kind: another process's loop of the kind executes none of them
+while it runs. Every grant-gated build mounts `request_tool_grant`, and a
+host that takes no grant requests answers its calls with a tool error.
+
+**Do:**
+
+- Upgrade every host that serves gated sessions, and every process that
+  executes decisions on their store, before relying on run scopes or
+  requests.
+- A client that compares a session's tools with its build's gate allows for
+  `request_tool_grant`.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

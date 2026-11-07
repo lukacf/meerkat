@@ -9,7 +9,11 @@
 //! session. A member host that does not serve the commands (one before
 //! protocol 7, or a protocol 7 host from before operator instructions)
 //! refuses them typed, and the mob blocks the member
-//! `member_host_unsupported`.
+//! `member_host_unsupported`. A member placed while its mob has
+//! instructions is born with its snapshot on a member host that records one
+//! at birth (the `instruction_target_birth` feature): the materialize carries
+//! it, the member's first turn has it, and the delivery after it finds it
+//! recorded. Toward a host without the feature the spawn is unchanged.
 //!
 //! Assertions are on public carriers: the mob's status read, the member
 //! host's session service (the session's recorded target), the real host
@@ -22,6 +26,7 @@
 mod governed_peer_support;
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_core::types::SessionId;
@@ -43,9 +48,11 @@ use meerkat_mob::{
 };
 use support::{
     HostDaemonFixture, HostFixtureOptions, PeerCommsEndpoint, REAL_COMMS_TEST_LOCK,
-    ScriptedHostPeer, ScriptedV7Mode, bind_then_materialize, create_controlling_mob,
-    member_incarnation_from_ack, raw_release_member_command, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint, spawn_scripted_host_peer, supervisor_spec_for_endpoint,
+    RecordedInstructionRecord, ScriptedHostPeer, ScriptedV7Mode, bind_then_materialize,
+    create_controlling_mob, member_incarnation_from_ack, placed_spawn_spec,
+    raw_release_member_command, scripted_member_client_completing_recorded,
+    spawn_host_daemon_fixture, spawn_peer_comms_endpoint, spawn_scripted_host_peer,
+    supervisor_spec_for_endpoint, wait_until,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -684,4 +691,263 @@ async fn member_host_releases_instruction_target_once_no_member_holds_the_sessio
     );
 
     fixture.shutdown().await;
+}
+
+// ===========================================================================
+// A placed member born with its snapshot (protocol 7)
+// ===========================================================================
+
+/// The `HostFeatures` feature of a member host that records a placed
+/// member's snapshot in the session its materialize mints.
+const BIRTH_FEATURE: &str = "instruction_target_birth";
+
+/// How many `HostFeatures` probes a scripted host received.
+fn feature_probes(scripted: &ScriptedHostPeer) -> usize {
+    scripted
+        .received_command_kinds()
+        .iter()
+        .filter(|kind| kind.as_str() == "host_features")
+        .count()
+}
+
+/// Every materialize a scripted host received, as wire JSON, in order.
+fn materialize_wires(scripted: &ScriptedHostPeer) -> Vec<serde_json::Value> {
+    scripted
+        .received_materialize_payloads()
+        .iter()
+        .map(|payload| serde_json::to_value(payload).expect("serialize a received materialize"))
+        .collect()
+}
+
+/// A member placed on a member host of this release while its mob has
+/// operator instructions is born with its snapshot: the host records the
+/// snapshot on the session its materialize mints (the session's create
+/// carries it), so the member's first turn, its spawn's kickoff, already has
+/// the instruction. The mob's delivery of that generation then finds it
+/// recorded: the one record the member's session receives answers
+/// `already_recorded` and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_member_is_born_with_its_snapshot_and_its_first_turn_has_it() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = HostFixtureOptions::named("oi-placed-birth-host").with_member_build();
+    options.member_llm_client = Some(scripted_member_client_completing_recorded(
+        "done",
+        Arc::clone(&requests),
+    ));
+    options.record_member_creates = true;
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("oi-placed-birth").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    let written = controlling
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL))
+        .await
+        .expect("the write commits");
+
+    let mut spec = placed_spawn_spec("worker", "b2", &report.host_id);
+    spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::AutonomousHost);
+    spec.initial_message = Some(meerkat_core::types::ContentInput::from("birth-first-input"));
+    controlling
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect("the placed spawn commits");
+    let member = AgentIdentity::from("b2");
+
+    let host_service = fixture
+        .failing_create
+        .as_ref()
+        .expect("the fixture records member creates");
+    let creates = host_service.recorded_creates();
+    let create = creates
+        .iter()
+        .find(|create| {
+            create
+                .mob_member_binding
+                .as_ref()
+                .is_some_and(|binding| binding.member == "b2")
+        })
+        .unwrap_or_else(|| panic!("the host's create of b2: {creates:#?}"));
+    let born = create.born_instruction_target.as_ref().unwrap_or_else(|| {
+        panic!("the session the materialize mints is born with b2's snapshot: {create:#?}")
+    });
+    assert_eq!(
+        born.owner(),
+        &InstructionTargetOwner::Mob {
+            mob_id: controlling.mob_id.to_string(),
+            agent_identity: "b2".to_string(),
+        }
+    );
+    assert_eq!(born.target_generation(), written.generation);
+
+    wait_until("b2's first turn reaches its model", || async {
+        !requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    })
+    .await;
+    let first = {
+        let requests = requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        serde_json::to_string(&requests[0]).expect("serialize the first request's messages")
+    };
+    assert!(
+        first.contains(FORMAL),
+        "b2's first turn has the instruction: {first}"
+    );
+
+    settle_member(
+        &controlling.handle,
+        &member,
+        "b2's delivery reads current",
+        |status| {
+            status.delivery.state == MemberInstructionDeliveryState::Current
+                && status.delivery.recorded_generation == Some(written.generation)
+        },
+    )
+    .await;
+    let session_id = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .materialized
+        .get("b2")
+        .map(|row| SessionId::parse(&row.session_id).expect("a session id"))
+        .expect("b2 is materialized on its host");
+    let records = host_service
+        .recorded_instruction_records()
+        .into_iter()
+        .filter(|record| record.session_id == session_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records,
+        vec![RecordedInstructionRecord {
+            session_id: session_id.clone(),
+            generation: written.generation,
+            disposition: Some(InstructionRecordDisposition::AlreadyRecorded),
+        }],
+        "the mob's delivery found the snapshot recorded and wrote nothing"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A member host that does not record a snapshot at birth, one before
+/// protocol 7 or a protocol 7 host whose features do not list it, still
+/// spawns a placed member as before: the controller asks the host's features
+/// once for the spawn and sends the materialize without the snapshot, in its
+/// V4 shape. The member receives its snapshot by delivery after the spawn,
+/// as before (a Known limitation of mixed-version deployments).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_member_host_spawns_a_placed_member_without_a_birth_snapshot() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("oi-birth-older-host").await;
+    let controlling = create_controlling_mob("oi-birth-older").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL))
+        .await
+        .expect("the write commits");
+
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits on a host before protocol 7");
+    scripted.serve_v7(ScriptedV7Mode::Features(vec![
+        HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
+        HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+    ]));
+    controlling
+        .spawn_placed("worker", "b3", &report.host_id)
+        .await
+        .expect("the placed spawn commits on a protocol 7 host without the feature");
+
+    assert_eq!(
+        feature_probes(&scripted),
+        2,
+        "each Fresh spawn of a mob with instructions asks the host once: {:?}",
+        scripted.received_command_kinds()
+    );
+    let wires = materialize_wires(&scripted);
+    assert_eq!(wires.len(), 2, "two materializes: {wires:#?}");
+    for wire in &wires {
+        assert!(
+            wire.get("instruction_target").is_none(),
+            "no snapshot toward a host that does not record one at birth: {wire}"
+        );
+        assert_eq!(wire["protocol_version"], 4, "the V4 shape: {wire}");
+    }
+
+    scripted.shutdown();
+}
+
+/// A placed spawn asks the member host's features only when its mob has
+/// operator instructions: a mob without any asks nothing, even a host that
+/// records a snapshot at birth, and sends the V4 materialize. Once the mob
+/// has an instruction, the next placed spawn asks once and its V7
+/// materialize carries the member's whole snapshot at the mob's generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_spawn_asks_its_host_once_and_only_when_its_mob_has_instructions() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("oi-birth-probe-host").await;
+    scripted.serve_v7(ScriptedV7Mode::Features(vec![BIRTH_FEATURE.to_string()]));
+    let controlling = create_controlling_mob("oi-birth-probe").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+    assert_eq!(
+        feature_probes(&scripted),
+        0,
+        "a mob without instructions asks nothing: {:?}",
+        scripted.received_command_kinds()
+    );
+    let wires = materialize_wires(&scripted);
+    let [plain] = wires.as_slice() else {
+        panic!("one materialize: {wires:#?}");
+    };
+    assert!(plain.get("instruction_target").is_none(), "{plain}");
+    assert_eq!(plain["protocol_version"], 4, "the V4 shape: {plain}");
+
+    let written = controlling
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL))
+        .await
+        .expect("the write commits");
+    controlling
+        .spawn_placed("worker", "b3", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+    assert_eq!(
+        feature_probes(&scripted),
+        1,
+        "the spawn of a mob with instructions asks once: {:?}",
+        scripted.received_command_kinds()
+    );
+    let wires = materialize_wires(&scripted);
+    let [_, carried] = wires.as_slice() else {
+        panic!("two materializes: {wires:#?}");
+    };
+    assert_eq!(carried["protocol_version"], 7, "a V7 command: {carried}");
+    assert_eq!(
+        carried["instruction_target"],
+        serde_json::json!({
+            "generation": written.generation,
+            "slots": [{
+                "slot": { "namespace": "app.example", "key": "tone" },
+                "revision": 1,
+                "body": FORMAL,
+            }],
+        }),
+        "the materialize carries b3's whole snapshot: {carried}"
+    );
+
+    scripted.shutdown();
 }

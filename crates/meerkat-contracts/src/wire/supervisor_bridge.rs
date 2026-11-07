@@ -8127,6 +8127,65 @@ mod tests {
         }
     }
 
+    /// A Fresh materialize may carry the new member's operator-instruction
+    /// snapshot, which its member host records in the session it mints (the
+    /// member is born with it). Carrying it is a V7 command: stamped V7 it
+    /// decodes and reads back as sent, stamped below V7 it is refused typed
+    /// before it is read, and on a Resume launch, which mints nothing, it is
+    /// refused.
+    #[test]
+    fn a_materialize_carrying_a_birth_snapshot_is_a_fresh_v7_command() {
+        let target = instruction_target_record(BridgeProtocolVersion::V7)["target"].clone();
+        let carrying = |version, launch| {
+            let mut envelope = prompt_context_fork_materialize(version, launch);
+            let object = envelope
+                .as_object_mut()
+                .expect("a materialize envelope is an object");
+            object.remove("prompt_context_fork");
+            object.insert("instruction_target".to_string(), target.clone());
+            envelope
+        };
+        let payload = match decode_bridge_command(carrying(
+            BridgeProtocolVersion::V7,
+            MaterializeLaunchMode::Fresh {},
+        )) {
+            Ok(BridgeCommand::MaterializeMember(payload)) => payload,
+            other => panic!("a V7 Fresh materialize carrying a snapshot decodes: {other:?}"),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).expect("serialize the payload")["instruction_target"],
+            target,
+            "the carried snapshot reads back as sent"
+        );
+        match decode_bridge_command(carrying(
+            BridgeProtocolVersion::V6,
+            MaterializeLaunchMode::Fresh {},
+        )) {
+            Err(BridgeCommandDecodeError::UnsupportedProtocolVersion(error)) => assert_eq!(
+                error,
+                UnsupportedBridgeProtocolVersion {
+                    raw: 6,
+                    command: Some("MaterializeMember"),
+                    minimum: Some(7),
+                }
+            ),
+            other => panic!("a carried snapshot stamped V6 must be refused typed: {other:?}"),
+        }
+        assert!(
+            matches!(
+                decode_bridge_command(carrying(
+                    BridgeProtocolVersion::V7,
+                    MaterializeLaunchMode::Resume {
+                        session_id: "019f0000-0000-7000-8000-0000000000aa".to_string(),
+                        resume_from_role: None,
+                    },
+                )),
+                Err(BridgeCommandDecodeError::Invalid(_))
+            ),
+            "a Resume launch carries no birth snapshot"
+        );
+    }
+
     fn instruction_target_member() -> BridgeMemberIncarnation {
         BridgeMemberIncarnation {
             mob_id: "mob-1".to_string(),

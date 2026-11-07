@@ -705,6 +705,7 @@ pub struct FailingOnceSessionService {
     fail_projection_drain: bool,
     projection_drain_failed_once: AtomicBool,
     recorded_creates: std::sync::Mutex<Vec<RecordedMemberCreate>>,
+    recorded_instruction_records: std::sync::Mutex<Vec<RecordedInstructionRecord>>,
     keep_durable_tails: AtomicBool,
     withheld_durable_tails: std::sync::Mutex<Option<meerkat_core::service::DurableResumeHold>>,
     fail_durable_tail_settles: AtomicBool,
@@ -753,6 +754,9 @@ pub struct RecordedMemberCreate {
     pub prompt_context_fork_source: Option<meerkat_core::PromptContextForkSource>,
     /// The fork seed the create records on the child's session, as JSON.
     pub fork_seed: Option<serde_json::Value>,
+    /// The operator-instruction target the session the create mints is born
+    /// with: the target its build's session carrier holds, if any.
+    pub born_instruction_target: Option<meerkat_core::SessionInstructionState>,
 }
 
 impl RecordedMemberCreate {
@@ -768,8 +772,25 @@ impl RecordedMemberCreate {
                     .get(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY)
                     .cloned()
             }),
+            born_instruction_target: build
+                .and_then(|build| build.resume_session.as_ref())
+                .and_then(|session| {
+                    session
+                        .instruction_target_state()
+                        .expect("a build's session carrier reads its instruction target")
+                }),
         }
     }
+}
+
+/// One operator-instruction record a fixture host's session service
+/// received: the member session, the snapshot's generation, and what the
+/// session did with it (`None` when it refused it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedInstructionRecord {
+    pub session_id: meerkat_core::SessionId,
+    pub generation: u64,
+    pub disposition: Option<meerkat_core::InstructionRecordDisposition>,
 }
 
 impl FailingOnceSessionService {
@@ -794,6 +815,7 @@ impl FailingOnceSessionService {
             fail_projection_drain,
             projection_drain_failed_once: AtomicBool::new(false),
             recorded_creates: std::sync::Mutex::new(Vec::new()),
+            recorded_instruction_records: std::sync::Mutex::new(Vec::new()),
             keep_durable_tails: AtomicBool::new(false),
             withheld_durable_tails: std::sync::Mutex::new(None),
             fail_durable_tail_settles: AtomicBool::new(false),
@@ -862,6 +884,15 @@ impl FailingOnceSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(RecordedMemberCreate::of(req));
+    }
+
+    /// Every operator-instruction record received, in order, with what the
+    /// member session did with it.
+    pub fn recorded_instruction_records(&self) -> Vec<RecordedInstructionRecord> {
+        self.recorded_instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Keep every durable tail at a cold start: the settle answers as the
@@ -1097,6 +1128,53 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
         session_id: &meerkat_core::SessionId,
     ) -> Result<meerkat_mob::MemberSessionActivity, meerkat_core::service::SessionError> {
         self.inner.subscribe_session_activity(session_id).await
+    }
+
+    async fn record_member_instruction_target(
+        self: Arc<Self>,
+        delivery: meerkat_mob::MemberInstructionDelivery,
+    ) -> Result<
+        meerkat_core::InstructionRecordReceipt,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        let session_id = delivery.session_id().clone();
+        let generation = delivery.generation();
+        let result = Arc::clone(&self.inner)
+            .record_member_instruction_target(delivery)
+            .await;
+        self.recorded_instruction_records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(RecordedInstructionRecord {
+                session_id,
+                generation,
+                disposition: result.as_ref().ok().map(|receipt| receipt.disposition),
+            });
+        result
+    }
+
+    async fn release_member_instruction_target(
+        self: Arc<Self>,
+        release: meerkat_mob::MemberInstructionRelease,
+    ) -> Result<
+        meerkat_core::InstructionReleaseDisposition,
+        meerkat_core::service::SessionInstructionError,
+    > {
+        Arc::clone(&self.inner)
+            .release_member_instruction_target(release)
+            .await
+    }
+
+    async fn read_member_instructions(
+        &self,
+        session_ids: &[meerkat_core::SessionId],
+    ) -> Vec<
+        Result<
+            meerkat_core::service::SessionInstructionRead,
+            meerkat_core::service::SessionInstructionError,
+        >,
+    > {
+        self.inner.read_member_instructions(session_ids).await
     }
 
     async fn commit_live_delegation_final_transcript(

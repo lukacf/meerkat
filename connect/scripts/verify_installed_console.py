@@ -443,7 +443,7 @@ class ConsoleScenario:
 
     def check_final_artifacts(self, directory, report):
         # The software prompt was answered in the Console by the fixture
-        # person: its stored decision must name that person (MU-11).
+        # person: its stored decision must name that person.
         check_answered_software_decision(directory, report)
 
     def original_request(self):

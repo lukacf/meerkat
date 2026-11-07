@@ -4033,7 +4033,7 @@ mod tests {
     }
 }
 
-/// How a Console answer is recorded (MU-11, review P3-4): in Core's
+/// How a Console answer is recorded: in Core's
 /// convention for an authenticated approver, the decision's actor is the
 /// person's bare id and the approver in its provenance carries the
 /// qualified principal, the assurance and the login's digest.

@@ -936,7 +936,7 @@ async fn answer_console_review(
     (result, approvals, id, root)
 }
 
-/// MU-11 row 2: a Console setup review records the person who answered it,
+/// A Console setup review records the person who answered it,
 /// not the presenter's construction label, as Core records an authenticated
 /// approver: the person's bare id as the decision's actor, and as its
 /// provenance Core's consent approver (the qualified principal, the
@@ -986,7 +986,7 @@ async fn console_review_records_the_answering_person() {
     .expect("the Console review did not settle");
 }
 
-/// MU-11 row 2: when the accepted answer no longer names a current person
+/// When the accepted answer no longer names a current person
 /// (its login ended, or its token stopped verifying), the review decides
 /// nothing: the approval stays pending and the request fails.
 #[tokio::test]

@@ -393,7 +393,7 @@ mod viewers {
     }
 }
 
-/// MU-11 row 5: every setup answer route (start, answer, credentials, cancel
+/// Every setup answer route (start, answer, credentials, cancel
 /// sign-in, callback) passes one gate, and the gate refuses every caller that
 /// is not a verified, current person with the Console's shared refusal
 /// `approver_unauthenticated`: a shared-account token, an open Console's
@@ -493,7 +493,7 @@ async fn two_logins() -> (
     (connection, (commands, responses), [first, second])
 }
 
-/// MU-11 row 3: two logins each hold their own setup prompt at once, and a
+/// Two logins each hold their own setup prompt at once, and a
 /// login holds one prompt at a time.
 #[tokio::test]
 async fn two_logins_hold_their_setup_prompts_at_once() {
@@ -534,7 +534,7 @@ async fn two_logins_hold_their_setup_prompts_at_once() {
     drop(pipe);
 }
 
-/// MU-11 row 3: the presenter loop's turns start a second login's request
+/// The presenter loop's turns start a second login's request
 /// while the first login's prompt waits for its answer, and one login's
 /// requests take turns in the order they arrived. (The loop itself runs in
 /// `the_presenter_loop_serves_two_logins_at_once_and_one_login_in_arrival_order`.)
@@ -613,7 +613,7 @@ fn gate_callers(console: &viewers::Console) -> (ConsoleViewerContext, GateCaller
     )
 }
 
-/// MU-11 row 5 (review P2-2): the one refusal function both answer checks
+/// The one refusal function both answer checks
 /// share. A signed-in person reaches the login lookup and gets its login;
 /// every caller that is not a verified, current person is refused with
 /// `approver_unauthenticated` before its login is looked up. A person whose
@@ -656,7 +656,7 @@ async fn the_answer_gate_refuses_non_persons_before_their_login_is_looked_up() {
     drop(pipe);
 }
 
-/// MU-11 row 5 at the routes (review P2-2): the selection every answer route
+/// At the routes: the selection every answer route
 /// makes (`select_presentation`) and its check after the route's awaits
 /// (`still_current`) each run the gate. A caller that is not a verified,
 /// current person is refused with `approver_unauthenticated` even when its
@@ -727,7 +727,7 @@ async fn retire_login(
     assert_eq!(reply["id"], id, "{reply}");
 }
 
-/// MU-11 (review P3-1): after the route's awaits, a person whose Console
+/// After the route's awaits, a person whose Console
 /// login ended while the answer waited (its host retired it at sign-out)
 /// answers nothing and is refused with `approver_unauthenticated`, though
 /// the token still verifies.
@@ -836,7 +836,7 @@ async fn loop_quiet(
         .is_err()
 }
 
-/// MU-11 row 3 at the loop (review P2-1): the Console presenter loop, with
+/// The Console presenter loop, with
 /// real setup enrollments and two real logins, presents login B's request
 /// while login A's presentation is held, starts login A's next requests one
 /// at a time in the order they arrived, and on host closure retires the

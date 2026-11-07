@@ -258,7 +258,7 @@ async fn exact_decision_refusal_does_not_record_or_wake_software_dispatch() {
     assert_eq!(f.count(), 0);
 }
 
-/// MU-11 row 2, software half (review P2-2): a software prompt answered in
+/// A software prompt answered in
 /// the Console, past its Console task check, is recorded as made by the
 /// person who answered: the approver in its provenance names the person,
 /// never this owner's presenter.

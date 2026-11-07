@@ -229,25 +229,33 @@ const LOWERINGS = {
   unavailable: true,
 } as const satisfies Record<WireInstructionLowering, true>;
 
+/**
+ * The refusal codes, keyed so the compiler holds the list to the generated
+ * union: a code the server adds fails the build until it is named here.
+ */
+const SET_ERROR_CODES = {
+  invalid_request: true,
+  digest_mismatch: true,
+  stale_revision: true,
+  revision_conflict: true,
+  unknown_slot: true,
+  slot_limit_exceeded: true,
+  body_too_large: true,
+  active_set_budget_exceeded: true,
+  owned_by_mob: true,
+  owned_by_session: true,
+  owned_by_other_mob: true,
+  slot_managed_by_activation: true,
+  durability_unavailable: true,
+  mob_terminal: true,
+  malformed_instruction_history: true,
+  prepared_authorization_required: true,
+} as const satisfies Record<InstructionSetErrorCode, true>;
+
 /** Every operator-instruction refusal code, as the server's closed vocabulary. */
-export const INSTRUCTION_SET_ERROR_CODES: readonly InstructionSetErrorCode[] = [
-  "invalid_request",
-  "digest_mismatch",
-  "stale_revision",
-  "revision_conflict",
-  "unknown_slot",
-  "slot_limit_exceeded",
-  "body_too_large",
-  "active_set_budget_exceeded",
-  "owned_by_mob",
-  "owned_by_session",
-  "owned_by_other_mob",
-  "slot_managed_by_activation",
-  "durability_unavailable",
-  "mob_terminal",
-  "malformed_instruction_history",
-  "prepared_authorization_required",
-];
+export const INSTRUCTION_SET_ERROR_CODES: readonly InstructionSetErrorCode[] = Object.keys(
+  SET_ERROR_CODES,
+) as InstructionSetErrorCode[];
 
 /**
  * The closed code of a refused operator-instruction write or read (the

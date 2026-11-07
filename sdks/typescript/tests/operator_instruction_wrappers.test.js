@@ -323,6 +323,22 @@ describe("operator instruction wrappers", () => {
     assert.equal(instructionSetCode(null), undefined);
   });
 
+  it("knows exactly the wire refusal codes", async () => {
+    const { INSTRUCTION_SET_ERROR_CODES, instructionSetCode } = await import("../dist/index.js");
+    const { readFileSync } = await import("node:fs");
+    const wire = JSON.parse(
+      readFileSync(new URL("../../../artifacts/schemas/wire-types.json", import.meta.url), "utf8"),
+    ).InstructionSetErrorCode.enum;
+    assert.deepEqual([...INSTRUCTION_SET_ERROR_CODES].sort(), [...wire].sort());
+    for (const code of wire) {
+      assert.equal(
+        instructionSetCode(new MeerkatError("-32602", "refused", { instruction_set_code: code })),
+        code,
+        `${code} reads typed`,
+      );
+    }
+  });
+
   it("the applied-instructions event is schema-known and keeps its payload", async () => {
     const { KNOWN_AGENT_EVENT_TYPES } = await import("../dist/generated/events.js");
     const raw = {

@@ -10717,8 +10717,9 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // A decision (a gate, a quarantine review, a goal confirmation)
             // is listed only to a signed-in person, as `whoami` reports one,
-            // and a claim and its release only to a caller with a principal
-            // to own it: every other caller is always refused them.
+            // and a claim, its release and the break-glass reassignment
+            // (which records its caller) only to a caller with a principal:
+            // every other caller is always refused them.
             let decides = governance.human.is_some();
             let owns = crate::rpc::workgraph_methods::console_trusted_principal(
                 authenticated_principal,
@@ -10911,9 +10912,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                                 _ => true,
                             }),
                     );
-                    methods.extend_from_slice(
-                        crate::rpc::workgraph_methods::WORKGRAPH_CONSOLE_MUTATE_METHODS,
-                    );
+                    if owns {
+                        methods.extend_from_slice(
+                            crate::rpc::workgraph_methods::WORKGRAPH_CONSOLE_MUTATE_METHODS,
+                        );
+                    }
                 }
             }
             if access.is_some() {

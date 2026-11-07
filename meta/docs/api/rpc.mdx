@@ -2459,7 +2459,7 @@ The paging rules are Meerkat's (`docs/api/rpc.mdx`, `workgraph/list`).
 | `meta/workgraph/attention/resume` | `{binding_id, expected_revision, namespace?}` | `{attention}` |
 | `meta/workgraph/attention/reassign` | `{binding_id, expected_revision, target (as goal/create), namespace?}`; coordinate-mode bindings only | `{previous, attention}` |
 | `meta/workgraph/attention/prune` | `{updated_before?: RFC3339, namespace?}`; deletes terminal (superseded/stopped) binding rows only | `{pruned}` |
-| `meta/workgraph/attention/break_glass_reassign` | console surface only: `{binding_id, expected_revision, target, reason (required, non-empty), namespace?}`; the principal is the authenticated console principal, never a wire param (unauthenticated consoles get `-32030`) | `{previous, attention}` |
+| `meta/workgraph/attention/break_glass_reassign` | console surface only: `{binding_id, expected_revision, target, reason (required, non-empty), namespace?}`; the principal is the authenticated console principal, never a wire param (a caller without one gets `-32030`, and `meta/capabilities` does not list the method to it) | `{previous, attention}` |
 
 `goal/create`, `attention/*`, and `policy/escalate` reject a non-default
 `namespace` (`-32602`) because upstream turn-overlay resolution reads only the

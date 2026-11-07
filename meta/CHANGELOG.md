@@ -161,9 +161,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   signed-in person to sign in as themselves to decide.
 - `meta/capabilities` on the console lists `meta/gating/decide`,
   `meta/memory/quarantine/decide` and `meta/workgraph/goal/confirm` only
-  to a signed-in person, and `meta/workgraph/claim` and
-  `meta/workgraph/release` only to a caller with a principal: every other
-  caller is always refused them.
+  to a signed-in person, and `meta/workgraph/claim`,
+  `meta/workgraph/release` and `meta/workgraph/attention/break_glass_reassign`
+  only to a caller with a principal: every other caller is always refused
+  them.
 - A gating decision made on the host's stdio RPC gateway, or by an
   embedding host through the library, records `deciding_assurance`
   `device_trusted` in its audit entry.

@@ -8092,6 +8092,60 @@ impl MeerkatMachine {
         }
     }
 
+    /// Deterministically pause the next retained-run settle of `session_id`
+    /// ([`Self::settle_retained_run`]) once the waiters it registered were
+    /// answered, before it takes the session's mutation gate again to read
+    /// what the settlement committed. The first receiver resolves when the
+    /// settle reaches the pause; sending on (or dropping) the returned sender
+    /// lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_retained_run_settle_before_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "retained-run settle gate test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_retained_run_settle_before_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
     /// Deterministically pause the runtime loop's next terminal run commit
     /// of `session_id` after the store commit landed and before the
     /// committed boundary is acknowledged to the session executor. The
@@ -11803,6 +11857,18 @@ pub struct MeerkatMachineShared {
             crate::tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// One-shot deterministic gate in a retained-run settle, after the
+    /// waiters it registered were answered and before it takes the session's
+    /// mutation gate again: a test replaces the registration (a reload)
+    /// while the settle waits there.
+    #[cfg(any(test, feature = "test-support"))]
+    test_retained_run_settle_before_gate: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// Run-start holds a session's next registration applies (#1500),
     /// before its runtime loop can start a run. A reason stays staged until
     /// it is released, so every re-registration re-applies exactly the
@@ -13779,6 +13845,8 @@ impl MeerkatMachine {
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_attachment_interrupted_notice_handoff: StdMutex::new(None),
@@ -14044,6 +14112,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -14975,6 +15045,9 @@ mod commit_deadline_tests;
 
 #[cfg(test)]
 mod lost_admission_ack_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod retained_run_fence_tests;
 
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;

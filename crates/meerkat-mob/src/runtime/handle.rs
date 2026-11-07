@@ -3113,6 +3113,7 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::WorkInputCompletionUnavailable { .. }
         | MobError::MemberInputRequeuedAcrossStop { .. }
         | MobError::MemberInputRequeueExpired { .. }
+        | MobError::MemberInputTerminalNotYetReadable { .. }
         | MobError::ActorCommandTimedOut { .. }
         | MobError::MemberReloadRefused { .. }
         | MobError::MemberReloadRepairBlocked { .. }

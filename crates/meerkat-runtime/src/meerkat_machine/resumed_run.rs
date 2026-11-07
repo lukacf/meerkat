@@ -378,6 +378,9 @@ impl MeerkatMachine {
                 // (a reload, a teardown): what committed is read below.
                 let _ = waiter.try_wait_with_terminal_outcome().await;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            self.run_retained_run_settle_before_gate_test_hook(session_id)
+                .await;
             // The facts, under the gate the loop holds through the
             // settlement's commit and its tail repair. A registration that
             // needs a reload, or is gone, refuses here.

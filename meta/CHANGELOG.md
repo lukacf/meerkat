@@ -190,13 +190,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The stock console reads `meta/console/whoami` once per console instance
   and names that caller (`expected_caller_scope`) on every console request,
   voice and MCP Apps tool calls included; a later answer for someone else
-  never changes whom it names. Its first change waits for that read, and
-  while no read has answered a change is not sent at all (it reads
-  **Not sent**, and the console reads its caller again with its next
-  experience read). A change refused with `caller_changed` reads
-  **Not sent**, and the console loads again as the caller the gateway now
-  serves; a voice call, an MCP Apps tool call or a blob upload refused that
-  way, or with an ended login, does the same as a send.
+  never changes whom it names. Its first change waits for that read. While
+  no read has answered, no console request that names a caller leaves: a
+  message sent then reads **Not sent**, a queued message stays queued, the
+  console commands that read (approvals and other panels) are refused too,
+  and the top bar shows no identity chip, so no **Sign out**. The console
+  reads its caller again with its next experience read, and loads again at
+  once when another tab of the console learns it. A change refused with
+  `caller_changed` reads **Not sent**, and the console loads again as the
+  caller the gateway now serves; a voice call, an MCP Apps tool call or a
+  blob upload refused that way, or with an ended login, does the same as a
+  send.
 - Console requests do not follow redirects (`redirect: "manual"`), and a
   queued message the stock console sends on its own (when its agent becomes
   idle) waits for a fresh read of the console experience first.
@@ -213,7 +217,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   browser, in every tab of the console; preferences stay. Both also remove
   the copy of a queue the storage lock keeps in IndexedDB on an origin
   without Web Locks, and the browser leaves for the sign-out once that is
-  done.
+  done, or after at most 1.5 seconds.
 
 ### Fixed
 

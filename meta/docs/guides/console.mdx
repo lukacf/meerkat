@@ -1267,11 +1267,15 @@ The stock console reads `whoami` once for each console it loads and names that
 caller on every console request (`expected_caller_scope`, and
 `expectedCallerScope` on an MCP Apps tool call): the `caller_scope` that read
 reported. A later answer for someone else never changes whom it names. Its
-first change waits for that read, and while no read has answered, a change is
-not sent at all: a message reads **Not sent**, and the console reads its caller
-again with its next read of the console experience. The gateway refuses a
-change made for another caller (`caller_changed`), so a message queued by one
-person is never sent as another.
+first change waits for that read. While no read has answered, no console
+request that names a caller leaves: a message sent then reads **Not sent**, a
+queued message stays queued, the console commands that read (approvals and the
+other panels that read through them) are refused too, and the top bar shows no
+identity chip, so **Sign out** is not offered. The console reads its caller
+again with its next read of the console experience, and loads again at once
+when another tab of the console learns it. The gateway refuses a change made
+for another caller (`caller_changed`), so a message queued by one person is
+never sent as another.
 
 When someone else signs in to the same browser, every tab of the console
 notices at once: a tab that learns its caller tells this browser's other tabs
@@ -1308,7 +1312,7 @@ arranged.
 in every tab of the console; preferences stay. On an origin without Web Locks
 (plain HTTP), the queue's storage lock keeps a copy of each queue in IndexedDB;
 signing out removes those copies too, and the browser leaves for the sign-out
-once they are gone. A queue an earlier console kept
+once they are gone, or after at most 1.5 seconds. A queue an earlier console kept
 for everyone using the browser (one that named no user, or a host namespace
 alone) is offered once as **Older queued messages**: importing it moves it to
 the user who imported it and removes the earlier copy, so no other user of

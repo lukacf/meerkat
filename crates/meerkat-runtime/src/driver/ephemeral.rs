@@ -9434,6 +9434,79 @@ mod tests {
         );
     }
 
+    /// A second graceful requeue stop over an input an earlier one kept,
+    /// before any start ran it, marks it again: the second stop's time and
+    /// max age replace the earlier mark, which is not kept. So the input's
+    /// age counts from the last stop that kept it, and the max age bounds
+    /// that last outage alone, however long before it the input was admitted
+    /// or first kept. RED before: the age counted from the input's admission,
+    /// so the input, admitted 20 minutes back, was over the second stop's
+    /// 10-minute max age the moment that stop kept it.
+    #[tokio::test]
+    async fn a_second_requeue_stop_marks_a_kept_input_again_from_its_own_time() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-second-stop").await;
+        // Admitted 20 minutes ago and kept by a first stop 10 minutes ago
+        // with a 15-minute max age, as the next registration recovers it.
+        let now = Utc::now();
+        let first_stop = now - chrono::Duration::minutes(10);
+        {
+            let row = driver.ledger.get_mut(&durable_id).expect("the kept row");
+            let admitted_at = now - chrono::Duration::minutes(20);
+            row.persisted_input
+                .as_mut()
+                .expect("a kept input keeps its payload")
+                .header_mut()
+                .timestamp = admitted_at;
+            row.created_at = admitted_at;
+            row.stop_requeue = Some(crate::input_state::StopRequeueMark {
+                stopped_at: first_stop,
+                max_age_ms: 900_000,
+            });
+        }
+
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            600_000,
+        );
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert_eq!(
+            driver.stop_non_terminal_inputs(&before_exit).unwrap(),
+            vec![durable_id.clone()],
+            "the second stop keeps the input again"
+        );
+        let mark = driver
+            .ledger
+            .get(&durable_id)
+            .and_then(|state| state.stop_requeue)
+            .expect("the second stop marks the input");
+        assert!(
+            mark.stopped_at >= now && mark.max_age_ms == 600_000,
+            "the second stop's time and max age replace the first stop's mark: {mark:?}"
+        );
+
+        // Fifteen minutes after the first stop is five minutes into the
+        // second outage: the first stop's mark no longer counts.
+        let first_bound = first_stop + chrono::Duration::milliseconds(900_001);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, first_bound).is_empty(),
+            "past the first stop's max age, the input is inside the second's"
+        );
+        let within = mark.stopped_at + chrono::Duration::milliseconds(600_000);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty(),
+            "at the second stop's max age, counted from that stop, the input still runs"
+        );
+        let past = mark.stopped_at + chrono::Duration::milliseconds(600_001);
+        assert_eq!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, past),
+            vec![durable_id],
+            "past it, the input expires"
+        );
+    }
+
     /// A requeue stop that suspends the in-flight run marks it resumable
     /// before its first classification: the stop then keeps the run's staged
     /// input bound to it with the stop's mark, and the verdicts before and

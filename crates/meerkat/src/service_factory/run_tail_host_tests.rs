@@ -1403,3 +1403,152 @@ async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_a
 async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_age_whole_blob() {
     the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_age(false).await;
 }
+
+// ---------------------------------------------------------------------------
+// A run a graceful stop kept, admitted long before the restart.
+// ---------------------------------------------------------------------------
+
+/// A run in flight at a host's graceful stop, whose prompt the runtime
+/// admitted 20 minutes before the stop: longer than the 15-minute max age
+/// (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`) of the stop a graceful
+/// shutdown makes when its host names no disposition, as `rkat-rpc`'s and
+/// the REST server's shutdowns do (`MeerkatMachine::graceful_shutdown_queued_inputs`).
+/// The stop suspends the run after its tool round's commit, while it waits on
+/// the model, and keeps its input bound to it, marked with the stop's time.
+/// The next host starts at once and resumes the run from its tail: the run
+/// asks the model once more, keeps its tool round once and completes once,
+/// and its input is consumed. RED before: the start measured the max age
+/// from the prompt's admission, so it ended the input `RequeueExpired` and
+/// closed the run as interrupted instead of resuming it, however short the
+/// restart.
+async fn a_run_admitted_long_before_a_graceful_restart_resumes_and_completes_once(
+    head_canonical: bool,
+) {
+    let root = TempDir::new().expect("temp");
+    let stores = DiskStores::new(head_canonical, &root);
+    let client = Arc::new(ScriptedModel::new());
+    let first = stores.open(&root, &client);
+    let id = materialize_session(&first, meerkat_core::Session::new()).await;
+
+    // The run's prompt, admitted 20 minutes before the stop: the run makes
+    // one tool call, commits that round and waits on the model.
+    client.push(Step::Tool);
+    client.push(Step::Held);
+    let mut prompt = PromptInput::new("kept", None);
+    prompt.header.timestamp = chrono::Utc::now() - chrono::Duration::minutes(20);
+    let prompt = Input::Prompt(prompt);
+    let kept = prompt.id().clone();
+    let (accepted, kept_waiter) = first
+        .machine
+        .accept_input_with_completion(&id, prompt)
+        .await
+        .expect("the runtime admits the prompt");
+    assert!(
+        accepted.is_accepted(),
+        "the prompt is admitted: {accepted:?}"
+    );
+    tokio::time::timeout(DEADLINE, client.entered.acquire())
+        .await
+        .expect("the run reaches its second model call")
+        .expect("model gate")
+        .forget();
+    let run = tail_run(&first, &id)
+        .await
+        .expect("the run's round commit stands as the provisional tail");
+
+    // The host's graceful stop, with the disposition its shutdown uses.
+    let queued_inputs = first.machine.graceful_shutdown_queued_inputs();
+    assert_eq!(
+        queued_inputs,
+        meerkat_runtime::UnregisterQueuedInputs::Requeue {
+            max_age: meerkat_runtime::UnregisterQueuedInputs::DEFAULT_MAX_AGE,
+        },
+        "a runtime with a store requeues with the default max age"
+    );
+    let registration = first
+        .machine
+        .current_session_registration_witnesses()
+        .await
+        .into_iter()
+        .find(|registration| registration.session_id() == &id)
+        .expect("the session's registration");
+    let unregistered = first
+        .machine
+        .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+            &registration,
+            queued_inputs,
+        )
+        .await
+        .expect("the graceful stop");
+    assert!(unregistered, "the graceful stop ends the registration");
+    let waited = tokio::time::timeout(DEADLINE, kept_waiter.expect("the prompt's waiter").wait())
+        .await
+        .expect("the prompt's waiter is answered");
+    assert!(
+        matches!(&waited, Err(error) if error.is_requeued_across_stop()),
+        "the stop keeps the run: {waited:?}"
+    );
+    first.service.try_shutdown().await.expect("shutdown");
+    let stopped = kept_prompt_row(&first, &id, &kept).await;
+    assert_eq!(
+        (
+            stopped.seed.last_run_id.as_ref(),
+            stopped.seed.terminal_outcome.as_ref(),
+            stopped.state.stop_requeue.map(|mark| mark.max_age_ms),
+        ),
+        (Some(&run), None, Some(900_000)),
+        "the stop keeps the prompt bound to its run, marked with the default max age"
+    );
+
+    // The next host starts at once.
+    let after_the_stop = TempDir::new().expect("temp");
+    let restarted = stores.power_cut_copy(&after_the_stop);
+    let resumed_client = Arc::new(ScriptedModel::new());
+    resumed_client.push(Step::Text("kept answer"));
+    let second = restarted.open(&after_the_stop, &resumed_client);
+    let opened =
+        try_materialize_session(&second, restarted.stored_session(&second, &id).await).await;
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    let settled = loop {
+        let row = kept_prompt_row(&second, &id, &kept).await;
+        if row.seed.terminal_outcome.is_some() || tokio::time::Instant::now() >= deadline {
+            break row;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        (settled.seed.phase, settled.seed.terminal_outcome),
+        (
+            InputLifecycleState::Consumed,
+            Some(meerkat_runtime::InputTerminalOutcome::Consumed),
+        ),
+        "the restart resumes the run, and its input is consumed: a prompt admitted 20 minutes \
+         before a stop that kept it moments ago is not expired"
+    );
+    opened.expect("the next host opens the session");
+    assert_eq!(
+        resumed_client.requests.load(Ordering::SeqCst),
+        1,
+        "the resumed run asks the model once"
+    );
+    assert_eq!(
+        committed_rows(&second, &id).await,
+        vec![
+            "user kept".to_string(),
+            "assistant tool use".to_string(),
+            "tool results".to_string(),
+            "assistant kept answer".to_string(),
+        ],
+        "the run completes once, its tool round kept once, with no interrupted-run notice"
+    );
+}
+
+#[tokio::test]
+async fn a_run_admitted_long_before_a_graceful_restart_resumes_and_completes_once_head_canonical() {
+    a_run_admitted_long_before_a_graceful_restart_resumes_and_completes_once(true).await;
+}
+
+#[tokio::test]
+async fn a_run_admitted_long_before_a_graceful_restart_resumes_and_completes_once_whole_blob() {
+    a_run_admitted_long_before_a_graceful_restart_resumes_and_completes_once(false).await;
+}

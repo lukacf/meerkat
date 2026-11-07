@@ -475,6 +475,49 @@ async fn an_installation_is_admitted_at_the_current_generation_only() {
     );
 }
 
+/// The realm's session service over `bundle`, as a host composes it.
+fn realm_service(
+    root: &Path,
+    bundle: meerkat::PersistenceBundle,
+) -> (
+    meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+) {
+    let builder = meerkat::FactoryAgentBuilder::new(
+        meerkat::AgentFactory::new(root.join("sessions")),
+        meerkat::Config::default(),
+    );
+    meerkat::surface::build_runtime_backed_service(builder, 4, bundle)
+        .expect("the realm's session service")
+}
+
+/// A realm's terminal close ends its custody of the restored grant owner,
+/// even while a task of the closed realm still holds the realm's machine:
+/// the realm reopens at once with the restored owner, so its installation is
+/// admitted again, rather than opening with an owner that could not restore.
+#[tokio::test]
+async fn a_closed_realm_reopens_with_its_owner_while_its_machine_is_still_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    governed_realm_with_installations(tmp.path()).await;
+    let installed = read_only_fixture();
+    let (service, machine) = realm_service(tmp.path(), open(tmp.path(), bootstrap()).await);
+    let held = Arc::clone(&machine);
+    service
+        .try_shutdown()
+        .await
+        .expect("the realm's terminal close");
+    drop(service);
+    drop(machine);
+
+    let reopened = open(tmp.path(), bootstrap()).await;
+    assert_eq!(
+        attachment_of(&reopened, &installed).await,
+        Some(Ok(())),
+        "the reopened realm restores its grant owner"
+    );
+    drop(held);
+}
+
 /// The installation is no authority of its own: a governed realm without
 /// its owners, or with an unrestorable grant owner, still refuses it.
 #[tokio::test]

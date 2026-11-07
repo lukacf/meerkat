@@ -826,6 +826,88 @@ fn a_lookup_waiting_behind_an_uncertain_append_is_unavailable() {
     });
 }
 
+/// RED stand-in for the custody release this change adds: before it, a
+/// host's close leaves the owner's custody as it is.
+trait ReleaseCustodyAtBase {
+    fn release_custody(&self) -> Result<(), GrantRefusal>;
+}
+impl ReleaseCustodyAtBase for LocalGrantAuthority {
+    fn release_custody(&self) -> Result<(), GrantRefusal> {
+        Ok(())
+    }
+}
+
+/// The close of an owner's host while a task of that host still holds a
+/// reference to the owner: the store restores at once, the straggler's later
+/// changes and uses are refused without extending the lease, and the
+/// successor never sees them. `opener` gives a fresh opener of the same store.
+fn release_while_referenced(opener: impl Fn() -> Arc<dyn GrantOwnerStore>) {
+    let owner = Arc::new(durable(opener()));
+    let kept = issue(&owner, "kept");
+    let ((), stamp) = owner.publication.observe(|| ()).expect("stamp");
+    let straggler = Arc::clone(&owner);
+    owner
+        .release_custody()
+        .expect("the host's close releases custody");
+    drop(owner);
+    assert_eq!(
+        stamp.check_current(),
+        Err(PublicationError::Changed),
+        "an observation taken before the close is not current after it"
+    );
+
+    let successor = restart(opener()).expect("the released store restores at once");
+    assert_eq!(
+        try_issue(&straggler, "late"),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert_eq!(
+        straggler.revoke(&who("root"), &kept, &mut IsolatedGrantTestCustody),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert!(matches!(
+        straggler.resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None),
+        Err(GrantRefusal::Unavailable)
+    ));
+    assert_eq!(
+        straggler.issued_reference(&id("kept")),
+        Err(GrantRefusal::Unavailable)
+    );
+    assert_eq!(
+        straggler.release_custody(),
+        Ok(()),
+        "a second close releases nothing more"
+    );
+    successor
+        .resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None)
+        .expect("the successor keeps every acknowledged grant");
+    issue(&successor, "after");
+    drop(straggler);
+    assert!(
+        matches!(
+            restart(opener()),
+            Err(GrantDurabilityError::StoreUnavailable)
+        ),
+        "dropping the straggler leaves the successor's lease intact"
+    );
+    drop(successor);
+
+    let last = restart(opener()).expect("restore after the successor");
+    assert!(!state(&last).records.contains_key(&id("late")));
+    assert!(state(&last).records.contains_key(&id("after")));
+}
+
+#[test]
+fn a_released_owner_frees_its_lease_while_a_reference_is_still_held() {
+    let shared = Arc::new(InMemoryGrantOwnerStore::new());
+    release_while_referenced(|| -> Arc<dyn GrantOwnerStore> { shared.clone() });
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("grant-owner.jsonl");
+    release_while_referenced(|| -> Arc<dyn GrantOwnerStore> {
+        Arc::new(FileGrantOwnerStore::new(&path))
+    });
+}
+
 /// A conjunct window open far beyond the fixture clock.
 fn open() -> ChildGrantValidity {
     ChildGrantValidity {

@@ -106,7 +106,7 @@ export function RemoteBrowserAccess({ state, build, options, receipt, blocked = 
   const url = !selectionBlocked && qualified && !selected.unavailable && !busy && !closeIntent
     ? remoteBrowserConsole(access, receipt, state, build, Math.max(clock, Date.now())) : null;
   const expired = !selectionBlocked && qualified && access?.status === "ready" && !url && !busy && !closeIntent && !selected.unavailable;
-  const authenticated = access?.scope?.authentication === "local-password";
+  const authentication = access?.scope?.authentication;
   return <section className="remote-browser-access" aria-label="Native Console browser connection"
     aria-disabled={selectionBlocked} {...guideSelectionEvents(selectionScope, state, selectionToken)}
     data-browser-status={selected.unavailable ? "unavailable" : access?.status || "checking"}>
@@ -122,7 +122,11 @@ export function RemoteBrowserAccess({ state, build, options, receipt, blocked = 
     </div>
     {removing ? <p className="deployment-note">Opening Console is withdrawn for this cloud removal request. Recheck or close an existing browser connection here until its local cleanup is confirmed.</p>
       : !qualified && <p className="deployment-note">Recheck or close this installed application's saved connection here. Opening its Console requires the matching accepted application and current destination checks.</p>}
-    {access && qualified && <p>{authenticated ? "Sign in with the Console password you chose for this installation. Forge does not copy or fill it in."
+    {access && qualified && <p>{authentication === "oidc"
+      ? "Sign in with your account at the identity provider this Console uses. Forge does not sign you in or keep its tokens."
+      : authentication === "local-accounts"
+      ? "Sign in with your own account name and password. Forge does not copy or fill them in."
+      : authentication === "local-password" ? "Sign in with the Console password you chose for this installation. Forge does not copy or fill it in."
       : "This installation's native Console does not ask for a Console password."}</p>}
     {!removing && <p>Keep Forge open while using the Console.</p>}
     {(selected.unavailable || access?.status === "unavailable") && <p className="deployment-warning" role="status">Browser access could not be verified. The open link is withheld; this does not prove the remote application failed or stopped. Recheck before reconnecting.</p>}

@@ -359,9 +359,11 @@ count. Reading it wakes no agent.
 The browser keeps these preferences in local storage, per signed-in user and
 console: the manual order, the Group and Sort choices and the pins follow the
 user and are kept when the `[agent_list]` configuration changes. The order of
-categories and subgroups and which of them are collapsed belong to that
-configuration and start over when it changes. Pins an earlier console kept
-carry over once.
+categories and subgroups and which of them are collapsed are kept per user too,
+for that configuration, and start over when it changes. Pins set in two tabs
+are both kept, and every tab shows them. Pins, and the category order and
+collapse an earlier console kept for every user of the runtime, carry over
+once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -391,7 +393,7 @@ counts.
 
 | Tab | What it shows |
 | --- | --- |
-| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. A decision whose record names its verified decider reads "Decided by" that principal, the approver label it decided as, and the assurance it was authenticated with (for example "alice@example.test (as Release manager) - person authenticated"); an older record keeps the approver label. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
@@ -418,6 +420,16 @@ no human, or a shared-account token), the inbox shows requests read-only and
 says to sign in as yourself to decide: such a caller can read them but not
 decide them. A request pinned to an approver id is decided by a person who
 holds that id through the access configuration's `approvers` bindings.
+
+Approval cards are personal. A request pinned to an approver id the caller does
+not hold reads **Waiting for** that approver and offers no decision; for a
+signed-in person, a request pinned to an id they hold, or pinned to no one,
+reads **For you**. **Needs you** counts only the requests that are not waiting
+for someone else (with any host items), and the sidebar's **Approvals** count
+counts the same requests. A request for the caller that someone
+else decides keeps its card, which says how and by whom (for example
+"Approved by" the deciding person, read from the gating audit), or "Decided
+elsewhere" when the audit cannot say.
 
 The same holds for memory quarantine reviews and WorkGraph goal confirmations:
 the console offers them only to a signed-in person. A WorkGraph claim is owned
@@ -1268,6 +1280,70 @@ host proxy converts console auth into cookies
 or another browser-ambient credential, that host must add origin and CSRF
 protection before exposing mutation routes such as `/console/rpc`,
 `/console/rpc/multipart`, or `/console/send`.
+
+### Who the console acts as
+
+The top bar names the caller the console acts as, from
+`meta/console/whoami`: the signed-in person, a shared account (a token that
+names no person), a service, or **Not signed in** on an open console. Its menu
+offers **Sign out** when the console configuration names `[sign_out]` (see
+[sign-out](/reference/configuration#sign-out)).
+
+The stock console reads `whoami` once for each console it loads and names that
+caller on every console request (`expected_caller_scope`, and
+`expectedCallerScope` on an MCP Apps tool call): the `caller_scope` that read
+reported. A later answer for someone else never changes whom it names. Its
+first change waits for that read. While no read has answered, no console
+request that names a caller leaves: a message sent then reads **Not sent**, a
+queued message stays queued, the console commands that read (approvals and the
+other panels that read through them) are refused too, and the top bar shows no
+identity chip, so **Sign out** is not offered. The console reads its caller
+again with its next read of the console experience, and loads again at once
+when another tab of the console learns it. The gateway refuses a change made
+for another caller (`caller_changed`), so a message queued by one person is
+never sent as another.
+
+When someone else signs in to the same browser, every tab of the console
+notices at once: a tab that learns its caller tells this browser's other tabs
+of the console, and a tab whose caller differs, or whose request was refused
+with `caller_changed` (a voice call, an MCP Apps tool call or a blob upload
+included), drops what it shows (transcripts, approvals, host items, the
+previous caller's queued messages and drafts), stops its streams and loads
+again as the new caller. A queued message the console sends on its own (an
+agent became idle) waits for a fresh read of the console experience first, so
+it is never sent under a login that changed meanwhile.
+
+A login that ends puts the console in one sign-in state: a 401,
+`caller_not_current`, or a front that redirects a console request to its
+sign-in page. No view of the ended login stays on screen. **Sign in** reloads
+the console page so the front can sign the browser in again, and signing in
+again in another tab, or coming back to the tab, brings the console back, with
+the message being written and the images attached to it. Console requests do
+not follow redirects, so a front's redirect to its sign-in page reads as "sign
+in", never as an unknown outcome: a send it stopped reads **Not sent**.
+Messages already queued stay saved in this browser.
+
+### What this browser keeps
+
+The browser keeps each signed-in user's console data apart. Queued messages
+(in local storage) and unsent drafts (in each tab's session storage) are kept
+under the user's storage scope, the `storage_scope` of `/console/experience`;
+a host that passes `storageNamespace` gets it combined with that scope. The
+display settings, the sidebar's and the activity rail's collapse and the agent
+list's arrangement are kept per user too, and each tab saves the panel layout
+only when it changes it, so a tab left open does not undo what another tab
+arranged.
+
+**Sign out** removes the user's queued messages and drafts from this browser,
+in every tab of the console; preferences stay. On an origin without Web Locks
+(plain HTTP), the queue's storage lock keeps a copy of each queue in IndexedDB;
+signing out removes those copies too, and the browser leaves for the sign-out
+once they are gone, or after at most 1.5 seconds. A queue an earlier console kept
+for everyone using the browser (one that named no user, or a host namespace
+alone) is offered once as **Older queued messages**: importing it moves it to
+the user who imported it and removes the earlier copy, so no other user of
+the browser is offered it. A preference an earlier console kept for everyone
+is read once in the same way, by the first user who loads the console.
 
 ## Build system
 

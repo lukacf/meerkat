@@ -160,7 +160,7 @@ pub(crate) fn status_json_rpc_row(
     target: Identifiers,
     answer: &(axum::http::StatusCode, Value),
 ) -> ConsoleAuditEntry {
-    ConsoleAuditEntry::answered(actor, method, target, &answer.1)
+    json_rpc_row(actor, method, target, &answer.1)
 }
 
 /// An MCP app tool call's answer, as the route gives it, and whether the

@@ -1453,7 +1453,7 @@ pub async fn console_rpc_handler(
     // A console change and its row in the console audit log run on the
     // server, a refusal included (`crate::console_audit`): a caller that
     // goes away cuts neither short.
-    let mut response =
+    let (status, mut response) =
         match audit::ConsoleAuditIntent::of(&state, &auth_context, &parsed_request) {
             None => console_rpc_answer(&state, voice, &auth_context, parsed_request).await,
             Some(intent) => intent
@@ -1461,17 +1461,17 @@ pub async fn console_rpc_handler(
                     async move {
                         console_rpc_answer(&state, voice, &auth_context, parsed_request).await
                     },
-                    console_change_lost(response_id.clone()),
-                    audit::json_rpc_row,
+                    (StatusCode::OK, console_change_lost(response_id.clone())),
+                    audit::status_json_rpc_row,
                 )
                 .await
-                .unwrap_or_else(|| console_change_lost(response_id)),
+                .unwrap_or_else(|| (StatusCode::OK, console_change_lost(response_id))),
         };
     if method == "meta/capabilities" && audit_offered {
         advertise_console_audit(&mut response);
     }
     crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
-    (StatusCode::OK, Json::<Value>(response))
+    (status, Json::<Value>(response))
 }
 
 /// The answer to a console change whose task ended without one.
@@ -1500,27 +1500,35 @@ fn advertise_console_audit(response: &mut Value) {
     }
 }
 
-/// The answer of one authenticated `POST /console/rpc` request.
+/// The answer of one authenticated `POST /console/rpc` request, with its HTTP
+/// status: 200, but for a sign-out by a caller without a login, which
+/// [`console_sign_out_rpc`] answers 401.
 async fn console_rpc_answer(
     state: &ConsoleJsonState,
     voice: Option<axum::Extension<crate::console_voice::ConsoleVoiceController>>,
     auth_context: &ConsoleHttpAuthContext,
     mut parsed_request: JsonRpcRequest,
-) -> Value {
+) -> (StatusCode, Value) {
     let request_method = parsed_request.method.clone();
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
         Err(message) => {
-            return invalid_params(parsed_request.id.clone().unwrap_or(Value::Null), message);
+            return (
+                StatusCode::OK,
+                invalid_params(parsed_request.id.clone().unwrap_or(Value::Null), message),
+            );
         }
     };
     if is_console_mutating_rpc_method(&request_method)
         && let Err(refusal) = auth_context.refuse_other_caller(expected_caller_scope.as_deref())
     {
-        return response_value(
-            parsed_request.id.clone().unwrap_or(Value::Null),
-            None,
-            Some(refusal.json_rpc_error()),
+        return (
+            StatusCode::OK,
+            response_value(
+                parsed_request.id.clone().unwrap_or(Value::Null),
+                None,
+                Some(refusal.json_rpc_error()),
+            ),
         );
     }
     // By this point the request is always authorized:
@@ -1540,16 +1548,32 @@ async fn console_rpc_answer(
             parsed_request.id.clone().unwrap_or(Value::Null),
         )
     {
-        return response_value(refusal.id, refusal.result, refusal.error);
+        return (
+            StatusCode::OK,
+            response_value(refusal.id, refusal.result, refusal.error),
+        );
     }
     if request_method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD {
-        return console_revoke_sessions_rpc(state, auth_context, read_only, &parsed_request);
+        return (
+            StatusCode::OK,
+            console_revoke_sessions_rpc(state, auth_context, read_only, &parsed_request),
+        );
+    }
+    if request_method == crate::rpc::CONSOLE_SIGN_OUT_METHOD {
+        let (status, Json(answer)) = console_sign_out_rpc(auth_context, &parsed_request);
+        return (status, answer);
     }
     if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
-        return console_whoami_rpc(&state.decisions, auth_context, &parsed_request);
+        return (
+            StatusCode::OK,
+            console_whoami_rpc(&state.decisions, auth_context, &parsed_request),
+        );
     }
     if request_method == crate::rpc::CONSOLE_AUDIT_METHOD {
-        return audit::console_audit_rpc(state, auth_context, &parsed_request).await;
+        return (
+            StatusCode::OK,
+            audit::console_audit_rpc(state, auth_context, &parsed_request).await,
+        );
     }
     if matches!(
         request_method.as_str(),
@@ -1563,13 +1587,14 @@ async fn console_rpc_answer(
             | crate::console_voice::VOICE_CAPTIONS_METHOD
     ) || crate::console_voice::is_channel_method(&request_method)
     {
-        return handle_console_voice_rpc(
+        let answer = handle_console_voice_rpc(
             state,
             voice.as_ref().map(|extension| &extension.0),
             auth_context,
             parsed_request,
         )
         .await;
+        return (StatusCode::OK, answer);
     }
     let Some(runtime) = &state.runtime else {
         // A change checks its caller again right before its handler runs,
@@ -1578,13 +1603,16 @@ async fn console_rpc_answer(
             && let Err(refusal) = ConsoleSendGovernance::for_request(state, auth_context)
                 .refuse_unless_caller_current()
         {
-            return response_value(
-                parsed_request.id.clone().unwrap_or(Value::Null),
-                None,
-                Some(refusal.json_rpc_error()),
+            return (
+                StatusCode::OK,
+                response_value(
+                    parsed_request.id.clone().unwrap_or(Value::Null),
+                    None,
+                    Some(refusal.json_rpc_error()),
+                ),
             );
         }
-        return Box::pin(handle_console_aggregator_rpc(
+        let answer = Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
             is_authenticated,
@@ -1594,6 +1622,7 @@ async fn console_rpc_answer(
             &auth_context.send_scope(),
         ))
         .await;
+        return (StatusCode::OK, answer);
     };
 
     let response_value = Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -1625,10 +1654,13 @@ async fn console_rpc_answer(
         &console_topology_apply_scope(auth_context),
     ))
     .await;
-    decorate_console_job_projection(
-        response_value,
-        &request_method,
-        state.job_health_projection.as_ref(),
+    (
+        StatusCode::OK,
+        decorate_console_job_projection(
+            response_value,
+            &request_method,
+            state.job_health_projection.as_ref(),
+        ),
     )
 }
 
@@ -2998,20 +3030,9 @@ impl ConsoleSendGovernance {
     }
 
     /// Refuse a change whose caller's login ended since the request was
-    /// accepted: the token must still pass the Console's acceptance now,
-    /// its principal's session fence included. The open Console's caller
-    /// without a token has no login to end.
+    /// accepted, by the rule of [`refuse_unless_current`].
     pub(crate) fn refuse_unless_caller_current(&self) -> Result<(), ConsoleCallerRefusal> {
-        match &self.verification {
-            Some(verification)
-                if verification
-                    .current_at(std::time::SystemTime::now())
-                    .is_none() =>
-            {
-                Err(ConsoleCallerRefusal::NotCurrent)
-            }
-            _ => Ok(()),
-        }
+        refuse_unless_current(self.verification.as_ref())
     }
 
     /// Whether a send to `identity` must be governed: the runtime's canonical
@@ -3270,6 +3291,14 @@ mod console_audit_tests;
 #[cfg(test)]
 #[path = "console_attribution_tests.rs"]
 mod console_attribution_tests;
+
+#[cfg(test)]
+#[path = "console_sign_out_tests.rs"]
+mod console_sign_out_tests;
+
+#[cfg(test)]
+#[path = "console_flow_editor_caller_tests.rs"]
+mod console_flow_editor_caller_tests;
 
 #[cfg(test)]
 #[path = "console_approver_tests.rs"]
@@ -4298,6 +4327,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/access/groups/set"
             | "meta/access/groups/delete"
             | crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD
+            | crate::rpc::CONSOLE_SIGN_OUT_METHOD
             | "meta/live/open"
             | "meta/live/replacement_required"
             | "meta/live/playback_owner/register"
@@ -4622,7 +4652,7 @@ impl ConsoleCallerRefusal {
 /// Take the `expected_caller_scope` field out of a console RPC's params, so
 /// no method's own params see it. A field that is not a string is invalid
 /// params.
-fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
+pub(crate) fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
     let Some(object) = params.as_object_mut() else {
         return Ok(None);
     };
@@ -4676,6 +4706,17 @@ pub(crate) fn served_hosts_only(router: Router, open: bool) -> Router {
 /// The 401 body for the JSON and multipart console RPC doors. The JSON-RPC
 /// code stays `-32600` for existing clients; `data.kind` is the typed reason.
 fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json<Value>) {
+    console_rpc_unauthenticated_response_with(
+        response_id,
+        "unauthorized: console rpc requires a valid auth token",
+    )
+}
+
+/// [`console_rpc_unauthenticated_response`] with its own `message`.
+fn console_rpc_unauthenticated_response_with(
+    response_id: Value,
+    message: &str,
+) -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
         Json::<Value>(serde_json::json!({
@@ -4683,7 +4724,7 @@ fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json
             "id": response_id,
             "error": {
                 "code": -32600,
-                "message": "unauthorized: console rpc requires a valid auth token",
+                "message": message,
                 "data": {
                     "kind": CONSOLE_UNAUTHENTICATED_KIND,
                     "http_status": StatusCode::UNAUTHORIZED.as_u16(),
@@ -5391,6 +5432,74 @@ fn access_denied_rpc_error(response_id: Value, message: impl Into<String>) -> Va
             data: Some(json!({ "kind": "access_denied" })),
         }),
     )
+}
+
+/// `meta/console/sign_out` on the console route: sign the caller out of the
+/// login its token belongs to (the issuer's `sid`, or the token alone
+/// without one), as of now. Every caller a token identified may sign itself
+/// out, under an access controller or not and on a read-only console too:
+/// ending one's own login changes nothing else. A caller the console did not
+/// identify by a token has no login to sign out and is answered 401. A
+/// console whose session fence record has no file refuses it, as it refuses
+/// a revocation: a restart would forget the sign-out.
+fn console_sign_out_rpc(
+    auth: &ConsoleHttpAuthContext,
+    request: &JsonRpcRequest,
+) -> (StatusCode, Json<Value>) {
+    use crate::auth::session_fence::ConsoleSessionFencesError;
+    use crate::runtime::ConsoleSignOutError;
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let Some(verification) = auth.verification.as_ref() else {
+        return console_rpc_unauthenticated_response_with(
+            response_id,
+            "unauthorized: signing out needs the token of the login to end, in the \
+             Authorization header",
+        );
+    };
+    let error = |code: i64, message: String| {
+        response_value(
+            response_id.clone(),
+            None,
+            Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
+        )
+    };
+    let response = match verification.sign_out_at(std::time::SystemTime::now()) {
+        Ok(signed_out) => response_value(
+            response_id.clone(),
+            Some(crate::rpc::console_sign_out_json(&signed_out)),
+            None,
+        ),
+        Err(ConsoleSignOutError::NotCurrent) => response_value(
+            response_id.clone(),
+            None,
+            Some(ConsoleCallerRefusal::NotCurrent.json_rpc_error()),
+        ),
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::NotDurable)) => error(
+            crate::rpc::CAPABILITY_UNAVAILABLE_CODE,
+            "this console has no durable session fence record, so a sign-out would not \
+             survive a restart; configure the gateway's state directory"
+                .to_string(),
+        ),
+        // The sign-out took effect; only its durability is not confirmed.
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::DurabilityUnconfirmed {
+            error: sync_error,
+            ..
+        })) => error(
+            -32603,
+            format!(
+                "signed out, but the session fence record's directory could not be synced \
+                 ({sync_error}), so the sign-out may not survive a power loss"
+            ),
+        ),
+        Err(ConsoleSignOutError::Fences(fence_error)) => {
+            error(-32603, format!("console sign-out failed: {fence_error}"))
+        }
+    };
+    (StatusCode::OK, Json::<Value>(response))
 }
 
 fn access_unavailable_rpc_error(response_id: Value) -> Value {
@@ -8427,6 +8536,96 @@ pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
     header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
 }
 
+/// The caller of a change on the Console's listener that a route outside
+/// the console's own router serves (the Flow Editor RPC), resolved as a
+/// console write's caller is ([`console_write_auth_context`]): the same
+/// decisions, session fence record and access controller, and a token only
+/// in the query string refused.
+pub(crate) struct ConsoleChangeCaller {
+    auth: ConsoleHttpAuthContext,
+}
+
+impl ConsoleChangeCaller {
+    /// The request's caller; `None` when the Console refuses the request as
+    /// unauthenticated (answered 401).
+    pub(crate) fn resolve(
+        decisions: &RuntimeDecisionState,
+        fences: &crate::auth::session_fence::ConsoleSessionFences,
+        access: Option<&AccessController>,
+        headers: &HeaderMap,
+        uri: &Uri,
+    ) -> Option<Self> {
+        if token_only_in_query(headers, uri) {
+            return None;
+        }
+        console_request_auth_context_for(decisions, fences, access, headers, uri)
+            .map(|auth| Self { auth })
+    }
+
+    /// The caller's access snapshot, when an access controller is
+    /// installed (an anonymous view on an open Console).
+    pub(crate) fn access_view(&self) -> Option<&AccessView> {
+        self.auth.access_view.as_ref()
+    }
+
+    /// The opaque caller scope `meta/console/whoami` reports for this
+    /// caller.
+    pub(crate) fn caller_scope(&self) -> String {
+        self.auth.caller_scope()
+    }
+
+    /// Refuse a change made for another caller: `expected` is the
+    /// request's `expected_caller_scope`, if any.
+    pub(crate) fn refuse_other_caller(
+        &self,
+        expected: Option<&str>,
+    ) -> Result<(), ConsoleCallerRefusal> {
+        self.auth.refuse_other_caller(expected)
+    }
+
+    /// The check this caller passes again right before its change is made,
+    /// after the change's awaits and reads, wherever it runs.
+    pub(crate) fn current_check(&self) -> ConsoleCallerCurrentCheck {
+        ConsoleCallerCurrentCheck {
+            verification: self.auth.verification.clone(),
+        }
+    }
+}
+
+/// Whether a console caller is still current, checked right before its
+/// change is made ([`ConsoleChangeCaller::current_check`]).
+#[derive(Clone)]
+pub(crate) struct ConsoleCallerCurrentCheck {
+    verification: Option<crate::runtime::ConsoleCallerVerification>,
+}
+
+impl ConsoleCallerCurrentCheck {
+    /// Refuse when the caller's login ended since the request was accepted,
+    /// by the rule of [`refuse_unless_current`].
+    pub(crate) fn refuse_unless_current(&self) -> Result<(), ConsoleCallerRefusal> {
+        refuse_unless_current(self.verification.as_ref())
+    }
+}
+
+/// Refuse a change whose caller's login ended since the request was
+/// accepted: the token must still pass the Console's acceptance now, its
+/// principal's and its login's session fences included. The open Console's
+/// caller without a token (no `verification`) has no login to end.
+fn refuse_unless_current(
+    verification: Option<&crate::runtime::ConsoleCallerVerification>,
+) -> Result<(), ConsoleCallerRefusal> {
+    match verification {
+        Some(verification)
+            if verification
+                .current_at(std::time::SystemTime::now())
+                .is_none() =>
+        {
+            Err(ConsoleCallerRefusal::NotCurrent)
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug)]
 struct MultipartImageUpload {
     media_type: String,
@@ -10289,6 +10488,7 @@ async fn handle_console_aggregator_rpc(
             let mut methods = vec![
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/console/list_identities",
                 "meta/console/inspect_identity",
                 "meta/console/query_timeline",
@@ -10842,6 +11042,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 "meta/status",
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/list_members",
                 "meta/get_member",
                 "meta/find_members",

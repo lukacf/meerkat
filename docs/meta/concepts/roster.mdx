@@ -4,7 +4,7 @@ description: "Understand Meta's lightweight roster projection, deep member statu
 icon: "users"
 ---
 
-*Mirrored from Meerkat Meta main at [133d11d1bbf1](https://github.com/lukacf/meerkat/commit/133d11d1bbf16d302740ab999ab7224c45362a3a) on 2026-11-05; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [44b3b12ffa44](https://github.com/lukacf/meerkat/commit/44b3b12ffa4413073241894c1e70111e27d0a6ff) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 The mob roster is the operational view of the members known to a mob. Roster
 reads return lightweight `MobMemberListEntry` projections. Deep execution
@@ -355,7 +355,9 @@ external-member observations, resolved model capabilities, execution progress,
 placement, reachability, freshness, and lifecycle-capability diagnostics.
 When Meerkat could not observe the member's session for the status (meerkat
 0.8.45+), `preview_unavailable` names why (`observation_deadline`,
-`read_failed`, `session_absent`, `not_observed_while_retiring`), and a missing
+`read_failed`, `session_absent`, `not_observed_while_retiring`, and from
+meerkat 0.9.11 `store_refused`: the store refuses to read the member's session
+until its realm is reopened), and a missing
 `output_preview` then does not mean an empty member. `meta/inspect_identity`
 and the console's per-member progress carry the same marker.
 

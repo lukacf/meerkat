@@ -3942,7 +3942,19 @@ async fn reconcile_agent_event_streams(
                 subscribe_agent_events_for_console_forwarder(handle, &identity, console, replay)
                     .await;
             match subscription {
-                Ok((stream, actor, epoch)) => {
+                // Released, or still waking, after this pass found it
+                // materialized: skipped as a member found unmaterialized
+                // is, with nothing attached, and its wake runs this pass
+                // again.
+                Ok(ForwarderSubscription::NotMaterialized) => {
+                    subscribe_failures.remove(&tracked_key);
+                    continue;
+                }
+                Ok(ForwarderSubscription::Attached {
+                    stream,
+                    actor,
+                    epoch,
+                }) => {
                     subscribe_failures.remove(&tracked_key);
                     let forwarded = console.then(|| tracked.forwarded_for(&owner));
                     let attachment = attach_member_event_stream(
@@ -4080,19 +4092,27 @@ async fn observe_bound_session(
 static FAIL_MEMBER_EVENT_SUBSCRIPTIONS_OF_MOB: std::sync::Mutex<Option<String>> =
     std::sync::Mutex::new(None);
 
+/// What the forwarder's subscription of one member answers.
+enum ForwarderSubscription {
+    /// The member's stream, the actor incarnation it belongs to (console
+    /// forwarder only) and its sequence space.
+    Attached {
+        stream: EventStream,
+        actor: Option<meerkat_session::LiveSessionActorWitness>,
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
+    },
+    /// The member was not materialized when the subscription was opened: it
+    /// was released, or was still waking, after the pass found it
+    /// materialized, so the subscription would attach only at its wake.
+    NotMaterialized,
+}
+
 async fn subscribe_agent_events_for_console_forwarder(
     handle: &MobHandle,
     identity: &AgentIdentity,
     console: bool,
     replay: bool,
-) -> Result<
-    (
-        EventStream,
-        Option<meerkat_session::LiveSessionActorWitness>,
-        Option<meerkat_core::comms::SessionEventEpoch>,
-    ),
-    meerkat_mob::MobError,
-> {
+) -> Result<ForwarderSubscription, meerkat_mob::MobError> {
     #[cfg(test)]
     if FAIL_MEMBER_EVENT_SUBSCRIPTIONS_OF_MOB
         .lock()
@@ -4120,10 +4140,22 @@ async fn subscribe_agent_events_for_console_forwarder(
         meerkat_core::comms::SessionEventCursor::Live
     };
     let subscription = handle.subscribe_agent_events_from(identity, cursor).await?;
+    // Opened while the member was not materialized (released, or still
+    // waking, after the pass found it materialized), the subscription would
+    // attach only at the member's wake. The pass skips such a member, and
+    // the end of its wake runs the pass again; dropping the subscription
+    // ends its wait.
+    if subscription.attached_epoch.is_some() {
+        return Ok(ForwarderSubscription::NotMaterialized);
+    }
     // The identity health monitor does not hold successors back, so it
     // leaves the actor untracked (its departed streams are cut off instead).
     let actor = if console { subscription.actor } else { None };
-    Ok((subscription.stream, actor, subscription.epoch))
+    Ok(ForwarderSubscription::Attached {
+        stream: subscription.stream,
+        actor,
+        epoch: subscription.epoch,
+    })
 }
 
 /// Streaming subscription against the meerkat mob event ledger. Each
@@ -8636,6 +8668,48 @@ mod tests {
             "after the wake",
         );
 
+        runtime.shutdown().await;
+    }
+
+    /// A subscription the forwarder opens for a member that is not
+    /// materialized would attach only at the member's wake: the forwarder
+    /// skips it, as it skips a member it finds unmaterialized, so a member
+    /// released between a pass's check and its subscription (as a mob's
+    /// teardown releases its members) is never attached. RED on the base:
+    /// the deferred subscription came back as a stream and the pass
+    /// attached it, the race behind
+    /// `reconcile_neither_retries_nor_warns_for_a_member_of_a_mob_shutting_down`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_subscription_of_an_unmaterialized_member_is_skipped_not_attached() {
+        let mob_id = "console-unmaterialized-subscribe";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mob_path = temp.path().join("mob.sqlite3");
+        let state_root = temp.path().join("state");
+        let (first, first_identity) =
+            boot_identity_first_persistent(mob_id, &mob_path, &state_root).await;
+        commit_restart_member_turn(&first_identity, "before restart").await;
+        first.shutdown().await;
+
+        let boot = boot_persistent_before_activation(mob_id, &mob_path, &state_root).await;
+        // The runtime's own forwarder is stopped, so only this row subscribes.
+        let _ingress = boot.runtime.install_test_event_ingress().await;
+        let runtime = boot.activate().await;
+        let handle = runtime.mob_handle();
+        let key = restart_member_key(&restart_member_entry(&handle).await, mob_id);
+        assert!(
+            handle.member_unmaterialized(&key.member_identity),
+            "the restart seated the member Dormant"
+        );
+
+        let subscription =
+            subscribe_agent_events_for_console_forwarder(&handle, &key.member_identity, true, true)
+                .await
+                .expect("the subscription answers");
+        assert!(
+            matches!(subscription, ForwarderSubscription::NotMaterialized),
+            "a subscription that would attach only at the member's wake is skipped, not attached"
+        );
+        drop(subscription);
         runtime.shutdown().await;
     }
 

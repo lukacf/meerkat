@@ -4,7 +4,9 @@
 //! grants. No host procfs is exposed: every confined launch gets a new pid
 //! namespace and a fresh procfs of that namespace at `/proc`, which shows only
 //! the launch's own processes (a toolchain needs `/proc/self/exe`), and only
-//! their task entries (`subset=pid`). This module owns no permission policy
+//! their task entries (`subset=pid`). With IP denied the launch also gets a
+//! network namespace of its own, so the per-task `net` trees those entries
+//! keep show no host network. This module owns no permission policy
 //! or child supervisor; it adapts the retained requirement and transfers the
 //! one spawned child into NativeChild, whose PID relays the launch: its pid 1
 //! is a small init of the backend's (`enter_init`), and the command runs
@@ -198,6 +200,9 @@ struct Bound {
 pub(super) struct LinuxPolicy {
     mounts: Vec<Mount>,
     filter: Vec<libc::sock_filter>,
+    // IP is denied: the launch gets a network namespace of its own (see
+    // `apply`).
+    own_network: bool,
     uid_map: Vec<u8>,
     gid_map: Vec<u8>,
 }
@@ -252,12 +257,11 @@ impl LinuxPolicy {
             // Mixed dimensions also need an exact metadata/write lowering.
             _ => return Err(ConfinementRefusal::UnsupportedRequirement),
         }
+        let ip = matches!(spec.network, IpNetworkAccess::Unrestricted);
         let policy = Arc::new(Self {
             mounts,
-            filter: filter(
-                architecture,
-                matches!(spec.network, IpNetworkAccess::Unrestricted),
-            ),
+            filter: filter(architecture, ip),
+            own_network: !ip,
             // Only fixed decimal mapping data is read after fork.
             uid_map: format!("0 {} 1\n", unsafe { libc::geteuid() }).into_bytes(),
             gid_map: format!("0 {} 1\n", unsafe { libc::getegid() }).into_bytes(),
@@ -384,12 +388,31 @@ impl LinuxPolicy {
         let status = {
             // The new pid namespace is owned by the new user namespace, which
             // is what lets the launch mount a procfs of it below.
+            //
+            // With IP denied the launch also gets a network namespace of its
+            // own, which holds only a loopback that is down: the per-task
+            // `net` trees its procfs keeps (`/proc/self/net`,
+            // `/proc/<pid>/net`) then show that namespace, not the host's
+            // routes, interfaces and socket tables. The seccomp filter's
+            // socket refusals stay as they are. Nothing the denied profile
+            // admits is scoped to the network namespace: `socket(AF_UNIX)`
+            // is refused outright, so no abstract Unix socket can be named,
+            // and a `socketpair` needs no namespace. With IP allowed the
+            // launch keeps the host's network namespace, which it needs (a
+            // `cargo fetch`), and so its `net` trees are the host's: they
+            // describe a network the process may use anyway.
+            let network = if self.own_network {
+                libc::CLONE_NEWNET
+            } else {
+                0
+            };
             raw(unsafe {
                 libc::unshare(
                     libc::CLONE_NEWUSER
                         | libc::CLONE_NEWNS
                         | libc::CLONE_NEWIPC
-                        | libc::CLONE_NEWPID,
+                        | libc::CLONE_NEWPID
+                        | network,
                 )
             })
             .map_err(SetupStep::Unshare.failed())?;
@@ -461,8 +484,9 @@ impl LinuxPolicy {
                     libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
                     // Task entries only (`/proc/<pid>`, `self`,
                     // `thread-self`): no `net`, `sys`, `cpuinfo` or any other
-                    // host-global state. No network namespace is created, so
-                    // `/proc/net` would be the host's even with IP denied.
+                    // host-global state. The task entries keep their own
+                    // `net`, of the reading process's network namespace: the
+                    // launch's own when IP is denied (see the unshare above).
                     c"subset=pid".as_ptr().cast(),
                 )
             })
@@ -1947,6 +1971,7 @@ mod tests {
         let policy = Arc::new(LinuxPolicy {
             mounts: vec![Mount::capture(&work, false, true).unwrap()],
             filter: Vec::new(),
+            own_network: true,
             uid_map: Vec::new(),
             gid_map: Vec::new(),
         });
@@ -2390,6 +2415,7 @@ mod tests {
                     Mount::capture(&link, false, false).unwrap(),
                 ],
                 filter: Vec::new(),
+                own_network: true,
                 uid_map: Vec::new(),
                 gid_map: Vec::new(),
             };
@@ -2894,6 +2920,13 @@ mod tests {
     /// backend at all (no unprivileged user namespaces, or a procfs it may
     /// not mount); the capability probe decides, as it does for callers.
     fn confined_workspace() -> Option<(tempfile::TempDir, PathBuf, Arc<LinuxPolicy>)> {
+        confined_workspace_with(IpNetworkAccess::Denied)
+    }
+
+    /// [`confined_workspace`] with `network` as its IP access.
+    fn confined_workspace_with(
+        network: IpNetworkAccess,
+    ) -> Option<(tempfile::TempDir, PathBuf, Arc<LinuxPolicy>)> {
         use meerkat_core::confinement::{ConfinementSpec, PlatformBaseline};
         let temp = tempfile::tempdir().unwrap();
         let work = temp.path().canonicalize().unwrap();
@@ -2904,7 +2937,7 @@ mod tests {
             deny_read: vec![],
             deny_write: vec![],
             unix_connect: vec![],
-            network: IpNetworkAccess::Denied,
+            network,
             require_descendant_termination: false,
         })
         .unwrap();
@@ -3031,9 +3064,9 @@ mod tests {
         assert!((2..=4).contains(&visible), "{stdout}");
     }
 
-    /// The procfs holds task entries only: no `/proc/net` (the host's, with
-    /// no network namespace), `/proc/sys`, `/proc/cpuinfo` or other global
-    /// state, while the per-task files a toolchain reads stay.
+    /// The procfs holds task entries only: no `/proc/net`, `/proc/sys`,
+    /// `/proc/cpuinfo` or other global state, while the per-task files a
+    /// toolchain reads stay.
     #[test]
     fn the_confined_procfs_holds_task_entries_only() {
         let Some((_temp, work, policy)) = confined_workspace() else {
@@ -3075,6 +3108,86 @@ mod tests {
         );
         let rest: Vec<&str> = rest.lines().collect();
         assert_eq!(rest, ["Name:\tcat", "NO-NET", "TASK-FILES"], "{stdout}");
+    }
+
+    // What a launch under `policy` reads of its network: its network
+    // namespace, and the interface names and route lines its task entry's
+    // `net` tree lists.
+    fn launch_network(
+        policy: Arc<LinuxPolicy>,
+        work: &Path,
+    ) -> (PathBuf, Vec<String>, Vec<String>) {
+        let output = runtime()
+            .block_on(async {
+                spawn(
+                    policy,
+                    shell(
+                        work,
+                        "readlink /proc/self/ns/net; echo END; cat /proc/self/net/dev; \
+                         echo END; cat /proc/self/net/route",
+                    ),
+                    SpawnIo::default(),
+                    None,
+                )
+                .unwrap()
+                .wait_with_output()
+                .await
+            })
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut parts = stdout.split("END\n");
+        let namespace = PathBuf::from(parts.next().unwrap().trim());
+        // Two header lines, then one `name: counters` line per interface.
+        let interfaces = parts
+            .next()
+            .unwrap()
+            .lines()
+            .skip(2)
+            .map(|line| line.split(':').next().unwrap().trim().to_owned())
+            .collect();
+        let routes = parts.next().unwrap().lines().map(str::to_owned).collect();
+        (namespace, interfaces, routes)
+    }
+
+    /// With IP denied the launch has a network namespace of its own, so the
+    /// `net` tree its task entries keep shows no host network: only the
+    /// loopback interface, and no route.
+    #[test]
+    fn a_launch_with_ip_denied_sees_no_host_network_through_its_task_entries() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        let (namespace, interfaces, routes) = launch_network(policy, &work);
+        assert_ne!(namespace, std::fs::read_link("/proc/self/ns/net").unwrap());
+        assert_eq!(interfaces, ["lo"]);
+        // The header line at most: a fresh namespace's kernel has no main
+        // table to list until a route is added, and then prints none.
+        assert!(routes.len() <= 1, "{routes:?}");
+        assert!(
+            routes.iter().all(|line| line.starts_with("Iface")),
+            "{routes:?}"
+        );
+    }
+
+    /// With IP allowed the launch keeps the host's network namespace (a
+    /// toolchain fetches through it), and its task entries' `net` tree is
+    /// the host's, as before.
+    #[test]
+    fn a_launch_with_ip_allowed_keeps_the_host_network() {
+        let Some((_temp, work, policy)) = confined_workspace_with(IpNetworkAccess::Unrestricted)
+        else {
+            return;
+        };
+        let (namespace, interfaces, _) = launch_network(policy, &work);
+        assert_eq!(namespace, std::fs::read_link("/proc/self/ns/net").unwrap());
+        let host = std::fs::read_to_string("/proc/self/net/dev").unwrap();
+        let host: Vec<String> = host
+            .lines()
+            .skip(2)
+            .map(|line| line.split(':').next().unwrap().trim().to_owned())
+            .collect();
+        assert_eq!(interfaces, host);
     }
 
     /// Killing the launch through its custody PID (the relay's teardown)

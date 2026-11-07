@@ -1300,7 +1300,13 @@ that name it (see [Access control](/concepts/access-control)). A console
 that keeps no log (a router built without a runtime, or a runtime whose
 metadata store keeps no realm documents) answers `-32601`, and the
 console's `meta/capabilities` lists the method only where the log exists
-and the caller may read it.
+and the caller may read it. A read leaves out the rows that name a member
+hidden from the reader by its private owner (another person's private side
+chat, or a member one created; see
+[Side chats](/concepts/access-control#side-chats)): a change row whose
+target or receipt names one, and an MCP app tool call on one, as every
+other console read leaves that member out. `next_after_seq` and `has_more`
+still move past them, so a page can hold fewer rows than `limit`.
 
 The log keeps two record sets, each with a bound of its own, so however
 many tool calls an app makes, no change row gives way to them: `changes`

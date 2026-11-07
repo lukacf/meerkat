@@ -303,9 +303,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
   and `console_tool_call_audit_limits`), and read with
   `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
-  `audit.view` access action. Its reads, and `meta/gating/audit`, report
-  `retention`: `durable` where the records survive a restart, `process`
-  where the gateway keeps them in memory.
+  `audit.view` access action. A read leaves out the rows that name a member
+  hidden from the reader by its private owner (another person's private
+  side chat, or a member one created). Its reads, and `meta/gating/audit`,
+  report `retention`: `durable` where the records survive a restart,
+  `process` where the gateway keeps them in memory.
 - Rust: `PersistentMetadataStore` gains provided realm-document methods
   (`realm_document_retention`, `realm_document`, `set_realm_document`,
   `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps

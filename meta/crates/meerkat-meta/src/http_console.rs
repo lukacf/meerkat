@@ -5630,6 +5630,9 @@ pub(crate) fn console_method_member_fields(method: &str) -> Option<&'static [Con
         method if method.starts_with("meta/workgraph/") => NO_MEMBER,
         method if method == crate::rpc::CONSOLE_WHOAMI_METHOD => NO_MEMBER,
         method if method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD => NO_MEMBER,
+        // The audit read names no member: it leaves out the rows that name
+        // one the reader's audience hides.
+        method if method == crate::rpc::CONSOLE_AUDIT_METHOD => NO_MEMBER,
         _ => return None,
     };
     Some(fields)

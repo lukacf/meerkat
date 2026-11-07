@@ -468,13 +468,13 @@ as they were.
   opened it: its audience is the agent's narrowed to that person, plus the
   access admins (`admins`). Everyone else meets it on no surface (sidebar,
   member lists, topology, timeline, streams, events, flow runs, peer lists,
-  inspection, memory). A request of theirs that names it, to read it, send
-  to it, close it or fork it, gets the answer that method gives a member
-  that does not exist (for example `-32602` `member not found` from
-  `meta/get_member`, or `404` `unknown_identity` from `POST /console/send`);
-  a request that would record something for it (an announcement
-  subscription, a schedule, a remembered fact, a topology edge, a WorkGraph
-  goal) is refused as naming an unknown member
+  inspection, memory, the audit log). A request of theirs that names it, to
+  read it, send to it, close it or fork it, gets the answer that method
+  gives a member that does not exist (for example `-32602` `member not
+  found` from `meta/get_member`, or `404` `unknown_identity` from
+  `POST /console/send`); a request that would record something for it (an
+  announcement subscription, a schedule, a remembered fact, a topology edge,
+  a WorkGraph goal) is refused as naming an unknown member
   (`-32001`). This holds with or without an access configuration (the SDK
   gateway's stdio plane is the trusted host plane: see
   [Known limitations](/concepts/access-control#known-limitations)). Its

@@ -2110,6 +2110,94 @@ mod tests {
         Ok(())
     }
 
+    /// A stored gating state this build cannot read is left byte for byte,
+    /// through gating changes and a shutdown, and the audit reads say
+    /// `process`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_gating_state_is_never_overwritten() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        metadata
+            .set_realm_document("gating/state", Some("{not a snapshot"))
+            .await
+            .map_err(|error| format!("{error}"))?;
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let _pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await;
+        assert_eq!(
+            gating_audit_retention(composition.runtime()).await?,
+            serde_json::json!("process")
+        );
+        let _ = composition.runtime().shutdown().await;
+        assert_eq!(
+            metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .as_deref(),
+            Some("{not a snapshot")
+        );
+        Ok(())
+    }
+
+    /// The gating state's writer follows a gating change without a shutdown:
+    /// the pending approval reaches the stored state while the gateway still
+    /// runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gating_change_is_written_without_a_shutdown() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let metadata: Arc<dyn PersistentMetadataStore> =
+            Arc::new(crate::runtime::SqliteMetadataStore::open(
+                directory.path().join("meta_metadata.sqlite3"),
+            )?);
+        let composition = console_drain_test_composition_over(
+            &directory,
+            GatewayCompatibilityProfile::StdioRpc,
+            None,
+            Arc::clone(&metadata),
+        )
+        .await?;
+        let pending = composition
+            .runtime()
+            .evaluate_gating_action(gated("deploy"))
+            .await
+            .pending_id
+            .ok_or("an R3 action waits for approval")?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut written = false;
+        while tokio::time::Instant::now() < deadline {
+            if metadata
+                .realm_document("gating/state")
+                .await
+                .map_err(|error| format!("{error}"))?
+                .is_some_and(|document| document.contains(&pending))
+            {
+                written = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            written,
+            "the pending approval was written before any shutdown"
+        );
+        let _ = composition.runtime().shutdown().await;
+        Ok(())
+    }
+
     fn console_drain_event(
         event_id: &str,
         event_type: &str,

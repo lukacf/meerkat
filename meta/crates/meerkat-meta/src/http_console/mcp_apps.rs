@@ -573,7 +573,49 @@ pub(super) async fn call_tool(
     uri: Uri,
     Json(request): Json<Request>,
 ) -> axum::response::Response {
-    handle(state, headers, uri, request, Operation::CallTool).await
+    // Every tool call writes a row in the console audit log, whatever its
+    // tool does: the console cannot tell whether a tool changes anything.
+    // The call and its row run on the server, so a caller that goes away
+    // cuts neither short. A caller the console cannot authenticate is
+    // answered 401 and writes none.
+    let intent = state.console_audit.as_ref().and_then(|log| {
+        let auth = console_write_auth_context(&state, &headers, &uri)?;
+        Some(audit::ConsoleAuditIntent::new(
+            Arc::clone(log),
+            &auth,
+            audit::MCP_APP_CALL_TOOL_ROUTE.to_string(),
+            crate::console_audit::target_of(&[
+                ("identity", Some(request.identity.as_str())),
+                ("tool", request.name.as_deref()),
+            ]),
+        ))
+    });
+    let Some(intent) = intent else {
+        return handle(state, headers, uri, request, Operation::CallTool).await;
+    };
+    let answered = intent
+        .run(
+            async move {
+                let response = handle(state, headers, uri, request, Operation::CallTool).await;
+                let (parts, body) = response.into_parts();
+                let body = axum::body::to_bytes(body, usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                (parts, body)
+            },
+            audit::http_row,
+        )
+        .await;
+    match answered {
+        Some((parts, body)) => {
+            axum::response::Response::from_parts(parts, axum::body::Body::from(body))
+        }
+        None => console_json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "the tool call ended without an answer",
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -466,14 +466,15 @@ pub(crate) fn project_side_chat_lineage(
 pub(crate) struct SideChatCreatorViewer<'a> {
     /// The viewer's console principal, when the console identified them.
     principal: Option<&'a str>,
-    /// Whether the viewer administers access.
+    /// Whether the viewer administers an enforced access policy.
     access_admin: bool,
 }
 
 impl<'a> SideChatCreatorViewer<'a> {
     /// The viewer with console principal `principal` (`None` for an
-    /// anonymous caller) and access view `access` (`None` on a console
-    /// without an access controller, which has no access admins).
+    /// anonymous caller) and access view `access`. Only a policy that is
+    /// enforced has access admins: a console without an access controller,
+    /// or with one it does not enforce, shows a creator to that person only.
     pub(crate) fn new(
         principal: Option<&'a str>,
         access: Option<&crate::access::AccessView>,
@@ -482,11 +483,13 @@ impl<'a> SideChatCreatorViewer<'a> {
             principal: principal
                 .map(str::trim)
                 .filter(|principal| !principal.is_empty()),
-            access_admin: access.is_some_and(crate::access::AccessView::can_administer),
+            access_admin: access.is_some_and(|view| view.enforced() && view.can_administer()),
         }
     }
 
-    fn sees(&self, creator: &Value) -> bool {
+    /// Whether the viewer may see `creator`, a side chat's creator as a
+    /// console answer names it.
+    pub(crate) fn sees(&self, creator: &Value) -> bool {
         self.access_admin
             || creator
                 .as_str()

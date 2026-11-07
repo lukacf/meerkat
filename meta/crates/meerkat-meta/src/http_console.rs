@@ -1,6 +1,6 @@
 //! HTTP routes for the admin console REST API.
 
-mod audit;
+pub(crate) mod audit;
 mod mcp_apps;
 pub(crate) mod schedules;
 mod shared_panels;
@@ -155,7 +155,7 @@ pub struct ConsoleJsonState {
 }
 
 #[derive(Debug, Clone)]
-struct ConsoleHttpAuthContext {
+pub(crate) struct ConsoleHttpAuthContext {
     principal: Option<String>,
     /// Whether the verified token classified the principal as a service
     /// identity rather than a human.
@@ -1438,18 +1438,61 @@ pub async fn console_rpc_handler(
             return console_rpc_unauthenticated_response(parsed_request.id.unwrap_or(Value::Null));
         }
     };
-    // A console change is recorded in the console audit log once its answer
-    // is known, a refusal included (`crate::console_audit`).
-    let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
-    let mut response = console_rpc_answer(&state, voice, &auth_context, parsed_request).await;
-    if let Some(intent) = audited {
-        intent.record(&auth_context, &response).await;
-    }
-    crate::side_chat::clear_unseen_side_chat_creators(
-        &mut response,
-        auth_context.side_chat_creator_viewer(),
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let method = parsed_request.method.clone();
+    let viewer_principal = auth_context.principal.clone();
+    let viewer = crate::side_chat::SideChatCreatorViewer::new(
+        viewer_principal.as_deref(),
+        auth_context.access_view.as_ref(),
     );
+    let audit_offered = audit::audit_read_offered(&state, &auth_context);
+    // A console change and its row in the console audit log run on the
+    // server, a refusal included (`crate::console_audit`): a caller that
+    // goes away cuts neither short.
+    let mut response =
+        match audit::ConsoleAuditIntent::of(&state, &auth_context, &parsed_request) {
+            None => console_rpc_answer(&state, voice, &auth_context, parsed_request).await,
+            Some(intent) => intent
+                .run(
+                    async move {
+                        console_rpc_answer(&state, voice, &auth_context, parsed_request).await
+                    },
+                    audit::json_rpc_row,
+                )
+                .await
+                .unwrap_or_else(|| console_change_lost(response_id)),
+        };
+    if method == "meta/capabilities" && audit_offered {
+        advertise_console_audit(&mut response);
+    }
+    crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
     (StatusCode::OK, Json::<Value>(response))
+}
+
+/// The answer to a console change whose task ended without one.
+fn console_change_lost(response_id: Value) -> Value {
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: -32603,
+            message: "the console change ended without an answer".to_string(),
+            data: None,
+        }),
+    )
+}
+
+/// Add the console audit read to a `meta/capabilities` answer's methods.
+fn advertise_console_audit(response: &mut Value) {
+    if let Some(methods) = response
+        .pointer_mut("/result/methods")
+        .and_then(Value::as_array_mut)
+        && !methods
+            .iter()
+            .any(|method| method.as_str() == Some(crate::rpc::CONSOLE_AUDIT_METHOD))
+    {
+        methods.push(json!(crate::rpc::CONSOLE_AUDIT_METHOD));
+    }
 }
 
 /// The answer of one authenticated `POST /console/rpc` request.
@@ -7670,18 +7713,32 @@ pub async fn console_rpc_multipart_handler(
             );
         }
     };
-    // A blob upload is a console change the console audit log records once
-    // its answer is known, a refusal included (`crate::console_audit`).
-    let audited = audit::ConsoleAuditIntent::of(&state, &parsed_request);
-    let (status, mut response) =
-        console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await;
-    if let Some(intent) = audited {
-        intent.record(&auth_context, &response).await;
-    }
-    crate::side_chat::clear_unseen_side_chat_creators(
-        &mut response,
-        auth_context.side_chat_creator_viewer(),
+    // A blob upload and its row in the console audit log run on the server,
+    // a refusal included (`crate::console_audit`): a caller that goes away
+    // cuts neither short.
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let viewer_principal = auth_context.principal.clone();
+    let viewer = crate::side_chat::SideChatCreatorViewer::new(
+        viewer_principal.as_deref(),
+        auth_context.access_view.as_ref(),
     );
+    let (status, mut response) =
+        match audit::ConsoleAuditIntent::of(&state, &auth_context, &parsed_request) {
+            None => {
+                console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await
+            }
+            Some(intent) => intent
+                .run(
+                    async move {
+                        console_rpc_multipart_answer(&state, &auth_context, parsed_request, files)
+                            .await
+                    },
+                    audit::status_json_rpc_row,
+                )
+                .await
+                .unwrap_or_else(|| (StatusCode::OK, console_change_lost(response_id))),
+        };
+    crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
     (status, Json::<Value>(response))
 }
 
@@ -8032,7 +8089,7 @@ fn console_request_auth_context(
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
 /// session fence record `fences` as it is now.
-fn console_request_auth_context_for(
+pub(crate) fn console_request_auth_context_for(
     decisions: &RuntimeDecisionState,
     fences: &crate::auth::session_fence::ConsoleSessionFences,
     access: Option<&AccessController>,

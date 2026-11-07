@@ -90,8 +90,22 @@ struct PrincipalFence {
     /// not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     revoked_by: Option<String>,
+    /// The fence `revoked_by` set. The revoker counts only while the fence
+    /// is still this one: a binary that predates it may move the fence and
+    /// keep both fields unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoked_by_not_before: Option<u64>,
     #[serde(flatten)]
     other: BTreeMap<String, Value>,
+}
+
+impl PrincipalFence {
+    /// Who set the fence as it stands, when the record names them.
+    fn revoker(&self) -> Option<String> {
+        self.revoked_by
+            .clone()
+            .filter(|_| self.revoked_by_not_before == Some(self.not_before_epoch_seconds))
+    }
 }
 
 /// Why the session fence record could not be read or changed. Later releases
@@ -325,7 +339,7 @@ impl ConsoleSessionFences {
             .map(|(principal, fence)| ConsoleSessionFence {
                 principal: principal.clone(),
                 not_before_epoch_seconds: fence.not_before_epoch_seconds,
-                revoked_by: fence.revoked_by.clone(),
+                revoked_by: fence.revoker(),
             })
             .collect()
     }
@@ -394,14 +408,16 @@ impl ConsoleSessionFences {
             .or_insert_with(|| PrincipalFence {
                 not_before_epoch_seconds: at,
                 revoked_by: None,
+                revoked_by_not_before: None,
                 other: BTreeMap::new(),
             });
         if at >= fence.not_before_epoch_seconds {
             fence.not_before_epoch_seconds = at;
+            fence.revoked_by_not_before = revoked_by.as_ref().map(|_| at);
             fence.revoked_by = revoked_by;
         }
         let not_before_epoch_seconds = fence.not_before_epoch_seconds;
-        let revoked_by = fence.revoked_by.clone();
+        let revoked_by = fence.revoker();
         // Persist first. A write that did not replace the file changed
         // nothing: nothing is published and nothing becomes visible. One
         // that replaced it may be read after a restart, so it takes effect

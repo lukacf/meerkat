@@ -2121,6 +2121,15 @@ const MOBPACK_DRAFT_STORE_WRITE_METHODS: &[&str] = &[
     "meta/mobpacks/redo",
 ];
 
+/// Whether a Flow Editor call is a change on the host: a draft store write,
+/// a deploy with `execute` or a validation through `rkat`, the calls a
+/// candidate launch refuses. Every other Flow Editor call reads.
+pub(crate) fn is_flow_editor_change(method: &str, params: &Value) -> bool {
+    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
+        || (matches!(method, "meta/mobpacks/deploy" | "meta/mobpacks/validate")
+            && candidate_launch_refuses_host_execution(method, params))
+}
+
 /// Whether a candidate launch refuses a Flow Editor draft store write: every
 /// one but a write to a store file the caller names (`store_path`) outside
 /// the launch's `state_dir` and the gateway home that is not the store

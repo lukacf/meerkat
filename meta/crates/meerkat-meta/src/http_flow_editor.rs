@@ -6,9 +6,11 @@ use axum::{
     routing::{get, post},
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tower::limit::GlobalConcurrencyLimitLayer;
 
 use crate::access::{ACTION_MOBPACK_AUTHOR, ACTION_MOBPACK_DEPLOY, AccessController, AccessView};
+use crate::console_audit::ConsoleAuditLog;
 use crate::http_console::ACCESS_DENIED_RPC_CODE;
 use crate::http_sse::sse_access_context;
 use crate::mobpack::MobpackRuntimeCatalogState;
@@ -84,7 +86,10 @@ pub fn protected_flow_editor_router(decisions: RuntimeDecisionState) -> Router {
 /// authoritative launch reads. A runtime whose agent factories hold a
 /// host-chosen provider credential store (`explicit_provider_credentials`)
 /// refuses typed every deploy with `execute`, whose `rkat` process could not
-/// carry that store.
+/// carry that store. Each change (a draft store write, a deploy with
+/// `execute`, a validation through `rkat`) writes a row in `console_audit`,
+/// the runtime's console audit log, when it keeps one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
     decisions: RuntimeDecisionState,
     runtime_catalog: MobpackRuntimeCatalogState,
@@ -93,6 +98,7 @@ pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     candidate: Option<FlowEditorCandidate>,
     explicit_provider_credentials: bool,
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 ) -> Router {
     flow_editor_frontend_router::<()>().merge(flow_editor_rpc_router_with_runtime_catalog(
         decisions,
@@ -102,6 +108,7 @@ pub(crate) fn protected_flow_editor_router_with_runtime_catalog(
         session_fences,
         candidate,
         explicit_provider_credentials,
+        console_audit,
     ))
 }
 
@@ -165,9 +172,11 @@ pub fn flow_editor_rpc_router_with_decisions(decisions: RuntimeDecisionState) ->
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         None,
         false,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flow_editor_rpc_router_with_runtime_catalog(
     decisions: RuntimeDecisionState,
     runtime_catalog: Option<MobpackRuntimeCatalogState>,
@@ -176,6 +185,7 @@ fn flow_editor_rpc_router_with_runtime_catalog(
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     candidate: Option<FlowEditorCandidate>,
     explicit_provider_credentials: bool,
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 ) -> Router {
     Router::new()
         .route("/flow-editor/rpc", post(protected_flow_editor_rpc_handler))
@@ -187,6 +197,7 @@ fn flow_editor_rpc_router_with_runtime_catalog(
             host_deploy_without_access_control,
             candidate,
             explicit_provider_credentials,
+            console_audit,
         })
 }
 
@@ -359,6 +370,9 @@ struct FlowEditorRpcState {
     /// Whether the runtime's agent factories hold a host-chosen provider
     /// credential store, which a deploy's `rkat` process could not carry.
     explicit_provider_credentials: bool,
+    /// The runtime's console audit log: each Flow Editor change writes a
+    /// row, as each console change does.
+    console_audit: Option<Arc<ConsoleAuditLog>>,
 }
 
 /// The `auth.mode` the runtime-mounted Flow Editor reports.
@@ -433,14 +447,72 @@ async fn protected_flow_editor_rpc_handler(
             );
         }
     };
+    // A Flow Editor change (a draft store write, a deploy with `execute`, a
+    // validation through `rkat`) writes a row in the console audit log, a
+    // refusal included; the change and its row run on the server, so a
+    // caller that goes away cuts neither short.
+    let intent = state
+        .console_audit
+        .as_ref()
+        .filter(|_| {
+            crate::rpc::is_flow_editor_change(&parsed_request.method, &parsed_request.params)
+        })
+        .and_then(|log| {
+            let auth = crate::http_console::console_request_auth_context_for(
+                &state.decisions,
+                &state.session_fences,
+                state.access.as_ref(),
+                &headers,
+                &uri,
+            )?;
+            Some(crate::http_console::audit::ConsoleAuditIntent::new(
+                Arc::clone(log),
+                &auth,
+                parsed_request.method.clone(),
+                crate::console_audit::audit_target(&parsed_request.params),
+            ))
+        });
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let (status, response) = match intent {
+        None => flow_editor_rpc_answer(state, parsed_request, access_view).await,
+        Some(intent) => intent
+            .run(
+                flow_editor_rpc_answer(state, parsed_request, access_view),
+                crate::http_console::audit::status_json_rpc_row,
+            )
+            .await
+            .unwrap_or_else(|| {
+                (
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "id": response_id,
+                        "error": {
+                            "code": -32603,
+                            "message": "the flow editor change ended without an answer",
+                        }
+                    }),
+                )
+            }),
+    };
+    (status, Json::<Value>(response))
+}
+
+/// The answer to an authenticated Flow Editor RPC request: its access,
+/// candidate launch and provider credential refusals, then the dispatch.
+async fn flow_editor_rpc_answer(
+    state: FlowEditorRpcState,
+    parsed_request: JsonRpcRequest,
+    access_view: Option<AccessView>,
+) -> (StatusCode, Value) {
     if let Some(error) = flow_editor_rpc_access_violation(access_view.as_ref(), &parsed_request) {
         return (
             StatusCode::OK,
-            Json::<Value>(serde_json::json!({
+            serde_json::json!({
                 "jsonrpc": JSONRPC_VERSION,
                 "id": parsed_request.id.unwrap_or(Value::Null),
                 "error": error,
-            })),
+            }),
         );
     }
     // A candidate launch runs nothing on the host and writes no draft store
@@ -459,7 +531,7 @@ async fn protected_flow_editor_rpc_handler(
     ) {
         return (
             StatusCode::OK,
-            Json::<Value>(serde_json::to_value(refusal).unwrap_or(Value::Null)),
+            serde_json::to_value(refusal).unwrap_or(Value::Null),
         );
     }
     // A deploy that runs `rkat` could not carry the runtime's host-chosen
@@ -472,7 +544,7 @@ async fn protected_flow_editor_rpc_handler(
     ) {
         return (
             StatusCode::OK,
-            Json::<Value>(serde_json::to_value(refusal).unwrap_or(Value::Null)),
+            serde_json::to_value(refusal).unwrap_or(Value::Null),
         );
     }
     // Host access (running `rkat` on this host, choosing the draft store
@@ -514,7 +586,7 @@ async fn protected_flow_editor_rpc_handler(
         response_id,
     )
     .await;
-    (StatusCode::OK, Json::<Value>(response))
+    (StatusCode::OK, response)
 }
 
 /// Map a flow-editor RPC method to the ABAC action it requires. Mirrors the
@@ -987,6 +1059,7 @@ mod tests {
             crate::auth::session_fence::ConsoleSessionFences::detached(),
             candidate,
             false,
+            None,
         );
         rpc_response_of(router, body).await
     }
@@ -1003,6 +1076,7 @@ mod tests {
             crate::auth::session_fence::ConsoleSessionFences::detached(),
             None,
             true,
+            None,
         );
         rpc_response_of(router, body).await
     }

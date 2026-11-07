@@ -1379,6 +1379,7 @@ impl UnifiedRuntimeBuilder {
 
     /// Bound the console audit log (by default 20000 rows, none older than
     /// 365 days). The log is kept in the composition's metadata store.
+    /// [`Self::build`] refuses limits that keep no row (`max_entries` 0).
     pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
         self.console_audit_limits = Some(limits);
         self
@@ -1429,6 +1430,17 @@ impl UnifiedRuntimeBuilder {
 
     pub async fn build(mut self) -> Result<UnifiedRuntime, UnifiedRuntimeBuilderError> {
         // --- Identity-first builder validation ---
+
+        if self
+            .console_audit_limits
+            .is_some_and(|limits| limits.max_entries == 0)
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "console audit limits: max_entries must be at least 1; a log that keeps no row \
+                 would reuse its row numbers"
+                    .into(),
+            ));
+        }
 
         if self.mob_spec.is_some() && self.mob_storage.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(

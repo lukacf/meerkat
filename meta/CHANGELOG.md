@@ -76,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `Host` serves the router on its own server instead;
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
+- An access configuration that names the new `audit.view` action is refused
+  by earlier releases (unknown action): keep it out of a configuration an
+  earlier gateway may still load.
 
 ### Added
 
@@ -99,14 +102,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   only on a side chat Meerkat's roster verifies; a `side_chat_creator`
   label set any other way, or copied from the forked agent, is dropped on
   every surface. It records the creator and grants nothing, and the
-  console shows it only to the creator and to access admins.
+  console shows it only to the creator and to the admins of an enforced
+  access policy.
 
 - A console audit log: each console change on `POST /console/rpc` and
-  `/console/rpc/multipart`, a refusal included, writes a row naming the
-  actor (kind, principal, assurance and a digest of the login, never the
-  token), the method, its target identifiers, the outcome and the owner's
-  receipt; sends, voice and live media are left out. The log is kept in
-  the realm's metadata store, bounded by count and age
+  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
+  change (a draft store write, a deploy with `execute`, a validation with
+  `rkat_validate`), a refusal included, writes a row naming the actor
+  (kind, principal, a person's verified issuer and subject, assurance and a
+  digest of the login, never the token), the method, its target
+  identifiers, the outcome and the owner's receipt; sends, voice and live
+  media are left out. A row is bounded (at most 16 identifiers each way,
+  4 KiB in all) and says when it left anything out (`truncated`), and the
+  change and its row run on the server, so a caller that goes away cuts
+  neither short. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), bounded by count and age
   (`UnifiedRuntimeBuilder::console_audit_limits`), and read with
   `meta/console/audit` under the new `audit.view` access action. Its reads,
   and `meta/gating/audit`, report `retention`: `durable` where the records
@@ -115,7 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`realm_document_retention`, `realm_document`, `set_realm_document`,
   `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
   no realm documents unless it implements them, so it has no console audit
-  log and keeps gating in memory.
+  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
+  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
+  gating state.
 - Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
   `supersede_by`, which write on behalf of a named author (the default
   ignores the author and writes as `remember`, `forget` and `supersede`
@@ -130,8 +142,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   embedded runtime; a host that persists `gating_state_snapshot` itself
   leaves it off.
 - Memory written from the console names the person who wrote it: its
-  author is the operator with the caller's principal. A quarantine review
-  made in the console names its reviewer on the record it releases.
+  author, `application` before, is now the operator with the caller's
+  principal (an operator naming no one for an anonymous caller of an open
+  console). A quarantine review made in the console names its reviewer on
+  the record it releases.
 - A console session revocation records who revoked (`revoked_by` in the
   fence record and the answer), and an access edit its author, time and
   revision (`last_edit` on `meta/access/get`).

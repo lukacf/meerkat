@@ -15,9 +15,12 @@ native process is used.
 """
 import asyncio
 import base64
+from contextlib import AsyncExitStack
 import hashlib
 import json
+import math
 import os
+from pathlib import Path
 import re
 import secrets
 import stat
@@ -287,7 +290,7 @@ def test_oidc_front_declares_its_own_issuer_and_key_to_the_console(tmp_path):
     assert other.native_auth["jwks_json"] != auth["jwks_json"]
     # The signing key stays in private state: the console gets only the public key.
     assert "d" not in key and front_key(tmp_path).private_numbers().private_value
-    # A changed issuer record is refused, never replaced.
+    # A malformed issuer record is refused, never replaced.
     records[0].write_text("https://console.example.test\n")
     with pytest.raises(ValueError, match="issuer"):
         oidc_front(tmp_path, OidcNative(), issuer)
@@ -305,7 +308,6 @@ def test_oidc_front_starts_after_a_start_killed_while_recording_its_identity(tmp
     """
     import signal
     import subprocess
-    from pathlib import Path
     root = tmp_path / "application"
     root.mkdir()
     stopped = "console_auth._new_signing_key" if killed_in == "key" else "pathlib.Path.unlink"
@@ -381,17 +383,23 @@ async def test_oidc_console_accepts_only_tokens_the_front_signed(tmp_path):
 
 
 @pytest.mark.parametrize("defect", ["signature", "audience", "expired", "issued-later", "issuer", "algorithm",
-                                    "unsigned", "nonce", "party", "subject"])
+                                    "unsigned", "nonce", "party", "subject", "audiences", "not-yet-valid",
+                                    "expiry-infinite", "expiry-nan", "issued-nan", "issued-minus-infinite"])
 async def test_oidc_refuses_an_id_token_that_does_not_verify(tmp_path, defect):
     native, issuer = OidcNative(), MockIssuer()
     console = oidc_front(tmp_path, native, issuer)
     app = console.application(NATIVE)
     now = int(time.time())
+    # Several audiences need an authorized party that names this client. A
+    # time is a finite number: Python's json reads Infinity and NaN as well.
     claims = {"audience": {"aud": "another-client"}, "expired": {"exp": now - 600},
               "issued-later": {"iat": now + 600}, "issuer": {"iss": "https://other.example.test"},
               "nonce": {"nonce": "another-sign-in-nonce"},
               "party": {"aud": [CLIENT_ID, "another-client"], "azp": "another-client"},
-              "subject": {"sub": "s" * 256}}.get(defect, {})
+              "subject": {"sub": "s" * 256}, "audiences": {"aud": [CLIENT_ID, "another-client"]},
+              "not-yet-valid": {"nbf": now + 600}, "expiry-infinite": {"exp": math.inf},
+              "expiry-nan": {"exp": math.nan}, "issued-nan": {"iat": math.nan},
+              "issued-minus-infinite": {"iat": -math.inf}}.get(defect, {})
     if defect == "signature":
         issuer.tamper = True
     elif defect == "algorithm":
@@ -542,16 +550,42 @@ async def test_oidc_host_health_probe_names_the_operator_and_no_person(tmp_path)
 
 async def test_oidc_limits_pending_sign_ins_and_failures_per_address(tmp_path, clock, monkeypatch):
     monkeypatch.setattr(console_auth, "LOGIN_FORMS_PER_CLIENT", 3)
+    monkeypatch.setattr(console_auth, "LOGIN_FORMS", 5)
     native, issuer = OidcNative(), MockIssuer()
     console = oidc_front(tmp_path, native, issuer)
     app = console.application(NATIVE)
+
+    def pending(address):
+        return [state for state, entry in console._oidc_pending.items() if entry.client == address]
     try:
-        async with browser(app, console, "192.0.2.10") as busy, browser(app, console, "192.0.2.20") as other:
-            for _ in range(3):
-                await start_sign_in(busy, console)
-            await start_sign_in(busy, console, status=429)
-            await start_sign_in(other, console)
-        async with browser(app, console, "192.0.2.30") as failing, browser(app, console, "192.0.2.40") as fine:
+        async with AsyncExitStack() as stack:
+            # Four people behind one relay share its address. A full address
+            # refuses no new sign-in: its oldest pending sign-in goes, so one
+            # caller there cannot hold everyone else's off.
+            relay = [await stack.enter_async_context(browser(app, console, "192.0.2.10")) for _ in range(4)]
+            started = [await start_sign_in(person, console) for person in relay]
+            assert len(pending("192.0.2.10")) == 3
+            evicted = await relay[0].get(issuer.authorize(started[0])[1])
+            assert evicted.status_code == 400 and "expired or was already used" in evicted.text
+            assert (await relay[3].get(issuer.authorize(started[3])[1])).status_code == 200
+            # A full table drops its oldest pending sign-in, whoever started it.
+            oldest = pending("192.0.2.10")[0]
+            others = [await stack.enter_async_context(browser(app, console, f"192.0.2.{20 + index}"))
+                      for index in range(4)]
+            for person in others:
+                await start_sign_in(person, console)
+            assert len(console._oidc_pending) == 5 and oldest not in console._oidc_pending
+            # Sign-in forms behave alike: the address's oldest form expires.
+            forms = [await stack.enter_async_context(browser(app, console, "192.0.2.30")) for _ in range(4)]
+            for person in forms:
+                assert (await person.get("/login")).status_code == 200
+            stale = await forms[0].post("/login", data={"nonce": forms[0].cookies[console.cookie + "_login"]},
+                                        headers={"Origin": console.origin})
+            assert stale.status_code == 403 and "expired" in stale.text
+            fresh = await forms[3].post("/login", data={"nonce": forms[3].cookies[console.cookie + "_login"]},
+                                        headers={"Origin": console.origin})
+            assert fresh.status_code == 303
+        async with browser(app, console, "192.0.2.40") as failing, browser(app, console, "192.0.2.50") as fine:
             issuer.tamper = True
             for _ in range(console_auth.FAILURES_PER_CLIENT):
                 await oidc_sign_in(failing, console, issuer, status=401)
@@ -626,13 +660,215 @@ async def test_oidc_refuses_a_provider_it_cannot_use_safely(tmp_path, discovery)
     app = console.application(NATIVE)
     try:
         async with browser(app, console) as alice:
+            # The sign-in page names the provider's authorization endpoint in
+            # its policy, so it is offered only for a usable provider.
+            page = await alice.get("/login")
+            assert page.status_code == 503 and "identity provider" in page.text and "<form" not in page.text
+            assert console.cookie + "_login" not in alice.cookies
+            # A provider that changes after the page was served is refused at the start.
+            issuer.discovery = {}
             form = await alice.get("/login")
+            issuer.discovery = discovery
+            console._oidc_discovery = None
             nonce = alice.cookies[console.cookie + "_login"]
             started = await alice.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
             assert started.status_code == 503 and "identity provider" in started.text
             assert "location" not in started.headers and form.status_code == 200
     finally:
         await console.close()
+
+
+# The sign-in page's form posts to the front, which answers with a redirect to
+# the identity provider. Chromium applies form-action to the redirects of a
+# form submission too, so the page admits the front and exactly the origin of
+# the provider's authorization endpoint, nothing wider.
+@pytest.mark.parametrize("endpoint, origin", [
+    (ISSUER_URL + "/authorize", "https://login.example.test"),
+    ("https://auth.example.test:8443/oauth2/v2/authorize?tenant=a", "https://auth.example.test:8443")])
+async def test_oidc_sign_in_page_lets_its_form_go_on_to_the_provider_only(tmp_path, endpoint, origin):
+    native, issuer = OidcNative(), MockIssuer(discovery={"authorization_endpoint": endpoint})
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            page = await alice.get("/login")
+            again = await alice.post("/login", data={"nonce": "expired-form"}, headers={"Origin": console.origin})
+            assert (page.status_code, again.status_code) == (200, 403)
+            for response in (page, again):
+                directives = [part.strip() for part in response.headers["content-security-policy"].split(";")]
+                assert [part for part in directives if part.startswith("form-action")] == [
+                    f"form-action 'self' {origin}"]
+                assert directives == ["default-src 'none'", "style-src 'unsafe-inline'",
+                                      f"form-action 'self' {origin}", "frame-ancestors 'none'"]
+            started = await start_sign_in(alice, console)
+            assert started.startswith(endpoint.split("?")[0] + "?")
+    finally:
+        await console.close()
+
+
+# A provider-signed ID token the front cannot read as one is a bad answer
+# from the provider: a typed 502, never a 500.
+@pytest.mark.parametrize("content", ["nonce", "algorithm"])
+async def test_oidc_answers_malformed_provider_content_as_a_bad_gateway(tmp_path, content):
+    native, issuer = OidcNative(), MockIssuer()
+    claims = {}
+    if content == "nonce":
+        # A lone surrogate: valid JSON, not text.
+        claims = {"nonce": "\ud800"}
+    else:
+        def sign(body):
+            _, payload, signature = jwt.encode(body, issuer.keys["key-a"], algorithm="RS256",
+                                               headers={"kid": "key-a"}).split(".")
+            header = base64url(json.dumps({"alg": ["RS256"], "kid": "key-a", "typ": "JWT"}).encode())
+            return ".".join((header, payload, signature))
+        issuer.sign = sign
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            _, _, answer = await oidc_sign_in(alice, console, issuer, status=502, **claims)
+            assert "could not read" in answer.text and "Sign in again" in answer.text
+            assert console._oidc_exchanges == 0 and not console.sessions and not native.requests
+    finally:
+        await console.close()
+
+
+# A verified address that only lowercases to a listed one is another person:
+# the front folds the case of ASCII addresses only.
+async def test_oidc_refuses_an_email_that_only_case_folds_to_a_listed_one(tmp_path):
+    kate = "kate@example.test"
+    # U+212A KELVIN SIGN first: str.lower() turns it into an ASCII "k".
+    kelvin = "\u212aate@example.test"
+    assert kelvin.lower() == kate and not kelvin.isascii()
+    native, issuer = OidcNative(), MockIssuer()
+    console = oidc_front(tmp_path, native, issuer, allowed=(kate,))
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as person:
+            await oidc_sign_in(person, console, issuer, status=403, email=kelvin)
+            assert console.cookie not in person.cookies and not console.sessions
+        async with browser(app, console) as listed:
+            await oidc_sign_in(listed, console, issuer, sub="kate-subject", email="Kate@example.test")
+            assert login_of(listed, console).principal == kate
+    finally:
+        await console.close()
+
+
+# Code exchanges at the provider are capped across every sign-in: one more
+# answer is told to try again, and its state stays usable.
+async def test_oidc_caps_code_exchanges_at_the_provider(tmp_path):
+    native, issuer = OidcNative(), MockIssuer()
+    release, entered = asyncio.Event(), []
+    answer = issuer.handle
+
+    async def handle(request):
+        if request.url.path == "/token":
+            entered.append(request)
+            await release.wait()
+        return answer(request)
+    issuer.transport = lambda: httpx.MockTransport(handle)
+    people = [f"person-{index}@example.test" for index in range(console_auth.OIDC_EXCHANGES + 1)]
+    console = oidc_front(tmp_path, native, issuer, allowed=tuple(people))
+    app = console.application(NATIVE)
+    tasks = []
+    try:
+        async with AsyncExitStack() as stack:
+            callbacks = []
+            for index, email in enumerate(people):
+                client = await stack.enter_async_context(browser(app, console, f"192.0.2.{index + 1}"))
+                _, callback = issuer.authorize(await start_sign_in(client, console), sub=f"subject-{index}",
+                                               email=email)
+                callbacks.append((client, callback))
+            tasks = [asyncio.create_task(client.get(callback)) for client, callback in callbacks[:-1]]
+            for _ in range(500):
+                if len(entered) == console_auth.OIDC_EXCHANGES:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(entered) == console_auth.OIDC_EXCHANGES
+            last, last_callback = callbacks[-1]
+            # Without the cap this exchange would wait at the provider too.
+            refused = await asyncio.wait_for(last.get(last_callback), 10)
+            assert refused.status_code == 429
+            release.set()
+            assert [response.status_code for response in await asyncio.gather(*tasks)] == [200] * len(tasks)
+            assert (await last.get(last_callback)).status_code == 200
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await console.close()
+
+
+class AlglessIssuer(MockIssuer):
+    """A provider that publishes its keys without "alg", as some do."""
+
+    def handle(self, request):
+        response = super().handle(request)
+        if request.url.path == "/jwks":
+            keys = [{name: value for name, value in key.items() if name != "alg"} for key in response.json()["keys"]]
+            return httpx.Response(200, json={"keys": keys})
+        return response
+
+
+# With keys that name no algorithm, the front's own algorithm list alone
+# refuses an HMAC token keyed by the client secret and an unsigned one.
+@pytest.mark.parametrize("algorithm, key", [("HS256", CLIENT_SECRET), ("none", None)])
+async def test_oidc_refuses_hmac_and_unsigned_tokens_when_keys_name_no_algorithm(tmp_path, algorithm, key):
+    native, issuer = OidcNative(), AlglessIssuer()
+    issuer.sign = lambda body: jwt.encode(body, key, algorithm=algorithm, headers={"kid": "key-a"})
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await oidc_sign_in(alice, console, issuer, status=401)
+            assert not console.sessions and not native.requests
+    finally:
+        await console.close()
+
+
+# The provider calls of one sign-in step (discovery, the code exchange and the
+# keys) share one deadline: each call within any limit of its own, together
+# past it, still ends the step with a typed timeout.
+async def test_oidc_sign_in_meets_one_overall_deadline_at_the_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(console_auth, "OIDC_SIGN_IN_SECONDS", 0.6, raising=False)
+    native, issuer = OidcNative(), MockIssuer()
+    delays = {}
+    answer = issuer.handle
+
+    async def handle(request):
+        await asyncio.sleep(delays.get(request.url.path, 0))
+        return answer(request)
+    issuer.transport = lambda: httpx.MockTransport(handle)
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            started = await start_sign_in(alice, console)
+            delays.update({"/token": 0.4, "/jwks": 0.4})
+            late = await alice.get(issuer.authorize(started)[1])
+            assert late.status_code == 504 and "did not answer in time" in late.text
+            assert console._oidc_exchanges == 0 and not console.sessions and not native.requests
+            # The page for a provider whose discovery does not answer in time is typed too.
+            console._oidc_discovery = None
+            delays.update({"/.well-known/openid-configuration": 1.0})
+            page = await alice.get("/login")
+            assert page.status_code == 504 and "did not answer in time" in page.text
+    finally:
+        await console.close()
+
+
+# The issuer URL is checked whole where it is declared, so no sign-in fails
+# on it later.
+@pytest.mark.parametrize("issuer_url", ["https://login.example.test:abc", "https://login.example.test:99999",
+                                        "https://login.example.test:0", "https://login.example.test:",
+                                        "https://login;example.test", "https://login.example.test:0443"])
+def test_oidc_issuer_url_is_checked_whole_where_it_is_declared(issuer_url):
+    from launchkit.templates_v2.console_configuration import console_authentication
+    with pytest.raises(ValueError, match="OIDC issuer"):
+        console_authentication(oidc_source(issuer=issuer_url), oidc_fields())
+    with pytest.raises(ValueError, match="OIDC issuer"):
+        console_auth.ConsoleOidc(issuer=issuer_url, client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
+    assert console_authentication(oidc_source(issuer="https://login.example.test:8443/realms/forge"),
+                                  oidc_fields()) == "oidc"
 
 
 def test_oidc_subject_encodes_the_providers_person_injectively():
@@ -848,6 +1084,28 @@ def test_update_does_not_move_an_installation_to_oidc():
     for before in (SHARED, b'{"authentication":"local-accounts"}\n'):
         _, blockers = console_update(before, json.dumps(oidc_source()).encode() + b"\n")
         assert any("application/console.json" in blocker for blocker in blockers)
+
+
+def test_update_does_not_move_an_installation_from_oidc_or_change_its_provider():
+    from test_console_named_accounts import console_update
+    before = json.dumps(oidc_source()).encode() + b"\n"
+    for after in (b'{"authentication":"local-accounts"}\n', b'{"authentication":"local-password"}\n',
+                  json.dumps(oidc_source(issuer="https://other.example.test")).encode() + b"\n",
+                  json.dumps(oidc_source(client_secret={"file": "/run/secrets/oidc"})).encode() + b"\n"):
+        _, blockers = console_update(before, after)
+        assert any("application/console.json" in blocker for blocker in blockers), after
+
+
+# The front signs with cryptography directly. OIDC runs on the product route
+# only (it needs the Meta runtime and the application's own source), whose
+# requirements are the release's dependency closure: it pins cryptography
+# exactly, with its hash, like every other dependency there.
+def test_oidc_route_requirements_pin_the_fronts_signing_library():
+    closures = sorted((Path(__file__).parents[1] / "release/inputs/product").glob("*/dependency-requirements.txt"))
+    assert closures
+    for closure in closures:
+        pins = [line for line in closure.read_text().splitlines() if line.lower().startswith("cryptography")]
+        assert len(pins) == 1 and re.fullmatch(r"cryptography==[0-9][0-9.]* --hash=sha256:[0-9a-f]{64}", pins[0]), closure
 
 
 def test_setup_checks_the_oidc_operator_email_and_the_people_to_admit(generated_setup, monkeypatch, capsys):

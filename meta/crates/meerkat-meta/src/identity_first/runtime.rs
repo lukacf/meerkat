@@ -4887,9 +4887,12 @@ impl IdentityRuntime {
                 continue;
             }
             let broken_outcome = refusal.map(ToString::to_string);
+            // Only the lifecycle state is read here, and Core's hold of the
+            // member for unpublished customizer tools changes no state: the
+            // pass reads no hold.
             let lifecycle = match history.as_ref() {
                 Some(history) => self
-                    .status_from(&spec.identity, history.as_ref(), &broken)
+                    .status_from(&spec.identity, history.as_ref(), &broken, false)
                     .await
                     .ok()
                     .map(|item| item.state),
@@ -5292,10 +5295,36 @@ impl IdentityRuntime {
             .await;
         // A candidate launch releases nothing: its members' runs belong to
         // the authoritative launch.
-        if !self.is_candidate_launch()
-            && self.core_holds_unpublished_tools(identity)
-            && let Some(bridge) = self.bridge.as_ref()
-        {
+        if self.is_candidate_launch() {
+            return;
+        }
+        let held = match self.core_holds_unpublished_tools(identity) {
+            Ok(held) => held,
+            // Fail closed: a hold that did not read keeps the identity
+            // pending, so nothing is admitted behind it until a later
+            // publication reads it and releases it.
+            Err(error) => {
+                let reason = format!(
+                    "customizer tools published, but Core's hold of the member for them did \
+                     not read: {error}"
+                );
+                tracing::error!(
+                    %identity,
+                    %reason,
+                    "the member may stay held: it starts no run until a later publication \
+                     reads its hold and releases it"
+                );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason,
+                        artifact_refusal: None,
+                    },
+                );
+                return;
+            }
+        };
+        if held && let Some(bridge) = self.bridge.as_ref() {
             let member_id = crate::member_comms_id::mob_member_id(identity.as_str());
             if let Err(error) = bridge
                 .release_member_run_starts_for_published_tools(&member_id)
@@ -5366,60 +5395,79 @@ impl IdentityRuntime {
     /// The registered identities whose members Core holds for unpublished
     /// customizer tools: Core's own read
     /// ([`SessionBridge::members_holding_run_starts_for_published_tools`]),
-    /// each member id taken to the identity it names. A read that fails holds
-    /// none here (logged): the next composition, or the member's wake or
-    /// delivery, reads it again.
-    pub(crate) fn members_core_holds_for_unpublished_tools(&self) -> BTreeSet<AgentIdentity> {
+    /// each member id taken to the identity it names. One read serves a
+    /// sweep of every identity (a composition, the statuses, the roster's
+    /// inspection). A read that fails is an error, never "none held".
+    pub(crate) fn members_core_holds_for_unpublished_tools(
+        &self,
+    ) -> Result<BTreeSet<AgentIdentity>, BridgeError> {
         let Some(bridge) = self.bridge.as_ref() else {
-            return BTreeSet::new();
+            return Ok(BTreeSet::new());
         };
-        match bridge.members_holding_run_starts_for_published_tools() {
-            Ok(members) => members
-                .iter()
-                .filter_map(|member| {
-                    AgentIdentity::parse(
-                        &crate::member_comms_id::durable_identity_for_roster_member(
-                            member.as_str(),
-                        ),
-                    )
-                    .ok()
-                })
-                .collect(),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "Core's members held for unpublished customizer tools did not read"
-                );
-                BTreeSet::new()
-            }
-        }
+        Ok(bridge
+            .members_holding_run_starts_for_published_tools()?
+            .iter()
+            .filter_map(|member| {
+                AgentIdentity::parse(&crate::member_comms_id::durable_identity_for_roster_member(
+                    member.as_str(),
+                ))
+                .ok()
+            })
+            .collect())
     }
 
     /// Whether Core holds `identity`'s member for unpublished customizer
-    /// tools ([`Self::members_core_holds_for_unpublished_tools`]).
-    pub(crate) fn core_holds_unpublished_tools(&self, identity: &AgentIdentity) -> bool {
-        self.members_core_holds_for_unpublished_tools()
-            .contains(identity)
+    /// tools: Core's read of that member alone
+    /// ([`SessionBridge::member_holds_run_starts_for_published_tools`]), for
+    /// a delivery, a publication or one identity's status. A read that
+    /// fails is an error, never "not held".
+    pub(crate) fn core_holds_unpublished_tools(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(false);
+        };
+        bridge.member_holds_run_starts_for_published_tools(&crate::member_comms_id::mob_member_id(
+            identity.as_str(),
+        ))
     }
 
     /// Why `identity`'s customizer tools are not published, if they are
-    /// not: the customizer's last failure, or, while Core holds the member
-    /// for unpublished tools, that they are published once the runtime is
-    /// composed. A candidate launch's holds are the authoritative launch's to
-    /// release, never a sign of unpublished tools: its status names only a
-    /// failure.
+    /// not, given whether Core holds its member for unpublished tools
+    /// (`core_holds`, read already): the customizer's last failure, or,
+    /// while Core holds the member, that they are published once the
+    /// runtime is composed. A candidate launch's holds are the authoritative
+    /// launch's to release, never a sign of unpublished tools: its status
+    /// names only a failure.
+    fn customizer_tools_pending_given(
+        &self,
+        identity: &AgentIdentity,
+        core_holds: bool,
+    ) -> Option<CustomizerToolsPending> {
+        self.customizer_failure(identity).or_else(|| {
+            (!self.is_candidate_launch() && core_holds).then(|| CustomizerToolsPending {
+                reason: super::build_preparer::PUBLISHED_ONCE_COMPOSED.to_string(),
+                artifact_refusal: None,
+            })
+        })
+    }
+
+    /// [`Self::customizer_tools_pending_given`] for one identity, reading
+    /// Core's hold of its member when no customizer failure answers first.
+    /// A read that fails is an error, never "nothing pending".
     pub(crate) fn customizer_tools_pending_for(
         &self,
         identity: &AgentIdentity,
-    ) -> Option<CustomizerToolsPending> {
-        self.customizer_failure(identity).or_else(|| {
-            (!self.is_candidate_launch() && self.core_holds_unpublished_tools(identity)).then(
-                || CustomizerToolsPending {
-                    reason: super::build_preparer::PUBLISHED_ONCE_COMPOSED.to_string(),
-                    artifact_refusal: None,
-                },
-            )
-        })
+    ) -> Result<Option<CustomizerToolsPending>, BridgeError> {
+        if let Some(failure) = self.customizer_failure(identity) {
+            return Ok(Some(failure));
+        }
+        if self.is_candidate_launch() {
+            return Ok(None);
+        }
+        let core_holds = self.core_holds_unpublished_tools(identity)?;
+        Ok(self.customizer_tools_pending_given(identity, core_holds))
     }
 
     /// Publish the customizer tools of a member Core holds for unpublished
@@ -5443,7 +5491,21 @@ impl IdentityRuntime {
         session_id: Option<&SessionId>,
         operation: &'static str,
     ) -> Result<(), IdentityRuntimeError> {
-        if !self.core_holds_unpublished_tools(identity) {
+        let refused = |detail: String| IdentityRuntimeError::IdentityWakeRetryable {
+            identity: identity.clone(),
+            session_id: session_id.cloned(),
+            detail,
+        };
+        let unread = |error: BridgeError| {
+            refused(format!(
+                "Core's hold of the member for unpublished customizer tools did not read \
+                 ({error}); nothing is admitted behind a hold that did not read, retry"
+            ))
+        };
+        if !self
+            .core_holds_unpublished_tools(identity)
+            .map_err(unread)?
+        {
             return Ok(());
         }
         // A candidate launch releases no hold, so Core keeps holding a member
@@ -5473,11 +5535,6 @@ impl IdentityRuntime {
             .map(|entry| entry.spec.clone())
         else {
             return Ok(());
-        };
-        let refused = |detail: String| IdentityRuntimeError::IdentityWakeRetryable {
-            identity: identity.clone(),
-            session_id: session_id.cloned(),
-            detail,
         };
         let mut shutdown = self.foreground_cancel.subscribe();
         if *shutdown.borrow() {
@@ -5515,8 +5572,9 @@ impl IdentityRuntime {
                 // A release that failed keeps the identity pending (and the
                 // member held): nothing is admitted behind it.
                 match self.customizer_tools_pending_for(identity) {
-                    None => Ok(()),
-                    Some(pending) => Err(refused(pending.reason)),
+                    Ok(None) => Ok(()),
+                    Ok(Some(pending)) => Err(refused(pending.reason)),
+                    Err(error) => Err(unread(error)),
                 }
             }
             Err(error) => {
@@ -13042,16 +13100,27 @@ impl IdentityRuntime {
                 detail: format!("reading Core's broken members: {error}"),
             }
         })?;
-        self.status_from(identity, history.as_ref(), &broken).await
+        let tools_held = self
+            .core_holds_unpublished_tools(identity)
+            .map_err(|error| IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: identity.clone(),
+                detail: format!(
+                    "reading Core's hold of the member for unpublished customizer tools: {error}"
+                ),
+            })?;
+        self.status_from(identity, history.as_ref(), &broken, tools_held)
+            .await
     }
 
-    /// [`Self::status`] over a history and Core's broken members already
-    /// read.
+    /// [`Self::status`] over a history, Core's broken members and whether
+    /// Core holds the identity's member for unpublished customizer tools
+    /// (`tools_held`), each read already.
     async fn status_from(
         &self,
         identity: &AgentIdentity,
         history: Option<&meerkat_mob::MemberBindingHistory>,
         broken: &BTreeMap<meerkat_mob::AgentIdentity, String>,
+        tools_held: bool,
     ) -> Result<IdentityStatus, IdentityRuntimeError> {
         let (spec, wake_refusal, replaced_session, declaration_refused) = {
             let entries = self.entries.read().await;
@@ -13089,7 +13158,7 @@ impl IdentityRuntime {
             wake_refusal,
             replaced_session,
             session_repair_required,
-            customizer_tools_pending: self.customizer_tools_pending_for(identity),
+            customizer_tools_pending: self.customizer_tools_pending_given(identity, tools_held),
         })
     }
 
@@ -13204,10 +13273,22 @@ impl IdentityRuntime {
                 detail: format!("reading Core's broken members: {error}"),
             }
         })?;
+        // One read of Core's held members serves every identity.
+        let tools_held = self
+            .members_core_holds_for_unpublished_tools()
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's members held for unpublished customizer tools: {error}"
+                ),
+            })?;
         let mut statuses = Vec::with_capacity(identities.len());
         for identity in identities {
             // An identity unregistered between the two reads has no status.
-            if let Ok(status) = self.status_from(&identity, history.as_ref(), &broken).await {
+            let held = tools_held.contains(&identity);
+            if let Ok(status) = self
+                .status_from(&identity, history.as_ref(), &broken, held)
+                .await
+            {
                 statuses.push(status);
             }
         }
@@ -14740,9 +14821,21 @@ impl IdentityRuntime {
                 detail: format!("reading Core's broken members: {error}"),
             }
         })?;
+        // One read of Core's held members serves every identity.
+        let tools_held = self
+            .members_core_holds_for_unpublished_tools()
+            .map_err(|error| IdentityRuntimeError::MemberHistoryUnavailable {
+                detail: format!(
+                    "reading Core's members held for unpublished customizer tools: {error}"
+                ),
+            })?;
         let mut result = BTreeMap::new();
         for (identity, spec) in specs {
-            if let Ok(status) = self.status_from(&identity, history.as_ref(), &broken).await {
+            let held = tools_held.contains(&identity);
+            if let Ok(status) = self
+                .status_from(&identity, history.as_ref(), &broken, held)
+                .await
+            {
                 result.insert(identity, (spec, status));
             }
         }
@@ -16519,7 +16612,9 @@ mod reset_reprofile_tests {
                 .await;
             let member = crate::member_comms_id::mob_member_id(identity.as_str()).to_string();
             assert_eq!(bridge.released(), vec![member.clone()]);
-            let pending = runtime.customizer_tools_pending_for(&identity);
+            let pending = runtime
+                .customizer_tools_pending_for(&identity)
+                .map_err(|error| error.to_string())?;
             if fail {
                 let pending = pending.ok_or("a failed release keeps the identity pending")?;
                 assert!(
@@ -16580,7 +16675,12 @@ mod reset_reprofile_tests {
         runtime
             .publish_customizer_tools(&identity, &mut draft)
             .await;
-        assert!(runtime.customizer_tools_pending_for(&identity).is_none());
+        assert!(
+            runtime
+                .customizer_tools_pending_for(&identity)
+                .expect("the hold reads")
+                .is_none()
+        );
 
         assert_eq!(
             bridge.released(),

@@ -4929,6 +4929,22 @@ pub trait SessionBridge: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether the mob holds `member_id`'s run starts for unpublished
+    /// customizer tools (`ToolsNotPublished`): one member's answer of
+    /// [`Self::members_holding_run_starts_for_published_tools`], Core's
+    /// read of that member alone (`MobHandle::member_holds_run_starts`)
+    /// from its published state, with no actor command. A delivery and one
+    /// identity's status read it. Defaults to the list read's answer for
+    /// the member.
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        Ok(self
+            .members_holding_run_starts_for_published_tools()?
+            .contains(member_id))
+    }
+
     /// Retry the build preparation the host asked to retry for a member
     /// (`MobHandle::resolve_member_build_preparation`): Core ends the cause
     /// it recorded, which refused the member's wakes
@@ -8549,6 +8565,23 @@ impl SessionBridge for MobSessionBridge {
             })
     }
 
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.handle
+            .member_holds_run_starts(
+                member_id,
+                meerkat_mob::HostRunStartHoldReason::ToolsNotPublished,
+            )
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "reading whether {member_id} is held for unpublished customizer tools \
+                     failed: {error}"
+                ))
+            })
+    }
+
     async fn resolve_member_build_preparation(
         &self,
         member_id: &MobAgentIdentity,
@@ -10610,6 +10643,14 @@ impl SessionBridge for super::PublicSessionBridge {
         &self,
     ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
         self.bridge.members_holding_run_starts_for_published_tools()
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.bridge
+            .member_holds_run_starts_for_published_tools(member_id)
     }
 
     async fn resolve_member_build_preparation(

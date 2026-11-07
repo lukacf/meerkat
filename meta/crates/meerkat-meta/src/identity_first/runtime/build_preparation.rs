@@ -154,7 +154,20 @@ impl IdentityRuntime {
         if !preparer.publishes_tools() {
             return;
         }
-        let held = self.members_core_holds_for_unpublished_tools();
+        let held = match self.members_core_holds_for_unpublished_tools() {
+            Ok(held) => held,
+            // Nothing is published, so every member Core holds stays held:
+            // a later composition, or the member's wake or delivery, reads
+            // its hold again.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Core's members held for unpublished customizer tools did not read; \
+                     they stay held until a later composition or delivery publishes them"
+                );
+                return;
+            }
+        };
         if held.is_empty() {
             return;
         }

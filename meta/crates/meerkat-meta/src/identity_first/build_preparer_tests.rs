@@ -278,7 +278,7 @@ async fn r111_a_build_before_the_runtime_is_bound_is_held_and_pending_on_the_run
     let (runtime, _registry) = runtime_with(&core, None).await?;
     preparer.bind(&runtime, None).await;
     let pending = runtime
-        .customizer_tools_pending_for(&alice)
+        .customizer_tools_pending_for(&alice)?
         .ok_or("the held build is pending on the runtime")?;
     assert_eq!(pending.reason, PUBLISHED_ONCE_COMPOSED);
     Ok(())
@@ -326,7 +326,7 @@ async fn r111_the_composition_publishes_a_held_member_and_releases_its_hold_once
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
     assert_eq!(registry.ensure(&alice).generation(), 1, "published once");
     assert_eq!(core.released(), vec![member_of(&alice).to_string()]);
-    assert!(runtime.customizer_tools_pending_for(&alice).is_none());
+    assert!(runtime.customizer_tools_pending_for(&alice)?.is_none());
     let contexts = customizer
         .contexts
         .lock()
@@ -380,7 +380,7 @@ async fn r109_after_the_composition_a_registered_identity_is_prepared_inline_and
         core.released().is_empty(),
         "an inline preparation holds nothing"
     );
-    assert!(runtime.customizer_tools_pending_for(&alice).is_none());
+    assert!(runtime.customizer_tools_pending_for(&alice)?.is_none());
     Ok(())
 }
 
@@ -478,7 +478,7 @@ async fn an_unlisted_identitys_member_is_held_and_a_host_adopted_one_is_prepared
 
     // A composition publishes nothing for the unlisted identity.
     runtime.compose_member_builds().await;
-    assert!(runtime.customizer_tools_pending_for(&gone).is_some());
+    assert!(runtime.customizer_tools_pending_for(&gone)?.is_some());
     assert!(core.released().is_empty());
     Ok(())
 }
@@ -513,7 +513,7 @@ async fn a_host_adopted_identitys_member_is_never_held_before_the_composition() 
         .await;
     assert_eq!(bound, Ok(MemberBuildPrepared::Prepared));
     assert!(
-        runtime.customizer_tools_pending_for(&adopted).is_none(),
+        runtime.customizer_tools_pending_for(&adopted)?.is_none(),
         "nothing is pending for a composition to release"
     );
     Ok(())
@@ -772,7 +772,7 @@ async fn the_composition_releases_the_members_core_holds_for_unpublished_tools()
         .expect("the identity registers");
     assert_eq!(
         runtime
-            .customizer_tools_pending_for(&alice)
+            .customizer_tools_pending_for(&alice)?
             .map(|pending| pending.reason),
         Some(PUBLISHED_ONCE_COMPOSED.to_string()),
         "the status reads Core's hold"
@@ -782,7 +782,7 @@ async fn the_composition_releases_the_members_core_holds_for_unpublished_tools()
     assert_eq!(customizer.builds.load(Ordering::SeqCst), 1);
     assert_eq!(registry.ensure(&alice).generation(), 1, "published once");
     assert_eq!(core.released(), vec![member_of(&alice).to_string()]);
-    assert!(runtime.customizer_tools_pending_for(&alice).is_none());
+    assert!(runtime.customizer_tools_pending_for(&alice)?.is_none());
 
     runtime.compose_member_builds().await;
     assert_eq!(

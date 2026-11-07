@@ -940,6 +940,22 @@ impl SessionBridge for SeatCore {
         Ok(lock(&self.tools_held).iter().map(member_id).collect())
     }
 
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member: &meerkat_mob::AgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.tools_held_point_reads.fetch_add(1, Ordering::SeqCst);
+        if self.tools_held_reads_fail.load(Ordering::SeqCst) {
+            return Err(BridgeError::Mob(
+                "Core's hold of the member for unpublished customizer tools did not read"
+                    .to_string(),
+            ));
+        }
+        Ok(lock(&self.tools_held)
+            .iter()
+            .any(|identity| member_id(identity) == *member))
+    }
+
     async fn checkpoint_session(
         &self,
         runtime_id: &AgentRuntimeId,

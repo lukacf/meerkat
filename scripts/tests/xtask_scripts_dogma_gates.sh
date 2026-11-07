@@ -396,6 +396,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
+# writer_fence_audit.sh (host_store_writer_fence) requires its eleven
+# witnesses violated, and with --mutants each seeded defect's invariant or
+# action property violated.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -1043,6 +1046,24 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessDeleteDropsEarlierAck is violated."' \
   'echo "Error: Invariant AuditAckSetAnswersTheLatestSupersession is violated."' \
   'echo "Error: Invariant AuditLatestSupersessionAcksAreKept is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResumedAfterStop is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWaitedOutOwnGrantResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHolderRenewed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessForeignAfterWait is violated."' \
+  'echo "Error: Invariant NotAuditWitnessListingFailedResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessResidual is violated."' \
+  'echo "Error: Invariant NotAuditWitnessWaitedOutAgainResumed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessQuarantineKeptAcrossReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPoisonKeptAcrossReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessFailedOpenRefusesReacquire is violated."' \
+  'echo "Error: Invariant NotAuditWitnessChunkOwnerQuarantined is violated."' \
+  'echo "Error: Invariant AuditNoFalseLoss is violated."' \
+  'echo "Error: Invariant AuditWaitsAgainOnlyUnrenewed is violated."' \
+  'echo "Error: Invariant AuditNoResumeWithoutProof is violated."' \
+  'echo "Error: Invariant AuditNoResumeOverForeignBatch is violated."' \
+  'echo "Error: Action property AuditClassificationsMonotone is violated."' \
+  'echo "Error: Invariant no_scope_is_quarantined_and_poisoned is violated."' \
+  'echo "Error: Invariant AuditNoReacquireAfterFailedOpen is violated."' \
   'echo "State 1: <Initial predicate>"' \
   > "$tlc_env_tmp/tlc"
 chmod +x "$tlc_env_tmp/tlc"

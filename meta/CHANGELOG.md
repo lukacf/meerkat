@@ -129,12 +129,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   update the installation. Update forward instead; the console then reads
   its kept copy again.
 - Forge: OIDC sign-in is an application's own choice, for a new
-  installation: no update moves an installation to it or from it. Register
+  installation: no update moves an installation to it or from it. Forge's
+  normal build route always produces named accounts, so OIDC must come from
+  the application's own source. Register
   `<Console address>/login/callback` as a redirect URI with the identity
   provider (`http://127.0.0.1:<port>/login/callback` for the local
-  Console). Keep `.mobkit/console-oidc-issuer` with the installation's
-  backups: the console knows each person by it, and a new one makes
-  everyone new to the console.
+  Console). Keep `.mobkit/console-oidc-issuer` and
+  `.mobkit/console-oidc-signing.pem` in the installation's backups, and keep
+  those backups private: the console knows each person by the issuer, so a
+  new one makes everyone new to the console, and the key signs the console
+  tokens of every person, administrators included.
 
 ### Added
 
@@ -210,8 +214,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   named accounts need the Meta runtime.
 - Forge: OIDC sign-in needs the Meta runtime too. Signing out ends the
   front's login and the console's tokens for it, not the person's session
-  at the identity provider. The front reaches the provider directly, not
-  through a proxy set in its environment.
+  at the identity provider: on a shared computer, **Continue to sign in**
+  can open the previous person's console without a prompt until they sign
+  out at the provider. A provider that does not send `email_verified: true`
+  signs nobody in. The front reaches the provider directly, not through a
+  proxy set in its environment.
+- Forge: sign-in forms and OIDC sign-ins waiting for the provider are
+  bounded per client address and in total; a full table drops its oldest
+  entry instead of refusing a new one, so one caller behind a shared address
+  cannot hold everyone else's sign-in off. A flood through one address can
+  still make other people's forms or waiting sign-ins expire early; put a
+  console that other computers reach behind a rate-limiting proxy.
 
 ## [0.9.10] - 2026-11-04
 

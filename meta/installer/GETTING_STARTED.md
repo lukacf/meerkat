@@ -466,17 +466,22 @@ password lets everyone who knows it chat, but approvals (frontend changes, the
 controller review and setup prompts) need a person's own account.
 
 An application can instead sign people in at its organization's identity
-provider (OIDC). Its setup then asks for the operator's email as the Console
-user, the OIDC client secret (or the application reads it from a private
+provider (OIDC). Forge's normal build route always produces named accounts, so
+OIDC must come from the application's own source (its
+`application/console.json`). Its setup then asks for the operator's email as the
+Console user, the OIDC client secret (or the application reads it from a private
 file), and optionally the email addresses of the further people who may sign
 in. Register the Console's sign-in callback with the identity provider as a
 redirect URI: `http://127.0.0.1:<port>/login/callback` for the local Console,
 or the same path on its public address. People then choose **Continue to sign
 in** and sign in at the provider; only a verified email that is the
-operator's or on the list opens the Console, each person as themselves. The
-Console keeps none of the provider's tokens. Keep the installation's
-`.mobkit/` folder in its backups: it holds the Console's own sign-in issuer,
-by which the Console knows each person.
+operator's or on the list opens the Console, each person as themselves. A
+provider that does not mark the email as verified (`email_verified`) signs
+nobody in. The Console keeps none of the provider's tokens. Keep the
+installation's `.mobkit/` folder in its backups, including
+`console-oidc-issuer`, by which the Console knows each person, and the
+signing key `console-oidc-signing.pem`. Keep those backups private: that key
+signs the Console tokens of every person, administrators included.
 
 Follow the installation action and its checks. **Install and start** starts an
 ordinary supported package. **Install application** checks the selected
@@ -782,6 +787,11 @@ returns to the password screen. If the Console did not confirm the sign-out, the
 page says so: you are signed out of that browser, and the tokens the Console
 already holds for that login expire within three minutes. If neither page appears,
 treat sign-out as unconfirmed; closing the tab is not confirmation.
+
+With OIDC sign-in, **Sign out** ends the Console login but not your session at
+the identity provider. On a shared computer, **Continue to sign in** can then
+open the previous person's Console again without asking for anything, until
+they also sign out at the provider.
 
 To add another conversation channel to a custom application, return to the same
 saved setup. Tell the guide which people should use it and whether it should

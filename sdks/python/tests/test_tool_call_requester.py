@@ -69,6 +69,47 @@ def test_a_requester_parses_and_a_malformed_one_is_none() -> None:
         assert ToolCallRequester.from_wire(malformed) is None, malformed
 
 
+def test_a_requester_core_refuses_is_none() -> None:
+    """Every shape the runtime's requester grammar refuses reads as no
+    requester: the SDK is never looser than the runtime."""
+    qualified = {"kind": "qualified", "trust_domain_id": ISSUER_DOMAIN}
+    alice = _wire_principal("alice")
+    refused = {
+        "an unknown qualification kind": {**alice, "qualification": {"kind": "maybe"}},
+        "an unknown qualification kind with a domain": {
+            **alice,
+            "qualification": {"kind": "maybe", "trust_domain_id": ISSUER_DOMAIN},
+        },
+        "a blank qualification kind": {**alice, "qualification": {"kind": "  "}},
+        "a null qualification": {**alice, "qualification": None},
+        "a trust domain on an unqualified principal": {
+            **alice,
+            "qualification": {"kind": "unqualified", "trust_domain_id": ISSUER_DOMAIN},
+        },
+        "a qualification field the runtime does not have": {
+            **alice,
+            "qualification": {**qualified, "via": "proxy"},
+        },
+        "a blank trust domain": {
+            **alice,
+            "qualification": {"kind": "qualified", "trust_domain_id": "  "},
+        },
+        "a trust domain with a control character": {
+            **alice,
+            "qualification": {"kind": "qualified", "trust_domain_id": ISSUER_DOMAIN + "\x00"},
+        },
+        "a blank principal kind": {**alice, "kind": "  "},
+        "an unknown principal kind": {**alice, "kind": "robot"},
+        "a qualified id with a control character": _wire_principal("ali\x07ce"),
+    }
+    accepted = [
+        name
+        for name, principal in refused.items()
+        if ToolCallRequester.from_wire({"principal": principal}) is not None
+    ]
+    assert accepted == [], f"the SDK reads a requester the runtime refuses: {accepted}"
+
+
 class _CapturingWriter:
     def __init__(self) -> None:
         self.frames: list[dict[str, Any]] = []

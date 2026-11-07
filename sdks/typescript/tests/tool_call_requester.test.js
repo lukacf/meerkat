@@ -84,6 +84,40 @@ describe("tool call requester", () => {
     }
   });
 
+  it("reads every requester the runtime refuses as no requester", () => {
+    const qualified = { kind: "qualified", trust_domain_id: ISSUER_DOMAIN };
+    const alice = wirePrincipal("alice");
+    const refused = {
+      "an unknown qualification kind": { ...alice, qualification: { kind: "maybe" } },
+      "an unknown qualification kind with a domain": {
+        ...alice,
+        qualification: { kind: "maybe", trust_domain_id: ISSUER_DOMAIN },
+      },
+      "a blank qualification kind": { ...alice, qualification: { kind: "  " } },
+      "a null qualification": { ...alice, qualification: null },
+      "a trust domain on an unqualified principal": {
+        ...alice,
+        qualification: { kind: "unqualified", trust_domain_id: ISSUER_DOMAIN },
+      },
+      "a qualification field the runtime does not have": {
+        ...alice,
+        qualification: { ...qualified, via: "proxy" },
+      },
+      "a blank trust domain": { ...alice, qualification: { kind: "qualified", trust_domain_id: "  " } },
+      "a trust domain with a control character": {
+        ...alice,
+        qualification: { kind: "qualified", trust_domain_id: `${ISSUER_DOMAIN}\u0000` },
+      },
+      "a blank principal kind": { ...alice, kind: "  " },
+      "an unknown principal kind": { ...alice, kind: "robot" },
+      "a qualified id with a control character": wirePrincipal("ali\u0007ce"),
+    };
+    const accepted = Object.entries(refused)
+      .filter(([, principal]) => MeerkatClient.parseToolCallRequester({ principal }) !== undefined)
+      .map(([name]) => name);
+    assert.deepEqual(accepted, [], "the SDK reads a requester the runtime refuses");
+  });
+
   it("lets a host refuse a person-scoped tool for another requester", async () => {
     const seen = [];
     const client = personScopedClient(person("alice"), seen);

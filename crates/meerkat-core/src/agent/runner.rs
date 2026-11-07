@@ -5518,10 +5518,12 @@ mod skill_activation_effect_tests {
             results: vec![original],
             created_at: crate::types::message_timestamp_now(),
         });
-        // The model run's own requester, which no app action borrows.
-        agent.tool_dispatch_context = crate::ToolDispatchContext::default().with_requester(Some(
-            crate::types::TurnRequester::direct(app_person("model-run")),
-        ));
+        // The model run's own requester, which no app action borrows: the
+        // agent holds it, and the context each action is handed carries it
+        // too, as a host that clones its run's context would pass it.
+        let model_run = || Some(crate::types::TurnRequester::direct(app_person("model-run")));
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_requester(model_run());
         let request = crate::ToolApplicationRequest {
             tool_call_id: "original".into(),
             extension: "test.app".into(),
@@ -5546,7 +5548,9 @@ mod skill_activation_effect_tests {
             let result = agent
                 .tool_application(
                     request.clone(),
-                    crate::ToolDispatchContext::default().with_tool_application_control(control),
+                    crate::ToolDispatchContext::default()
+                        .with_requester(model_run())
+                        .with_tool_application_control(control),
                 )
                 .await
                 .expect("the app action runs");

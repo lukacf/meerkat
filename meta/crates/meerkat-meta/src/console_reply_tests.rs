@@ -115,6 +115,38 @@ fn no_one_drives_any_agent() -> AccessController {
     .expect("access controller")
 }
 
+/// An access configuration under which every signed-in caller may do
+/// everything to every agent but view one labelled `tier=secret`: only root,
+/// the admin, views those.
+fn no_one_views_secret_agents() -> AccessController {
+    AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![ROOT.to_string()],
+        rules: vec![
+            AccessRule {
+                id: "everyone-drives-every-agent".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["*".to_string()],
+                ..AccessRule::default()
+            },
+            AccessRule {
+                id: "no-one-views-secret-agents".to_string(),
+                effect: crate::access::AccessEffect::Deny,
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.view".to_string()],
+                match_labels: std::collections::BTreeMap::from([(
+                    "tier".to_string(),
+                    "secret".to_string(),
+                )]),
+                ..AccessRule::default()
+            },
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("access controller")
+}
+
 /// A console payload policy that withholds the text of every private reply
 /// frame.
 struct WithholdReplies;
@@ -1357,6 +1389,71 @@ async fn an_item_is_listed_only_while_its_person_may_view_the_agent() -> TestRes
         items.as_ref().map(Vec::len),
         Ok(1),
         "access granted again lists the item again: {items:?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// An item follows its agent's current labels whichever read comes first:
+/// once `alpha` is relabelled (as a respawn with new labels registers them)
+/// into a class an access rule hides from everyone but root, Alice's list
+/// leaves her item from it out, as her read of `alpha`'s timeline leaves out
+/// the request, also when no other read refreshed the console's access
+/// attributes from the roster since the relabel.
+#[tokio::test]
+async fn a_relabelled_agent_hides_its_item_without_a_prior_read() -> TestResult {
+    let fixture = Fixture::new(
+        "replies-relabelled",
+        true,
+        Some(no_one_views_secret_agents()),
+    )
+    .await?;
+    let alice = alice();
+    let sent = send(&fixture.app, Some(&alice), "alpha", "relabelled-question").await;
+    let receipt = fixture
+        .replies()
+        .deliver(&interaction_of(&sent), "reply-1", REPLY_TEXT)
+        .await;
+    assert!(is_attention(&receipt), "{receipt:?}");
+    let before = attention(&fixture.app, &alice).await;
+    assert_eq!(
+        before.as_ref().map(Vec::len),
+        Ok(1),
+        "Alice reads her item while she may view alpha: {before:?}"
+    );
+
+    fixture
+        .owner
+        .console_events()
+        .register_identity_labels(
+            "alpha",
+            std::collections::BTreeMap::from([("tier".to_string(), "secret".to_string())]),
+        )
+        .await;
+
+    // Her list is read first: no other read refreshed the access attributes
+    // since the relabel.
+    let first = attention(&fixture.app, &alice).await;
+    let frames = timeline(&fixture.app, &alice, Some("alpha")).await;
+    let after_timeline = attention(&fixture.app, &alice).await;
+    assert!(
+        !matches!(
+            &frames,
+            Ok(frames) if frames
+                .iter()
+                .any(|frame| frame["interaction_id"] == json!(interaction_of(&sent)))
+        ),
+        "Alice no longer reads alpha's request: {frames:?}"
+    );
+    assert_eq!(
+        after_timeline.as_ref().map(Vec::len),
+        Ok(0),
+        "after her timeline read her list leaves the item out: {after_timeline:?}"
+    );
+    assert_eq!(
+        first.as_ref().map(Vec::len),
+        Ok(0),
+        "her first read after the relabel leaves the item out too: {first:?}"
     );
     fixture.stop().await;
     Ok(())

@@ -4285,20 +4285,29 @@ impl IdentityRuntime {
 
     /// The host holds `identities`' creation in this process: a held pass is
     /// about to create their members. Each is marked in the rollback mirror,
-    /// durably and before any member exists, as 0.9.10 marks it (a write that
-    /// fails refuses the pass, as it does there); nothing here reads the
-    /// marks.
+    /// durably and before any member exists, as 0.9.10 marks it; nothing
+    /// here reads the marks. The hold extends only once the marks are
+    /// written: a write that fails refuses the pass, as it does there, and
+    /// leaves none of its identities held.
     pub(crate) async fn mark_held_completion_owed(
         &self,
         identities: &[AgentIdentity],
     ) -> Result<(), IdentityRuntimeError> {
+        if let Some(marks) = self.held_completion_marks() {
+            Self::write_held_completion_marks(marks, identities).await?;
+        }
         self.host_held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend(identities.iter().cloned());
-        let Some(marks) = self.held_completion_marks() else {
-            return Ok(());
-        };
+        Ok(())
+    }
+
+    /// Write `identities`' marks where `marks` keeps them, durably.
+    async fn write_held_completion_marks(
+        marks: super::held_bootstrap::HeldCompletionMarksAt,
+        identities: &[AgentIdentity],
+    ) -> Result<(), IdentityRuntimeError> {
         let dir = marks.describe();
         match marks {
             super::held_bootstrap::HeldCompletionMarksAt::StateDir(files) => {

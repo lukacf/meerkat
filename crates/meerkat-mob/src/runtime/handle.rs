@@ -13213,17 +13213,17 @@ impl MobHandle {
     }
 
     /// [`Self::start_governed_input_with_custody`] at the member incarnation
-    /// the caller read: `runtime_id` and `fence_token` (a [`RosterEntry`]'s,
-    /// say), bound to `session_id`. The submission names that incarnation,
-    /// where the unpinned form submits to whichever incarnation is current
-    /// when it runs: a member rotated, respawned or retired since the read
-    /// is refused ([`MobError::StaleFenceToken`], or
-    /// [`MobError::MemberNotFound`] once no incarnation of it is live), one
-    /// whose session moved under the same incarnation
-    /// [`MobError::StaleDeliveryScope`], and nothing is admitted: the custody
-    /// settles `NotAdmitted`. A check the caller made of the incarnation it
-    /// read, its addressability for one, therefore holds for the work
-    /// admitted.
+    /// the caller read: `runtime_id` and `fence_token` (the ones
+    /// [`Self::get_member`] answered, say), bound to `session_id`. The
+    /// submission names that incarnation, where the unpinned form submits to
+    /// whichever incarnation is current when it runs: a member rotated,
+    /// respawned or retired since the read is refused
+    /// ([`MobError::StaleFenceToken`], or [`MobError::MemberNotFound`] once no
+    /// incarnation of it is live), one whose session moved under the same
+    /// incarnation [`MobError::StaleDeliveryScope`], and nothing is admitted:
+    /// the custody settles `NotAdmitted`. A check the caller made of the
+    /// incarnation it read, its addressability for one, therefore holds for
+    /// the work admitted.
     ///
     /// The custody is guarded before the future is returned, so dropping the
     /// future before it is first polled still settles it `NotAdmitted`.

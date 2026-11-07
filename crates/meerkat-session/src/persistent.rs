@@ -21893,17 +21893,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// ends, so its discards still reach the caller.
     ///
     /// - A session this service hosts (a live actor, or a registration on
-    ///   its runtime machine) answers [`OwedCompactionSettlement::Live`]: its
-    ///   live agent owns the finalization. Nothing is written.
-    /// - No pending row answers [`OwedCompactionSettlement::NothingOwed`], so
-    ///   a second settle owes nothing and changes nothing.
+    ///   its runtime machine) answers
+    ///   [`OwedCompactionSettlement::Live`](crate::OwedCompactionSettlement::Live):
+    ///   its live agent owns the finalization. Nothing is written.
+    /// - No pending row answers
+    ///   [`OwedCompactionSettlement::NothingOwed`](crate::OwedCompactionSettlement::NothingOwed),
+    ///   so a second settle owes nothing and changes nothing.
     /// - Otherwise each row is the commit authority of its projection (only
     ///   a commit inserted it): the builder finalizes the batch
     ///   ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`])
     ///   and the store acknowledges the row, which removes the intent from
     ///   the authoritative session in the same transaction, so a later
     ///   revival's reconciliation sees a consistent pair. The answer is
-    ///   [`OwedCompactionSettlement::Settled`], in outbox order.
+    ///   [`OwedCompactionSettlement::Settled`](crate::OwedCompactionSettlement::Settled),
+    ///   in outbox order.
     ///
     /// It runs under this runtime owner's hosting claim for the session
     /// (#1813): a session another runtime owner hosts is refused with

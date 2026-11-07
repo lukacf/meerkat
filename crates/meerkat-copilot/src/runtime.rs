@@ -9779,38 +9779,52 @@ mod tests {
             }
         }
 
-        /// A transport whose first answer takes `first_delay`; every later
-        /// one is the model list at once.
-        struct SlowFirstListing {
-            first_delay: StdDuration,
+        /// A transport whose answers to the listing take `delays[n]` for the
+        /// n-th request (the last delay for every later one), each then the
+        /// model list. A delay is never ready on its first poll, as the
+        /// network is not.
+        struct DelayedListing {
+            delays: Vec<StdDuration>,
             requests: std::sync::atomic::AtomicUsize,
         }
 
+        impl DelayedListing {
+            fn new(delays: impl IntoIterator<Item = StdDuration>) -> Self {
+                Self {
+                    delays: delays.into_iter().collect(),
+                    requests: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+
         #[async_trait]
-        impl CopilotHttpTransport for SlowFirstListing {
+        impl CopilotHttpTransport for DelayedListing {
             async fn get(
                 &self,
                 _url: &str,
                 _headers: HeaderMap,
             ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
-                if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
-                    tokio::time::sleep(self.first_delay).await;
-                }
+                let request = self.requests.fetch_add(1, Ordering::SeqCst);
+                let delay = self
+                    .delays
+                    .get(request)
+                    .or(self.delays.last())
+                    .copied()
+                    .unwrap_or_default();
+                tokio::time::sleep(delay).await;
                 Ok(models_response())
             }
         }
 
-        /// A first listing attempt that does not answer within its share of
+        /// A first listing attempt that does not answer within its half of
         /// the listing's bound is cut there, and the second attempt answers
-        /// within the rest of the bound. (Fails-old: the first attempt used
-        /// the whole bound, so the second never answered and the listing
-        /// timed out.)
+        /// within the rest of the bound, here after 100 ms of its 400.
+        /// (Fails-old: the first attempt used the whole bound, so the second
+        /// had no time to answer and the listing timed out.)
         #[tokio::test]
         async fn a_listing_whose_first_attempt_hangs_is_answered_by_the_second() {
-            let transport = SlowFirstListing {
-                first_delay: StdDuration::from_secs(5),
-                requests: std::sync::atomic::AtomicUsize::new(0),
-            };
+            let transport =
+                DelayedListing::new([StdDuration::from_secs(5), StdDuration::from_millis(100)]);
             let started = std::time::Instant::now();
             let snapshot = fetch_copilot_models_within(
                 &transport,
@@ -9826,6 +9840,38 @@ mod tests {
             assert!(
                 started.elapsed() < StdDuration::from_secs(5),
                 "the first attempt was cut within the bound"
+            );
+        }
+
+        /// Two listing attempts that both hang end with the listing's bound,
+        /// not past it: the second attempt gets only what is left of the
+        /// bound.
+        #[tokio::test]
+        async fn a_listing_whose_attempts_both_hang_ends_at_its_bound() {
+            let transport = DelayedListing::new([StdDuration::from_secs(5)]);
+            let started = std::time::Instant::now();
+            let failed = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    failed,
+                    Err(CopilotModelDiscoveryError::Transport(
+                        CopilotHttpTransportError::Timeout
+                    ))
+                ),
+                "{failed:?}"
+            );
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                elapsed < StdDuration::from_millis(1_100),
+                "the listing ends at its 800 ms bound, not past it: {elapsed:?}"
             );
         }
 

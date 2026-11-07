@@ -688,18 +688,20 @@ epoch_index="${view_positions#* }"
 # the two that record an entry is a self-loop (it updates only phase, to the
 # value its guard reads, and model_step_count), and those two (Adopted for a
 # listed identity, AdoptedUnlisted for an unlisted one) make the same update
-# under the same guards apart from one guard of their own that reads only
-# the observations (the listing). Their shared guards read the observations
-# only as the arguments of the adoption's verdict rule
-# (legacy_adoption_verdict), which answers Adopted for some observation of a
-# listed identity exactly when it does for some observation of an unlisted
-# one, whatever the state it reads: the audit module's ASSUME
+# under the same guards apart from one guard of their own, their listing
+# ((listed = TRUE) for Adopted, (listed = FALSE) for AdoptedUnlisted). Their
+# shared guards read the observations only as the arguments of one call of
+# the adoption's verdict rule (legacy_adoption_verdict), whose answer they
+# compare with "Adopted", and the rule answers Adopted for some observation
+# of a listed identity exactly when it does for some observation of an
+# unlisted one, whatever the state it reads: the audit module's ASSUME
 # ListingSymmetricAdoption, which TLC checks when it loads the module. So
 # the two fire in the same states, each run fires one of them (its covered
 # actions), a step that changes the VIEW is a step of both runs, both reach
 # every state, and every adoption step is checked by the run its listing
-# belongs to. Fails when the generated model no longer has that shape, or
-# the audit module no longer states the rule's symmetry.
+# belongs to. Fails when the generated model no longer has that shape (the
+# two premises the ASSUME states, the listing and the "Adopted" verdict,
+# included), or the audit module no longer states the rule's symmetry.
 check_adoption_split() {
   MODEL="${spec_dir}/model.tla" AUDIT="${spec_dir}/identity_entry_audit.tla" python3 - <<'PY'
 import os, re, sys
@@ -721,7 +723,8 @@ def reads_only_observations(line):
     return not observation.sub("", re.sub(r"\b(TRUE|FALSE|IF|THEN|ELSE)\b", "", line)).strip(" /\\()=~")
 
 def rule_call_arguments(line):
-    """The top-level arguments of the one verdict rule call on the line."""
+    """The top-level arguments of the one verdict rule call on the line, the
+    line outside the call, and what follows the call."""
     if line.count("legacy_adoption_verdict(") != 1:
         return None
     start = line.index("legacy_adoption_verdict(") + len("legacy_adoption_verdict(")
@@ -734,7 +737,7 @@ def rule_call_arguments(line):
             depth -= 1
         elif c == ")":
             args.append(line[begin:i].strip())
-            return args, line[:start] + line[i:]
+            return args, line[:start] + line[i:], line[i + 1:]
         elif c == "," and depth == 0:
             args.append(line[begin:i].strip())
             begin = i + 1
@@ -746,7 +749,7 @@ def reads_observations_only_through_the_rule(line):
     call = rule_call_arguments(line)
     if call is None:
         return False
-    args, outside = call
+    args, outside, _ = call
     return (len(args) == len(rule_params) and args[5:9] == rule_params[5:9]
             and not any(observation.search(arg) for arg in args[:5] + args[9:])
             and not observation.search(outside))
@@ -757,6 +760,9 @@ if not re.search(r"^legacy_adoption_verdict\(" + ", ".join(rule_params) + r"\) =
 if not re.search(r"^ASSUME ListingSymmetricAdoption$", audit, re.M):
     sys.exit("error: the entry runs' split expects ASSUME ListingSymmetricAdoption in identity_entry_audit.tla")
 recording = ("Adopted", "AdoptedUnlisted")
+# The ASSUME's premises: each recording arm's own guard is its listing, and
+# the verdict rule's answer they compare is Adopted.
+listing = {"Adopted": "    /\\ (listed = TRUE)", "AdoptedUnlisted": "    /\\ (listed = FALSE)"}
 if not set(recording) <= set(arms):
     sys.exit("error: the entry runs' split expects AdoptLegacyIdentityEntryAdopted and AdoptedUnlisted in model.tla")
 shapes = []
@@ -768,6 +774,13 @@ for name in recording:
             or any(observation.search(line) for line in updates):
         sys.exit(f"error: AdoptLegacyIdentityEntry{name} must read the observations in one guard of their own"
                  " and otherwise only as the verdict rule's arguments")
+    if own[0] != listing[name]:
+        sys.exit(f"error: AdoptLegacyIdentityEntry{name}'s own guard must be its listing,"
+                 f" {listing[name].strip()}, as the ASSUME's premise is")
+    calls = [rule_call_arguments(line) for line in shared if "legacy_adoption_verdict(" in line]
+    if len(calls) != 1 or calls[0] is None or not re.fullmatch(r'\s*=\s*"Adopted"\)*', calls[0][2]):
+        sys.exit(f"error: AdoptLegacyIdentityEntry{name} must compare one verdict rule call with"
+                 " \"Adopted\", as the ASSUME does")
     shapes.append((shared, updates))
 if shapes[0] != shapes[1]:
     sys.exit("error: AdoptLegacyIdentityEntryAdopted and AdoptedUnlisted no longer differ only in their own observation guard")

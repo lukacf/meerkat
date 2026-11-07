@@ -1378,18 +1378,23 @@ run_machine_verify() {
 # audits-l = the identity entry audit's entry part with --mutants (--part
 # entry), alone: the audit 404-715, the shard 588-741 s while the part also
 # held the single entry run (101 s of main's 0.9.10 release run
-# 41976604006); now the lifecycle run with its 14 witnesses and 8 mutants
-# (203 s on that run, 157 s locally with 4 TLC workers) and the two entry
-# runs' 11 witnesses and 6 mutants (148 s locally): not yet measured on a
-# hosted runner, about 545 s with the entry runs' at 2.3x their local time
-# (700 s with every run at 2.3x);
+# 41976604006); now the lifecycle run with its witnesses and mutants and
+# the two entry runs' 11 witnesses and 6 mutants: 685 s on a pull
+# request's run 42096156511 and 418 s on run 42271560144 before the
+# identity entry takeover, which grew the lifecycle run from 12024 to
+# 17964 states (54 s to 109 s of TLC locally) and added 4 witnesses and 2
+# mutants to it: about 911 s on the first of those runners and 556 s on
+# the second, past the 720 s target below (to be rebalanced);
 # audits-w = the identity entry audit's listed run (--part listed), alone:
-# not yet measured on a hosted runner, 277 s locally, about 640 s at 2.3x;
-# audits-x = its unlisted run (--part unlisted), alone: 270 s locally,
-# about 620 s at 2.3x. The single entry run they split took 544 s locally
-# and reached the 900 s per-run cap on a pull request's run 42057238243, a
-# hosted factor above 1.65x for that run class (1.29x on main), hence the
-# 2.3x;
+# 726 s on run 42096156511 (2.61x its 278 s local TLC time, this run
+# class's hosted factor there) and 525 s on run 42271560144 before the
+# takeover: about 816 s and 590 s with it, past the 720 s target (to be
+# rebalanced), and its one run about 10 percent under the 900 s per-run
+# cap on the first runner;
+# audits-x = its unlisted run (--part unlisted), alone: 652 s and 497 s on
+# those runs before the takeover, about 702 s and 535 s with it. The
+# single entry run they split took 544 s locally and reached the 900 s
+# per-run cap on a pull request's run 42057238243 (1.29x on main);
 # audits-q = the created identity audit's scan and placed runs 170-272 (the
 # shard 183-277 s) and the run-start hold audit, from audits-c: about
 # 471-568 s;

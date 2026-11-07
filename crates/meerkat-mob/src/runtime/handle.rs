@@ -10911,7 +10911,9 @@ impl MobHandle {
     /// incarnation moved before MobMachine decided is observed again from a
     /// fresh read, a bounded number of times. The answer is MobMachine's
     /// verdict, with the generation of the incarnation it decided on and the
-    /// observation it decided from.
+    /// observation the shell sent. MobMachine also decides on its step's own
+    /// store read of the identity's intent row, so the returned observation's
+    /// `intent_row` can differ from the one it decided from.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,

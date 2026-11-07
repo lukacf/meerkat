@@ -3201,11 +3201,14 @@ async fn a_complete_roster_leaves_an_unlisted_host_adopted_member_with_both_mark
 /// has the pass observe the member as such an earlier read does
 /// (`legacy_observation_hold::force_no_intent_row`): the legacy adoption reads
 /// the host's intent row in its own step, so MobMachine leaves the member as
-/// it is and the seal retires nothing.
+/// it is: the identity is no identity entry, and the seal retires nothing.
 ///
 /// RED (before the step reads the intent row): MobMachine decides on the
-/// pass's observation alone, adopts the member (`AdoptedUnlisted`), and the
-/// seal retires the host's member with the cause `Unlisted`.
+/// pass's observation alone and adopts the host's member as a Declared
+/// identity entry (`AdoptedUnlisted`). The seal, which reads the pass's own
+/// history read, then spares that entry only when the read already names
+/// the host's intent row (as it does here); otherwise it retires the host's
+/// member with the cause `Unlisted`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
     use crate::runtime::handle::legacy_observation_hold;
@@ -3267,6 +3270,14 @@ async fn a_host_adoption_the_pass_read_missed_keeps_the_member() {
         .await
         .expect("the apply answers")
         .expect("the apply runs");
+    assert!(
+        crate::runtime::identity_entry::machine_entry_origin(
+            &handle.machine_state_watch_rx.borrow(),
+            &id("missed"),
+        )
+        .is_none(),
+        "MobMachine adopted nothing: the identity is no identity entry"
+    );
     assert!(outcome.unlisted.is_empty(), "{outcome:?}");
     assert!(
         handle

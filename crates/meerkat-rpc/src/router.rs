@@ -7824,8 +7824,8 @@ mod tests {
         }
 
         /// A `current_run` grant needs a run: an idle session refuses it
-        /// with the typed `run_not_active`, and nothing is issued. A
-        /// `window` scope is the plain window grant.
+        /// with the typed request refusal `run_not_active`, and nothing is
+        /// issued. A `window` scope is the plain window grant.
         #[tokio::test]
         async fn a_current_run_grant_of_an_idle_session_is_refused_run_not_active() {
             let (router, _rx) = test_router().await;
@@ -7845,7 +7845,12 @@ mod tests {
             let failure = refused.error.as_ref().expect("an idle session has no run");
             assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
             let data = failure.data.as_ref().expect("typed refusal data");
-            assert_eq!(data["kind"], "run_not_active", "{data}");
+            assert_eq!(data["kind"], "tool_grant_request_refused", "{data}");
+            assert_eq!(
+                data["tool_grant_request_refusal"],
+                serde_json::json!({"kind": "run_not_active"}),
+                "{data}"
+            );
             assert!(listed(&router, &session_id, true).await.is_empty());
 
             let window = call(
@@ -9714,11 +9719,8 @@ mod tests {
 
             let idle = call(&rig, "tool_grants/grant", current_run_grant.clone()).await;
             assert_eq!(
-                idle.error
-                    .as_ref()
-                    .and_then(|failure| failure.data.as_ref())
-                    .map(|data| data["kind"].clone()),
-                Some(serde_json::json!("run_not_active")),
+                refusal_kind(&idle),
+                "run_not_active",
                 "a member that runs no turn has no current run: {idle:?}"
             );
 

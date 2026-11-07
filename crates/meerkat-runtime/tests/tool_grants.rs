@@ -1589,6 +1589,7 @@ impl ToolGrantRequestNotices for RecordedNotices {
 struct HostRuns {
     runs: std::sync::Mutex<BTreeMap<String, RunId>>,
     ended: std::sync::Mutex<BTreeSet<String>>,
+    unknown: std::sync::Mutex<BTreeSet<String>>,
 }
 
 impl HostRuns {
@@ -1605,6 +1606,17 @@ impl HostRuns {
         };
     }
 
+    /// Whether the host cannot tell what `subject` is now.
+    fn set_unknown(&self, subject: &ToolGrantSubject, unknown: bool) {
+        let key = subject.key().as_str().to_owned();
+        let mut set = self.unknown.lock().unwrap();
+        if unknown {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
+    }
+
     /// `subject`'s identity ended: its member retired, its entry ended, or
     /// its mob was reset or replaced.
     fn end_subject(&self, subject: &ToolGrantSubject) {
@@ -1619,6 +1631,9 @@ impl HostRuns {
 impl ToolGrantSubjectObserver for HostRuns {
     async fn presence(&self, subject: &ToolGrantSubject) -> ToolGrantSubjectPresence {
         let key = subject.key().as_str().to_owned();
+        if self.unknown.lock().unwrap().contains(&key) {
+            return ToolGrantSubjectPresence::Unknown;
+        }
         if self.ended.lock().unwrap().contains(&key) {
             return ToolGrantSubjectPresence::Ended;
         }
@@ -2297,6 +2312,49 @@ async fn an_approved_request_to_an_ended_identity_issues_nothing() {
                 .unwrap()
                 .is_none(),
             "{backend:?}: nothing is issued to an ended identity"
+        );
+    }
+}
+
+/// An approved request whose subject the host cannot tell now (it cannot
+/// read its record of the mob or the roster) issues nothing: the execution
+/// is refused `subject_unknown`, fail closed, and a later pass, once the
+/// host can tell again, issues nothing either.
+#[tokio::test]
+async fn an_approved_request_whose_subject_the_host_cannot_tell_issues_nothing() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let member = member_subject();
+        let held = rig.request_for(member.clone(), "ask-1", None);
+        rig.runs.set_unknown(&member, true);
+        rig.decide(&held, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &held.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(
+            rig.decisions
+                .get(&held.decision_id)
+                .unwrap()
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("subject_unknown"),
+            "{backend:?}"
+        );
+        rig.runs.set_unknown(&member, false);
+        rig.pass().await;
+        assert!(
+            rig.grants
+                .issued_for(&held.decision_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend:?}: never issued, even once the host can tell again"
         );
     }
 }

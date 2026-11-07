@@ -119,6 +119,7 @@ enum SetupStep {
     InitSignals = 28,
     CommandDeathSignal = 29,
     TeardownSignal = 30,
+    RelayGroup = 31,
 }
 
 impl SetupStep {
@@ -325,6 +326,9 @@ impl LinuxPolicy {
         // One slot per mount for setup's reopened sources, allocated before
         // fork: the child only writes its own copy.
         let mut sources = vec![-1; self.mounts.len()];
+        // The probe's child stays in this group, so its relay's move into it
+        // is a no-op.
+        let host_group = unsafe { libc::getpgrp() };
         let pid = fork_confined();
         if pid == -1 {
             return Err(ConfinementRefusal::BackendUnavailable);
@@ -333,7 +337,7 @@ impl LinuxPolicy {
             // `apply` forks again into the new pid namespace, and its pid 1
             // forks the command; this child then only relays their status,
             // so the probe reads the setup outcome of both here.
-            let status = match self.apply(bound, &mut sources) {
+            let status = match self.apply(bound, &mut sources, host_group) {
                 Ok(()) => 0,
                 Err(failure) => failure.step.probe_status(),
             };
@@ -381,8 +385,15 @@ impl LinuxPolicy {
     // This path performs raw syscalls and reads preallocated data only. No
     // allocation, host lock, callback, Rust destructor or async operation.
     // `sources` is preallocated with one slot per mount, and `bound` holds
-    // what the launch validated of each mount.
-    fn apply(&self, bound: &[Bound], sources: &mut [i32]) -> Result<(), SetupFailure> {
+    // what the launch validated of each mount. `host_group` is the host
+    // process's own process group, read before fork, which the relay joins
+    // (`enter_pid_namespace`).
+    fn apply(
+        &self,
+        bound: &[Bound],
+        sources: &mut [i32],
+        host_group: libc::pid_t,
+    ) -> Result<(), SetupFailure> {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
         let status = {
@@ -422,7 +433,7 @@ impl LinuxPolicy {
             // Returns only in pid 1 of the new pid namespace, with the write
             // end of the status pipe to the relay; the caller's process
             // becomes the relay and never returns from here.
-            let status = enter_pid_namespace()?;
+            let status = enter_pid_namespace(host_group)?;
             // Private propagation precedes every bind or filesystem mutation.
             raw(unsafe {
                 libc::mount(
@@ -584,16 +595,17 @@ fn fork_confined() -> libc::pid_t {
     }
 }
 
-// The catchable signals a process group's teardown sends (process_lifecycle
-// and the MCP connection signal the whole group): the relay ignores them, so
-// a group SIGTERM leaves it running and the command its grace.
-const RELAY_IGNORED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
+// The asynchronous signals the relay ignores. It lives in the host
+// process's own process group (see `relay`), so it ignores what a terminal,
+// job control or the host program may send that group, the same set init
+// ignores: none of them may end the relay before it has reaped init.
+const RELAY_IGNORED: [libc::c_int; 12] = INIT_IGNORED;
 
 // The host's request that the relay tear its launch down (`relay`), sent by
 // NativeChild (`Termination::Teardown`). A real-time signal, because no
 // terminal, job control or process lifecycle path sends one: SIGTERM and its
 // kin must stay ignored (`RELAY_IGNORED`), and SIGUSR1/2 are signals a
-// program may send to its own process group, which the relay shares. The
+// program may send to its own process group, which the relay joins. The
 // offset clears the real-time signals the C library reserves (two in glibc,
 // three in musl), which `SIGRTMIN()` already excludes, and keeps clear of
 // the first few a program is likely to pick.
@@ -607,11 +619,11 @@ fn relay_teardown_signal() -> libc::c_int {
 const RELAY_TEARDOWN_BOUND: Duration = Duration::from_secs(5);
 
 // The asynchronous signals init ignores, so a handler inherited from the
-// host process never runs in it. The command and every process it starts
-// share the relay's process group (setpgid and setsid are refused), so a
-// group signal reaches them directly and init forwards nothing: a forward
-// would deliver the signal twice, and a program that takes a second SIGINT
-// or SIGTERM as "stop now" would lose its grace.
+// host process never runs in it. Init, the command and every process it
+// starts share the launch's process group (setpgid and setsid are refused
+// the command), so a group signal reaches them directly and init forwards
+// nothing: a forward would deliver the signal twice, and a program that
+// takes a second SIGINT or SIGTERM as "stop now" would lose its grace.
 const INIT_IGNORED: [libc::c_int; 12] = [
     libc::SIGHUP,
     libc::SIGINT,
@@ -642,7 +654,15 @@ const INIT_IGNORED: [libc::c_int; 12] = [
 // (NativeChild's last-resort SIGKILL after `RELAY_TEARDOWN_BOUND`), so the
 // whole launch dies with the relay either way. Pid 1 is our init
 // (`enter_init`), not the command, so the command cannot clear that death
-// signal. The process group std sets on the relay is inherited.
+// signal.
+//
+// Process groups: std makes the relay the leader of a new group, which init
+// inherits at the fork here and the command at init's. That group, whose id
+// is the relay's PID, is what the engine's lifecycle sites signal (a shell's
+// process lifecycle, an MCP server's close, a command hook: SIGTERM, then
+// SIGKILL). The relay itself leaves it for the host process's group
+// (`relay`), so a group SIGKILL kills init, and with it the namespace, but
+// never the relay, which survives to reap init.
 //
 // The relay blocks SIGCHLD and the teardown signal before it forks, so a
 // teardown request is never lost: it stays pending until the relay waits for
@@ -651,7 +671,7 @@ const INIT_IGNORED: [libc::c_int; 12] = [
 // anything else, so init and the command run with std's.
 //
 // Allocation-free raw syscalls only.
-fn enter_pid_namespace() -> Result<i32, SetupFailure> {
+fn enter_pid_namespace(host_group: libc::pid_t) -> Result<i32, SetupFailure> {
     // Pid 1 cannot see the relay through getppid() (it lives in the parent
     // pid namespace), so the relay holds the write end of this pipe until it
     // ends: a hang-up on the read end, seen after the death signal is armed,
@@ -708,7 +728,7 @@ fn enter_pid_namespace() -> Result<i32, SetupFailure> {
         return Err(failure);
     }
     if pid != 0 {
-        relay(pid, hold, status_read, &awaited);
+        relay(pid, hold, status_read, &awaited, host_group);
     }
     raw(unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw const previous, std::ptr::null_mut()) })
         .map_err(SetupStep::TeardownSignal.failed())?;
@@ -879,8 +899,9 @@ fn init(command: libc::pid_t, status: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
-// The relay: ignores a process group's catchable termination signals
-// (`RELAY_IGNORED`), closes every descriptor but `hold` and `status` (std's
+// The relay: ignores the asynchronous signals (`RELAY_IGNORED`), leaves the
+// launch's process group for `host_group`, the host process's own, closes
+// every descriptor but `hold` and `status` (std's
 // exec-error pipe among them, so `Command::spawn` returns once the command
 // execs or reports its setup failure through its own copy), waits for pid 1
 // or the teardown signal (`awaited`, both blocked by the caller before the
@@ -891,11 +912,32 @@ fn init(command: libc::pid_t, status: i32) -> ! {
 // as a teardown does): its exit code, or its terminating signal raised again
 // on the relay. Allocation-free raw syscalls only; it never returns into
 // std's exec.
-fn relay(child: libc::pid_t, hold: i32, status: i32, awaited: &libc::sigset_t) -> ! {
+fn relay(
+    child: libc::pid_t,
+    hold: i32,
+    status: i32,
+    awaited: &libc::sigset_t,
+    host_group: libc::pid_t,
+) -> ! {
     // Nothing can signal the relay before this: `Command::spawn` returns,
     // and with it the relay's PID, only after the command's exec.
     for signal in RELAY_IGNORED {
         unsafe { libc::signal(signal, libc::SIG_IGN) };
+    }
+    // Init was forked into the launch's group, which std made with the
+    // relay as its leader; the relay leaves it before spawn can return (it
+    // still holds std's error pipe), so every signal the host sends that
+    // group, SIGKILL included, reaches init and the command but never the
+    // relay, which then reaps init. A host that is pid 1 of its container,
+    // or a subreaper, would otherwise adopt the killed init and never wait
+    // for it. The group keeps its id, the relay's PID, while any process of
+    // the launch is in it, and the kernel reuses neither meanwhile. The
+    // host's group is in the relay's session, since std starts none.
+    let detached = unsafe { libc::setpgid(0, host_group) } == 0;
+    if !detached {
+        // Still in the group a host signals: end the launch rather than run
+        // it where a group SIGKILL would leave init to the host.
+        unsafe { libc::kill(child, libc::SIGKILL) };
     }
     let closed = close_all_but(&[hold.min(status), hold.max(status)]);
     if !closed {
@@ -929,6 +971,9 @@ fn relay(child: libc::pid_t, hold: i32, status: i32, awaited: &libc::sigset_t) -
     }
     if !closed {
         unsafe { libc::_exit(SetupStep::PidNamespace.probe_status()) };
+    }
+    if !detached {
+        unsafe { libc::_exit(SetupStep::RelayGroup.probe_status()) };
     }
     // Init and every process that could hold the write end are gone with
     // the namespace, so this read ends.
@@ -1911,6 +1956,8 @@ pub(super) fn spawn(
     command
         .env_clear()
         .envs(&launch.environment)
+        // The launch's group, whose id is the relay's PID; the relay leaves
+        // it once init is in it (see `relay`).
         .process_group(0)
         .stdin(Stdio::from(stdin_source))
         .stdout(Stdio::from(stdout_source))
@@ -1925,6 +1972,8 @@ pub(super) fn spawn(
     // One slot per mount for setup's reopened sources, allocated here: the
     // pre-exec child only writes its own copy.
     let mut sources = vec![-1; policy.mounts.len()];
+    // The group the relay joins once it has forked init (see `relay`).
+    let host_group = unsafe { libc::getpgrp() };
     // SAFETY: The closure invokes only syscall helpers using preallocated
     // strings, buffers, policy, bindings and FDs. Returning an error uses
     // Command's existing owned error pipe; spawn does not report success after
@@ -1932,7 +1981,7 @@ pub(super) fn spawn(
     unsafe {
         command.pre_exec(move || {
             policy
-                .apply(&bound, &mut sources)
+                .apply(&bound, &mut sources, host_group)
                 .map_err(|failure| io::Error::from_raw_os_error(failure.errno))?;
             raw(libc::chdir(directory.as_ptr())).map_err(io::Error::from_raw_os_error)?;
             if let Some(gate) = &gate {
@@ -3263,7 +3312,13 @@ mod tests {
     // A confined `sleep 60` under its shell: the relay's PID (the custody
     // PID), init's, the shell's and the sleep's, as the host sees them.
     fn sleeping_launch(policy: Arc<LinuxPolicy>, work: &Path) -> (NativeChild, [u32; 4]) {
-        let child = spawn(policy, shell(work, "sleep 60; :"), SpawnIo::default(), None).unwrap();
+        launch_tree(policy, work, "sleep 60; :")
+    }
+
+    // [`sleeping_launch`] of `script`, which must run one child of the
+    // shell, and nothing else, until it is killed.
+    fn launch_tree(policy: Arc<LinuxPolicy>, work: &Path, script: &str) -> (NativeChild, [u32; 4]) {
+        let child = spawn(policy, shell(work, script), SpawnIo::default(), None).unwrap();
         let relay = child.id().unwrap();
         let mut tree = vec![relay];
         for _ in 0..3 {
@@ -3295,6 +3350,46 @@ mod tests {
             assert!(started.elapsed() < RELAY_TEARDOWN_BOUND);
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+            assert!(reaped(relay));
+            assert!(poll_until(|| {
+                reaped(init) && !running(command) && !running(sleeper)
+            }));
+        });
+    }
+
+    /// What the engine's lifecycle sites do to a launch that resists
+    /// SIGTERM (a shell's process lifecycle, an MCP server's close, a
+    /// command hook): signal the group its PID names with SIGTERM, then
+    /// SIGKILL, then wait for the child. The relay is not in that group, so
+    /// it survives the SIGKILL and reaps init: a host that adopts orphans
+    /// is left no init zombie, and every process of the launch is gone.
+    #[test]
+    fn a_group_sigkill_leaves_no_init_for_a_reaping_host() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        become_subreaper();
+        runtime().block_on(async {
+            let (mut child, [relay, init, command, sleeper]) =
+                launch_tree(policy, &work, "trap '' TERM; sleep 60; :");
+            let group = |pid: u32| unsafe { libc::getpgid(pid as libc::pid_t) };
+            // Init and the command are in the group the relay's PID names;
+            // the relay is in this process's.
+            assert_eq!(group(init), relay as libc::pid_t);
+            assert_eq!(group(command), relay as libc::pid_t);
+            assert_eq!(group(relay), unsafe { libc::getpgrp() });
+            let pgid = relay as libc::pid_t;
+            assert_eq!(unsafe { libc::killpg(pgid, libc::SIGTERM) }, 0);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(running(relay) && running(init) && running(command) && running(sleeper));
+            assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            use std::os::unix::process::ExitStatusExt;
+            // The relay ends the way init did; it was not killed itself.
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
             assert!(reaped(relay));
             assert!(poll_until(|| {
                 reaped(init) && !running(command) && !running(sleeper)

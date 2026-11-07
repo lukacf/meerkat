@@ -58,7 +58,11 @@ pub(super) enum Termination {
     /// kills and reaps the pid namespace it launched and then exits. A relay
     /// that has not exited `bound` after the request gets SIGKILL, the last
     /// resort: its pid namespace then dies by init's parent-death signal,
-    /// but init is left to whoever adopts it.
+    /// but init is left to whoever adopts it. The relay is not in the
+    /// process group its PID names, the launch's, so a caller's group
+    /// SIGKILL kills init and the command but leaves the relay to reap init.
+    /// That group keeps the relay's PID as its id while any of the launch
+    /// is in it.
     #[cfg(target_os = "linux")]
     Teardown {
         signal: libc::c_int,

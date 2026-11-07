@@ -169,7 +169,7 @@ async def browser_responds(port, authentication):
                 return False
             locations = [line.partition(":")[2].strip() for line in lines[1:]
                          if line.partition(":")[0].lower() == "location"]
-            if authentication in ("local-password", "local-accounts"):
+            if authentication in ("local-password", "local-accounts", "oidc"):
                 return status[1] == "303" and locations == ["/login"]
             return authentication == "loopback-only" and status[1] == "200" and not locations
     except (OSError, TimeoutError, ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):

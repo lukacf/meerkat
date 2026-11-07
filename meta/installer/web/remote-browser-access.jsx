@@ -122,7 +122,9 @@ export function RemoteBrowserAccess({ state, build, options, receipt, blocked = 
     </div>
     {removing ? <p className="deployment-note">Opening Console is withdrawn for this cloud removal request. Recheck or close an existing browser connection here until its local cleanup is confirmed.</p>
       : !qualified && <p className="deployment-note">Recheck or close this installed application's saved connection here. Opening its Console requires the matching accepted application and current destination checks.</p>}
-    {access && qualified && <p>{authentication === "local-accounts"
+    {access && qualified && <p>{authentication === "oidc"
+      ? "Sign in with your account at the identity provider this Console uses. Forge does not sign you in or keep its tokens."
+      : authentication === "local-accounts"
       ? "Sign in with your own account name and password. Forge does not copy or fill them in."
       : authentication === "local-password" ? "Sign in with the Console password you chose for this installation. Forge does not copy or fill it in."
       : "This installation's native Console does not ask for a Console password."}</p>}

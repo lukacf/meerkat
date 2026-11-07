@@ -106,11 +106,15 @@ export function remotePrivateOptions(receipt) {
       (field.description == null || typeof field.description === "string" && field.description.length <= 2000) &&
       (field.default == null || !field.secret && typeof field.default === "string" && field.default.length <= 32768))) return null;
   const authentication = receipt.console_scope?.authentication;
-  if (Object.hasOwn(receipt, "console_scope") && !["loopback-only", "local-password", "local-accounts"].includes(authentication)) return null;
+  if (Object.hasOwn(receipt, "console_scope") && !["loopback-only", "local-password", "local-accounts", "oidc"].includes(authentication)) return null;
   if (["local-password", "local-accounts"].includes(authentication) &&
       ![["CONSOLE_USER_ID", false], ["CONSOLE_LOGIN_PASSWORD", true]].every(([key, secret]) =>
         receipt.fields.some((field) => field.key === key && field.required === true && field.secret === secret &&
           !Object.hasOwn(field, "default")))) return null;
+  // An OIDC Console's own account is the operator's email; its client secret
+  // field, whatever its name, is one more declared required secret.
+  if (authentication === "oidc" && !receipt.fields.some((field) => field.key === "CONSOLE_USER_ID" &&
+      field.required === true && field.secret === false && !Object.hasOwn(field, "default"))) return null;
   return { fields: receipt.fields.map((field) => ({ ...field, configured: false })), host_provider_keys: [],
     can_use_host_provider_credentials: false,
     ...(authentication ? { console_scope: { authentication } } : {}) };

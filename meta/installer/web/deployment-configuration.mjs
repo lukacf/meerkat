@@ -32,6 +32,14 @@ export function deploymentFieldConstraintsValid(field) {
   return field.max_length == null || String(closest).length <= field.max_length;
 }
 
+// The destination's own email rule for an OIDC Console (console_configuration.py).
+const CONSOLE_EMAIL = /^[A-Za-z0-9_.+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$/;
+
+function allowedEmails(value) {
+  const emails = value.trim().split(/[\s,]+/).filter(Boolean);
+  return value.length <= 32768 && emails.length <= 100 && emails.every((email) => CONSOLE_EMAIL.test(email));
+}
+
 /** Describe invalid supplied input without returning or normalizing any value. */
 export function deploymentFieldIssues(options, values = {}, removed = []) {
   const removal = new Set(removed), issues = [];
@@ -54,9 +62,14 @@ export function deploymentFieldIssues(options, values = {}, removed = []) {
     // Only a declared authenticated Console binds these runtime credentials.
     // Matching names in an unrelated application do not establish that contract.
     // With named accounts they are the installation's own account.
-    if (!detail && ["local-password", "local-accounts"].includes(options?.console_scope?.authentication)) {
+    const authentication = options?.console_scope?.authentication;
+    if (!detail && ["local-password", "local-accounts", "oidc"].includes(authentication)) {
       if (field.key === "CONSOLE_USER_ID" && (length < 1 || length > 200 || /[^A-Za-z0-9_.@+-]/.test(value)))
         detail = "Use 1-200 letters, numbers, dots, underscores, @, + or hyphens.";
+      else if (field.key === "CONSOLE_USER_ID" && authentication === "oidc" && !CONSOLE_EMAIL.test(value))
+        detail = "Use the operator's email address, as the identity provider reports it.";
+      else if (field.key === "CONSOLE_ALLOWED_EMAILS" && authentication === "oidc" && !allowedEmails(value))
+        detail = "List up to 100 email addresses, separated by commas or spaces.";
       else if (field.key === "CONSOLE_LOGIN_PASSWORD" && (length < 12 || length > 4096))
         detail = "Use 12-4096 characters for the Console password.";
       else if (field.key === "CONSOLE_LOGIN_PASSWORD" && /[\uD800-\uDFFF]/u.test(value))

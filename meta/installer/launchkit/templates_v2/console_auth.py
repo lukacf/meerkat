@@ -26,18 +26,22 @@ import sys
 import tempfile
 import time
 from types import MappingProxyType
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit
 
 try:
-    from .console_configuration import (CONSOLE_ACCESS_FILE, console_account_issue, console_configuration,
-        console_password_issue, validate_console_credentials)
+    from .console_configuration import (CONSOLE_ACCESS_FILE, CONSOLE_ALLOWED_EMAILS, CONSOLE_EMAIL,
+        MAX_ALLOWED_EMAILS, console_account_issue, console_allowed_emails, console_authentication_source,
+        console_configuration, console_password_issue, oidc_url_issue, validate_console_credentials)
 except ImportError:
-    from console_configuration import (CONSOLE_ACCESS_FILE, console_account_issue, console_configuration,
-        console_password_issue, validate_console_credentials)
+    from console_configuration import (CONSOLE_ACCESS_FILE, CONSOLE_ALLOWED_EMAILS, CONSOLE_EMAIL,
+        MAX_ALLOWED_EMAILS, console_account_issue, console_allowed_emails, console_authentication_source,
+        console_configuration, console_password_issue, oidc_url_issue, validate_console_credentials)
 
 ISSUER = "http://127.0.0.1/mobkit-gateway"
 AUDIENCE = "persistent-gateway"
 HEALTH_AUDIENCE = "mobkit-launch-host-health"
+# Every token the front mints for the console lives this long.
+TOKEN_SECONDS = 120
 SESSION_SECONDS = 8 * 60 * 60
 HEALTH_PATHS = {"/console/experience", "/console/identities"}
 AVAILABILITY_PATH = "/host/availability"
@@ -110,6 +114,29 @@ SESSIONS = 1000
 PASSWORD_CHECKS = 4
 # Every name that cannot be an account shares this one limiter key.
 _INVALID_ACCOUNT = "\x00"
+# OIDC sign-in (`oidc`): the front runs the authorization code flow with
+# PKCE, state and nonce at the identity provider, verifies the provider's ID
+# token and keeps none of the provider's tokens. It signs the console's
+# tokens itself, under an issuer recorded once per installation and an
+# ES256 key kept in private state; their subject encodes the provider's
+# issuer and subject, so the person stays the same while the front's
+# address changes and two providers' people never meet.
+OIDC_CALLBACK_PATH = "/login/callback"
+OIDC_SCOPES = "openid email"
+OIDC_PENDING_SECONDS = 600
+OIDC_SKEW_SECONDS = 60
+OIDC_JWKS_REFRESH_SECONDS = 30
+OIDC_DISCOVERY_SECONDS = 3600
+OIDC_ALGORITHMS = frozenset({"RS256", "PS256", "ES256"})
+OIDC_MAX_DOCUMENT = 256 * 1024
+OIDC_MAX_KEYS = 64
+OIDC_MAX_ID_TOKEN = 16 * 1024
+OIDC_MAX_CALLBACK_QUERY = 8 * 1024
+# Code exchanges at the provider running at once, across every sign-in.
+OIDC_EXCHANGES = 8
+OIDC_ISSUER_FILE = "console-oidc-issuer"
+OIDC_KEY_FILE = "console-oidc-signing.pem"
+_FRONT_ISSUER = re.compile(r"urn:forge-console:[a-f0-9]{32}")
 
 
 def _console_assets(value):
@@ -200,6 +227,12 @@ class ConsoleConnectLogin:
     expires_at_ms: int
     origin: str
     is_current: object
+    # The issuer and subject of this login's console tokens, which a native
+    # enrollment for the login carries: the front's issuer and the account,
+    # or with OIDC sign-in the front's recorded issuer and the provider's
+    # person. None in a selection made without them.
+    issuer: str | None = None
+    subject: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,11 +536,224 @@ def _token(key, principal, *, scope="native-console", login_scope_id=None):
     now = int(time.time())
     claims = {"iss": ISSUER, "aud": HEALTH_AUDIENCE if scope == "host-health" else AUDIENCE,
               "sub": principal, "email": principal,
-              "email_verified": True, "iat": now, "exp": now + 120,
+              "email_verified": True, "iat": now, "exp": now + TOKEN_SECONDS,
               "host_scope": scope}
     if login_scope_id is not None:
         claims["sid"] = login_scope_id
     return jwt.encode(claims, key, algorithm="HS256")
+
+
+@dataclass(frozen=True)
+class ConsoleOidc:
+    """One identity provider the front signs people in at (`oidc`).
+
+    `client_secret` is the value the application's source references (a
+    declared secret private field, or a private file), read at start. It
+    never reaches the console's configuration, a page or a log.
+    `allowed_emails` are the people admitted besides the operator.
+    `transport` replaces the network in tests.
+    """
+    issuer: str
+    client_id: str
+    client_secret: str = field(repr=False)
+    allowed_emails: tuple = ()
+    transport: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        issue = oidc_url_issue(self.issuer)
+        if issue is not None:
+            raise ValueError("OIDC issuer: " + issue)
+        if (not isinstance(self.client_id, str) or not 1 <= len(self.client_id) <= 512
+                or any(ord(char) < 33 or ord(char) == 127 for char in self.client_id)):
+            raise ValueError("The OIDC client_id must be 1-512 visible characters.")
+        if (not isinstance(self.client_secret, str) or not 1 <= len(self.client_secret) <= 4096
+                or "\x00" in self.client_secret):
+            raise ValueError("The OIDC client secret is missing or invalid.")
+        if (type(self.allowed_emails) is not tuple or len(self.allowed_emails) > MAX_ALLOWED_EMAILS
+                or any(not isinstance(email, str) or not CONSOLE_EMAIL.fullmatch(email)
+                       for email in self.allowed_emails)):
+            raise ValueError("The people an OIDC Console admits are email addresses.")
+
+
+def _client_secret_file(path):
+    """The OIDC client secret in a private file this user owns."""
+    refused = "The OIDC client secret file must be a private ordinary file this user owns."
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise ValueError(refused) from None
+    with os.fdopen(descriptor, "rb") as channel:
+        info = os.fstat(channel.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 4096):
+            raise ValueError(refused)
+        content = channel.read(4097)
+    try:
+        secret = content.decode("utf-8").removesuffix("\n").removesuffix("\r")
+    except UnicodeError:
+        raise ValueError("The OIDC client secret file must hold one secret as text.") from None
+    if not secret or any(char in secret for char in "\r\n\x00"):
+        raise ValueError("The OIDC client secret file must hold one secret as text.")
+    return secret
+
+
+def console_oidc_settings(root, fields, environ):
+    """The OIDC sign-in a source declares, its client secret read by reference."""
+    source = console_authentication_source(root, fields)
+    if source is None or source["authentication"] != "oidc":
+        raise ValueError("The application does not declare OIDC Console sign-in.")
+    operator = environ.get("CONSOLE_USER_ID", "")
+    if not isinstance(operator, str) or not CONSOLE_EMAIL.fullmatch(operator):
+        raise ValueError("Set CONSOLE_USER_ID to the operator's email address.")
+    try:
+        allowed = console_allowed_emails(environ.get(CONSOLE_ALLOWED_EMAILS, ""))
+    except ValueError as error:
+        raise ValueError(f"{CONSOLE_ALLOWED_EMAILS}: {error}") from None
+    reference = source["client_secret"]
+    if "env" in reference:
+        secret = environ.get(reference["env"], "")
+        if not secret:
+            raise ValueError(f"Set the OIDC client secret in private setting {reference['env']}.")
+    else:
+        secret = _client_secret_file(reference["file"])
+    return ConsoleOidc(issuer=source["issuer"], client_id=source["client_id"], client_secret=secret,
+                       allowed_emails=allowed)
+
+
+def oidc_subject(issuer, subject):
+    """The console's subject for one person at an identity provider.
+
+    Their issuer and subject as a two-string JSON array: one encoding per
+    pair and back, so no two people share a subject, two providers' equal
+    subjects included.
+    """
+    return json.dumps([issuer, subject], separators=(",", ":"), ensure_ascii=True)
+
+
+def _record_once(directory, name, make):
+    """A private record made once, published only complete, then only read.
+
+    `make()` gives its bytes the first time; a record that exists is read
+    and never replaced.
+    """
+    path = directory / name
+    if not path.exists() and not path.is_symlink():
+        temporary = directory / ("." + name + "." + secrets.token_hex(8) + ".pending")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(make())
+                output.flush()
+                os.fsync(output.fileno())
+            try:
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError:
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+        handle = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as channel:
+        info = os.fstat(channel.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 64 * 1024):
+            raise ValueError(f"The console front's {name} must be a private ordinary file this user owns.")
+        return channel.read()
+
+
+def _new_signing_key():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    return ec.generate_private_key(ec.SECP256R1()).private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+
+
+def _front_identity(root):
+    """The front's own OIDC issuer, ES256 signing key and public JWK.
+
+    Both are made once per installation in private state. The issuer is a
+    random name, never an address, so the console's people keep their keys
+    when the front moves; a changed issuer record is refused, not replaced.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    directory = _private_state_directory(root, create=True)
+    recorded = _record_once(directory, OIDC_ISSUER_FILE,
+        lambda: ("urn:forge-console:" + secrets.token_hex(16) + "\n").encode("ascii"))
+    try:
+        issuer = recorded.decode("ascii").removesuffix("\n")
+    except UnicodeError:
+        issuer = ""
+    if not _FRONT_ISSUER.fullmatch(issuer) or recorded != (issuer + "\n").encode("ascii"):
+        raise ValueError("The console front's recorded OIDC issuer is invalid. Restore it from a backup of "
+                         "this installation; a new one would make every person new to the console.")
+    try:
+        key = serialization.load_pem_private_key(_record_once(directory, OIDC_KEY_FILE, _new_signing_key), None)
+    except (ValueError, TypeError):
+        raise ValueError("The console front's OIDC signing key is invalid.") from None
+    if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+        raise ValueError("The console front's OIDC signing key must be a P-256 key.")
+    numbers = key.public_key().public_numbers()
+    public = {"crv": "P-256", "kty": "EC", "x": _base64(numbers.x.to_bytes(32, "big")),
+              "y": _base64(numbers.y.to_bytes(32, "big"))}
+    # The kid is the key's RFC 7638 thumbprint.
+    kid = _base64(hashlib.sha256(json.dumps(public, separators=(",", ":"), sort_keys=True).encode()).digest())
+    return issuer, key, {"kty": "EC", "crv": "P-256", "x": public["x"], "y": public["y"], "kid": kid,
+                         "alg": "ES256", "use": "sig"}
+
+
+class _OidcRefused(Exception):
+    """A sign-in the front refuses, with the status and words its page shows."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+class _OidcUnavailable(Exception):
+    """The identity provider could not be reached or used."""
+
+
+@dataclass(frozen=True)
+class _OidcPending:
+    """One started sign-in, kept until its callback or its expiry."""
+    binding: bytes
+    nonce: str
+    verifier: str
+    expires: float
+    client: str
+    earlier: str | None
+
+
+def _oidc_discovery_checked(document, issuer):
+    """The parts of a provider's discovery document this front uses, checked."""
+    if not isinstance(document, dict) or document.get("issuer") != issuer:
+        raise _OidcUnavailable("The discovery document names another issuer.")
+    loopback = urlsplit(issuer).scheme == "http"
+    endpoints = {}
+    for name in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+        value = document.get(name)
+        if oidc_url_issue(value, loopback_http=loopback, query=True) is not None:
+            raise _OidcUnavailable(f"The provider's {name} is not a usable https URL.")
+        endpoints[name] = value
+    responses = document.get("response_types_supported")
+    challenges = document.get("code_challenge_methods_supported")
+    methods = document.get("token_endpoint_auth_methods_supported", ["client_secret_basic"])
+    if (responses is not None and (not isinstance(responses, list) or "code" not in responses)
+            or challenges is not None and (not isinstance(challenges, list) or "S256" not in challenges)
+            or not isinstance(methods, list)):
+        raise _OidcUnavailable("The provider does not offer the code flow with S256 PKCE.")
+    if "client_secret_basic" in methods:
+        endpoints["client_auth"] = "client_secret_basic"
+    elif "client_secret_post" in methods:
+        endpoints["client_auth"] = "client_secret_post"
+    else:
+        raise _OidcUnavailable("The provider accepts no client secret this front can send.")
+    return endpoints
 
 
 def health_headers(root):
@@ -589,6 +835,14 @@ class _ConsoleLogin:
     console_login_revoke_failed: bool = False
     mcp_attempts: dict = field(default_factory=dict)
     mcp_close: asyncio.Task | None = None
+    # With OIDC sign-in, the provider's person this login's tokens name;
+    # otherwise the account itself (None).
+    token_subject: str | None = None
+
+    @property
+    def subject(self):
+        """The subject of this login's console tokens."""
+        return self.principal if self.token_subject is None else self.token_subject
 
 
 class ConsoleFront:
@@ -606,14 +860,29 @@ class ConsoleFront:
     def __init__(self, root, port, principal, password, on_input=None, *, transport=None, connect_factory=None,
                  console_assets=None, document_transform=None, controller_review_factory=None,
                  console_login_factory=None, runtime_namespace="mobkit", public_origin=None,
-                 hosted_mcp_targets=(), accounts=None):
+                 hosted_mcp_targets=(), accounts=None, oidc=None):
         if type(runtime_namespace) is not str or runtime_namespace not in ("mobkit", "meta"):
             raise ValueError("The application must select the mobkit or meta Console runtime namespace.")
         # The trusted application selects one SDK before serving. Browser RPC
         # methods never select or widen the admitted-input delivery hook.
         self._console_send_method = runtime_namespace + "/console/send"
         self._runtime_namespace = runtime_namespace
-        validate_console_credentials(principal, password)
+        if oidc is not None:
+            # People sign in at the identity provider, each as themselves;
+            # the installation's own account is the operator's email.
+            if type(oidc) is not ConsoleOidc:
+                raise ValueError("OIDC sign-in needs its checked settings.")
+            if runtime_namespace != "meta":
+                raise ValueError("OIDC sign-in needs the Meta Console runtime, whose tokens can name a person.")
+            if accounts is not None:
+                raise ValueError("OIDC sign-in has no named accounts: the identity provider signs people in.")
+            if password is not None:
+                raise ValueError("OIDC sign-in has no Console password.")
+            if not isinstance(principal, str) or not CONSOLE_EMAIL.fullmatch(principal):
+                raise ValueError("OIDC sign-in needs the operator's email address as the Console user.")
+        else:
+            validate_console_credentials(principal, password)
+        self.oidc = oidc
         # None: the installation's own account is the only one, and everyone
         # with its password shares it. A mapping: further named accounts
         # (name to stored password hash), and every account is one person's.
@@ -642,6 +911,22 @@ class ConsoleFront:
         self._mcp_original_targets = {key: copy.deepcopy(target) for key, target in self._mcp_targets.items()}
         self._mcp_routes = {}
         self.key = _private_key(root, create=True)
+        # The console's tokens name this issuer: the front's own, recorded
+        # once per installation, with OIDC sign-in.
+        self._token_issuer = ISSUER
+        self._oidc_key = self._oidc_jwk = None
+        self._oidc_people = MappingProxyType({})
+        if oidc is not None:
+            self._token_issuer, self._oidc_key, self._oidc_jwk = _front_identity(self.root)
+            people = {}
+            # The operator first, then the listed people; an address differing
+            # only in case is the same person.
+            for email in (principal, *oidc.allowed_emails):
+                people.setdefault(email.lower(), email)
+            self._oidc_people = MappingProxyType(people)
+        self._oidc_pending = {}
+        self._oidc_discovery = self._oidc_jwks = self._oidc_jwks_lock = self._oidc_client = None
+        self._oidc_exchanges = 0
         # Every account, the installation's own included, costs one scrypt per
         # check, and an unknown name costs one against a decoy, so the answer
         # time names no account. Both hashes are made at the first check.
@@ -684,6 +969,12 @@ class ConsoleFront:
 
     @property
     def native_auth(self):
+        if self.oidc is not None:
+            # The console trusts this front alone: its recorded issuer and one
+            # public key. The provider's person is in each token's `sub`.
+            return {"provider": "oidc", "issuer": self._token_issuer, "audience": AUDIENCE,
+                    "jwks_json": {"keys": [dict(self._oidc_jwk)]},
+                    "email_allowlist": list(self._oidc_people.values()), "accounts": "personal"}
         auth = {"provider": "jwt", "shared_secret": self.key, "issuer": ISSUER,
                 "audience": AUDIENCE, "email_allowlist": [self.principal]}
         if self.accounts is not None:
@@ -693,6 +984,25 @@ class ConsoleFront:
             auth["email_allowlist"] += list(self.accounts)
             auth["accounts"] = "personal"
         return auth
+
+    def _native_token(self, login=None):
+        """The console's bearer for one request: a login's, or the host's own probe.
+
+        With OIDC sign-in the front signs it with its ES256 key, as its own
+        issuer: a login's token names the provider's person as `sub`; the
+        host's probe names the operator's email and no person.
+        """
+        if self.oidc is None:
+            return _token(self.key, self.principal if login is None else login.principal,
+                          login_scope_id=None if login is None else login.login_scope_id)
+        import jwt
+        now = int(time.time())
+        claims = {"iss": self._token_issuer, "aud": AUDIENCE,
+                  "email": self.principal if login is None else login.principal, "email_verified": True,
+                  "iat": now, "exp": now + TOKEN_SECONDS, "host_scope": "native-console"}
+        if login is not None:
+            claims.update(sub=login.subject, sid=login.login_scope_id)
+        return jwt.encode(claims, self._oidc_key, algorithm="ES256", headers={"kid": self._oidc_jwk["kid"]})
 
     def application(self, native_url):
         import httpx
@@ -782,7 +1092,7 @@ class ConsoleFront:
         if self._runtime_namespace != "meta" or self.client is None or self._closing:
             return True
         import httpx
-        token = _token(self.key, login.principal, login_scope_id=login.login_scope_id)
+        token = self._native_token(login)
         try:
             outgoing = self.client.build_request("POST", self.native_url + "/console/rpc",
                 json={"jsonrpc": "2.0", "id": "forge-logout", "method": "meta/console/sign_out", "params": {}},
@@ -887,7 +1197,8 @@ class ConsoleFront:
     def _console_login_binding_current(self, login):
         owner = login.console_login
         try:
-            return (owner is not None and owner.issuer == ISSUER and owner.subject == login.principal
+            # The enrollment names this login's tokens: their issuer and subject.
+            return (owner is not None and owner.issuer == self._token_issuer and owner.subject == login.subject
                     and owner.login_scope_id == login.login_scope_id
                     and type(owner.expires_at_ms) is int and owner.expires_at_ms == int(login.expires * 1000)
                     and owner.is_current() is True)
@@ -899,10 +1210,13 @@ class ConsoleFront:
         if login.context is None:
             principal, origin = login.principal, self.origin
             installation, scope, expiry = self.principal, login.login_scope_id, login.expires
+            issuer, subject = self._token_issuer, login.subject
             login.context = ConsoleConnectLogin(principal, scope, int(expiry * 1000), origin,
                 lambda: (self._login_current(login) and login.principal == principal
                          and self.principal == installation and self.origin == origin
-                         and login.login_scope_id == scope and login.expires == expiry))
+                         and login.login_scope_id == scope and login.expires == expiry
+                         and self._token_issuer == issuer and login.subject == subject),
+                issuer=issuer, subject=subject)
         return login.context
 
     def _reserve_console_login(self, login):
@@ -1035,6 +1349,7 @@ class ConsoleFront:
             self._closing = True
             self.login_tokens.clear()
             self._login_token_clients.clear()
+            self._oidc_pending.clear()
             for session in list(self.sessions):
                 self._retire_login(session, "application_stopping")
             self._close_task = asyncio.create_task(self._close_resources())
@@ -1095,6 +1410,8 @@ class ConsoleFront:
             await asyncio.gather(*list(self._replaced_sign_outs), return_exceptions=True)
             if self.client:
                 await self.client.aclose()
+            if self._oidc_client is not None:
+                await self._oidc_client.aclose()
             self.sessions.clear()
 
     async def _body(self, request, limit):
@@ -1114,7 +1431,8 @@ class ConsoleFront:
         nonce = secrets.token_urlsafe(32)
         self.login_tokens[nonce] = now + 300
         self._login_token_clients[nonce] = client
-        response = HTMLResponse(_login_form(nonce, error, named=self.accounts is not None),
+        provider = None if self.oidc is None else urlsplit(self.oidc.issuer).hostname
+        response = HTMLResponse(_login_form(nonce, error, named=self.accounts is not None, provider=provider),
                                 status_code=status_code)
         response.set_cookie(self.cookie + "_login", nonce, httponly=True, samesite="strict", max_age=300,
                             secure=self._secure_cookie, path="/")
@@ -1129,7 +1447,9 @@ class ConsoleFront:
                 or len(self.failures.get(("client", client), ())) >= FAILURES_PER_CLIENT)
 
     def _record_failure(self, account, client, now):
-        for key in (("account", account), ("client", client)):
+        # An OIDC sign-in names no account before it opens: its address alone counts.
+        keys = (("client", client),) if account is None else (("account", account), ("client", client))
+        for key in keys:
             self.failures.setdefault(key, []).append(now)
         # A name nobody has is counted like an account, and every client
         # address too, in bounded tables: the oldest key is forgotten first.
@@ -1142,8 +1462,9 @@ class ConsoleFront:
             del self.failures[min(clients, key=lambda key: self.failures[key][-1])]
 
     def _forget_failure(self, account, client, now):
-        """A password that opened takes back the attempt counted for it."""
-        for key in (("account", account), ("client", client)):
+        """A sign-in that opened takes back the attempt counted for it."""
+        keys = (("client", client),) if account is None else (("account", account), ("client", client))
+        for key in keys:
             times = self.failures.get(key)
             if times and now in times:
                 times.remove(now)
@@ -1182,6 +1503,294 @@ class ConsoleFront:
             self._decoy_password = self._decoy_password or decoy
         opened = await asyncio.to_thread(verify_console_password, stored or self._decoy_password, password)
         return opened and stored is not None
+
+    def _open_login(self, account, *, person, subject=None):
+        """A new login of this account; its session's time starts now."""
+        session = secrets.token_urlsafe(32)
+        self.sessions[session] = time.time() + SESSION_SECONDS
+        login = _ConsoleLogin(session, self.sessions[session], principal=account, person=person,
+                              token_subject=subject)
+        self._logins[session] = login
+        self._reserve_console_login(login)
+        self._queue_controller_review(login)
+        login.expiry_task = asyncio.create_task(self._expire_login(login))
+        return login
+
+    def _oidc_http(self):
+        import httpx
+        if self._oidc_client is None:
+            # The provider is reached directly: no proxy, netrc or redirect.
+            self._oidc_client = httpx.AsyncClient(transport=self.oidc.transport, trust_env=False,
+                timeout=httpx.Timeout(10, connect=5), follow_redirects=False)
+        return self._oidc_client
+
+    async def _oidc_document(self, method, url, **options):
+        """One bounded JSON answer from the identity provider: (status, value)."""
+        import httpx
+        body = bytearray()
+        try:
+            async with self._oidc_http().stream(method, url, **options) as response:
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > OIDC_MAX_DOCUMENT:
+                        raise _OidcUnavailable("The identity provider's answer is too large.")
+                status = response.status_code
+        except httpx.HTTPError:
+            raise _OidcUnavailable("The identity provider could not be reached.") from None
+        try:
+            value = json.loads(bytes(body).decode("utf-8"), object_pairs_hook=_frontend_object)
+        except (ValueError, UnicodeError, RecursionError):
+            value = None
+        return status, value
+
+    async def _oidc_discovery_document(self):
+        cached = self._oidc_discovery
+        if cached is not None and time.time() - cached[1] < OIDC_DISCOVERY_SECONDS:
+            return cached[0]
+        status, document = await self._oidc_document("GET",
+            self.oidc.issuer.rstrip("/") + "/.well-known/openid-configuration", headers={"Accept": "application/json"})
+        if status != 200:
+            raise _OidcUnavailable("The identity provider's discovery document is unavailable.")
+        checked = _oidc_discovery_checked(document, self.oidc.issuer)
+        self._oidc_discovery = (checked, time.time())
+        return checked
+
+    async def _oidc_fetch_jwks(self):
+        discovery = await self._oidc_discovery_document()
+        previous = () if self._oidc_jwks is None else self._oidc_jwks[0]
+        # The attempt is recorded first, so the refetch bound holds after a failure too.
+        self._oidc_jwks = (previous, time.time())
+        status, document = await self._oidc_document("GET", discovery["jwks_uri"],
+            headers={"Accept": "application/json"})
+        keys = document.get("keys") if isinstance(document, dict) else None
+        if status != 200 or not isinstance(keys, list) or len(keys) > OIDC_MAX_KEYS:
+            raise _OidcUnavailable("The identity provider's keys are unavailable.")
+        import jwt
+        parsed = []
+        for item in keys:
+            if (not isinstance(item, dict) or item.get("use", "sig") != "sig"
+                    or item.get("kty") not in ("RSA", "EC")):
+                continue
+            try:
+                parsed.append((item.get("kid"), item.get("alg"), item["kty"], item.get("crv"), jwt.PyJWK(item).key))
+            except (jwt.PyJWTError, KeyError, TypeError, ValueError):
+                continue
+        self._oidc_jwks = (tuple(parsed), self._oidc_jwks[1])
+
+    def _oidc_find_key(self, alg, kid):
+        """The one published key that fits this token's algorithm and kid, or None."""
+        if self._oidc_jwks is None:
+            return None
+        family = "EC" if alg == "ES256" else "RSA"
+        found = [key for key_id, key_alg, kty, curve, key in self._oidc_jwks[0]
+                 if kty == family and key_alg in (None, alg) and (family == "RSA" or curve == "P-256")
+                 and (kid is None or key_id == kid)]
+        return found[0] if len(found) == 1 else None
+
+    async def _oidc_signing_key(self, alg, kid):
+        """The provider's key for this token, refetching the keys once for an unknown one.
+
+        A refetch happens at most once per OIDC_JWKS_REFRESH_SECONDS, so
+        tokens naming keys nobody published cannot drive the provider.
+        """
+        key = self._oidc_find_key(alg, kid)
+        if key is not None:
+            return key
+        if self._oidc_jwks_lock is None:
+            self._oidc_jwks_lock = asyncio.Lock()
+        async with self._oidc_jwks_lock:
+            key = self._oidc_find_key(alg, kid)
+            if key is not None:
+                return key
+            if self._oidc_jwks is not None and time.time() - self._oidc_jwks[1] < OIDC_JWKS_REFRESH_SECONDS:
+                return None
+            await self._oidc_fetch_jwks()
+            return self._oidc_find_key(alg, kid)
+
+    async def _oidc_start(self, request, now, client):
+        """Send the browser to the identity provider: the code flow, with PKCE, state and nonce."""
+        from starlette.responses import RedirectResponse, Response
+        if self._sign_in_held(None, client, now):
+            return Response("Too many sign-in attempts from this address. Try again in one minute.",
+                            status_code=429)
+        self._oidc_pending = {state: pending for state, pending in self._oidc_pending.items()
+                              if pending.expires > now}
+        if (len(self._oidc_pending) >= LOGIN_FORMS
+                or sum(1 for pending in self._oidc_pending.values() if pending.client == client)
+                >= LOGIN_FORMS_PER_CLIENT):
+            return Response("Try again shortly.", status_code=429)
+        try:
+            discovery = await self._oidc_discovery_document()
+        except _OidcUnavailable:
+            return self._oidc_refusal(503, "This Console could not use its identity provider just now. Try again "
+                                      "shortly; if it keeps failing, tell the Console's operator.")
+        if self._closing:
+            return Response("The Console is stopping.", status_code=503)
+        state, nonce, binding = (secrets.token_urlsafe(32) for _ in range(3))
+        verifier = secrets.token_urlsafe(64)
+        # A sign-in over this browser's live login ends that login when it opens.
+        earlier = self._live_login(request)
+        self._oidc_pending[state] = _OidcPending(hashlib.sha256(binding.encode()).digest(), nonce, verifier,
+            time.time() + OIDC_PENDING_SECONDS, client, None if earlier is None else earlier.session)
+        endpoint = discovery["authorization_endpoint"]
+        query = urlencode({"response_type": "code", "client_id": self.oidc.client_id,
+            "redirect_uri": self.origin + OIDC_CALLBACK_PATH, "scope": OIDC_SCOPES, "state": state,
+            "nonce": nonce, "code_challenge": _base64(hashlib.sha256(verifier.encode("ascii")).digest()),
+            "code_challenge_method": "S256"})
+        response = RedirectResponse(endpoint + ("&" if urlsplit(endpoint).query else "?") + query, status_code=303)
+        # The provider sends the browser back on a top-level navigation from
+        # its own site, which carries Lax cookies only: this one binds the
+        # callback to the browser that started the sign-in.
+        response.set_cookie(self.cookie + "_oidc", binding, httponly=True, samesite="lax",
+                            max_age=OIDC_PENDING_SECONDS, secure=self._secure_cookie, path="/")
+        response.delete_cookie(self.cookie + "_login", secure=self._secure_cookie, httponly=True,
+                               samesite="strict", path="/")
+        response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        return response
+
+    async def _oidc_callback(self, request, now):
+        """The provider's answer: spend its state once, verify its ID token, open a login."""
+        from starlette.responses import Response
+        if request.method != "GET":
+            return Response("Sign-in answers use GET.", status_code=405,
+                            headers={**_console_public_headers(), "Allow": "GET"})
+        raw = request.scope["query_string"]
+        if len(raw) > OIDC_MAX_CALLBACK_QUERY:
+            return self._oidc_refusal(413, "This sign-in answer is too large.")
+        try:
+            pairs = parse_qsl(raw.decode("ascii"), keep_blank_values=True, strict_parsing=True, max_num_fields=8)
+        except (ValueError, UnicodeError):
+            return self._oidc_refusal(400, "This sign-in answer is not one this Console can read.")
+        params = dict(pairs)
+        if len(params) != len(pairs):
+            return self._oidc_refusal(400, "This sign-in answer is not one this Console can read.")
+        if self._oidc_exchanges >= OIDC_EXCHANGES:
+            return Response("Try again shortly.", status_code=429, headers=_console_public_headers())
+        state = params.get("state", "")
+        pending = self._oidc_pending.pop(state, None) if state else None
+        if pending is None or pending.expires <= now:
+            return self._oidc_refusal(400, "This sign-in expired or was already used.")
+        binding = request.cookies.get(self.cookie + "_oidc", "")
+        if not hmac.compare_digest(hashlib.sha256(binding.encode()).digest(), pending.binding):
+            return self._oidc_refusal(400, "This sign-in was started in another browser or window.")
+        if "error" in params:
+            code = params["error"]
+            named = f" ({code})" if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code) else ""
+            return self._oidc_refusal(401, f"The identity provider did not sign you in{named}.")
+        code = params.get("code", "")
+        if not code or len(code) > 4096:
+            return self._oidc_refusal(400, "This sign-in answer carries no code.")
+        client = request.client.host if request.client is not None else ""
+        # The attempt counts before the exchange; a sign-in that opens takes it back.
+        self._record_failure(None, client, now)
+        self._oidc_exchanges += 1
+        try:
+            principal, subject = await self._oidc_person(code, pending)
+        except _OidcRefused as refused:
+            return self._oidc_refusal(refused.status, refused.message)
+        except _OidcUnavailable:
+            return self._oidc_refusal(503, "The identity provider could not confirm this sign-in just now.")
+        finally:
+            self._oidc_exchanges -= 1
+        self._forget_failure(None, client, now)
+        if self._closing:
+            return Response("The Console is stopping.", status_code=503)
+        if self._sessions_full(principal):
+            return self._oidc_refusal(429, "Too many active sessions. Sign out of another one, or restart the "
+                                      "application to clear them.")
+        earlier = None if pending.earlier is None else self._logins.get(pending.earlier)
+        if earlier is not None and self._login_current(earlier):
+            self._replace_login(earlier)
+        return self._oidc_landing(self._open_login(principal, person=True, subject=subject))
+
+    async def _oidc_person(self, code, pending):
+        """Exchange the code with its PKCE verifier; the admitted person and their console subject."""
+        discovery = await self._oidc_discovery_document()
+        form = {"grant_type": "authorization_code", "code": code,
+                "redirect_uri": self.origin + OIDC_CALLBACK_PATH, "code_verifier": pending.verifier}
+        headers = {"Accept": "application/json"}
+        if discovery["client_auth"] == "client_secret_basic":
+            pair = quote_plus(self.oidc.client_id, safe="") + ":" + quote_plus(self.oidc.client_secret, safe="")
+            headers["Authorization"] = "Basic " + base64.b64encode(pair.encode("utf-8")).decode("ascii")
+        else:
+            form.update(client_id=self.oidc.client_id, client_secret=self.oidc.client_secret)
+        status, answer = await self._oidc_document("POST", discovery["token_endpoint"], data=form, headers=headers)
+        id_token = answer.get("id_token") if isinstance(answer, dict) else None
+        if status != 200 or not isinstance(id_token, str) or not 1 <= len(id_token) <= OIDC_MAX_ID_TOKEN:
+            raise _OidcRefused(401, "The identity provider did not confirm this sign-in.")
+        # Only the ID token is read; the provider's other tokens are dropped here.
+        claims = await self._oidc_verified_claims(id_token, pending.nonce)
+        return self._oidc_admitted(claims)
+
+    async def _oidc_verified_claims(self, id_token, nonce):
+        import jwt
+        refused = _OidcRefused(401, "The identity provider's answer did not verify.")
+        try:
+            header = jwt.get_unverified_header(id_token)
+        except jwt.PyJWTError:
+            raise refused from None
+        alg, kid = header.get("alg"), header.get("kid")
+        if alg not in OIDC_ALGORITHMS or kid is not None and (not isinstance(kid, str) or len(kid) > 256):
+            raise refused
+        key = await self._oidc_signing_key(alg, kid)
+        if key is None:
+            raise refused
+        try:
+            claims = jwt.decode(id_token, key, algorithms=[alg], audience=self.oidc.client_id,
+                issuer=self.oidc.issuer, options={"verify_exp": False, "verify_iat": False, "verify_nbf": False,
+                "require": ["iss", "aud", "sub", "exp", "iat", "nonce"]})
+        except jwt.PyJWTError:
+            raise refused from None
+        now = time.time()
+        def moment(value):
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if (not moment(claims["exp"]) or not moment(claims["iat"]) or claims["exp"] + OIDC_SKEW_SECONDS <= now
+                or claims["iat"] > now + OIDC_SKEW_SECONDS
+                or "nbf" in claims and (not moment(claims["nbf"]) or claims["nbf"] > now + OIDC_SKEW_SECONDS)):
+            raise refused
+        # Several audiences, or a named authorized party, must name this client.
+        if (isinstance(claims["aud"], list) and len(claims["aud"]) > 1 or "azp" in claims) \
+                and claims.get("azp") != self.oidc.client_id:
+            raise refused
+        if not isinstance(claims["nonce"], str) or not hmac.compare_digest(claims["nonce"].encode(), nonce.encode()):
+            raise refused
+        subject = claims["sub"]
+        if not isinstance(subject, str) or not 1 <= len(subject) <= 255 or not subject.isascii() or not subject.isprintable():
+            raise refused
+        return claims
+
+    def _oidc_admitted(self, claims):
+        """The admitted person: a verified email on the list. Their name and console subject."""
+        email, verified = claims.get("email"), claims.get("email_verified")
+        # Without a usable email, the front's own page names the person by
+        # the provider's subject; the console never sees them.
+        named = email if isinstance(email, str) and email and len(email) <= 320 and email.isprintable() else claims["sub"]
+        if not isinstance(email, str) or not email or verified is not True:
+            raise _OidcRefused(403, f"Your identity provider did not confirm a verified email address for {named}. "
+                               "This Console signs people in by their verified email address.")
+        principal = self._oidc_people.get(email.lower()) if email.isascii() else None
+        if principal is None:
+            raise _OidcRefused(403, f"{named} may not sign in to this Console. Ask its operator to add you.")
+        return principal, oidc_subject(self.oidc.issuer, claims["sub"])
+
+    def _oidc_landing(self, login):
+        """The signed-in page: a same-site step on to the console, which carries the Strict cookie."""
+        from starlette.responses import HTMLResponse
+        response = HTMLResponse(_oidc_landing_page())
+        response.set_cookie(self.cookie, login.session, httponly=True, samesite="strict", max_age=SESSION_SECONDS,
+                            secure=self._secure_cookie, path="/")
+        response.delete_cookie(self.cookie + "_oidc", secure=self._secure_cookie, httponly=True, samesite="lax",
+                               path="/")
+        response.headers.update(_oidc_page_headers())
+        return response
+
+    def _oidc_refusal(self, status, message):
+        from starlette.responses import HTMLResponse
+        response = HTMLResponse(_oidc_refusal_page(message), status_code=status)
+        response.delete_cookie(self.cookie + "_oidc", secure=self._secure_cookie, httponly=True, samesite="lax",
+                               path="/")
+        response.headers.update(_oidc_page_headers())
+        return response
 
     async def handle(self, request):
         from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -1258,8 +1867,12 @@ class ConsoleFront:
             nonce = form.get("nonce", "")
             if (not nonce or nonce != request.cookies.get(self.cookie + "_login")
                     or not self.login_tokens.pop(nonce, None)):
-                return self._login_response(now, client, error="This sign-in form expired. Enter your Console password again.", status_code=403)
+                return self._login_response(now, client, error=("This sign-in form expired. Sign in again."
+                    if self.oidc is not None else "This sign-in form expired. Enter your Console password again."),
+                    status_code=403)
             self._login_token_clients.pop(nonce, None)
+            if self.oidc is not None:
+                return await self._oidc_start(request, now, client)
             account = self._login_account(form)
             # A name that cannot be an account costs no password hash and
             # shares one limit with every other such name.
@@ -1291,15 +1904,9 @@ class ConsoleFront:
             earlier = self._live_login(request)
             if earlier is not None:
                 self._replace_login(earlier)
-            session = secrets.token_urlsafe(32)
             # The session's time starts now, after the password work.
-            self.sessions[session] = time.time() + SESSION_SECONDS
-            login = _ConsoleLogin(session, self.sessions[session], principal=account,
-                                  person=self.accounts is not None)
-            self._logins[session] = login
-            self._reserve_console_login(login)
-            self._queue_controller_review(login)
-            login.expiry_task = asyncio.create_task(self._expire_login(login))
+            login = self._open_login(account, person=self.accounts is not None)
+            session = login.session
             response = RedirectResponse("/console", status_code=303)
             response.set_cookie(self.cookie, session, httponly=True, samesite="strict", max_age=SESSION_SECONDS,
                                 secure=self._secure_cookie, path="/")
@@ -1307,6 +1914,8 @@ class ConsoleFront:
                                    samesite="strict", path="/")
             response.headers["Cache-Control"] = "no-store"
             return response
+        if self.oidc is not None and path == OIDC_CALLBACK_PATH:
+            return await self._oidc_callback(request, now)
         # Provider navigation can omit the Strict cookie. This fixed landing
         # GET never borrows a viewer; only its later same-origin POST may do so.
         login = None if toolkit_callback_landing or local_health else self._live_login(request)
@@ -1489,9 +2098,8 @@ class ConsoleFront:
             return JSONResponse({"error": "Console login required."}, status_code=401)
         # A browser login acts as its own account; a host health probe as the
         # installation's own account, with no login association.
-        headers = {} if toolkit_callback_landing else {"Authorization": "Bearer " + _token(self.key,
-                   login.principal if is_human else self.principal,
-                   login_scope_id=login.login_scope_id if is_human else None)}
+        headers = {} if toolkit_callback_landing else {
+            "Authorization": "Bearer " + self._native_token(login if is_human else None)}
         if toolkit_post_limit is not None:
             headers["Origin"] = self.origin
         for name in ("content-type", "accept", "last-event-id", "range"):
@@ -1644,7 +2252,7 @@ class ConsoleFront:
                 or parsed.query or parsed.fragment or "%" in path or "//" in path
                 or any(part in (".", "..") for part in path.split("/"))
                 or path in ("/", "/login", "/logout", AVAILABILITY_PATH)
-                or path.startswith(("/console", "/blobs/", "/host/toolkit/setup", "/host/toolkit/consent"))):
+                or path.startswith(("/console", "/blobs/", "/host/toolkit/setup", "/host/toolkit/consent", "/login/"))):
             raise ValueError("The native callback cannot be mounted on this Console.")
         if any(other is not attempt and other.client is not None and other.client.redirect_uri == redirect
                for other in login.mcp_attempts.values()):
@@ -1784,7 +2392,8 @@ class ConsoleFront:
         principal, scope, origin = login.principal, login.login_scope_id, self.origin
         deadline = int(login.expires * 1000)
         return ConsoleConnectLogin(principal, scope, deadline, origin,
-            lambda: not self._closing and self.origin == origin and time.time() * 1000 < deadline)
+            lambda: not self._closing and self.origin == origin and time.time() * 1000 < deadline,
+            issuer=self._token_issuer, subject=login.subject)
 
     async def _console_administrator(self, login):
         """Whether the console names this login's person an administrator.
@@ -1793,7 +2402,7 @@ class ConsoleFront:
         login, so an access edit applies at once. None when it cannot tell.
         """
         import httpx
-        token = _token(self.key, login.principal, login_scope_id=login.login_scope_id)
+        token = self._native_token(login)
         try:
             outgoing = self.client.build_request("POST", self.native_url + "/console/rpc",
                 json={"jsonrpc": "2.0", "id": "forge-whoami", "method": "meta/console/whoami", "params": {}},
@@ -2356,10 +2965,16 @@ def _signed_out_page(problem):
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"})
 
 
-def _login_form(nonce, error=None, *, named=False):
+def _login_form(nonce, error=None, *, named=False, provider=None):
     notice = f'<p id="login-error" role="alert">{html.escape(error)}</p>' if error else ""
     description = ' aria-describedby="login-error"' if error else ""
-    if named:
+    button = "Open Console"
+    if provider is not None:
+        guidance = (f"Sign in with your account at this Console's identity provider ({html.escape(provider)}). "
+                    "Only the people its operator lists can open it.")
+        account = password = ""
+        button = "Continue to sign in"
+    elif named:
         guidance = ("Sign in with your account name and password. Leave the account empty to use this "
                     "installation's own account and the Console password chosen during installation. "
                     "Your provider API key is separate.")
@@ -2372,7 +2987,28 @@ def _login_form(nonce, error=None, *, named=False):
                     "identity is applied automatically. Your provider API key is separate.")
         account = ""
         password = f'<label for="password">Console password</label><input id="password" type="password" name="password" autocomplete="current-password" required autofocus{description}>'
-    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MobKit Console login</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}input,button{{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:12px 0}}button{{background:#242522;color:white;border:0;border-radius:6px}}#login-error{{padding:12px;background:#fbece5;color:#783d2e;border:1px solid #dab19d;border-radius:6px}}</style></head><body><main><h1>Open your Console</h1><p>{guidance}</p>{notice}<form method="post" action="/login"><input type="hidden" name="nonce" value="{html.escape(nonce)}">{account}{password}<button>Open Console</button></form></main></body></html>'''
+    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MobKit Console login</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}input,button{{font:inherit;padding:12px;box-sizing:border-box;width:100%;margin:12px 0}}button{{background:#242522;color:white;border:0;border-radius:6px}}#login-error{{padding:12px;background:#fbece5;color:#783d2e;border:1px solid #dab19d;border-radius:6px}}</style></head><body><main><h1>Open your Console</h1><p>{guidance}</p>{notice}<form method="post" action="/login"><input type="hidden" name="nonce" value="{html.escape(nonce)}">{account}{password}<button>{button}</button></form></main></body></html>'''
+
+
+def _oidc_page_headers():
+    # The callback address holds the provider's code: no page here sends it on.
+    return {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"}
+
+
+def _oidc_page(title, body):
+    return f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{body[0]}<title>{title}</title><style>body{{font:16px system-ui;background:#faf9f6;color:#242522;margin:0;padding:6vh 20px}}main{{max-width:400px;margin:auto}}p{{line-height:1.6}}</style></head><body><main><h1>{title}</h1>{body[1]}</main></body></html>'''
+
+
+def _oidc_landing_page():
+    """Signed in: a same-site step on to the Console, which sends the Strict session cookie."""
+    return _oidc_page("Signed in", ('<meta http-equiv="refresh" content="0;url=/console">',
+                                    '<p><a href="/console">Open the Console</a></p>'))
+
+
+def _oidc_refusal_page(message):
+    return _oidc_page("Not signed in", ("", f'<p role="alert">{html.escape(message)}</p>'
+                                            '<p><a href="/login">Sign in again</a></p>'))
 
 
 from contextlib import contextmanager

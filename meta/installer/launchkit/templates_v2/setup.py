@@ -128,7 +128,8 @@ def main():
     generated_keys = {spec["knowledge"]["token_env"], spec["knowledge"]["space_env"]} if local_knowledge else set()
     fields = [*spec["environment"], *application_fields(ROOT, (field["key"] for field in spec["environment"]))]
     authenticated_console = console_configuration(ROOT, fields)
-    named = authenticated_console and console_authentication_choice(ROOT, fields) == "local-accounts"
+    authentication = console_authentication_choice(ROOT, fields) if authenticated_console else None
+    named = authentication == "local-accounts"
     if named:
         from console_auth import load_console_accounts
         # The installation's own account cannot take a named account's name.
@@ -160,7 +161,7 @@ def main():
             value = value or current or fallback
             try:
                 validate_configuration_value(field, value)
-                issue = console_credential_issue(field, value) if authenticated_console else None
+                issue = console_credential_issue(field, value, authentication) if authenticated_console else None
                 if issue is not None:
                     raise ValueError(f"{issue['label']} ({issue['key']}): {issue['message']}")
                 if named and key == "CONSOLE_USER_ID" and value in existing_accounts:
@@ -174,10 +175,15 @@ def main():
             break
     validate_configuration_values([field for field in fields if field["key"] not in generated_keys], values)
     if authenticated_console:
-        validate_console_configuration_values(fields, values)
+        validate_console_configuration_values(fields, values, authentication)
     save_values(path, values, original)
     if named:
         manage_named_accounts(values["CONSOLE_USER_ID"])
+    if authentication == "oidc":
+        port = values.get("MOBKIT_PORT") or os.environ.get("MOBKIT_PORT") or spec["port"]
+        print("People sign in to the Console at its identity provider. Register the Console's sign-in "
+              f"callback with the provider: http://127.0.0.1:{port}/login/callback here, or the same path "
+              "on the Console's public address.")
     if local_knowledge:
         print("Preparing the local knowledge service credentials and project space...")
         subprocess.run([sys.executable, str(ROOT / "knowledge/manage.py"), "setup"], check=True)

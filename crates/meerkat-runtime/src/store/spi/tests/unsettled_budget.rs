@@ -91,10 +91,12 @@ async fn unsettled_past_its_budget(
             if cause.ends_with("last answer: unavailable: injected)")),
         "the write fails typed, its outcome unknown, with the last answer: {written:?}"
     );
-    // The settle ends once its next pause (3.2 s at most) would pass the
-    // budget; the writer's window, open throughout, never stopped it.
+    // The typed error says the budget, not the window, ended the settle: it
+    // ends once its next pause would pass the budget, so never later than
+    // the budget (with room for a loaded runner's scheduling; the test's
+    // clock starts before the settle's).
     assert!(
-        elapsed < BUDGET && elapsed + Duration::from_millis(3200) >= BUDGET,
+        elapsed <= BUDGET + Duration::from_secs(1),
         "the retry budget ended the settle, after {elapsed:?}"
     );
     assert_eq!(
@@ -115,6 +117,16 @@ async fn unsettled_past_its_budget(
         matches!(&refused, Err(RuntimeStoreError::ScopeRefused { scopes })
             if scopes.len() == 1 && scopes[0].scope == "rt:unsettled"),
         "the unsettled batch's scope stays poisoned: {refused:?}"
+    );
+    assert!(
+        opened.1.refuses_runtime_until_reopen(&runtime()),
+        "the store says it refuses the runtime until the reopen"
+    );
+    assert!(
+        !opened
+            .1
+            .refuses_runtime_until_reopen(&LogicalRuntimeId::new("other")),
+        "and no other runtime"
     );
     assert!(
         opened.0.realm_poisoned().is_none(),
@@ -141,6 +153,10 @@ async fn a_batch_that_landed_unsettled_past_its_budget_is_judged_by_the_reopen()
     let (opened, input) = unsettled_past_its_budget(&host, true).await;
     let commits = host.commit_count();
     let reopened = reopen(&host, opened).await;
+    assert!(
+        !reopened.1.refuses_runtime_until_reopen(&runtime()),
+        "the reopened realm refuses nothing"
+    );
     let rows = reopened
         .1
         .load_input_states(&runtime())

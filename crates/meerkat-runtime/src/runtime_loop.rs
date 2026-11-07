@@ -5535,6 +5535,17 @@ impl RuntimeLoopAuthorityBinding {
         self.store_self_fence().is_some_and(|fence| fence.lost())
     }
 
+    /// Whether the session's store refuses every later call that needs the
+    /// session's runtime until its realm is reopened (a batch of it left
+    /// unsettled poisoned its scope, or the realm lost its fence): nothing
+    /// this process writes for the session lands, and the store keeps its
+    /// inputs as it last committed them.
+    fn store_refuses_session_until_reopen(&self) -> bool {
+        self.machine
+            .upgrade()
+            .is_some_and(|machine| machine.store_refuses_session_until_reopen(&self.session_id))
+    }
+
     /// Whether the session store's fence reads closed with no other writer
     /// proven (a store fence gap, or the start of one): its writes wait for
     /// the writer's re-acquire.
@@ -6096,11 +6107,12 @@ async fn wait_out_store_fence_gap(fence: &dyn meerkat_core::host_store::SelfFenc
 
 /// Tell the local waiters of the session's inputs that the store keeps (every
 /// unfinished input but an ephemeral one) that their inputs stay queued
-/// (`RequeuedAcrossStop`): another writer holds the session store's fence, so
-/// nothing this process does for them lands, and the new owner runs them. An
-/// ephemeral input is in no store: the session's teardown ends it, and
-/// answers its waiters, as before.
-async fn answer_waiters_for_lost_store_fence(
+/// (`RequeuedAcrossStop`): another writer holds the session store's fence, or
+/// the store refuses the session's writes until its realm is reopened, so
+/// nothing this process does for them lands, and the new owner, or the next
+/// start, runs them. An ephemeral input is in no store: the session's
+/// teardown ends it, and answers its waiters, as before.
+async fn answer_waiters_for_store_kept_inputs(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) {
@@ -8329,7 +8341,7 @@ async fn process_queue(
                      resume in this process, the session's waiters are told their inputs stay \
                      queued for the new owner, and the session is torn down"
                 );
-                answer_waiters_for_lost_store_fence(driver, completions).await;
+                answer_waiters_for_store_kept_inputs(driver, completions).await;
                 handoff.disposition = RuntimeLoopTeardownDisposition::UnregisterRequired;
                 // As a teardown-required apply does: returning exits the
                 // loop, and the watcher starts the canonical unregister.
@@ -9987,6 +9999,17 @@ async fn process_queue(
                         // that it ended, so no caller resubmits work the new
                         // owner runs.
                         let store_fence_lost = authority_binding.store_fence_lost();
+                        // A run torn down because its store could not settle
+                        // one of its writes (a round commit whose outcome
+                        // stayed unknown: the teardown class) leaves the
+                        // session's scope refusing every write until the realm
+                        // is reopened. Nothing this teardown realizes for the
+                        // session's inputs lands either, and the store keeps
+                        // them as last committed, pending, for the next start:
+                        // their waiters are told so, as at a lost fence.
+                        let store_refuses_session = !store_fence_lost
+                            && e.requires_runtime_teardown()
+                            && authority_binding.store_refuses_session_until_reopen();
                         let teardown_required = e.requires_runtime_teardown()
                             || completed_terminal_before_failure
                             || store_fence_lost;
@@ -10002,7 +10025,16 @@ async fn process_queue(
                                  waiters are told their inputs stay queued for the new owner, and \
                                  the session is torn down"
                             );
-                            answer_waiters_for_lost_store_fence(driver, completions).await;
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
+                        } else if store_refuses_session {
+                            tracing::warn!(
+                                session_id = %authority_binding.session_id,
+                                %run_id,
+                                "the session store refuses the session's writes until its realm \
+                                 is reopened; the session's waiters are told their inputs stay \
+                                 queued for the next start, and the session is torn down"
+                            );
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
                         }
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal failure")

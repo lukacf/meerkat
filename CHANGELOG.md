@@ -91,6 +91,11 @@ them.
   its fence window does, so the live actor is reloaded from what the store
   holds; it answered `AgentError::InternalError`, which failed the run as an
   internal error while the actor stayed loaded over a scope that refuses it.
+  The runtime then tells the waiters of the session's kept inputs that they
+  stay queued (`CompletionWaitError::RequeuedAcrossStop`), as at a lost
+  fence, since the store keeps them for the next start; they were told
+  `AuthorityUnavailable` ("runtime session unregistered before terminal
+  failure").
 
 ### Added
 
@@ -104,6 +109,11 @@ them.
   and `RuntimeStoreError::UnsettledPastRetryBudget { cause }`: a host store
   commit whose retry budget ran out with its outcome unknown, typed the same
   way.
+
+- `meerkat-runtime`: `RuntimeStore::refuses_runtime_until_reopen`, whether a
+  store refuses every later call that needs a runtime until its realm is
+  reopened (`false` by default; a decorator forwards its inner store's
+  answer), and `SpiRealm::scope_poisoned`.
 
 - `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`

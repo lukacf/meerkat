@@ -1363,6 +1363,13 @@ impl RuntimeStore for SpiRuntimeStore {
         Some(Arc::clone(&self.realm) as Arc<dyn meerkat_core::host_store::SelfFence>)
     }
 
+    /// The realm refuses every call until it is reopened, or the runtime's
+    /// scope does.
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.realm.realm_poisoned().is_some()
+            || self.realm.scope_poisoned(&runtime_id_scope(runtime_id))
+    }
+
     async fn commit_prepared_session_boundary_with_fence(
         &self,
         runtime_id: &LogicalRuntimeId,

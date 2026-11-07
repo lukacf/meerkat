@@ -10099,6 +10099,19 @@ pub trait RuntimeStore: Send + Sync {
         None
     }
 
+    /// Whether this store refuses every later call that needs `runtime_id`'s
+    /// state until its realm is reopened: a host store realm that lost its
+    /// fence, or whose scope of that runtime is poisoned (a batch of it
+    /// failed, or its outcome stayed unknown). Nothing a caller writes for
+    /// the runtime lands before that reopen, so the store keeps the runtime's
+    /// inputs as it last committed them, for the next start. A store with no
+    /// such refusal answers `false`, the default. Decorators must forward
+    /// their inner store's answer.
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        let _ = runtime_id;
+        false
+    }
+
     /// Load the exact generated runtime-delivery authority record.
     async fn load_runtime_delivery_authority(
         &self,

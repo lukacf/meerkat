@@ -1057,6 +1057,13 @@ impl SpiRealm {
         !lock(&self.poisoned).is_empty()
     }
 
+    /// Whether the scope `id` is poisoned: it refuses every call until the
+    /// realm is reopened.
+    #[must_use]
+    pub fn scope_poisoned(&self, id: &ScopeId) -> bool {
+        lock(&self.poisoned).contains_key(id)
+    }
+
     /// Every poisoned scope, in scope order, with its cause. A scope stays
     /// poisoned until the realm is reopened.
     #[must_use]

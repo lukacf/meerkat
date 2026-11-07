@@ -157,6 +157,15 @@ impl ConsoleVisibilityPolicy for WithholdReplies {
     }
 }
 
+/// A console payload policy that hides every private reply frame.
+struct HideReplies;
+
+impl ConsoleVisibilityPolicy for HideReplies {
+    fn frame_visible(&self, frame: &ConsoleFrame) -> bool {
+        frame.kind != "private_reply"
+    }
+}
+
 /// The console decisions of the rows: Alice and root allowlisted beside the
 /// base people; `sign_in` is the Enforced posture, `read_only` a console
 /// that takes no changes.
@@ -384,6 +393,20 @@ async fn attention(app: &Router, bearer: &str) -> Result<Vec<Value>, Value> {
         .as_array()
         .cloned()
         .unwrap_or_default())
+}
+
+/// The keys of `fixture`'s attention documents that hold `part` (`/item/`
+/// for the items' records, `/live/` for their listing entries).
+async fn attention_keys(fixture: &Fixture, part: &str) -> Vec<String> {
+    fixture
+        .owner
+        .persistent_metadata()
+        .realm_document_keys("console-attention/")
+        .await
+        .expect("attention keys")
+        .into_iter()
+        .filter(|key| key.contains(part))
+        .collect()
 }
 
 fn is_attention(receipt: &Result<ConsoleReplyReceipt, ConsoleReplyError>) -> bool {
@@ -1330,6 +1353,54 @@ async fn a_later_policy_withholds_the_earlier_item_like_the_thread() -> TestResu
     Ok(())
 }
 
+/// A console whose payload policy hides private reply frames
+/// (`frame_visible`) hides the reply in the person's thread and lists none
+/// of the person's items: an item is decided by the reading console's
+/// visibility as the reply's frame is. A console that keeps those frames
+/// lists the item.
+#[tokio::test]
+async fn a_view_that_hides_reply_frames_hides_the_item() -> TestResult {
+    let fixture = Fixture::enforced("replies-hidden-frames").await?;
+    let hiding = fixture.router(decisions(true, false), Arc::new(HideReplies));
+    let alice = alice();
+    fork_side_chat(&fixture.app, &alice, "alpha", "alpha-side").await;
+    let private = send(&fixture.app, Some(&alice), "alpha-side", "hidden-private").await;
+    let shared = send(&fixture.app, Some(&alice), "alpha", "hidden-shared").await;
+    let replies = fixture.replies();
+    let in_thread = replies
+        .deliver(&interaction_of(&private), "reply-1", REPLY_TEXT)
+        .await;
+    assert!(is_thread(&in_thread), "{in_thread:?}");
+    let as_item = replies
+        .deliver(&interaction_of(&shared), "reply-1", REPLY_TEXT)
+        .await;
+    assert!(is_attention(&as_item), "{as_item:?}");
+
+    let frames = timeline(&hiding, &alice, Some("alpha-side"))
+        .await
+        .expect("Alice reads her side chat");
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame["kind"] == json!("private_reply")),
+        "the hiding console hides the reply in the thread: {frames:#?}"
+    );
+    let hidden = attention(&hiding, &alice).await;
+    assert_eq!(
+        hidden.as_ref().map(Vec::len),
+        Ok(0),
+        "the hiding console lists no item: {hidden:?}"
+    );
+    let kept = attention(&fixture.app, &alice).await;
+    assert_eq!(
+        kept.as_ref().map(Vec::len),
+        Ok(1),
+        "a console that keeps reply frames lists the item: {kept:?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// An attention item is listed only while its person may still view the
 /// agent the reply came from, as that agent's own frames are: once the
 /// access configuration no longer lets Alice view `alpha`, her item from it
@@ -1538,6 +1609,67 @@ async fn one_unreadable_item_keeps_the_rest_of_the_list() -> TestResult {
     Ok(())
 }
 
+/// An item a later build wrote is left out of its person's list by its
+/// version, also when its record still decodes in this build's shape: the
+/// version says what the record means.
+#[tokio::test]
+async fn an_item_of_a_later_version_is_left_out_of_the_list() -> TestResult {
+    let fixture = Fixture::enforced("replies-later-version").await?;
+    let alice = alice();
+    let sent = send(&fixture.app, Some(&alice), "alpha", "later-version").await;
+    let replies = fixture.replies();
+    let later = replies
+        .deliver(
+            &interaction_of(&sent),
+            "reply-later",
+            "A later build's reply.",
+        )
+        .await;
+    let Ok(ConsoleReplyReceipt {
+        delivery: ConsoleReplyDelivery::Attention { item_id: later_id },
+        ..
+    }) = later
+    else {
+        panic!("the first reply is an item: {later:?}");
+    };
+    let kept = replies
+        .deliver(&interaction_of(&sent), "reply-1", REPLY_TEXT)
+        .await;
+    assert!(is_attention(&kept), "{kept:?}");
+
+    // A later build writes the first item's record under its own version,
+    // in this build's shape.
+    let records: Vec<String> = attention_keys(&fixture, "/item/")
+        .await
+        .into_iter()
+        .filter(|key| key.ends_with(later_id.as_str()))
+        .collect();
+    assert_eq!(records.len(), 1, "one record: {records:?}");
+    let store = fixture.owner.persistent_metadata();
+    let document = store
+        .realm_document(&records[0])
+        .await
+        .map_err(|error| error.to_string())?
+        .expect("the item's record");
+    let mut record: Value = serde_json::from_str(&document)?;
+    assert_eq!(record["v"], json!(1), "{record:#}");
+    record["v"] = json!(2);
+    store
+        .set_realm_document(&records[0], Some(&record.to_string()))
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let items = attention(&fixture.app, &alice).await.expect("Alice's list");
+    assert_eq!(items.len(), 1, "the later item is left out: {items:#?}");
+    assert_eq!(
+        items[0]["text"],
+        json!(REPLY_TEXT),
+        "the item of this build's version is still listed: {items:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// The attention list reads only the items not dismissed: once Alice
 /// dismissed two of her three items, a read of her list reads the one left
 /// and no dismissed one.
@@ -1602,6 +1734,64 @@ async fn the_attention_list_reads_no_dismissed_item() -> TestResult {
     Ok(())
 }
 
+/// A dismissal that stopped between the item's record and the removal of
+/// its listing entry still keeps the item off the list, and dismissing it
+/// again removes the entry.
+#[tokio::test]
+async fn a_stopped_dismissal_keeps_the_item_off_the_list() -> TestResult {
+    let fixture = Fixture::enforced("replies-stopped-dismissal").await?;
+    let alice = alice();
+    let sent = send(&fixture.app, Some(&alice), "alpha", "stopped-dismissal").await;
+    let delivered = fixture
+        .replies()
+        .deliver(&interaction_of(&sent), "reply-1", REPLY_TEXT)
+        .await;
+    assert!(is_attention(&delivered), "{delivered:?}");
+    let items = attention(&fixture.app, &alice).await.expect("Alice's list");
+    let item_id = items[0]["id"].as_str().expect("an item id").to_string();
+    let live = attention_keys(&fixture, "/live/").await;
+    assert_eq!(live.len(), 1, "one listing entry: {live:?}");
+    let dismiss = || {
+        console_rpc_as(
+            &fixture.app,
+            Some(&alice),
+            "meta/console/attention/dismiss",
+            json!({ "item_id": item_id }),
+        )
+    };
+    let dismissed = dismiss().await;
+    assert_eq!(
+        dismissed["result"]["dismissed"],
+        json!(true),
+        "{dismissed:#}"
+    );
+
+    // The stop: the record says dismissed, and the listing entry is back.
+    let store = fixture.owner.persistent_metadata();
+    store
+        .set_realm_document(&live[0], Some(r#"{"v":1}"#))
+        .await
+        .map_err(|error| error.to_string())?;
+    let listed = attention(&fixture.app, &alice).await;
+    assert_eq!(
+        listed.as_ref().map(Vec::len),
+        Ok(0),
+        "a dismissed item stays off the list: {listed:?}"
+    );
+    let again = dismiss().await;
+    assert_eq!(again["result"]["dismissed"], json!(true), "{again:#}");
+    assert_eq!(
+        store
+            .realm_document(&live[0])
+            .await
+            .map_err(|error| error.to_string())?,
+        None,
+        "the second dismissal removes the entry"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// One attention read reads a bounded number of items however many its
 /// person holds: at most twice the page (the newest not dismissed), and it
 /// answers at most the page, newest first.
@@ -1658,6 +1848,61 @@ async fn an_attention_read_is_bounded() -> TestResult {
     Ok(())
 }
 
+/// The read bound holds when the items are hidden: once Alice may no longer
+/// view the agent all her items came from, one read of her list shows none
+/// of them and still reads at most twice the page of records.
+#[tokio::test]
+async fn a_read_of_hidden_items_is_bounded() -> TestResult {
+    let store = Arc::new(CountingMetadataStore::default());
+    let mut fixture = Fixture::build(
+        "replies-hidden-bound",
+        true,
+        Some(everyone_drives_every_agent()),
+        None,
+        {
+            let store = Arc::clone(&store);
+            move |builder| builder.persistent_metadata(store)
+        },
+    )
+    .await?;
+    let alice = alice();
+    let sent = send(&fixture.app, Some(&alice), "alpha", "hidden-bound").await;
+    let replies = fixture.replies();
+    let held = 2 * CONSOLE_ATTENTION_PAGE + 10;
+    for reply in 0..held {
+        let delivered = replies
+            .deliver(
+                &interaction_of(&sent),
+                &format!("reply-{reply}"),
+                &format!("Reply {reply}."),
+            )
+            .await;
+        assert!(is_attention(&delivered), "{delivered:?}");
+    }
+    fixture
+        .owner
+        .set_access_controller(no_one_drives_any_agent());
+    let revoked = fixture.router(
+        decisions(true, false),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+
+    store.take_attention_reads();
+    let items = attention(&revoked, &alice).await;
+    let reads = store.take_attention_reads();
+    assert_eq!(
+        items.as_ref().map(Vec::len),
+        Ok(0),
+        "none of the hidden items is shown: {items:?}"
+    );
+    assert!(
+        reads <= 2 * CONSOLE_ATTENTION_PAGE,
+        "a read of hidden items reads at most twice the page, not all {held}: {reads} reads"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// A delivery reads its request's send record once, whether the reply goes
 /// to the person's thread or to their attention list: the record is found
 /// by a scan of the console log, which no index shortens.
@@ -1699,6 +1944,66 @@ async fn a_delivery_reads_its_send_record_once() -> TestResult {
         log.take_send_record_reads(),
         1,
         "a delivery to the person's thread reads the send record once"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A delivery that stopped between the item's record and its listing entry
+/// has not delivered the item: the reply reads as not delivered and the
+/// list shows nothing, and the next delivery of the same reply completes it
+/// with the first receipt.
+#[tokio::test]
+async fn a_stopped_delivery_is_completed_by_the_next() -> TestResult {
+    let fixture = Fixture::enforced("replies-stopped-delivery").await?;
+    let alice = alice();
+    let sent = send(&fixture.app, Some(&alice), "alpha", "stopped-delivery").await;
+    let interaction = interaction_of(&sent);
+    let replies = fixture.replies();
+    let first = replies.deliver(&interaction, "reply-1", REPLY_TEXT).await;
+    let Ok(first) = first else {
+        panic!("the reply is delivered: {first:?}");
+    };
+    let ConsoleReplyDelivery::Attention { item_id } = &first.delivery else {
+        panic!("the reply is an item: {first:?}");
+    };
+    // The stop: the item's record stays, its listing entry is gone.
+    let live: Vec<String> = attention_keys(&fixture, "/live/")
+        .await
+        .into_iter()
+        .filter(|key| key.ends_with(item_id.as_str()))
+        .collect();
+    assert_eq!(live.len(), 1, "one listing entry: {live:?}");
+    fixture
+        .owner
+        .persistent_metadata()
+        .set_realm_document(&live[0], None)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        replies.delivered(&interaction, "reply-1").await,
+        Ok(None),
+        "the stopped delivery reads as not delivered"
+    );
+    let listed = attention(&fixture.app, &alice).await;
+    assert_eq!(
+        listed.as_ref().map(Vec::len),
+        Ok(0),
+        "the stopped delivery lists nothing: {listed:?}"
+    );
+    let again = replies.deliver(&interaction, "reply-1", REPLY_TEXT).await;
+    assert_eq!(
+        again,
+        Ok(first.clone()),
+        "the next delivery completes it with the first receipt"
+    );
+    let listed = attention(&fixture.app, &alice).await;
+    assert_eq!(listed.as_ref().map(Vec::len), Ok(1), "{listed:?}");
+    assert_eq!(
+        replies.delivered(&interaction, "reply-1").await,
+        Ok(Some(first)),
+        "the completed delivery reads as delivered"
     );
     fixture.stop().await;
     Ok(())

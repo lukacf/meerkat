@@ -31728,10 +31728,14 @@ mod tests {
     }
 
     /// A host store whose renews always fail: the realm's first renew
-    /// stops its writer, and its self-fence window closes.
+    /// stops its writer, and its self-fence window closes. Each acquire is
+    /// granted a token above every earlier grant, as a store's token order
+    /// requires.
     #[cfg(not(target_arch = "wasm32"))]
-    #[derive(Debug)]
-    struct RenewFailingHost;
+    #[derive(Debug, Default)]
+    struct RenewFailingHost {
+        granted: std::sync::atomic::AtomicU64,
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[async_trait::async_trait]
@@ -31741,8 +31745,12 @@ mod tests {
             _mode: meerkat_core::host_store::AcquireMode,
         ) -> Result<meerkat_core::host_store::FenceGrant, meerkat_core::host_store::HostStoreError>
         {
+            let token = self
+                .granted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
             Ok(meerkat_core::host_store::FenceGrant {
-                token: meerkat_core::host_store::FenceToken::new(1),
+                token: meerkat_core::host_store::FenceToken::new(token),
                 superseded_lease: std::time::Duration::ZERO,
             })
         }
@@ -31840,9 +31848,12 @@ mod tests {
             run_suspension: std::sync::OnceLock::new(),
             rewrite_audit: None,
         };
-        let realm = SpiRealm::open(Arc::new(RenewFailingHost), SpiRealmConfig::default())
-            .await
-            .expect("the realm opens");
+        let realm = SpiRealm::open(
+            Arc::new(RenewFailingHost::default()),
+            SpiRealmConfig::default(),
+        )
+        .await
+        .expect("the realm opens");
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
             SpiRuntimeStore::open(realm)
                 .await

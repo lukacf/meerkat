@@ -65,8 +65,11 @@
 #   - a journal that drops the spend (journal_drops_consumption:
 #     AuditSpentSurvivesRestart).
 # The rebuild after a restart is assumed, not checked: the audit restores
-# the state the journal acknowledged, which the owner's rebuild computes by
-# folding the journal through this same machine. So is an attempt's
+# the state the journal acknowledged. The owner's rebuild writes that state
+# directly from the journal's changes (it does not replay them through this
+# machine), and what makes the fold safe is what it checks after: the
+# machine's generated invariants and the owner's lineage verification, which
+# refuse a state no run of the machine reaches. So is an attempt's
 # discipline: it enters only while the revision it prepared at is current.
 # An anchor this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed

@@ -33,8 +33,11 @@
 \* uncertain spend: its write may or may not have landed, the owner fails
 \* closed (it applies nothing more), and the use does not enter. A restart
 \* rebuilds the owner from its journal; the audit models the rebuild as the
-\* acknowledged state, which is what the owner's rebuild computes by folding
-\* the journal through this same machine. One restart is modeled.
+\* acknowledged state. The owner's rebuild writes that state directly from
+\* the journal's changes, not through this machine; the machine's generated
+\* invariants and the owner's lineage verification, checked after the fold,
+\* are what refuse a state no run of the machine reaches. One restart is
+\* modeled.
 \*
 \* Two concurrent attempts. An attempt prepares the valid use of a leaf (a
 \* resolution, at the revision it read) and enters (spends) only while that

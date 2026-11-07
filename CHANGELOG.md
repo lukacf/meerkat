@@ -166,6 +166,45 @@ them.
   last, so an exhaustive match needs their arms. The machine is at version
   3.
 
+- `meerkat-core`: `PreparedOperationAuthorization` gains the required
+  method `spend_at_entry` (see Added), with no default: an implementation
+  states the spend its decision takes when its effect enters (`Ok(())` for
+  none), and a wrapper forwards it. A default that spent nothing would let
+  a wrapper's approval-carried operation enter without spending its use.
+
+- `meerkat-core`: `ToolExecutionResolutionError` is `#[non_exhaustive]` and
+  gains `RefusedWithData { tool_name, message, data }`: a plan-time refusal
+  now surfaces as `execution_failed` with its data
+  (`ToolError::ExecutionFailedWithData`), the same shape as at effect time.
+  A downstream exhaustive match needs a wildcard arm.
+
+- `meerkat-runtime`: `DecisionExecutor` gains the required method `sweep`,
+  with no default: each pass asks each kind the loop claims, after the owed
+  decisions, to undo what its executions left outside the decision store
+  (see Added). An executor whose executions leave nothing there answers no
+  outcome (`Vec::new()`), and a wrapper forwards it.
+
+- `meerkat-core`: `DecisionMachineState` gains the public fields
+  `cleanup: DecisionCleanup` and `reply_digest: Option<String>`, so code
+  that builds it literally must set them (`DecisionCleanup::NotOwed` and
+  `None` are the state as before, stored as the same bytes; see Upgrade
+  notes).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the `DurableDecisionMachine`, at version 3, owns two facts of an executed
+  decision (see Added). `DurableDecisionMachineState`
+  (meerkat-machine-schema `catalog::dsl::durable_decision` and
+  meerkat-runtime `decision::dsl`) and the kernel's
+  `generated::durable_decision::State` gain the public fields
+  `cleanup: DurableDecisionCleanup` and `reply_digest: Option<DecisionDigest>`,
+  so code that builds them literally must set them (`NotOwed` and `None` are
+  the state as before). `DurableDecisionInput` gains `OweCleanup`,
+  `SettleCleanup` and `SettleReply { digest }`, and `DurableDecisionEffect`
+  gains `CleanupOwed`, `CleanupSettled` and `ReplySettled`; the kernel's
+  `Input`, `InputKind`, `Effect`, `EffectKind` and `TransitionId` gain the
+  matching variants, each appended last, so an exhaustive match needs their
+  arms.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -392,51 +431,96 @@ them.
   operation's server, the requester and the origin from the calling work
   (in a peer work, the work the asking agent sent; else the calling work),
   computes the operation's digest from its exact arguments, and holds a
-  `grant.child` decision for the offering grant's rule's approver id. Its
-  held request (`grant.child.v1`, `GrantChildRequest`) carries the exact
-  terms the grant is issued with, whose digest is the decision's request
-  digest, and its rendering (`grant.render-v1`) every term the approver
-  approves. An offer is refused at hold, typed (`AccessOfferRefusal`), when
-  nothing approved could run: `no_child_approval_rule`,
+  `grant.child` decision for the offering grant's rule's approver id, in
+  the human stage only (a `grant.child` hold that names a reviewer is
+  refused `review_stage_not_allowed`). Its held request (`grant.child.v1`,
+  `GrantChildRequest`) carries the exact terms the grant is issued with,
+  whose digest is the decision's request digest, and its rendering
+  (`grant.render-v1`) every term the approver approves; it is read only as
+  Core held it (`GrantChildRequestError`): the operation's digest is the
+  digest of the arguments the rendering shows, the reply goes to the terms'
+  requester, and the terms name the decision's approved work. An offer is
+  refused at hold, typed (`AccessOfferRefusal`, its kind and reason), when
+  nothing approved could run: `no_child_approval_rule` (with its reason:
+  `no_parent_grant`, `parent_not_current` or `parent_cannot_delegate`),
   `reply_route_unavailable`, `approval_branch_unavailable` (with its reason:
   `not_branchable`, `controller_cannot_admit_child`, or `subject_mismatch`
   when the offering grant acts for another principal than the asking
   agent's controller grant, so an approved work has one represented
   subject), `uses_over_policy` and `window_over_policy` (`ApprovalGrantPolicy`:
-  one use and a 15-minute window by default). The executor
-  (`GrantDecisionExecutor`, from `ApprovalGrants::executor`, for the
+  one use and a 15-minute window by default), `window_over_parent` (the
+  offering grant's window ends first) and `outside_parent_bounds` (with its
+  reason: `processor_excluded` or `audience_excluded`, when the offering
+  grant's bounds exclude the approval branch or the requester). The
+  executor (`GrantDecisionExecutor`, from `ApprovalGrants::executor`, for the
   `DecisionExecutorLoop` of the runtime that holds the grant owner's
   single-writer custody) executes an approved offer only for a person's
-  decision whose effective terms are still the presented ones
-  (`terms_changed` otherwise): it opens a one-time approval branch of the
-  asking agent (a member forked from it at an empty prefix, labelled
-  `decision.approval_branch` with the decision id), issues the branch a
-  controller grant, a child of the asking agent's own (depth 0, processed by
-  the branch only, its id derived from the decision and recovered on
-  retry), and the approval-carried grant, and records the decision
-  executed. Its notice tells the origin that access was approved, with no
-  content, and admits the approved work into the branch
+  decision whose offering grant still resolves and whose effective terms
+  are still the presented ones. Before it opens anything it opens the
+  decision's cleanup (see the next entry); it then opens a one-time
+  approval branch of the asking agent (a member forked from it at an empty
+  prefix, labelled `decision.approval_branch` with the decision id), issues
+  the branch a controller grant, a child of the asking agent's own (depth 0,
+  processed by the branch only, its id derived from the decision and
+  recovered on retry), and the approval-carried grant, and records the
+  decision executed. An execution refused for good ends the decision
+  refused with its token: `malformed_request`, `not_a_human_decision`,
+  `parent_refused`, `terms_changed`, `terms_unbounded`,
+  `approval_branch_unavailable`, `assurance_below_rule`,
+  `no_child_approval_rule` or `decision_carried`. Its notice admits the
+  approved work into the branch the execution opened
   (`ApprovalCarriedIngress`): the request's requester, the decision ingress
   as its ingress actor, the grant's represented subject, the branch as its
   executor, one target lineage (the bound operation's, ending at the
   approval-carried grant) and no base, enrolled in the host's custody of
   originals before its admission, in the origin's realm and ingress domain.
-  It runs the approved operation once and replies once
-  (`reply_to_requester`: Core's rule of the approved work, never a grant;
-  the same text again answers the first delivery, another text is refused
-  `reply_already_delivered`). The branch is retired, and its controller
-  grant revoked, when its work ends or its grant's window does
-  (`ApprovalGrants::sweep_branches` retires what a restart left open). A
-  declined, expired, withdrawn or refused offer tells its origin how it
-  ended, with no content. Hosts compose it (`ApprovalGrants`,
-  `ApprovalGrantsConfiguration`) from their decision owner, their grant
-  owner, their approval branches (`ApprovalBranchHost`), their requester
-  reply route (`RequesterReplyRoute`, with `can_deliver`) and the native
-  custody that revokes a retired branch's controller grant
-  (`ApprovalControllerCustody`, implemented by `MeerkatMachine`), give
-  their agents the `decisions` tools (`ApprovalGrants::tools`,
+  Only then is the origin told that access was approved, with no content;
+  an admission that fails for good tells it the request was refused. A
+  redelivered notice admits nothing new, and once the branch ended it
+  settles and forks nothing. The approved work runs the approved operation
+  once and replies once (`reply_to_requester`: Core's rule of the approved
+  work, never a grant). The decision settles the reply by the digest of its
+  text before the host's route delivers it: the same text again is handed
+  to the route, which answers the first delivery, and another text is
+  refused `reply_already_delivered`, whatever the route does. When the
+  approved work ends or the grant's window does, whichever is first, the
+  branch is retired, its controller grant revoked and the decision's
+  cleanup settled; what a stop, a busy custody or an unavailable read left
+  is swept by Core's pass (`DecisionExecutor::sweep`), from the grant
+  owner's unrevoked branch controller grants and the host's open branches,
+  and `ApprovalGrants::sweep_branches` runs that sweep at once. A declined,
+  expired, withdrawn or refused offer tells its origin how it ended, with
+  no content, once its branch is retired. A `decisions` tool refused for
+  good answers `execution_failed` with typed data, at its plan as at its
+  effect: `not_governed_work` (outside governed work of one original),
+  `not_an_approved_work`, `reply_already_delivered`, or an offer's refusal
+  kind and reason; a grant owner that cannot answer now answers the
+  retryable `unavailable` (`temporarily_unavailable`). Hosts compose it
+  (`ApprovalGrants`, `ApprovalGrantsConfiguration`) from their decision
+  owner, their grant owner, their approval branches (`ApprovalBranchHost`),
+  their requester reply route (`RequesterReplyRoute`, with `can_deliver`)
+  and the native custody that revokes a retired branch's controller grant
+  (`ApprovalControllerCustody`, implemented by `MeerkatMachine`), give their
+  agents the `decisions` tools (`ApprovalGrants::tools`,
   `DecisionsToolDispatcher`), and compose their grant owner with
   `DecisionApprovalUseCurrentness`.
+
+- `meerkat-core`, `meerkat-runtime`: two facts of an executed durable
+  decision, owned by the `DurableDecisionMachine` (see Breaking) and
+  settled like its notice. Its cleanup (`DecisionCleanup`): an owner whose
+  execution leaves work outside the decision store to undo once the
+  decision's work is over opens it while it holds its permit, before it
+  creates any of it (`DurableDecisionService::owe_cleanup`), and settles it
+  after the decision ended and it undid that work (`settle_cleanup`); it
+  stays owed across a release, a refusal or an expiry. Its one reply
+  (`settle_reply`): the first settles it by digest, the same one again
+  replays, another is refused `not_owed`. A kind that opens neither keeps
+  its rows byte for byte. A pass records a settled cleanup
+  (`DecisionPassOutcome::CleanupSettled`) or one that cannot settle now
+  (`DecisionDeferral::CleanupUnsettled`). A kind decided by people only
+  (`approval::decision::decided_by_people_only`, `DECIDED_BY_PEOPLE_ONLY`)
+  refuses a review stage at its hold
+  (`DecisionContractError::ReviewStageNotAllowed`, `review_stage_not_allowed`).
 
 - `meerkat-core`, `meerkat-authorization-contracts`: the operation targets
   of the `decisions` tools, `ToolOperationTarget::DecisionHold` and
@@ -449,8 +533,8 @@ them.
 
 - `meerkat-core`, `meerkat-authorization`: a governed operation's effect
   entry spends what its prepared decision spends
-  (`PreparedOperationAuthorization::spend_at_entry`, a provided method that
-  spends nothing; wrappers forward it), once, after the review it spends:
+  (`PreparedOperationAuthorization::spend_at_entry`, a required method that
+  every wrapper forwards; see Breaking), once, after the review it spends:
   for an operation whose lineage ends at an approval-carried grant, one use
   (`LocalWorkPolicy::entry_spend`, `GrantUseSpend`,
   `LocalGrantAuthority::spend_use_at_entry`), asking the host's currentness
@@ -459,7 +543,9 @@ them.
   a person no longer current refuses the entry and spends nothing, and an
   unsettled answer, or an owner without a currentness owner, is
   unavailable and spends nothing. `LocalGrantAuthority::retained_grant`
-  reads a retained grant's immutable facts (`RetainedGrant`), and
+  reads a retained grant's immutable facts (`RetainedGrant`, with its
+  issuer), `unrevoked_grants` the unrevoked grants a selection names, from
+  the owner's resident state (no store read), and
   `child_admissible` whether a child grant would be issued now, without
   issuing it. The grant-backed policy admits a reply to the requester only
   in an approval-carried work (`grant_policy::requester_reply_values`,
@@ -472,9 +558,17 @@ them.
   the one-time branch of a decision (its identity from
   `MobHandle::approval_branch_identity`), labelled
   `decision.approval_branch`, exempt from the definition's wiring and wired
-  to no parent; opening it again finds it.
-  `MobHandle::retire_approval_branch` retires it and
-  `MobHandle::approval_branches` lists the open ones.
+  to no parent, and records the decision as the member's typed creation
+  source (its `MemberSpawned` row and `RosterEntry::approval_branch`);
+  opening it again adopts only the member whose recorded source is that
+  decision. The identity prefix `approval-branch-` and the label are
+  reserved: every other spawn, ensure, reconcile, fork, dormant seat,
+  rotation and policy spawn that takes them, and every wire, unwire or
+  respawn of an open branch, is refused `MobError::ApprovalBranchReserved`
+  (`approval_branch_reserved`) by the mob itself, so every surface answers
+  it. `MobHandle::retire_approval_branch` retires a branch and
+  `MobHandle::approval_branches` lists the open ones, by their recorded
+  source.
 
 ### Changed
 
@@ -613,6 +707,17 @@ them.
   access offer), since it does not know that grant target. Before a
   rollback, let such works end.
 
+- 0.9.10 reads a durable decision whose row records a cleanup or a reply
+  (an executed `grant.child` decision) as unreadable, and acts on it in no
+  way: its machine state refuses a field it does not know
+  (`DecisionMachineState`, `deny_unknown_fields`, in
+  `crates/meerkat-core/src/approval/decision/record.rs`), and its decision
+  store reads a row it cannot decode as `DecisionRow::Unreadable` (`decode`,
+  in `crates/meerkat-store/src/approval_decision_store.rs`). Every other
+  decision's row is unchanged, byte for byte, and both releases read it.
+  Before a rollback, let the approval branches end and their cleanups
+  settle.
+
 ### Known limitations
 
 - Peers keep the original requester in process only. A delivery over a
@@ -630,6 +735,18 @@ them.
   receiver whose composition installs another ingress domain, such as a
   peer under another composition or realm in the same process, refuses the
   work at admission.
+
+- No stock Core host composes approval-carried grants (`ApprovalGrants`):
+  a host composes them (see Added).
+
+- An approval branch's privacy toward console viewers and memory is the
+  host's. Core keeps every spawn, wire and respawn path off the branch and
+  labels it (`APPROVAL_BRANCH_LABEL`); a host's console and memory must
+  neither show nor index a member with that label.
+
+- The derivation of an access offer in a peer work (the asking agent, the
+  requester and the origin from the work the asking agent sent) is covered
+  at the runtime level only.
 
 ## [0.9.10] - 2026-11-04
 

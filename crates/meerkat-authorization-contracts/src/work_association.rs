@@ -156,7 +156,11 @@ pub enum GrantTarget {
     /// Holds of a decision for the approver id `approver_id`: the target of
     /// the owner-produced `DecisionHold` (an access offer). A hold asks a
     /// person for a decision and grants nothing; its lineage covers no
-    /// other operation, and the base never covers a hold.
+    /// other operation, and the base never covers a hold. A
+    /// [`WorkAuthorityBasis::GrantLineage`] basis's one lineage covers a
+    /// hold too, for any approver id: the approver id binds nothing there,
+    /// and Core derives it (the offering grant's child rule), never the
+    /// model.
     DecisionHold {
         approver_id: meerkat_core::approval::decision::ApproverId,
     },

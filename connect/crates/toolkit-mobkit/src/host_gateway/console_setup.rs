@@ -353,17 +353,6 @@ impl ConsoleSetupBinding {
                 HostLifetimeError::Denied
             })
     }
-    /// Whether `viewer`'s Console login exists but ended (its host retired
-    /// it, or it expired), so a setup answer route tells such a person apart
-    /// from a caller without a login. A read only; [`Self::current_login`]
-    /// admits.
-    pub fn login_ended(&self, viewer: &ConsoleViewerContext) -> bool {
-        viewer.human.as_ref().is_some_and(|human| {
-            human
-                .login_scope()
-                .is_some_and(|scope| self.logins.ended(human.issuer(), human.subject(), scope))
-        })
-    }
     /// Pure canonical read. Re-resolve the HTTP viewer after this await before
     /// disclosing the result. This is not a reconciliation or readiness call.
     pub async fn status(

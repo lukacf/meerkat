@@ -156,7 +156,6 @@ fn selected(
         &viewer,
         |viewer| match panel.0.binding.current_login(viewer) {
             Ok(login) => LoginLookup::Current(login),
-            Err(_) if panel.0.binding.login_ended(viewer) => LoginLookup::Ended,
             Err(_) => LoginLookup::Refused(StatusCode::FORBIDDEN),
         },
         |login| {

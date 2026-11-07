@@ -144,13 +144,13 @@ impl RosterAuthority {
         self.roster.owed_kickoff_prompt(identity)
     }
 
-    /// What the unborn seat session `identity` is bound to carries to its
-    /// first build ([`Roster::seat_build`]).
-    pub(crate) fn seat_build(
+    /// What the next build of `identity`'s current incarnation sets on its
+    /// request ([`Roster::next_build`]).
+    pub(crate) fn next_build(
         &self,
         identity: &AgentIdentity,
     ) -> Option<std::sync::Arc<crate::runtime::SeatBuild>> {
-        self.roster.seat_build(identity)
+        self.roster.next_build(identity)
     }
 
     /// Set the descriptive inputs a store-owned identity's unborn seat

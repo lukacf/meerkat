@@ -10,9 +10,9 @@ There are no roles. Every check evaluates the caller's attributes (subject, grou
 
 ## The model
 
-- **Principal** — the authenticated console caller: the `subject` (email or token `sub`) plus the groups it belongs to. On an auth-optional console (`require_app_auth = false`), callers without a valid voluntarily supplied token are anonymous and only match rules without subject constraints. With access control and trusted-token validation configured, a valid optional token can still identify a named principal for HTTP and SSE access checks.
-- **Resource** — usually an agent: its identity, role, and labels (the same labels you already use for console grouping).
-- **Action** — a verb from a fixed vocabulary:
+- **Principal** - the authenticated console caller: the `subject` (email or token `sub`) plus the groups it belongs to. On an auth-optional console (`require_app_auth = false`), callers without a valid voluntarily supplied token are anonymous. An anonymous caller matches every rule without subject constraints and every deny rule that has them, but no allow rule that has them: it may be any person, so leaving out a token never escapes a deny that names you. With access control and trusted-token validation configured, a valid optional token can still identify a named principal for HTTP and SSE access checks.
+- **Resource** - usually an agent: its identity, role, and labels (the same labels you already use for console grouping).
+- **Action** - a verb from a fixed vocabulary:
 
 | Action | Grants |
 |--------|--------|
@@ -392,7 +392,7 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 
 ## Relationship to authentication
 
-Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). With authentication optional, a valid voluntarily supplied token can still establish a named principal when trusted-token validation and access control are configured. Callers without one are anonymous and match only rules without subject constraints. For per-user deployments, require authentication rather than relying on optional identification.
+Access control layers on top of console authentication (`require_app_auth` + the email allowlist): authentication decides who may reach the console at all, ABAC decides what each of them sees and does once inside. Identity comes from the validated bearer token (`email` or `sub` claim). With authentication optional, a valid voluntarily supplied token can still establish a named principal when trusted-token validation and access control are configured. Callers without one are anonymous: allow rules that name subjects or groups never match them, and deny rules that name subjects or groups always do, because the console cannot tell an anonymous caller from the person a deny names. For per-user deployments, require authentication rather than relying on optional identification.
 
 ## Timeline frames of members that changed or left
 

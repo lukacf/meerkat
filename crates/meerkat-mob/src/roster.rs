@@ -219,6 +219,15 @@ pub struct Roster {
     /// reads the declaration as nothing to migrate.
     #[serde(skip)]
     resume_from_roles: BTreeMap<AgentIdentity, (Generation, ProfileName)>,
+    /// The build each identity's incarnation applies at its builds on a
+    /// session a build created, with that incarnation's generation, from
+    /// its `MemberSpawned` row (`MemberSpawnedEvent::seat_build_inputs` on
+    /// a row whose session is not unborn): a same-session successor's
+    /// declared role migration carries its composed build so. Every build
+    /// of that incarnation sets it on its request before the host's spawn
+    /// customizer is asked ([`Self::next_build`]).
+    #[serde(skip)]
+    incarnation_builds: BTreeMap<AgentIdentity, (Generation, Arc<crate::runtime::SeatBuild>)>,
     /// What each unborn seat session carries to its first build, keyed by
     /// the session: the build inputs its seat rows journaled
     /// (`MemberSpawnedEvent::seat_build_inputs`, a later seat of the same
@@ -360,6 +369,13 @@ impl Roster {
                 {
                     self.resume_from_roles.remove(agent_identity);
                 }
+                if self
+                    .incarnation_builds
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.incarnation_builds.remove(agent_identity);
+                }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
                 // A stale abandonment marker can replay after a successor
@@ -482,6 +498,7 @@ impl Roster {
                 self.owed_kickoff_prompts.clear();
                 self.spawn_continuity.clear();
                 self.resume_from_roles.clear();
+                self.incarnation_builds.clear();
                 self.seat_builds.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
@@ -529,6 +546,7 @@ impl Roster {
             owed_kickoff_prompts: BTreeMap::new(),
             spawn_continuity: BTreeMap::new(),
             resume_from_roles: BTreeMap::new(),
+            incarnation_builds: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
@@ -659,6 +677,22 @@ impl Roster {
         (self.entries.get(agent_identity)?.generation == *generation).then_some(role)
     }
 
+    /// What the next build of `agent_identity`'s current incarnation sets on
+    /// its request before the host's spawn customizer is asked: what its
+    /// unborn session carries to its first build ([`Self::seat_build`]), or,
+    /// on a session a build created, the build its own `MemberSpawned` row
+    /// carried (a same-session successor's declared role migration), which
+    /// every build of that incarnation applies.
+    pub(crate) fn next_build(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<Arc<crate::runtime::SeatBuild>> {
+        self.seat_build(agent_identity).or_else(|| {
+            let (generation, build) = self.incarnation_builds.get(agent_identity)?;
+            (self.entries.get(agent_identity)?.generation == *generation).then(|| Arc::clone(build))
+        })
+    }
+
     /// What the session `agent_identity` is bound to carries to its first
     /// build, while no build has created it: the inputs its seat named (see
     /// [`crate::runtime::SeatBuild`]). Whether the session is still unborn
@@ -786,6 +820,28 @@ impl Roster {
             }
             None => {
                 self.resume_from_roles.remove(identity);
+            }
+        }
+        // An unborn session's inputs are its seat build's (above); on a
+        // session a build created, they are this incarnation's own.
+        match member_spawned
+            .seat_build_inputs()
+            .filter(|_| !member_spawned.seat_session_unborn())
+        {
+            Some(inputs) => {
+                self.incarnation_builds.insert(
+                    identity.clone(),
+                    (
+                        member_spawned.generation,
+                        Arc::new(crate::runtime::SeatBuild {
+                            inputs: inputs.clone(),
+                            local: crate::runtime::SeatLocalBuildInputs::default(),
+                        }),
+                    ),
+                );
+            }
+            None => {
+                self.incarnation_builds.remove(identity);
             }
         }
         Some(member_ref)

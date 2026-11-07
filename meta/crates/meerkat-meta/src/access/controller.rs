@@ -2516,7 +2516,7 @@ mod tests {
                 trusted_oidc: crate::TrustedOidcRuntimeConfig {
                     discovery_json: json!({"issuer": ISSUER, "jwks_uri": format!("{ISSUER}/.well-known/jwks.json")}).to_string(),
                     jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.into(),
-                    audience: "meerkat-console".into(), require_verified_email: false,
+                    audience: "meerkat-console".into(), require_verified_email: false, shared_account_tokens: false,
                 },
                 console: crate::ConsolePolicy { require_app_auth: true, ..Default::default() },
                 ops: crate::RuntimeOpsPolicy::default(),

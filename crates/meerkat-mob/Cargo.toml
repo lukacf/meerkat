@@ -92,8 +92,6 @@ tokio_with_wasm = { workspace = true }
 meerkat = { workspace = true, features = ["jsonl-store", "session-store", "memory-store-session"] }
 
 [dev-dependencies]
-# Cold-restart fixtures need these helpers even in package-scoped test lanes.
-meerkat-mob = { path = ".", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -211,10 +209,12 @@ path = "../../examples/018-mob-research-team-rs/main.rs"
 name = "019-mob-pipeline"
 path = "../../examples/019-mob-pipeline-rs/main.rs"
 
-# The feature set this crate's own tests need. The published package
-# has no self dev-dependency to turn them on, so its README.md prints the
-# command with these features, and the standalone test lane
-# (scripts/published_crates_standalone.py) reads them from here.
+# The feature set this crate's own tests need. No dev-dependency turns
+# them on: the workspace's test builds pass them (scripts/core-workspace-args.mjs
+# --tests, the CI planner and the Bazel generator read them from here), the
+# published package's README.md prints the command with them, and the
+# standalone test lane (scripts/published_crates_standalone.py) reads them
+# from here too. The cold-restart fixtures need the `test-support` helpers.
 [package.metadata.meerkat.standalone-tests]
 features = ["test-support"]
 # The README's command sets this thread stack, the workspace's

@@ -19,6 +19,10 @@ pub(super) enum WriteState {
     Installed,
     Stored,
     NotWritten,
+    /// The realm's configuration changed after it was reviewed (another
+    /// write landed first): nothing was written, and a fresh review can
+    /// write.
+    Conflict,
     NotAdmitted,
     OutcomeUnknown,
 }

@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Console setup: an answer from a login that has no open setup prompt is
   refused with `409`, whether or not another login's prompt is open. Before,
   it was refused with `403` while another login's prompt was open.
+- Console setup: a credential install that loses to another change of the
+  realm's configuration made at the same moment (two people installing at
+  once) reports `persistence.install.state` `conflict`, a new value. Before,
+  it reported `not_written`, the state of a refusal that a new review does
+  not change. Nothing was written; review the request again.
 
 ### Fixed
 
@@ -41,6 +46,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Known limitations
 
+- Console setup: an agent session asks for one setup answer at a time, so
+  two people in one shared session answer its setup prompts one after the
+  other.
 - Provider setup and first-target setup read a realm's explicit tables only,
   so they do not yet list the routes a `[realm.<realm>.copilot]` section
   declares (Meerkat's GitHub Copilot account configured once), and a realm

@@ -383,6 +383,12 @@ fn install_failure(error: meerkat_mobkit::rpc_gateway::GatewayRealmMcpError) -> 
         | GatewayRealmMcpError::Persist(McpRealmPersistError::OutcomeUnknown(_)) => {
             WriteState::OutcomeUnknown
         }
+        // Another write moved the realm's own document after this install
+        // was reviewed (two logins installing at once): nothing was written,
+        // and a fresh review can install.
+        GatewayRealmMcpError::Persist(McpRealmPersistError::Config(
+            meerkat_core::ConfigRuntimeError::GenerationConflict { .. },
+        )) => WriteState::Conflict,
         GatewayRealmMcpError::Persist(
             McpRealmPersistError::ServerExists(_)
             | McpRealmPersistError::ServerNotFound(_)
@@ -460,6 +466,15 @@ mod tests {
             (
                 GatewayRealmMcpError::from(McpRealmPersistError::Config(io_failure())),
                 "not_written",
+            ),
+            (
+                GatewayRealmMcpError::from(McpRealmPersistError::Config(
+                    ConfigRuntimeError::GenerationConflict {
+                        expected: 7,
+                        current: 8,
+                    },
+                )),
+                "conflict",
             ),
             (
                 GatewayRealmMcpError::NotAdmitted(AdministrationEntryRefusal::Unavailable(

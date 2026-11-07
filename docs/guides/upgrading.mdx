@@ -55,6 +55,39 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.11
+
+This section is for systems running 0.9.10. The full list of changes is in
+the CHANGELOG under `## [0.9.11]`.
+
+### Complete rosters retire unlisted legacy members
+
+A complete declared apply (`MobHandle::apply_declared_roster` with
+`DeclaredRoster::complete`, Rust only) now also retires each member the
+roster does not list whose spawn row carries both legacy marks, the
+durable-identity continuity marker and the legacy `agent_identity` label
+naming its own identity, and that no host's intent row names. A local member
+bound to a session is adopted as an entry, and the apply's seal unlists the
+entry and retires the member with the cause `Unlisted`. A member placed on a
+member host, or bound to no session, is retired without becoming an entry,
+and its retirement records no cause. The answer names either as `Retired` in
+`DeclaredRosterOutcome::unlisted`, and a member whose retirement started
+already as `NotAdopted`. Such a member is one a host seated under its
+identity before identity entries existed, whose identity the roster dropped
+before the host first applied it; 0.9.10 left it serving as a worker. A
+member with one mark only, or one a host adopted, is left as it is, and a
+partial roster retires no member it does not list.
+
+The legacy label is also read in the one encoding of a name into a member id:
+it names a member whose id encodes the label's name (`team:alice`, seated as
+`mk--team_calice`). A listed identity's member labelled so is adopted where
+0.9.10 refused its name `NameHeldByWorker` unless the member carried the
+durable-identity marker.
+
+**Do:** before the first complete apply on 0.9.11, make the roster list every
+identity whose member you keep: a member with both legacy marks that the
+roster does not list is retired by that apply.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

@@ -4048,6 +4048,8 @@ pub enum LegacyIdentityEntryAdoptionKind {
     NonAuthoritative,
     #[serde(rename = "MobNotRunning")]
     MobNotRunning,
+    #[serde(rename = "RetireUnadopted")]
+    RetireUnadopted,
 }
 impl LegacyIdentityEntryAdoptionKind {
     pub fn as_str(&self) -> &'static str {
@@ -4060,6 +4062,7 @@ impl LegacyIdentityEntryAdoptionKind {
             Self::NotSeated => "NotSeated",
             Self::NonAuthoritative => "NonAuthoritative",
             Self::MobNotRunning => "MobNotRunning",
+            Self::RetireUnadopted => "RetireUnadopted",
         }
     }
 }
@@ -4075,6 +4078,7 @@ impl std::convert::TryFrom<&str> for LegacyIdentityEntryAdoptionKind {
             "NotSeated" => Ok(Self::NotSeated),
             "NonAuthoritative" => Ok(Self::NonAuthoritative),
             "MobNotRunning" => Ok(Self::MobNotRunning),
+            "RetireUnadopted" => Ok(Self::RetireUnadopted),
             other => Err(format!(
                 "invalid LegacyIdentityEntryAdoptionKind value `{other}`"
             )),
@@ -11606,7 +11610,10 @@ pub mod inputs {
     pub struct AdoptLegacyIdentityEntry {
         pub agent_identity: AgentIdentity,
         pub generation: Generation,
-        pub legacy_roster_member: bool,
+        pub durable_identity_marker: bool,
+        pub own_identity_label: bool,
+        pub listed: bool,
+        pub intent_row: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAgentLaneMemberAdmission {
@@ -16999,6 +17006,8 @@ pub enum TransitionId {
     UnlistIdentityEntryMobNotRunningStopped,
     UnlistIdentityEntryMobNotRunningCompleted,
     UnlistIdentityEntryMobNotRunningDestroyed,
+    AdoptLegacyIdentityEntryAdoptedUnlisted,
+    AdoptLegacyIdentityEntryRetireUnadopted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

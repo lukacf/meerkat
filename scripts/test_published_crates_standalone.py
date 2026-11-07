@@ -9,6 +9,7 @@ listing parser, the manifest's workspace-only selection and name parity.
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 import tempfile
@@ -406,13 +407,35 @@ class PublishedTestContract(unittest.TestCase):
         readme = "cargo test --features missing,workspace-tests\n"
         self.assertEqual(len(self.failures(manifest, readme)), 2)
 
-    def test_workspace_tests_needs_the_path_only_self_dev_dependency(self):
+    def test_workspace_tests_needs_no_dev_dependency(self):
+        # The workspace's test builds pass it (scripts/core-workspace-args.mjs --tests).
         declared = {"workspace-tests": []}
-        self.assertEqual(len(self.failures(crate_manifest(None, declared))), 1)
-        versioned = {"demo": {"path": ".", "version": "1", "features": ["workspace-tests"]}}
-        self.assertEqual(len(self.failures(crate_manifest(None, declared, versioned))), 1)
-        path_only = {"demo": {"path": ".", "features": ["workspace-tests"]}}
-        self.assertEqual(self.failures(crate_manifest(None, declared, path_only)), [])
+        self.assertEqual(self.failures(crate_manifest(None, declared)), [])
+
+
+class CargoConfigAbove(unittest.TestCase):
+    def test_a_configuration_above_the_directory_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            (root / ".cargo").mkdir(parents=True)
+            (root / ".cargo" / "config.toml").write_text("[env]\n")
+            self.assertEqual(pcs.cargo_config_above(root / "target" / "census"), root / ".cargo" / "config.toml")
+            self.assertIsNone(pcs.cargo_config_above(pathlib.Path(tmp) / "elsewhere"))
+
+    def test_the_users_own_cargo_home_does_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp) / ".cargo"
+            home.mkdir()
+            (home / "config.toml").write_text("[build]\n")
+            previous = os.environ.get("CARGO_HOME")
+            os.environ["CARGO_HOME"] = str(home)
+            try:
+                self.assertIsNone(pcs.cargo_config_above(pathlib.Path(tmp) / "census"))
+            finally:
+                if previous is None:
+                    del os.environ["CARGO_HOME"]
+                else:
+                    os.environ["CARGO_HOME"] = previous
 
 
 UNIT_TEST_RULE = """
@@ -452,6 +475,140 @@ class BazelWorkspaceTests(unittest.TestCase):
     def test_only_the_named_target_counts(self):
         other = self.rule("workspace-tests").replace("demo_crate_unit_test", "demo_crate_other_test")
         self.assertEqual(len(self.failures({"workspace-tests": []}, other + self.rule("test-support"))), 1)
+
+    def test_every_declared_test_feature_is_on(self):
+        manifest = crate_manifest({"features": ["test-support", "live"]}, {"test-support": [], "live": []})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "BUILD.bazel").write_text(self.rule("live", "test-support"))
+            self.assertEqual(pcs.bazel_workspace_tests_failures("demo-crate", manifest, root), [])
+            (root / "BUILD.bazel").write_text(self.rule("test-support"))
+            self.assertEqual(len(pcs.bazel_workspace_tests_failures("demo-crate", manifest, root)), 1)
+
+
+def canary_source(predicate, message, used=True):
+    return (
+        "//! Demo.\n\n"
+        "// Test-feature canary; .cargo/config.toml [env] sets MEERKAT_WORKSPACE_TEST_FEATURES.\n"
+        f"#[cfg(all(test, not({predicate})))]\n"
+        "mod test_features_canary {\n"
+        "    fn require<T>() {\n"
+        "        const {\n"
+        "            let _ = size_of::<T>();\n"
+        "            assert!(\n"
+        '                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),\n'
+        f'                "{message}"\n'
+        "            );\n"
+        "        }\n"
+        "    }\n"
+        + ("\n    #[used]\n    static REQUIRE: fn() = require::<()>;\n" if used else "")
+        + "}\n\npub fn f() {}\n"
+    )
+
+
+def const_canary_source(predicate, message):
+    """The earlier shape: a `const _` assert, which `cargo check` and editors
+    evaluate too."""
+    return (
+        "//! Demo.\n\n"
+        f"#[cfg(all(test, not({predicate})))]\n"
+        "const _: () = assert!(\n"
+        '    option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),\n'
+        f'    "{message}"\n'
+        ");\n\npub fn f() {}\n"
+    )
+
+
+class TestFeatureCanary(unittest.TestCase):
+    def failures(self, manifest, source):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text(source)
+            return pcs.canary_failures("demo", manifest, root)
+
+    def test_the_test_features_are_the_declared_ones_then_workspace_tests(self):
+        manifest = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": [], "workspace-tests": []})
+        self.assertEqual(pcs.test_features(manifest), ["a", "b", "workspace-tests"])
+        self.assertEqual(pcs.test_features(crate_manifest(None, {"a": []})), [])
+
+    def test_one_canary_over_exactly_the_test_features(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
+        self.assertEqual(self.failures(single, canary_source('feature = "workspace-tests"', message)), [])
+        several = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
+        source = canary_source('all(feature = "a", feature = "b")', "demo: run `cargo test -p demo --features a,b`")
+        self.assertEqual(self.failures(several, source), [])
+
+    def test_a_canary_split_over_lines_counts(self):
+        several = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
+        message = "demo: needs its test features: \\\n                 `cargo test -p demo --features a,b` \\\n                 (more)"
+        source = canary_source('all(feature = "a", feature = "b")', message)
+        split = source.replace("#[cfg(all(test, not(all(", "#[cfg(all(\n    test,\n    not(all(\n        ")
+        self.assertEqual(self.failures(several, split), [])
+        broken = canary_source('all(feature = "a", feature = "b")', "demo: run `cargo test -p demo \\\n    --features a,b`")
+        self.assertEqual(self.failures(several, broken), [])
+
+    def test_a_missing_wrong_or_doubled_canary_fails(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
+        self.assertEqual(len(self.failures(single, "pub fn f() {}\n")), 1)
+        self.assertEqual(len(self.failures(single, canary_source('feature = "other"', message))), 1)
+        self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', "demo: needs features"))), 1)
+        doubled = canary_source('feature = "workspace-tests"', message) * 2
+        self.assertEqual(len(self.failures(single, doubled)), 1)
+        partial = crate_manifest({"features": ["a", "b"]}, {"a": [], "b": []})
+        self.assertEqual(len(self.failures(partial, canary_source('feature = "a"', "demo: run `cargo test -p demo --features a,b`"))), 1)
+
+    def test_the_message_names_the_whole_command(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        for message in (
+            "demo: needs `--features workspace-tests`",
+            "demo: run `cargo test -p other --features workspace-tests`",
+            "demo: run cargo test -p demo --features workspace-tests",
+        ):
+            self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', message))), 1, message)
+
+    def test_only_a_canary_that_code_generation_alone_evaluates_counts(self):
+        single = crate_manifest(None, {"workspace-tests": []})
+        message = "demo: run `cargo test -p demo --features workspace-tests`"
+        # A `const _` assert trips `cargo check`, clippy and editors too.
+        self.assertEqual(len(self.failures(single, const_canary_source('feature = "workspace-tests"', message))), 1)
+        # Without the static nothing instantiates the function: no build trips it.
+        self.assertEqual(len(self.failures(single, canary_source('feature = "workspace-tests"', message, used=False))), 1)
+
+    def test_a_crate_without_test_features_carries_none(self):
+        plain = crate_manifest(None, {"a": []})
+        self.assertEqual(self.failures(plain, "pub fn f() {}\n"), [])
+        stray = canary_source('feature = "a"', "demo: run `cargo test -p demo --features a`")
+        self.assertEqual(len(self.failures(plain, stray)), 1)
+
+
+class CanaryFixture(unittest.TestCase):
+    def test_the_selftest_fixture_carries_the_canary_shape(self):
+        """scripts/test-feature-canary-selftest.sh builds this fixture to prove
+        how the canary behaves on the pinned toolchain: it must have the shape
+        the guard requires of the Core crates."""
+        fixture = pcs.ROOT / "scripts" / "tests" / "fixtures" / "test-feature-canary"
+        manifest = pcs.tomllib.loads((fixture / "Cargo.toml.txt").read_text())
+        self.assertEqual(pcs.test_features(manifest), ["canary-test-feature"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text((fixture / "lib.rs.txt").read_text())
+            self.assertEqual(pcs.canary_failures("test-feature-canary-fixture", manifest, root), [])
+
+
+class SelfDevDependency(unittest.TestCase):
+    def test_a_crate_never_dev_depends_on_itself(self):
+        self.assertEqual(pcs.self_dev_dependency_failures("demo", crate_manifest(None, {}, {"other": "1"})), [])
+        path_only = crate_manifest(None, {}, {"demo": {"path": ".", "features": ["workspace-tests"]}})
+        self.assertEqual(len(pcs.self_dev_dependency_failures("demo", path_only)), 1)
+        renamed = crate_manifest(None, {}, {"me": {"path": ".", "package": "demo"}})
+        self.assertEqual(len(pcs.self_dev_dependency_failures("demo", renamed)), 1)
+        targeted = crate_manifest()
+        targeted["target"] = {"cfg(unix)": {"dev-dependencies": {"demo": {"path": "."}}}}
+        self.assertEqual(len(pcs.self_dev_dependency_failures("demo", targeted)), 1)
 
 
 if __name__ == "__main__":

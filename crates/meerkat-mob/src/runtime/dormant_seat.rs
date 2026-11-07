@@ -84,6 +84,22 @@ fn web_search_inherits(web_search: &ToolCategoryOverride) -> bool {
 }
 
 impl SeatBuildInputs {
+    /// The inputs `spec` names, read without taking them out of it: what a
+    /// declared role migration's successor builds with
+    /// ([`super::MemberRespawn`]).
+    pub(crate) fn of_spec(spec: &super::handle::SpawnMemberSpec) -> Self {
+        Self {
+            context: spec.context.clone(),
+            additional_instructions: spec.additional_instructions.clone(),
+            system_prompt_override: spec.system_prompt_override.clone(),
+            budget_limits: spec.budget_limits.clone(),
+            tool_access_policy: spec.tool_access_policy.clone(),
+            application_tool_policy: spec.application_tool_policy.clone(),
+            auth_binding: spec.auth_binding.clone(),
+            web_search: spec.tool_category_overrides.web_search,
+        }
+    }
+
     /// Whether the seat carries none of these inputs.
     pub(crate) fn is_empty(&self) -> bool {
         self == &Self::default()
@@ -550,8 +566,9 @@ pub(in crate::runtime) struct DormantSeatCandidate {
     pub(in crate::runtime) kickoff_objective_id: meerkat_core::interaction::ObjectiveId,
     /// What the seat carries to its session's first build: the spec's build
     /// inputs, taken out of it at the plan. Journaled and kept only for an
-    /// unborn session; a seat whose session exists binds what that session
-    /// holds.
+    /// unborn session, and for a same-session successor whose request
+    /// carries a build ([`super::MemberRespawn`]); any other seat whose
+    /// session exists binds what that session holds.
     pub(in crate::runtime) seat_build: SeatBuild,
 }
 

@@ -1373,6 +1373,11 @@ meerkat_machine_runtime_internal_inputs!(
         HoldInputController,
         ReleaseInputController,
     ],
+    // The failure arm of the until-changed switch-turn reconfigure, beside
+    // its completion arm: it withdraws the request the switch-turn staged.
+    LiveTopologyReconfiguration => [
+        AbortUntilChangedSwitchTurnReconfigure,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

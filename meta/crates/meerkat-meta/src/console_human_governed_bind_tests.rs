@@ -281,6 +281,7 @@ async fn send(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The frame's settled delivery status.

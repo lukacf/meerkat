@@ -363,9 +363,9 @@ mod tests {
 
     /// Facade features that exist in the manifest but are deliberately not
     /// part of the documented shipping inventory: test-only support, the
-    /// internal `workspace-tests` switch that only the path-only self
-    /// dev-dependency enables, and the deprecated private GPT Live path plus
-    /// its non-shipping harness.
+    /// internal `workspace-tests` switch that only the workspace's own test
+    /// builds turn on, and the deprecated private GPT Live path plus its
+    /// non-shipping harness.
     const NON_SHIPPING_FACADE_FEATURES: [&str; 7] = [
         "experimental-gpt-live",
         "experimental-gpt-live-gate0-harness",

@@ -258,6 +258,27 @@ them.
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
 
+- `meerkat-mob-mcp`, `meerkat-runtime`: a GPT Live voice request that the
+  voice model had turned into a client delegation just before its channel
+  closed (Turbo S S107), or that was still waiting behind a running
+  delegation when the user ended the call (a console voice session runs one
+  delegated turn at a time), now still runs after the close. The close
+  cancelled every admitted delegation whose worker had not started as work
+  that never started, so the spoken request was neither executed nor
+  recorded, and nothing said so. A delegation admitted before the close now
+  starts after it once a worker slot frees, on its operation's own closed
+  channel: the generated `ReconcileLiveDelegationTranscript*`,
+  `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`
+  and `RequeueUnstartedLiveDelegation` guards also admit a channel that
+  carries no runtime, fence or generation binding at all, on the exact
+  operation join, as `ResolveLiveDelegationWorkerStart` already did, and a
+  worker started that way takes no worker slot of the closed channel. It
+  settles like a worker that was running at the close: an owned fork's
+  result merges into the source member exactly once, and an existing member
+  keeps the request, its executor input and its answer in its own session.
+  Only blocked work the close finds, or work a worker hands back blocked
+  after the close, is still cancelled. Affects 0.8.41 through 0.9.10.
+
 - `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5
   with no thinking configured) no longer fails after a mid-session tool
   change on accounts that enforce thinking-block binding (Anthropic accounts

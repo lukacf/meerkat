@@ -435,6 +435,11 @@ struct ChannelSchedule {
     /// Results of completed items on this channel, by item, so a worker
     /// restarted after waiting on them receives them verbatim.
     completed_results: std::collections::HashMap<meerkat::WorkItemId, (String, String)>,
+    /// The channel closed. Its admitted delegations still start, run and
+    /// settle on the operation's own retired channel; it requeues nothing a
+    /// worker hands back, and it is dropped once nothing is queued or
+    /// running on it.
+    closed: bool,
 }
 
 impl ChannelSchedule {
@@ -445,7 +450,20 @@ impl ChannelSchedule {
             pending: std::collections::HashMap::new(),
             append_lane: Arc::new(Mutex::new(())),
             completed_results: std::collections::HashMap::new(),
+            closed: false,
         }
+    }
+}
+
+/// Drop a closed channel's schedule once nothing is queued or running on it.
+fn drop_drained_closed_schedule(
+    schedules: &mut std::collections::HashMap<ActiveChannelKey, ChannelSchedule>,
+    channel_key: &ActiveChannelKey,
+) {
+    if schedules.get(channel_key).is_some_and(|schedule| {
+        schedule.closed && schedule.queue.is_empty() && schedule.running.is_empty()
+    }) {
+        schedules.remove(channel_key);
     }
 }
 
@@ -5207,10 +5225,17 @@ impl ExperimentalLiveDelegationCoordinator {
         pending: &PendingDelegation,
         lane: Arc<Mutex<()>>,
     ) {
-        if let Some(schedule) = self.schedules.lock().await.get_mut(channel_key) {
-            schedule.running.remove(operation_id);
-            schedule.pending.remove(operation_id);
+        {
+            let mut schedules = self.schedules.lock().await;
+            if let Some(schedule) = schedules.get_mut(channel_key) {
+                schedule.running.remove(operation_id);
+                schedule.pending.remove(operation_id);
+            }
+            drop_drained_closed_schedule(&mut schedules, channel_key);
         }
+        // An owned delegation that waited out its channel's close is no
+        // longer on its way to the source member.
+        lock_unpoisoned(&self.running_after_close).remove(operation_id);
         let state = self
             .runtime
             .live_delegation_schedule_state(pending.runtime_binding.session_id(), operation_id)
@@ -6389,18 +6414,27 @@ impl ExperimentalLiveDelegationCoordinator {
             .iter()
             .map(|(_, title)| title.clone())
             .collect::<Vec<_>>();
+        let mut cancel_after_close = false;
         {
             let mut schedules = self.schedules.lock().await;
             if let Some(schedule) = schedules.get_mut(channel_key) {
                 schedule.running.remove(&operation_id);
                 if terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked {
-                    if let Some(pending) = schedule.pending.get_mut(&operation_id) {
-                        pending.blocked = true;
-                        pending.waited_on =
-                            terminal.blockers.iter().map(|(id, _)| id.clone()).collect();
-                    }
-                    if !schedule.queue.contains(&operation_id) {
-                        schedule.queue.push_back(operation_id.clone());
+                    if schedule.closed {
+                        // A closed channel requeues nothing a worker hands
+                        // back: like blocked work the close found, the item
+                        // is cancelled.
+                        schedule.pending.remove(&operation_id);
+                        cancel_after_close = true;
+                    } else {
+                        if let Some(pending) = schedule.pending.get_mut(&operation_id) {
+                            pending.blocked = true;
+                            pending.waited_on =
+                                terminal.blockers.iter().map(|(id, _)| id.clone()).collect();
+                        }
+                        if !schedule.queue.contains(&operation_id) {
+                            schedule.queue.push_back(operation_id.clone());
+                        }
                     }
                 } else {
                     schedule.pending.remove(&operation_id);
@@ -6413,6 +6447,28 @@ impl ExperimentalLiveDelegationCoordinator {
                             .insert(work.id.clone(), (retained.title.clone(), text.clone()));
                     }
                 }
+                drop_drained_closed_schedule(&mut schedules, channel_key);
+            }
+        }
+        if cancel_after_close {
+            if let Err(error) = self
+                .runtime
+                .cancel_queued_live_delegation(&retained.runtime_binding, &retained.operation)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    %operation_id,
+                    "live delegation blocked after its channel closed could not be cancelled"
+                );
+            }
+            if let (Some(workgraph), Some(work)) =
+                (retained.workgraph.as_ref(), retained.work.as_ref())
+                && let Err(error) = workgraph
+                    .close(&work.id, meerkat::WorkStatus::Cancelled, None)
+                    .await
+            {
+                tracing::warn!(%error, %operation_id, "voice work item blocked after its channel closed could not be cancelled");
             }
         }
         match terminal.terminal {
@@ -6429,14 +6485,10 @@ impl ExperimentalLiveDelegationCoordinator {
             }
             LiveDelegationWorkerTerminalKind::Completed if terminal.channel_closed => {
                 // An existing member executed the turn in its own canonical
-                // session; only an owned fork's result needs merging back.
-                if retained.admission.worker_ownership()
-                    == LiveDelegationWorkerOwnership::OwnedMember
-                    && let Some(text) = terminal.result_text.as_deref()
-                {
-                    self.merge_result_into_source(retained, text).await;
-                }
-                self.remove_retained_delegation(retained).await;
+                // session; only an owned fork's result merges back, exactly
+                // once even when the close sweep reaches it first (the result
+                // text is taken under its lock).
+                self.merge_result_after_channel_close(retained).await;
             }
             LiveDelegationWorkerTerminalKind::Completed if !terminal.terminal_ineligible => {
                 // The Completed sentence and the result are released under one
@@ -7254,27 +7306,74 @@ impl ExperimentalLiveDelegationCoordinator {
         self.cancel_responses_executions_for_binding(binding).await;
         self.settle_result_recovery_tasks(binding).await;
         self.settle_failed_start_cleanups(binding).await;
-        // Channel close cancels only work that never started: queued items
-        // and blocked items awaiting requeue. Running forks keep their
-        // machine custody and finish; their results merge into the source
-        // member instead of reaching the closed provider channel.
-        let (queued, running) = {
+        // Channel close cancels only the blocked work its schedule holds: a
+        // worker already took such an item and handed it back. Every admitted
+        // delegation that has not started keeps its generated admission (the
+        // close cancelled it once, as work that never started, and the spoken
+        // request was neither executed nor recorded, Turbo S S107): the
+        // schedule stays, marked closed, and starts it on the operation's own
+        // retired channel once a worker slot frees. Running workers keep
+        // their machine custody and finish. Results merge into the source
+        // member (an owned fork) or stay in the member's own canonical
+        // session (an existing member) instead of reaching the closed
+        // provider channel.
+        let owned_workers =
+            self.execution_policy.worker_ownership() == LiveDelegationWorkerOwnership::OwnedMember;
+        let (blocked, waiting, running) = {
             let mut schedules = self.schedules.lock().await;
-            match schedules.remove(&key) {
+            match schedules.get_mut(&key) {
                 Some(schedule) => {
-                    let queued = schedule
+                    schedule.closed = true;
+                    let mut blocked = Vec::new();
+                    let mut waiting = std::collections::BTreeSet::new();
+                    for operation_id in &schedule.queue {
+                        let Some(pending) = schedule.pending.get(operation_id) else {
+                            continue;
+                        };
+                        if pending.runtime_binding.generation()
+                            != binding.runtime_generation().get()
+                            || pending.runtime_binding.fence_token()
+                                != binding.runtime_fence().get()
+                        {
+                            continue;
+                        }
+                        if pending.blocked {
+                            blocked.push(pending.clone());
+                        } else {
+                            waiting.insert(operation_id.clone());
+                        }
+                    }
+                    let running = schedule.running.clone();
+                    schedule
                         .queue
-                        .iter()
-                        .filter_map(|operation_id| schedule.pending.get(operation_id).cloned())
-                        .collect::<Vec<_>>();
-                    (queued, schedule.running)
+                        .retain(|operation_id| waiting.contains(operation_id));
+                    schedule.pending.retain(|operation_id, _| {
+                        waiting.contains(operation_id) || running.contains(operation_id)
+                    });
+                    // Recorded while the item is still queued, so a worker
+                    // that starts and settles meanwhile cannot leave a stale
+                    // entry behind.
+                    if owned_workers {
+                        let mut running_after_close = lock_unpoisoned(&self.running_after_close);
+                        for operation_id in &waiting {
+                            running_after_close
+                                .insert(operation_id.clone(), binding.session_id().clone());
+                        }
+                    }
+                    drop_drained_closed_schedule(&mut schedules, &key);
+                    (blocked, waiting, running)
                 }
-                None => (Vec::new(), std::collections::BTreeSet::new()),
+                None => (
+                    Vec::new(),
+                    std::collections::BTreeSet::new(),
+                    std::collections::BTreeSet::new(),
+                ),
             }
         };
         // An owned worker still running finishes after the close and merges
         // its result into the source member: a channel reopened on this
-        // session meanwhile is told the work is still finishing.
+        // session meanwhile is told the work is still finishing, as it is for
+        // an owned delegation still waiting for its worker.
         {
             let retained = self.retained.lock().await;
             let mut running_after_close = lock_unpoisoned(&self.running_after_close);
@@ -7287,12 +7386,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 }
             }
         }
-        for pending in queued {
-            if pending.runtime_binding.generation() != binding.runtime_generation().get()
-                || pending.runtime_binding.fence_token() != binding.runtime_fence().get()
-            {
-                continue;
-            }
+        for pending in blocked {
             if let Err(error) = self
                 .runtime
                 .cancel_queued_live_delegation(&pending.runtime_binding, &pending.operation)
@@ -7301,7 +7395,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 tracing::warn!(
                     %error,
                     operation_id = %pending.operation.operation_id(),
-                    "queued live delegation could not be cancelled at channel close"
+                    "blocked live delegation could not be cancelled at channel close"
                 );
             }
             if let (Some(workgraph), Some(work)) =
@@ -7310,8 +7404,11 @@ impl ExperimentalLiveDelegationCoordinator {
                     .close(&work.id, meerkat::WorkStatus::Cancelled, None)
                     .await
             {
-                tracing::warn!(%error, "queued voice work item could not be cancelled");
+                tracing::warn!(%error, "blocked voice work item could not be cancelled");
             }
+        }
+        if !waiting.is_empty() {
+            self.spawn_pump(key.clone());
         }
         let retained = self
             .retained

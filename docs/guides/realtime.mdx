@@ -722,6 +722,18 @@ acknowledge a concurrent historical summary, gets the same notice. While the
 model is speaking, that notice waits until the response ends or the user takes
 the floor, and it is dropped if the result arrives first.
 
+A delegation outlives its channel. When the channel closes, or its transport
+drops, a delegation already running finishes, and one Meerkat admitted that
+has not started yet (still waiting behind the channel's worker limit, or
+admitted as the channel closed) starts after the close: its request is
+committed to the session and it runs on its closed channel's own delegation
+authority. Its result reaches the session instead of the closed channel: a
+durable fork's result merges into the member as a new turn, and an existing
+member's own turn already holds it. Until a durable fork's result has merged,
+a channel reopened on the session is told that work from the earlier call is
+still finishing. Only blocked work (a fork that handed its item back to wait
+for another item) ends at the close, as cancelled.
+
 On open and reopen, the selected canonical dialogue is supplied in native
 `session.input` at provider session creation. User text and visible assistant
 text retain their order and roles; executor System rows, SystemNotice rows, tool
@@ -872,9 +884,11 @@ let coordinator = compose_experimental_live_delegation_coordinator_with_policy(
 The coordinator resolves the source member from the channel's authoritative
 session binding; the browser does not select a worker or supply an execution
 session. Voice work uses the member's ordinary text model and generated input
-admission. Concurrent ordinary text remains independent work. Close and
-supersession cancel the exact voice operation, never retire the existing member
-or interrupt whichever unrelated user turn happens to be running. Operation
+admission. Concurrent ordinary text remains independent work. Supersession
+cancels the exact voice operation; a close lets it finish, and a request
+admitted before the close starts after it. Neither retires the existing
+member or interrupts whichever unrelated user turn happens to be running.
+Operation
 ownership is retained with recovery evidence rather than reconstructed from the
 host's current policy. Compose the returned coordinator into the same shared
 context-mirror/activation host as the default coordinator.

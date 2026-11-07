@@ -1,9 +1,12 @@
 //! Native Linux lowering of the existing immutable confinement requirement.
 //!
 //! Restricted paths use an empty private mount view, not content-only Landlock
-//! grants. No host procfs is exposed. This module owns no permission policy or
-//! child supervisor; it adapts the retained requirement and transfers the one
-//! spawned child into NativeChild.
+//! grants. No host procfs is exposed: every confined launch gets a new pid
+//! namespace and a fresh procfs of that namespace at `/proc`, which shows only
+//! the launch's own processes (a toolchain needs `/proc/self/exe`). This
+//! module owns no permission policy or child supervisor; it adapts the
+//! retained requirement and transfers the one spawned child into NativeChild,
+//! whose PID relays the launch's pid 1.
 //!
 //! Every granted path is canonical, with one exception: a read-only literal
 //! file grant may name a symbolic link as its final component
@@ -50,7 +53,8 @@ use crate::{ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunch
 
 // These are compatibility resources, not a bind of the host root. Missing
 // optional distribution paths are omitted; /bin/sh and the target still have
-// to resolve inside this view at actual exec. No /proc, /sys, home or scratch.
+// to resolve inside this view at actual exec. No host /proc, /sys, home or
+// scratch; the backend mounts its own procfs of the launch's pid namespace.
 const BASELINE_DIRECTORIES: &[&str] = &[
     "/bin",
     "/sbin",
@@ -101,6 +105,10 @@ enum SetupStep {
     Capabilities = 19,
     CloseRange = 20,
     Seccomp = 21,
+    PidNamespace = 22,
+    ParentDeathSignal = 23,
+    ProcTarget = 24,
+    ProcMount = 25,
 }
 
 impl SetupStep {
@@ -305,13 +313,14 @@ impl LinuxPolicy {
         // One slot per mount for setup's reopened sources, allocated before
         // fork: the child only writes its own copy.
         let mut sources = vec![-1; self.mounts.len()];
-        // A launch site of the confinement backend: the capability probe.
-        #[allow(clippy::disallowed_methods)]
-        let pid = unsafe { libc::fork() };
+        let pid = fork_confined();
         if pid == -1 {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         if pid == 0 {
+            // `apply` forks again into the new pid namespace; this child
+            // then only relays that grandchild's status, so the probe reads
+            // the grandchild's setup outcome here.
             let status = match self.apply(bound, &mut sources) {
                 Ok(()) => 0,
                 Err(failure) => failure.step.probe_status(),
@@ -365,13 +374,23 @@ impl LinuxPolicy {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
         {
+            // The new pid namespace is owned by the new user namespace, which
+            // is what lets the launch mount a procfs of it below.
             raw(unsafe {
-                libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC)
+                libc::unshare(
+                    libc::CLONE_NEWUSER
+                        | libc::CLONE_NEWNS
+                        | libc::CLONE_NEWIPC
+                        | libc::CLONE_NEWPID,
+                )
             })
             .map_err(SetupStep::Unshare.failed())?;
             write_file(c"/proc/self/setgroups", b"deny").map_err(SetupStep::Setgroups.failed())?;
             write_file(c"/proc/self/uid_map", &self.uid_map).map_err(SetupStep::UidMap.failed())?;
             write_file(c"/proc/self/gid_map", &self.gid_map).map_err(SetupStep::GidMap.failed())?;
+            // Returns only in pid 1 of the new pid namespace; the caller's
+            // process becomes its relay and never returns from here.
+            enter_pid_namespace()?;
             // Private propagation precedes every bind or filesystem mutation.
             raw(unsafe {
                 libc::mount(
@@ -419,6 +438,22 @@ impl LinuxPolicy {
                 mount.install(root, source, bound.noexec)?;
             }
             raw(unsafe { libc::close(root) }).map_err(SetupStep::StageOpen.failed())?;
+            // The backend's own procfs, of this launch's pid namespace: it
+            // shows only the launch's processes, never a host process's
+            // /proc/<pid>/mem or descriptors. A caller grant under /proc stays
+            // refused (`reserved_read_root`), so nothing else lands here.
+            raw(unsafe { libc::mkdir(c"/tmp/proc".as_ptr(), 0o555) })
+                .map_err(SetupStep::ProcTarget.failed())?;
+            raw(unsafe {
+                libc::mount(
+                    c"proc".as_ptr(),
+                    c"/tmp/proc".as_ptr(),
+                    c"proc".as_ptr(),
+                    libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                    std::ptr::null(),
+                )
+            })
+            .map_err(SetupStep::ProcMount.failed())?;
             // The synthetic ancestors are not writable scratch. Child mounts
             // keep their separately assigned read/write flags.
             raw(unsafe {
@@ -494,6 +529,140 @@ impl LinuxPolicy {
         .map_err(SetupStep::Seccomp.failed())?;
         Ok(())
     }
+}
+
+// The one fork of the confinement backend, for the capability probe and for
+// the launch's entry into its pid namespace. Allocation-free.
+fn fork_confined() -> libc::pid_t {
+    // A launch site of the confinement backend: the capability probe and the
+    // pid namespace's first process.
+    #[allow(clippy::disallowed_methods)]
+    unsafe {
+        libc::fork()
+    }
+}
+
+// Between fork and exec, after `unshare(CLONE_NEWPID)`, which moves only the
+// caller's future children: forks pid 1 of the new pid namespace and returns
+// only there. The caller (the child `Command::spawn` returns, or the probe's
+// child) becomes the relay (`relay`) and never returns.
+//
+// Kill semantics: NativeChild signals SIGKILL to the relay only. Pid 1 has
+// PR_SET_PDEATHSIG(SIGKILL) on the relay, and the death of a pid namespace's
+// pid 1 kills every process in that namespace, so the whole launch dies with
+// the relay. The process group std sets on the relay is inherited.
+//
+// Allocation-free raw syscalls only.
+fn enter_pid_namespace() -> Result<(), SetupFailure> {
+    // Pid 1 cannot see the relay through getppid() (it lives in the parent
+    // pid namespace), so the relay holds the write end of this pipe until it
+    // ends: a hang-up on the read end, seen after the death signal is armed,
+    // means the relay died before it was.
+    let mut alive = [-1; 2];
+    raw(unsafe { libc::pipe2(alive.as_mut_ptr(), libc::O_CLOEXEC) })
+        .map_err(SetupStep::PidNamespace.failed())?;
+    let [watch, hold] = alive;
+    let pid = fork_confined();
+    if pid == -1 {
+        let failure = SetupFailure {
+            step: SetupStep::PidNamespace,
+            errno: errno(),
+        };
+        unsafe {
+            libc::close(watch);
+            libc::close(hold);
+        }
+        return Err(failure);
+    }
+    if pid != 0 {
+        relay(pid, hold);
+    }
+    raw(unsafe { libc::close(hold) }).map_err(SetupStep::ParentDeathSignal.failed())?;
+    raw(unsafe {
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL as libc::c_ulong,
+            0,
+            0,
+            0,
+        )
+    })
+    .map_err(SetupStep::ParentDeathSignal.failed())?;
+    let mut relay_end = libc::pollfd {
+        fd: watch,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let ready = unsafe { libc::poll(&raw mut relay_end, 1, 0) };
+        if ready == 0 {
+            break;
+        }
+        if ready == -1 && errno() == libc::EINTR {
+            continue;
+        }
+        // A hang-up (the relay is gone) or a poll failure: never run on
+        // unwatched.
+        return Err(SetupFailure {
+            step: SetupStep::ParentDeathSignal,
+            errno: if ready == -1 { errno() } else { libc::ESRCH },
+        });
+    }
+    raw(unsafe { libc::close(watch) }).map_err(SetupStep::ParentDeathSignal.failed())?;
+    Ok(())
+}
+
+// The relay: closes every descriptor but `hold` (std's exec-error pipe among
+// them, so `Command::spawn` returns once pid 1 execs or reports its setup
+// failure through its own copy), waits for pid 1 and ends the way it ended:
+// its exit code, or its terminating signal raised again on the relay.
+// Allocation-free raw syscalls only; it never returns into std's exec.
+fn relay(child: libc::pid_t, hold: i32) -> ! {
+    // std's stdio sits at 0..=2, so `hold` is at least 3.
+    let closed = match (hold as libc::c_uint).checked_sub(1) {
+        Some(below) => unsafe {
+            libc::syscall(libc::SYS_close_range, 0_u32, below, 0_u32) != -1
+                && libc::syscall(libc::SYS_close_range, below + 2, u32::MAX, 0_u32) != -1
+        },
+        None => false,
+    };
+    if !closed {
+        // Cannot release std's error pipe: end the launch rather than leave
+        // spawn blocked on it while the target runs.
+        unsafe { libc::kill(child, libc::SIGKILL) };
+    }
+    let mut status = 0;
+    loop {
+        if unsafe { libc::waitpid(child, &raw mut status, 0) } == child {
+            break;
+        }
+        if errno() != libc::EINTR {
+            // Lost the only child: nothing left to relay.
+            unsafe { libc::_exit(PROBE_STEP_STATUS_BASE + SetupStep::PidNamespace as i32) };
+        }
+    }
+    if !closed {
+        unsafe { libc::_exit(PROBE_STEP_STATUS_BASE + SetupStep::PidNamespace as i32) };
+    }
+    if libc::WIFSIGNALED(status) {
+        let signal = libc::WTERMSIG(status);
+        unsafe {
+            // The relay's own death by the signal must not dump core.
+            let none = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::setrlimit(libc::RLIMIT_CORE, &raw const none);
+            libc::signal(signal, libc::SIG_DFL);
+            let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            libc::sigemptyset(set.as_mut_ptr());
+            libc::sigaddset(set.as_mut_ptr(), signal);
+            libc::sigprocmask(libc::SIG_UNBLOCK, set.as_ptr(), std::ptr::null_mut());
+            libc::kill(libc::getpid(), signal);
+            libc::_exit(128 + signal);
+        }
+    }
+    unsafe { libc::_exit(libc::WEXITSTATUS(status)) }
 }
 
 fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), ConfinementRefusal> {
@@ -2402,6 +2571,255 @@ mod tests {
             };
             counter += 1 + usize::from(skip);
         }
+    }
+
+    /// A compiled workspace policy over a fresh temporary directory, or
+    /// `None` (after a `SKIPPED:` line) where this host cannot run the
+    /// backend at all (no unprivileged user namespaces, or a procfs it may
+    /// not mount); the capability probe decides, as it does for callers.
+    fn confined_workspace() -> Option<(tempfile::TempDir, PathBuf, Arc<LinuxPolicy>)> {
+        use meerkat_core::confinement::{ConfinementSpec, PlatformBaseline};
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().canonicalize().unwrap();
+        let requirement = ExecutionConfinement::try_from(ConfinementSpec {
+            baseline: PlatformBaseline::CommandRuntimeV1,
+            read: FilesystemAccess::Paths(vec![PathAccess::Subtree(work.clone())]),
+            write: FilesystemAccess::Paths(vec![PathAccess::Subtree(work.clone())]),
+            deny_read: vec![],
+            deny_write: vec![],
+            unix_connect: vec![],
+            network: IpNetworkAccess::Denied,
+            require_descendant_termination: false,
+        })
+        .unwrap();
+        match LinuxPolicy::compile(&requirement) {
+            Err(ConfinementRefusal::BackendUnavailable) => {
+                println!("SKIPPED: the Linux confinement backend is unavailable on this host");
+                None
+            }
+            // Any other refusal of this supported profile fails the test.
+            compiled => Some((temp, work, compiled.unwrap())),
+        }
+    }
+
+    fn shell(work: &Path, script: &str) -> ProcessLaunchSpec {
+        ProcessLaunchSpec::new(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), script.into()],
+            work.to_path_buf(),
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    // The host PIDs of `pid`'s children, read from the host procfs.
+    fn children(pid: u32) -> Vec<u32> {
+        std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(|child| child.parse().unwrap())
+            .collect()
+    }
+
+    // Whether host process `pid` still runs (neither reaped nor a zombie).
+    fn running(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
+            })
+            .is_some_and(|state| state != "Z")
+    }
+
+    fn poll_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        done()
+    }
+
+    /// The launch sees a procfs of its own: `/proc/self/exe` resolves (the
+    /// toolchain's self-location), for the shell and for a command it runs.
+    #[test]
+    fn a_confined_launch_resolves_its_own_executable_through_proc() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        let shell_name = std::fs::canonicalize("/bin/sh").unwrap();
+        let shell_name = shell_name.file_name().unwrap().to_str().unwrap();
+        let output = runtime()
+            .block_on(async {
+                spawn(
+                    policy,
+                    shell(&work, "readlink /proc/$$/exe && readlink /proc/self/exe"),
+                    SpawnIo::default(),
+                    None,
+                )
+                .unwrap()
+                .wait_with_output()
+                .await
+            })
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "{stdout}");
+        assert!(lines.iter().all(|line| line.starts_with('/')), "{stdout}");
+        assert!(lines[0].ends_with(&format!("/{shell_name}")), "{stdout}");
+        assert!(lines[1].ends_with("/readlink"), "{stdout}");
+    }
+
+    /// The procfs is that of the launch's own pid namespace: it lists only
+    /// the launch's processes, and its pid 1 is the launched command.
+    #[test]
+    fn the_confined_procfs_shows_only_the_launchs_own_processes() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        let output = runtime()
+            .block_on(async {
+                spawn(
+                    policy,
+                    shell(
+                        &work,
+                        "cat /proc/1/comm; ls /proc | grep -c '^[0-9][0-9]*$'",
+                    ),
+                    SpawnIo::default(),
+                    None,
+                )
+                .unwrap()
+                .wait_with_output()
+                .await
+            })
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("sh"), "{stdout}");
+        let visible: u32 = lines.next().unwrap().parse().unwrap();
+        // The shell, ls and grep at most: no host process is listed.
+        assert!((1..=3).contains(&visible), "{stdout}");
+    }
+
+    /// Killing the custody PID (the relay) ends the whole launch: pid 1 of
+    /// the namespace dies by its parent-death signal and takes its
+    /// descendants with it.
+    #[test]
+    fn killing_the_custody_pid_ends_every_process_of_the_launch() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        runtime().block_on(async {
+            let mut child = spawn(
+                policy,
+                shell(&work, "sleep 60; :"),
+                SpawnIo::default(),
+                None,
+            )
+            .unwrap();
+            let relay = child.id().unwrap();
+            let mut init = Vec::new();
+            assert!(poll_until(|| {
+                init = children(relay);
+                init.len() == 1
+            }));
+            let init = init[0];
+            let mut sleeper = Vec::new();
+            assert!(poll_until(|| {
+                sleeper = children(init);
+                sleeper.len() == 1
+            }));
+            let sleeper = sleeper[0];
+            let started = Instant::now();
+            child.kill().await.unwrap();
+            let status = child.wait().await.unwrap();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert!(poll_until(|| !running(init) && !running(sleeper)));
+        });
+    }
+
+    /// An exec failure inside the sandbox is still `spawn`'s typed error,
+    /// carried by std's exec-error pipe, not a child that exits non-zero.
+    #[test]
+    fn a_missing_confined_program_fails_spawn() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        let launch = ProcessLaunchSpec::new(
+            work.join("missing-program"),
+            Vec::new(),
+            work.clone(),
+            Default::default(),
+        )
+        .unwrap();
+        let _runtime = runtime();
+        let _guard = _runtime.enter();
+        let error = spawn(policy, launch, SpawnIo::default(), None)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    }
+
+    /// The relay ends the way the launched command ended: its exit code, or
+    /// its terminating signal.
+    #[test]
+    fn the_custody_pid_relays_the_launchs_exit_code_and_signal() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        use std::os::unix::process::ExitStatusExt;
+        runtime().block_on(async {
+            let status = spawn(
+                Arc::clone(&policy),
+                shell(&work, "exit 7"),
+                SpawnIo::default(),
+                None,
+            )
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+            assert_eq!(status.code(), Some(7));
+
+            // Inside the sandbox kill(2) is refused and a pid namespace's
+            // pid 1 ignores unhandled signals from its own namespace, so the
+            // host signals pid 1 directly: SIGKILL from an ancestor namespace
+            // is always delivered. The relay itself is not signalled.
+            let mut child = spawn(
+                policy,
+                shell(&work, "sleep 60; :"),
+                SpawnIo::default(),
+                None,
+            )
+            .unwrap();
+            let relay = child.id().unwrap();
+            let mut init = Vec::new();
+            assert!(poll_until(|| {
+                init = children(relay);
+                init.len() == 1
+            }));
+            assert_eq!(
+                unsafe { libc::kill(init[0] as libc::pid_t, libc::SIGKILL) },
+                0
+            );
+            let status = child.wait().await.unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert_eq!(status.code(), None);
+        });
     }
 
     /// ioctl admits only FIONBIO, the ioctl form of O_NONBLOCK that std uses

@@ -55,6 +55,22 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
             .is_err()
     );
     assert!(!marker.exists(), "target ran before host release");
+    // Custody's PID relays one process: pid 1 of the launch's own pid
+    // namespace, which holds the gate and then becomes the target.
+    #[cfg(target_os = "linux")]
+    {
+        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
+        let children: Vec<&str> = children.split_whitespace().collect();
+        assert_eq!(children.len(), 1, "{children:?}");
+        let status = std::fs::read_to_string(format!("/proc/{}/status", children[0])).unwrap();
+        let namespaced = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(namespaced, [children[0], "1"]);
+    }
     writer.write_all(b"host-release\n").unwrap();
     drop(writer);
     let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
@@ -62,6 +78,9 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
         .unwrap()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+    #[cfg(target_os = "linux")]
+    assert_eq!(output.stdout, b"1");
+    #[cfg(not(target_os = "linux"))]
     assert_eq!(output.stdout, pid.to_string().as_bytes());
     assert_eq!(std::fs::read(marker).unwrap(), b"ran");
 }

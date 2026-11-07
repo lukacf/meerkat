@@ -2885,18 +2885,32 @@ impl McpConnection {
         // transport result. Dropping the router's admitted read future would
         // skip its outcome observation and release its credential lease early.
         // A timeout is local unavailability, never proof the remote did no work.
-        let result = tokio::time::timeout_at(deadline, async {
-            self.service
-                .send_request_with_option(
+        // The deadline ends both the handoff and the wait for the response.
+        // A read it ends is abandoned: the server is told it is cancelled,
+        // from a task, so the caller is not held while that notice is sent
+        // (rmcp's own timeout would wait for it, and on a connection whose
+        // transport is still busy with this very read it could wait forever).
+        let result = async {
+            let handle = tokio::time::timeout_at(
+                deadline,
+                self.service.send_request_with_option(
                     request,
-                    rmcp::service::PeerRequestOptions::with_timeout(remaining),
-                )
-                .await?
-                .await_response()
-                .await
-        })
+                    rmcp::service::PeerRequestOptions::no_options(),
+                ),
+            )
+            .await
+            .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))?;
+            let abandoned = AbandonedRequest::arm(&self.service, handle.id.clone());
+            match tokio::time::timeout_at(deadline, handle.await_response()).await {
+                Ok(response) => {
+                    abandoned.settled();
+                    response
+                }
+                // Dropping the guard abandons the read.
+                Err(_) => Err(rmcp::ServiceError::Timeout { timeout: remaining }),
+            }
+        }
         .await
-        .unwrap_or(Err(rmcp::ServiceError::Timeout { timeout: remaining }))
         .map_err(|error| {
             let disposition = dispatch.disposition();
             if matches!(disposition, Some(RequestDisposition::Sent) | None)
@@ -4034,7 +4048,7 @@ pub(crate) async fn call_tool_on(
         request.extensions.insert(custody);
     }
     let request = request.into();
-    let result = service.send_request(request).await.map_err(|error| {
+    let failure = |error: rmcp::ServiceError| {
         let disposition = dispatch.disposition();
         // An OAuth refusal (a 401, or no usable credential before
         // dispatch) is typed unless the request's own disposition already
@@ -4045,12 +4059,82 @@ pub(crate) async fn call_tool_on(
             return refused;
         }
         tool_call_failure(server, name, disposition, &error)
-    })?;
+    };
+    let handle = service
+        .send_cancellable_request(request, rmcp::service::PeerRequestOptions::no_options())
+        .await
+        .map_err(&failure)?;
+    // A caller that stops waiting (its deadline expired, or it was
+    // cancelled) drops this future: the server is told the request is
+    // abandoned, unless its response settled it first.
+    let abandoned = AbandonedRequest::arm(service, handle.id.clone());
+    let response = handle.await_response().await;
+    abandoned.settled();
+    let result = response.map_err(failure)?;
     match result {
         ServerResult::CallToolResult(result) => Ok(result),
         _ => Err(McpError::ProtocolError {
             message: "unexpected MCP tools/call response".into(),
         }),
+    }
+}
+
+/// Why a request this host stopped waiting for is cancelled.
+const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
+
+/// Tells the server about a request this host stops waiting for. Dropped
+/// before the request settled (the caller's future was dropped: its deadline
+/// expired or it was cancelled), the guard sends `notifications/cancelled`
+/// for the request id, once, from a task: the caller is never held while
+/// the notice is sent. A request settled by its response or an error sends
+/// nothing.
+///
+/// Known limit: rmcp writes every outbound message from a task of its own, so
+/// a cancellation sent in the same tick as its request's handoff (a deadline
+/// that expires during a slow entry step, or one that had already expired)
+/// can reach the server before the request does. The server cannot match it
+/// and keeps working; this was seen in about 3 of 1500 immediate abandons on
+/// a multi-threaded runtime. Ordinary deadlines fire long after the request
+/// was written. A real fix needs rmcp to write a request before later
+/// messages. Without this guard no cancellation is sent at all.
+struct AbandonedRequest {
+    peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
+    id: rmcp::model::RequestId,
+}
+
+impl AbandonedRequest {
+    fn arm(peer: &rmcp::service::Peer<rmcp::RoleClient>, id: rmcp::model::RequestId) -> Self {
+        Self {
+            peer: Some(peer.clone()),
+            id,
+        }
+    }
+
+    /// The request settled: there is nothing to cancel.
+    fn settled(mut self) {
+        self.peer = None;
+    }
+}
+
+impl Drop for AbandonedRequest {
+    fn drop(&mut self) {
+        let Some(peer) = self.peer.take() else {
+            return;
+        };
+        // A drop cannot wait for the send, so the notification goes from a
+        // task. Without a runtime the transport is shutting down with it and
+        // nothing can be sent.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let notification =
+            rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam {
+                request_id: self.id.clone(),
+                reason: Some(ABANDONED_REQUEST_REASON.to_owned()),
+            });
+        runtime.spawn(async move {
+            let _ = peer.send_notification(notification.into()).await;
+        });
     }
 }
 
@@ -7299,6 +7383,14 @@ mod pagination_tests;
 #[cfg(test)]
 #[path = "structured_result_tests.rs"]
 mod structured_result_tests;
+
+#[cfg(test)]
+#[path = "cancel_tests.rs"]
+mod cancel_tests;
+
+#[cfg(test)]
+#[path = "cancel_http_tests.rs"]
+mod cancel_http_tests;
 
 #[cfg(test)]
 #[path = "process_confinement_tests.rs"]

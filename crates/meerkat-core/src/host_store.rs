@@ -51,7 +51,10 @@
 //!    pick one by a fixed rule, such as the lowest commit id, decided per
 //!    batch, so that a batch that loses in one scope is invisible in all of
 //!    them. Whatever the rule, a batch carrying a lower fence token never
-//!    beats one carrying a higher token at the same version.
+//!    beats one carrying a higher token at the same version. A store that
+//!    fails the load reports the scope per scope in its listings
+//!    ([`HeadPage::conflicts`], with the version that holds the two
+//!    batches) and never fails a page for it.
 //! 5. **Fencing.** After a token is acquired, a batch carrying a lower token
 //!    whose commit point comes later never becomes visible, and every batch
 //!    whose commit point comes before the acquire stays visible, whether or
@@ -693,14 +696,73 @@ pub struct ScopeHead {
     pub head: VersionedHead,
 }
 
-/// One page of [`HostStore::list_heads`].
+/// One page of [`HostStore::list_heads`]: the visible scopes of the listed
+/// kind and name range, as heads, and those whose load answers a typed
+/// conflict (obligation 4 met at load), as conflicts. A name is in one
+/// list, never both. Both lists are in name order (by the bytes of the
+/// names), and together they are one page: at most the call's `limit`
+/// entries across both, and `next` is the last name of either list when
+/// more remain. Build one with [`HeadPage::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct HeadPage {
-    /// Visible scopes of the listed kind, in name order (by the bytes of
-    /// their names), each with its visible head.
+    /// Visible scopes of the listed kind, each with its visible head.
     pub heads: Vec<ScopeHead>,
+    /// Visible scopes of the listed kind whose load answers a typed
+    /// conflict.
+    pub conflicts: Vec<ScopeConflict>,
     /// The name to read on after, or `None` when the listing has ended.
     pub next: Option<ScopeName>,
+}
+
+impl HeadPage {
+    /// A page of `heads`, reading on after `next` when it is `Some`, with
+    /// no conflicted scope.
+    #[must_use]
+    pub fn new(heads: Vec<ScopeHead>, next: Option<ScopeName>) -> Self {
+        Self {
+            heads,
+            conflicts: Vec::new(),
+            next,
+        }
+    }
+
+    /// This page with the conflicted scopes it reports.
+    #[must_use]
+    pub fn with_conflicts(mut self, conflicts: Vec<ScopeConflict>) -> Self {
+        self.conflicts = conflicts;
+        self
+    }
+}
+
+/// A visible scope whose load answers a typed conflict: two batches hold
+/// its `version` (obligation 4 met at load). A listing reports it in
+/// [`HeadPage::conflicts`] and never fails the page for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ScopeConflict {
+    /// The scope's name.
+    pub name: ScopeName,
+    /// The version that holds the two batches: the `current` its load's
+    /// [`HostStoreError::Conflict`] names.
+    pub version: ScopeVersion,
+    /// The conflicting batches' commit ids in ascending order, without
+    /// repeats, the same each time the store lists an unchanged conflict;
+    /// empty when the store does not know them.
+    pub commit_ids: Vec<CommitId>,
+}
+
+impl ScopeConflict {
+    /// The conflict of `name` at `version`, between the batches
+    /// `commit_ids` (ascending, without repeats; empty when unknown).
+    #[must_use]
+    pub fn new(name: ScopeName, version: ScopeVersion, commit_ids: Vec<CommitId>) -> Self {
+        Self {
+            name,
+            version,
+            commit_ids,
+        }
+    }
 }
 
 /// What one batch does to one scope. The parts apply in this order:
@@ -876,7 +938,9 @@ pub enum HostStoreError {
     /// The store refused the batch at commit: `scope` is at `current`
     /// (`None`: it does not exist), not at the update's previous version.
     /// Only a store that meets obligation 4 at commit answers it; nothing
-    /// of the batch is applied.
+    /// of the batch is applied. For a load (obligation 4 met at load),
+    /// `current` is the version that holds the two batches, the version a
+    /// listing reports in [`ScopeConflict::version`].
     #[error("{scope} is at version {current:?}, not the batch's previous version")]
     Conflict {
         scope: ScopeRef,
@@ -963,6 +1027,14 @@ pub trait HostStore: Send + Sync {
     /// failover (obligation 9). Core lists the four kinds at once, each
     /// kind's pages one after another, so up to four calls of one realm
     /// run concurrently, never two of one kind.
+    ///
+    /// A scope whose load answers a typed conflict is reported in
+    /// [`HeadPage::conflicts`], with the version that holds the two
+    /// batches, never among the heads and never by failing the page; the
+    /// page holds at most `limit` entries across both lists. A store that
+    /// must wait before it can decide what a lower token's batch shows (a
+    /// pending acquire cut) answers [`HostStoreError::Unavailable`] for
+    /// the page, never a conflict.
     async fn list_heads(
         &self,
         kind: ScopeKind,

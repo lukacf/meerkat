@@ -543,7 +543,7 @@ impl HostStore for FenceHost {
         } else {
             None
         };
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next))
     }
 
     async fn read_rows(

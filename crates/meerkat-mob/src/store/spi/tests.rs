@@ -145,7 +145,7 @@ impl HostStore for MemoryHost {
         });
         let next = (heads.len() > limit).then(|| heads[limit - 1].name.clone());
         heads.truncate(limit);
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next))
     }
 
     async fn read_rows(

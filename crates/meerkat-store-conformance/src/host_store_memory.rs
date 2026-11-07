@@ -497,7 +497,7 @@ impl HostStore for InMemoryHostStore {
         } else {
             None
         };
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next))
     }
 
     async fn read_rows(

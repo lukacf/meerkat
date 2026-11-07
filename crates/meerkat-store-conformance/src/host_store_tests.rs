@@ -315,7 +315,7 @@ impl HostStore for StaleRelist {
         } else {
             None
         };
-        Ok(HeadPage { heads: page, next })
+        Ok(HeadPage::new(page, next))
     }
 
     async fn read_rows(

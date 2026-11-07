@@ -10,8 +10,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeVersion, VersionedHead,
 };
 use tokio::time::Instant;
 
@@ -65,9 +65,8 @@ struct HostState {
 /// A scope the host loads as a typed conflict: two batches hold one of its
 /// versions (a superseded writer's late batch, folded at that version), so
 /// every load of it answers `Conflict` naming that version, as a store that
-/// meets obligation 4 at load does. A listing whose page would show it fails
-/// the whole page, as a store that does not report a conflict per scope
-/// does.
+/// meets obligation 4 at load does. A listing reports it per scope
+/// (`HeadPage::conflicts`).
 #[derive(Debug, Clone)]
 pub(crate) struct ConflictedScope {
     pub(crate) version: ScopeVersion,
@@ -618,51 +617,60 @@ impl HostStore for TestHost {
         }
         let limit = cap.map_or(limit, |cap| limit.min(cap));
         let state = self.state();
+        // Every name of the kind after `after`, in name order: a visible
+        // scope, or a conflicted one (a deleted incarnation a late batch
+        // landed on included). A conflicted name is reported per scope,
+        // never as a head and never by failing the page, unless its conflict
+        // arose after this listing.
+        let names: std::collections::BTreeSet<&String> = state
+            .scopes
+            .keys()
+            .chain(state.conflicts.keys())
+            .filter(|(scope_kind, name)| {
+                *scope_kind == kind && after.is_none_or(|after| name.as_str() > after.as_str())
+            })
+            .map(|(_, name)| name)
+            .collect();
         let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut last: Option<String> = None;
         let mut more = false;
-        for ((scope_kind, name), stored) in &state.scopes {
-            if *scope_kind != kind || after.is_some_and(|after| name.as_str() <= after.as_str()) {
-                continue;
-            }
-            if heads.len() == limit {
+        for name in names {
+            if heads.len() + conflicts.len() == limit {
                 more = true;
                 break;
             }
-            heads.push(ScopeHead {
-                name: ScopeName::try_new(name.clone())?,
-                head: VersionedHead {
-                    version: stored.version,
-                    commit_id: stored.commit_id.clone(),
-                    head: stored.head.clone(),
-                },
-            });
+            let key = (kind, name.clone());
+            match state.conflicts.get(&key) {
+                Some(conflicted) if !conflicted.after_listing => {
+                    conflicts.push(ScopeConflict::new(
+                        ScopeName::try_new(name.clone())?,
+                        conflicted.version,
+                        conflicted.commit_ids.clone(),
+                    ));
+                }
+                _ => {
+                    let Some(stored) = state.scopes.get(&key) else {
+                        continue;
+                    };
+                    heads.push(ScopeHead {
+                        name: ScopeName::try_new(name.clone())?,
+                        head: VersionedHead {
+                            version: stored.version,
+                            commit_id: stored.commit_id.clone(),
+                            head: stored.head.clone(),
+                        },
+                    });
+                }
+            }
+            last = Some(name.clone());
         }
         let next = if more {
-            heads.last().map(|head| head.name.clone())
+            last.map(ScopeName::try_new).transpose()?
         } else {
             None
         };
-        // A conflicted scope in this page's range fails the whole page, as a
-        // store that does not report a conflict per scope does.
-        if let Some(((_, name), conflicted)) =
-            state
-                .conflicts
-                .iter()
-                .find(|((scope_kind, name), conflicted)| {
-                    *scope_kind == kind
-                        && !conflicted.after_listing
-                        && after.is_none_or(|after| name.as_str() > after.as_str())
-                        && next
-                            .as_ref()
-                            .is_none_or(|end| name.as_str() <= end.as_str())
-                })
-        {
-            return Err(HostStoreError::Conflict {
-                scope: ScopeRef::new(kind, ScopeName::try_new(name.clone())?),
-                current: Some(conflicted.version),
-            });
-        }
-        Ok(HeadPage { heads, next })
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
     }
 
     async fn read_rows(

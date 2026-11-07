@@ -31789,10 +31789,7 @@ mod tests {
             _limit: usize,
         ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
         {
-            Ok(meerkat_core::host_store::HeadPage {
-                heads: Vec::new(),
-                next: None,
-            })
+            Ok(meerkat_core::host_store::HeadPage::new(Vec::new(), None))
         }
 
         async fn read_rows(
@@ -32302,10 +32299,7 @@ mod tests {
             _limit: usize,
         ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
         {
-            Ok(meerkat_core::host_store::HeadPage {
-                heads: Vec::new(),
-                next: None,
-            })
+            Ok(meerkat_core::host_store::HeadPage::new(Vec::new(), None))
         }
 
         async fn read_rows(

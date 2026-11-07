@@ -1745,6 +1745,14 @@ impl SpiRealm {
                 .host
                 .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
                 .await?;
+            // A conflicted scope the store reports fails the listing, as a
+            // store that fails the page for it does.
+            if let Some(conflict) = page.conflicts.first() {
+                return Err(SpiError::Host(HostStoreError::Conflict {
+                    scope: ScopeRef::new(kind, conflict.name.clone()),
+                    current: Some(conflict.version),
+                }));
+            }
             heads.extend(page.heads);
             match page.next {
                 Some(next) => after = Some(next),

@@ -23,10 +23,14 @@ use meerkat_mob::{MobDefinition, SpawnMemberSpec};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const ISSUER: &str = "https://trusted.meta.local";
+/// A development issuer (a `.localhost` host), whose HS256 fixture tokens
+/// the console verifies (signature, issuer, audience, allowlist).
+const ISSUER: &str = "https://trusted.meta.localhost";
 const ALICE: &str = "alice@example.test";
 const BOB: &str = "bob@example.test";
 const ROBOT: &str = "svc:robot";
+/// The access admin an enabled access controller needs; no row sends as it.
+const ADMIN: &str = "root@example.test";
 const MEMBER: &str = "router";
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -105,9 +109,9 @@ fn person_bearer(email: &str) -> String {
     }))
 }
 
-/// A service's token.
+/// A service's token: a `svc:` subject with the service actor type.
 fn service_bearer() -> String {
-    bearer_with(json!({ "sub": ROBOT, "email": ROBOT, "actor_type": "service" }))
+    bearer_with(json!({ "sub": ROBOT, "actor_type": "service", "provider": "generic_oidc" }))
 }
 
 /// A persistent composition over `state`, as a gateway boots one.
@@ -520,6 +524,7 @@ async fn open_console_person_send_names_no_requester() {
     runtime.set_access_controller(
         AccessController::new(AccessControlConfig {
             enabled: true,
+            admins: vec![ADMIN.to_string()],
             rules: vec![AccessRule {
                 id: "everyone-views-and-sends".to_string(),
                 actions: vec!["agent.view".to_string(), "agent.send".to_string()],

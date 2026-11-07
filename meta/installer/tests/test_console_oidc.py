@@ -481,6 +481,21 @@ async def test_oidc_logout_signs_the_login_out_of_the_console(tmp_path):
         await console.close()
 
 
+async def test_oidc_host_health_probe_names_the_operator_and_no_person(tmp_path):
+    native, issuer = OidcNative(), MockIssuer()
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as probe:
+            bearer = console_auth._token(console.key, OPERATOR_EMAIL, scope="host-health")
+            response = await probe.get("/console/experience", headers={"Authorization": "Bearer " + bearer})
+            assert response.status_code == 200
+            claims = front_claims(native.requests[-1], console)
+            assert claims["email"] == OPERATOR_EMAIL and "sub" not in claims and "sid" not in claims
+    finally:
+        await console.close()
+
+
 async def test_oidc_limits_pending_sign_ins_and_failures_per_address(tmp_path, clock, monkeypatch):
     monkeypatch.setattr(console_auth, "LOGIN_FORMS_PER_CLIENT", 3)
     native, issuer = OidcNative(), MockIssuer()
@@ -817,66 +832,47 @@ def test_setup_checks_the_oidc_operator_email_and_the_people_to_admit(generated_
 
 
 async def test_generated_host_builds_the_oidc_front_from_its_source_and_private_settings(tmp_path, monkeypatch):
-    """The generated host reads the source and private settings once, at start."""
-    import meerkat_mobkit
+    """The generated Meta host reads the source and private settings once, at start."""
+    import importlib.util
     from launchkit.blueprint import starter_blueprint
     from launchkit.compiler import generate_files
-    from test_application_extension import load_host, supported_host_carriers
 
-    module = load_host(monkeypatch, tmp_path)
     files = generate_files(starter_blueprint())
+    for name, content in files.items():
+        destination = tmp_path / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    definition = importlib.util.spec_from_file_location("oidc_generated_app", tmp_path / "app.py")
+    host = importlib.util.module_from_spec(definition)
+    definition.loader.exec_module(host)
     spec = json.loads(files["deployment.json"])
-    (tmp_path / "config").mkdir()
-    (tmp_path / "config/mob.toml").write_text(files["config/mob.toml"])
-    (tmp_path / "deployment.json").write_text(json.dumps(spec))
+    (tmp_path / "application").mkdir(exist_ok=True)
+    (tmp_path / "application/__init__.py").write_text(
+        "class Integration: pass\ndef build(context): return Integration()\n")
+    (tmp_path / "application/tool-policy.json").write_text(json.dumps({
+        "provider_id": "oidc-host-specimen", "policy_id": "explicit-empty-intent", "revision": 1,
+        "members": [{"member_identity": row["identity"], "grants": []} for row in spec["agents"]]}))
     write_oidc_source(tmp_path)
-    (tmp_path / "application/__init__.py").write_text("class Integration: pass\ndef build(context): return Integration()\n")
     (tmp_path / "application/configuration.json").write_text(json.dumps({"fields": oidc_fields()}))
-    binary = tmp_path / "gateway"
-    binary.touch()
-    monkeypatch.setattr(module, "gateway_path", lambda: binary)
-    monkeypatch.setenv("OPENAI_API_KEY", "isolated-test-value")
+    monkeypatch.setattr(host, "validate_configuration_values", lambda *a: None)
+    monkeypatch.setattr(host, "local_tools", lambda *a: [])
     monkeypatch.setenv("CONSOLE_USER_ID", OPERATOR_EMAIL)
     monkeypatch.setenv("CONSOLE_OIDC_CLIENT_SECRET", CLIENT_SECRET)
     monkeypatch.setenv("CONSOLE_ALLOWED_EMAILS", ALICE)
     monkeypatch.delenv("CONSOLE_LOGIN_PASSWORD", raising=False)
     fronts, configs = [], []
-    original = module.ConsoleFront
+    original = host.ConsoleFront
 
     def front(*args, **options):
         console = original(*args, **options)
         fronts.append((args, options, console))
         return console
-
-    class Runtime:
-        def __init__(self, config):
-            configs.append(config)
-
-        async def connect(self):
-            pass
-
-        async def identity_bootstrap_status(self):
-            return SimpleNamespace(complete=True, ready=True, counts=SimpleNamespace(broken=0))
-
-        async def shutdown(self):
-            pass
-
-    class Tools:
-        def __init__(self, *args):
-            pass
-
-        def for_agent(self, agent):
-            return []
-
-        async def close(self):
-            pass
+    monkeypatch.setattr(host, "ConsoleFront", front)
 
     class Pool:
         def __init__(self, spec):
-            pass
-
-        def for_class(self, item):
-            return []
+            self.connections = {}
 
         async def start(self):
             pass
@@ -884,22 +880,43 @@ async def test_generated_host_builds_the_oidc_front_from_its_source_and_private_
         async def close(self):
             pass
 
-    async def prepare_storage(root, factory):
-        pass
+        def for_class(self, item):
+            return []
+    monkeypatch.setattr(host, "MCPPool", Pool)
 
-    monkeypatch.setattr(module, "ConsoleFront", front)
-    monkeypatch.setattr(module, "ConnectorTools", Tools)
-    monkeypatch.setattr(module, "MCPPool", Pool)
-    Runtime._rpc = supported_host_carriers
-    monkeypatch.setattr(meerkat_mobkit, "MobKitRuntime", Runtime)
-    monkeypatch.setitem(sys.modules, "storage_setup", SimpleNamespace(prepare_storage=prepare_storage))
-    args = SimpleNamespace(connections_check=False, activate_revision=7, definition_revision=False,
-                           list_flows=False, run_flow=None, smoke=False)
-    await module.run(spec, args)
+    class Runtime:
+        async def identity_bootstrap_status(self):
+            return SimpleNamespace(complete=True, ready=True, counts=SimpleNamespace(broken=0))
+
+        async def shutdown(self):
+            pass
+    runtime = Runtime()
+
+    class Startup:
+        console_public_origin = None
+        hosted_mcp_targets = ()
+        gateway = SimpleNamespace(path=tmp_path / "app.py")
+
+        async def prepare(self, application):
+            pass
+
+        def builder_config(self, **options):
+            configs.append(options)
+            return SimpleNamespace(**options)
+
+        async def connect(self, config, application):
+            application.context.stop_event.set()
+            return runtime
+
+        async def shutdown(self, selected):
+            await selected.shutdown()
+    await host.run(spec, SimpleNamespace(activate_revision=None, connections_check=False),
+                   application_startup=Startup())
     (args_used, options, console), = fronts
-    assert args_used[2:4] == (OPERATOR_EMAIL, None)
+    assert args_used[2:4] == (OPERATOR_EMAIL, None) and options["runtime_namespace"] == "meta"
     settings = options["oidc"]
     assert (settings.issuer, settings.client_id, settings.client_secret, settings.allowed_emails) == (
         ISSUER_URL, CLIENT_ID, CLIENT_SECRET, (ALICE,))
-    assert configs[-1].auth_config == console.native_auth and console.native_auth["provider"] == "oidc"
+    assert configs[-1]["auth_config"] == console.native_auth and console.native_auth["provider"] == "oidc"
     assert FRONT_ISSUER.fullmatch(console.native_auth["issuer"])
+    assert CLIENT_SECRET not in json.dumps(configs[-1]["auth_config"])

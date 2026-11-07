@@ -40,8 +40,25 @@ describe("normalizeConsoleAttention", () => {
       kind: "private_reply",
       createdAtMs: 1_000,
       text: "Reply a",
+      redacted: false,
       origin: { identity: "alpha", interactionId: "interaction-a", inputFrameId: "frame-a" },
     }]);
+  });
+
+  it("keeps a reply a policy rewrote, and one it left no text in, never dropping it", () => {
+    const { text: _text, ...withoutText } = wire("hidden", { redacted: true });
+    const items = normalizeConsoleAttention({
+      items: [
+        withoutText,
+        wire("rewritten", { text: "[withheld]", redacted: true }),
+        wire("blank", { text: "  ", redacted: true }),
+      ],
+    });
+    expect(items?.map((item) => [item.id, item.text, item.redacted])).toEqual([
+      ["hidden", null, true],
+      ["rewritten", "[withheld]", true],
+      ["blank", null, true],
+    ]);
   });
 
   it("bounds the list and each text", () => {

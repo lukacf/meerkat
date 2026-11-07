@@ -207,6 +207,25 @@ describe("private replies in the console", () => {
     view.unmount();
   }, 30_000);
 
+  it("a reply whose text a policy removed is counted, says its content is hidden by policy, and is dismissed", async () => {
+    const harness = transport();
+    const { text: _text, ...hidden } = { ...replyItem("reply-hidden", REPLY), redacted: true };
+    harness.items[ALICE] = [hidden];
+    const view = render(<ConsoleApp baseUrl="" transport={harness} />);
+    await settle();
+    expect(needsYou(view).getAttribute("aria-label")).toContain("1 reply for you");
+    await openInbox(view);
+    const card = view.getByTestId("console-attention:reply-hidden");
+    expect(within(card).getByText("Content hidden by policy")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(view.getByTestId("console-attention-dismiss:reply-hidden"));
+    });
+    await waitFor(() => expect(view.queryByTestId("console-attention:reply-hidden")).toBeNull());
+    expect(harness.commands.find((entry) => entry.command === "dismissConsoleAttention")?.params)
+      .toEqual({ item_id: "reply-hidden" });
+    view.unmount();
+  }, 30_000);
+
   it("a read-only console shows the reply and offers no Dismiss", async () => {
     const harness = transport();
     harness.readOnly = true;

@@ -335,6 +335,7 @@ describe("private replies", () => {
     kind: "private_reply" as const,
     createdAtMs: Date.now() - 120_000,
     text: "Approved.\nThe release goes out tonight.",
+    redacted: false,
     origin: { identity: "release-bot", interactionId: "interaction-1", inputFrameId: "frame-1" },
   };
   it("is a reply card: who answered, only for you, the text with its line breaks, and when", () => {
@@ -364,6 +365,18 @@ describe("private replies", () => {
     expect(openAgent).toHaveBeenCalledWith("release-bot", "chat");
     fireEvent.click(view.getByRole("button", { name: "Dismiss the reply from Release bot" }));
     expect(onDismiss).toHaveBeenCalledWith(reply);
+  });
+  it("says a reply's content is hidden by policy when a policy left no text, and still dismisses it", () => {
+    const hidden = { ...reply, id: "reply-2", text: null, redacted: true };
+    const onDismiss = vi.fn();
+    const view = render(<PrivateReplyCard item={hidden} onDismiss={onDismiss} />);
+    const card = view.getByTestId("console-attention:reply-2");
+    expect(card.getAttribute("data-redacted")).toBe("true");
+    const text = card.querySelector(".cc-private-reply__text");
+    expect(text?.textContent).toBe("Content hidden by policy");
+    expect(text?.classList.contains("cc-private-reply__text--hidden")).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Dismiss the reply from Release bot" }));
+    expect(onDismiss).toHaveBeenCalledWith(hidden);
   });
   it("adds to the Needs you count with approvals and host items", () => {
     const view = render(<ApprovalAttention snapshot={snapshot()} hostItems={1} replies={2} onOpen={vi.fn()} />);

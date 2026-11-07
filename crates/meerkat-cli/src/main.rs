@@ -40255,3 +40255,34 @@ mod cli_mcp_host_auth_resolver_tests {
         );
     }
 }
+
+/// Both CLI `MobSessionService` wrappers forward the cold settle of a member
+/// session's owed compaction projections to the service they wrap. The
+/// trait default refuses it for a service that keeps durable sessions, so a
+/// wrapper without the forward compiles and leaves a dormant member's owed
+/// compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    /// The body of the impl block `header` opens, up to its closing brace.
+    fn impl_block<'a>(source: &'a str, header: &str) -> Option<&'a str> {
+        let start = source.find(header)?;
+        let body = &source[start..];
+        Some(&body[..body.find("\n}\n")?])
+    }
+
+    #[test]
+    fn both_cli_wrappers_forward_the_owed_compaction_settle() {
+        let source = include_str!("main.rs");
+        for header in [
+            "impl meerkat_mob::MobSessionService for RunMobSessionService {",
+            "impl meerkat_mob::MobSessionService for MobCliSessionService {",
+        ] {
+            let block = impl_block(source, header);
+            assert!(block.is_some(), "{header} is in the CLI's source");
+            assert!(
+                block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+                "{header} forwards the owed compaction settle to the service it wraps"
+            );
+        }
+    }
+}

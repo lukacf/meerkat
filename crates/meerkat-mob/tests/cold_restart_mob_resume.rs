@@ -14364,3 +14364,105 @@ async fn a_registered_session_answers_live_to_the_owed_compaction_settle() {
     );
     let _ = start.handle.shutdown().await;
 }
+
+/// A settle that meets a stage an earlier finalization already published,
+/// without reaching its acknowledgement (a crash between the two, a scope
+/// index rebuild that failed after the commit, a cancelled settle),
+/// acknowledges the owed row and answers the projection with no entries,
+/// though the session's memory holds the published discards: a host that
+/// harvests the answered batch reads them from the session's memory
+/// instead.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settle_after_an_unacknowledged_finalization_answers_no_entries() {
+    use meerkat_core::memory::MemoryStore as _;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+    // An earlier finalization published the stage but never acknowledged
+    // its outbox row.
+    let memory_dir = paths.runtime_root.join("factory-store").join("memory");
+    let store = meerkat::HnswMemoryStore::open(&memory_dir).expect("open the memory store");
+    for projection in &start.owed {
+        store
+            .finalize_compaction_batch(projection)
+            .await
+            .expect("an earlier finalization publishes the stage");
+    }
+    drop(store);
+    let (published, _) = published_compaction_entries(&paths, &start.run.w1_sid);
+    assert!(
+        published > 0,
+        "the earlier finalization published the discards"
+    );
+
+    let settlement = start
+        .handle
+        .settle_member_owed_compaction_projections(&AgentIdentity::from("w-1"))
+        .await
+        .expect("the settle answers");
+    let projections = match settlement {
+        meerkat_session::OwedCompactionSettlement::Settled { projections } => projections,
+        other => panic!("the settle acknowledges the owed rows: {other:?}"),
+    };
+    assert_the_owed_projection_settled(
+        &paths,
+        &start,
+        "settle after an unacknowledged finalization",
+    )
+    .await;
+    assert_eq!(
+        projections
+            .iter()
+            .map(|settled| settled.projection.clone())
+            .collect::<Vec<_>>(),
+        start.owed,
+        "the settle answers the owed projections"
+    );
+    let answered: usize = projections
+        .iter()
+        .map(|settled| settled.entries.len())
+        .sum();
+    assert_eq!(
+        answered, 0,
+        "the settle answers none of the discards an earlier finalization published"
+    );
+    start.assert_no_model_request("settle after an unacknowledged finalization");
+    let _ = start.handle.shutdown().await;
+}
+
+/// A plain retirement of the dormant member (no rotation) does not settle
+/// it cold: the session can be resumed, and the resumed member's wake owns
+/// the finalization and its harvest, which a cold settle would preempt by
+/// publishing the batch and dropping it. The outbox row stays pending and
+/// the stage staged.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_retire_of_a_dormant_member_leaves_its_owed_projection_owed() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let start = start_lazily_over_an_owed_projection(&paths).await;
+
+    tokio::time::timeout(
+        Duration::from_mins(1),
+        start.handle.retire(AgentIdentity::from("w-1")),
+    )
+    .await
+    .expect("the retirement answers")
+    .expect("the retirement of the dormant member succeeds");
+
+    for projection in &start.owed {
+        assert_eq!(
+            compaction_outbox_states(&paths, projection),
+            vec!["pending".to_string()],
+            "the plain retirement leaves the outbox row pending"
+        );
+        assert_eq!(
+            compaction_stage_state(&paths, projection).as_deref(),
+            Some("staged"),
+            "the plain retirement leaves the stage staged"
+        );
+    }
+    start.assert_no_model_request("plain retire");
+    let _ = start.handle.shutdown().await;
+}

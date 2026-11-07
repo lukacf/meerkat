@@ -44421,3 +44421,26 @@ mod governed_host_original_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[path = "session_runtime/resumed_run_tests.rs"]
 mod resumed_run_tests;
+
+/// The RPC `MobSessionService` wrapper forwards the cold settle of a member
+/// session's owed compaction projections to the persistent service it
+/// wraps. The trait default refuses it for a service that keeps durable
+/// sessions, so a wrapper without the forward compiles and leaves a dormant
+/// member's owed compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    #[test]
+    fn the_rpc_wrapper_forwards_the_owed_compaction_settle() {
+        let source = include_str!("session_runtime.rs");
+        let header = "impl meerkat_mob::MobSessionService for RpcMobSessionService {";
+        let block = source.find(header).and_then(|start| {
+            let body = &source[start..];
+            body.find("\n}\n").map(|end| &body[..end])
+        });
+        assert!(block.is_some(), "the RPC wrapper is in the source");
+        assert!(
+            block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+            "the RPC wrapper forwards the owed compaction settle to the service it wraps"
+        );
+    }
+}

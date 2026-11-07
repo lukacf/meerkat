@@ -1430,3 +1430,85 @@ ingress_subjects = [{ ingress = "chat", subject = "U123" }]
     drop(app);
     runtime.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_unreadable_row_reads_as_not_found_to_a_non_administrator() {
+    let absent = format!("decision:{}", "0".repeat(64));
+    // An enforced reader who holds nothing and asked for nothing, and an
+    // Open Console's anonymous caller with access control off.
+    for (case, access, require_app_auth, subject) in [
+        ("enforced", ENFORCED, true, Some(CAROL)),
+        ("open", ACCESS_OFF, false, None),
+    ] {
+        let dir = tempfile::tempdir().expect("dir");
+        let state = dir.path().join("state");
+        let (runtime, app) = console(&state, Some(access), require_app_auth).await;
+        let owner = decisions_of(&state);
+        let broken = hold(
+            &owner,
+            "release",
+            "probe-broken",
+            "team:ops",
+            agent_requester(),
+        );
+        make_unreadable(&state, &broken);
+        let readable = hold(
+            &owner,
+            "release",
+            "probe-readable",
+            "team:ops",
+            agent_requester(),
+        );
+        for method in ["meta/decisions/get", "meta/decisions/rendering"] {
+            let unreadable = rpc(
+                &app,
+                subject,
+                method,
+                json!({"decision_id": broken.decision_id.to_string()}),
+            )
+            .await;
+            let invisible = rpc(
+                &app,
+                subject,
+                method,
+                json!({"decision_id": readable.decision_id.to_string()}),
+            )
+            .await;
+            let missing = rpc(&app, subject, method, json!({"decision_id": absent})).await;
+            assert_eq!(
+                missing["error"]["data"]["kind"],
+                json!("decision_not_found"),
+                "{missing}"
+            );
+            assert_eq!(
+                invisible, missing,
+                "{case} {method}: a row the caller cannot see"
+            );
+            assert_eq!(
+                unreadable, missing,
+                "{case} {method}: an unreadable row answers as an absent id"
+            );
+            if case == "enforced" {
+                let administrator = rpc(
+                    &app,
+                    Some(ERIN),
+                    method,
+                    json!({"decision_id": broken.decision_id.to_string()}),
+                )
+                .await;
+                assert_eq!(
+                    administrator["error"]["data"]["kind"],
+                    json!("decision_unreadable"),
+                    "{administrator}"
+                );
+                assert_eq!(
+                    administrator["error"]["code"],
+                    json!(-32603),
+                    "{administrator}"
+                );
+            }
+        }
+        drop(app);
+        runtime.shutdown().await;
+    }
+}

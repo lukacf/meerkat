@@ -38,7 +38,8 @@ use meerkat_meta::{
 };
 use meerkat_mob::MobDefinition;
 use meerkat_runtime::decision::{
-    DecisionApproverCurrentness, DecisionError, DecisionRefusal, DurableDecisionService,
+    APPROVER_NOT_CURRENT_REFUSAL, DecisionApproverCurrentness, DecisionError, DecisionRefusal,
+    DurableDecisionService,
 };
 use serde_json::{Value, json};
 
@@ -797,5 +798,109 @@ async fn an_attested_decide_over_a_store_that_cannot_keep_events_is_refused() {
         "the refusal names the event record: {refused}"
     );
     assert_still_open(&owner, &held);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_link_added_after_the_decision_ends_it_execution_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let runtime = runtime(&state, Some(MAP_WITH_HOLDER)).await;
+    let owner = owner_of(&state);
+    let requester = PrincipalRef::in_domain(
+        PrincipalKind::Human,
+        "U999",
+        TrustDomainId::new("meta-ingress-chat").expect("domain"),
+    )
+    .expect("requester");
+    let held = owner
+        .hold(
+            DecisionHoldRequest::new(
+                DecisionKind::new("test.operation").expect("kind"),
+                DecisionSubjectKey::new("probe-1").expect("subject"),
+                DecisionOperationId::new("operation:probe-1").expect("operation"),
+                Sha256Digest::of(b"{}"),
+                DecisionRequestBody::from_value(&json!({})).expect("body"),
+                DecisionPrincipalKey::of(&requester).expect("key"),
+                ApproverId::new("team:owners").expect("approver"),
+                u64::MAX / 2,
+                DecisionRendering::new(RENDERING).expect("rendering"),
+                DecisionRenderer::new("render.v1").expect("renderer"),
+            ),
+            false,
+        )
+        .expect("hold");
+    let at_ms = present_to_owners(&owner, &held);
+    let person = PrincipalRef::in_domain(
+        PrincipalKind::Human,
+        "U123",
+        TrustDomainId::new("meta-ingress-chat").expect("domain"),
+    )
+    .expect("person");
+    let approver = AuthenticatedApprover::new(person, ApprovalAssurance::PersonAuthenticated)
+        .expect("approver")
+        .with_authentication_scope(HostAuthenticationScope::new("chat-session-1"));
+    let decision = AttestedDecision::new(
+        approver,
+        DecisionIngress::new("chat").expect("ingress"),
+        DecisionReference::new("chat:probe-event-1").expect("event"),
+        at_ms,
+        ApproverId::new("team:owners").expect("approver"),
+        held.descriptor.subject_digest.clone(),
+        true,
+    )
+    .expect("decision");
+    let decided = owner
+        .decide(&held.decision_id, &decision, &AttestedHere)
+        .expect("decide");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+    let currentness = runtime.decision_approver_currentness();
+    assert!(matches!(
+        currentness.approver_answer(&decided),
+        ConsentEligibilityAnswer::Eligible(_)
+    ));
+
+    // The map now says the decider U123 and the requester U999 are one
+    // person.
+    replace_map(
+        &runtime,
+        r#"
+enabled = false
+
+[approvers."team:owners"]
+subjects = ["owner@example.org"]
+people = [
+  { ingress_subjects = [{ ingress = "chat", subject = "U123" }, { ingress = "chat", subject = "U999" }] },
+]
+"#,
+    );
+    let answer = currentness.approver_answer(&decided);
+    assert!(
+        matches!(answer, ConsentEligibilityAnswer::Refused),
+        "the answer from the linked snapshot refuses the decider"
+    );
+    let authorized = owner.authorize_execution(
+        &decided.decision_id,
+        &decided.descriptor.operation_id,
+        &decided.descriptor.request_digest,
+        &answer,
+    );
+    assert!(
+        matches!(
+            authorized,
+            Err(DecisionError::Refused {
+                refusal: DecisionRefusal::NotEligible,
+                ..
+            })
+        ),
+        "not a permit, not a deferral: {authorized:?}"
+    );
+    let row = owner.get(&decided.decision_id).expect("row");
+    assert_eq!(row.state.phase, DecisionPhase::ExecutionRefused);
+    assert!(!row.state.permit_issued);
+    assert_eq!(
+        row.execution_refusal,
+        Some(DecisionReference::new(APPROVER_NOT_CURRENT_REFUSAL).expect("reference"))
+    );
     runtime.shutdown().await;
 }

@@ -226,7 +226,8 @@ every five minutes off the request path: a request that finds the refresh due
 goes out at once on the current token and the list the account holds, and the
 refresh runs beside it. A listing that meets a 408, 502, 503 or 504, or a
 network failure or timeout, is tried once more at once, both attempts within
-the listing's 30-second bound. On the device sign-in's routes, a refresh that fails
+the listing's 30-second bound (the first within 15 seconds, so one that does
+not answer leaves the second the rest). On the device sign-in's routes, a refresh that fails
 (a network failure, a 5xx, a rate limit, or a 403 that asks for no action on
 the account) keeps the last list and is tried again after 30 seconds, or after
 the listing's `Retry-After`; a 401, or a 403 that asks for an account action,
@@ -250,7 +251,8 @@ GitHub sign-in by a token exchange and replaces before it expires. A temporary
 failure of that exchange (a network failure or timeout, HTTP 408, 429 or 5xx,
 or a GitHub API rate limit) does not fail turns: the current token, minted from
 the current sign-in, keeps serving until it expires, and the exchange is tried
-again after its `Retry-After` (at least a second later), or after 30 seconds
+again after its `Retry-After` (a number of seconds or an HTTP date; at least a
+second later), or after 30 seconds
 without one. Once no valid token is left, a turn fails with a retryable error
 (rate limited, server error, network timeout), which the agent loop retries;
 when the exchange sent `Retry-After`, every turn until then fails the same way

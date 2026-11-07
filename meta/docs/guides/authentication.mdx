@@ -335,9 +335,10 @@ are kept for as long as the file exists.
 
 A candidate launch (`runtime_options.mob_composition.authority =
 "candidate"`) reads that file when it starts, so it refuses the sessions
-revoked before it. It writes nothing to the file: it refuses
-`meta/console/revoke_sessions` (revoke on the authoritative launch), and it
-lists a principal whose token has no `exp` in its own `meta/status` only.
+revoked, and the logins signed out, before it. It writes nothing to the
+file: it refuses `meta/console/revoke_sessions` and `meta/console/sign_out`
+(revoke and sign out on the authoritative launch), and it lists a principal
+whose token has no `exp` in its own `meta/status` only.
 
 A revocation is written to that file before it takes effect. On Unix the
 state directory is synced after the file is replaced; when that sync fails,
@@ -347,7 +348,7 @@ not survive a power loss: revoke again. On other platforms the replaced file
 is as durable as the platform makes it.
 
 The routers a `UnifiedRuntime` builds, and both bundled gateways, apply
-revocations. The standalone router constructors, the
+revocations and sign-outs. The standalone router constructors, the
 `handle_console_rest_json_route*` functions and `validate_console_token`
 apply no session fence; use the runtime's routers, or
 `validate_console_token_under_session_fences` for a host's own token check.
@@ -359,6 +360,45 @@ part of the Console's configuration itself (an HS256 shared secret in
 restarting the gateway. Removing a principal's access grants, or adding a
 deny rule, is an access change: it applies to open streams at once, but it
 does not refuse the token.
+
+### Signing out of one login
+
+A revocation ends every session of a principal. To end one login and keep
+the others (another browser, another device), the caller calls
+`meta/console/sign_out` on the console's `/console/rpc` with a token of that
+login, in the `Authorization` header:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"meta/console/sign_out","params":{}}
+```
+
+A login is the issuer's login association, the `sid` claim, when the token
+carries one: every token the issuer signs into that login. A token without
+`sid` is a login of its own. A front that mints a fresh token per request
+signs its own session's `sid` into each, so that one sign-out ends them all.
+From then on the Console refuses with 401 each token of that login issued
+before the sign-out plus 30 seconds, by the rule of a revocation, and ends
+the event streams and console voice sessions they opened. The caller's other
+logins are untouched, and so are its schedules: a schedule keeps the mandate
+it was defined with, and only a revocation of the principal stops it. A token
+the issuer signs into the same login after that (a sign-in again) is
+accepted. Every caller a token identified may sign itself out, under an
+access controller or not and on a read-only console too; a caller the
+Console did not identify by a token has no login and gets 401.
+
+Sign-outs live in `console-session-fences.json` beside the revocations,
+written and synced the same way, and a console without a durable state
+directory refuses `meta/console/sign_out` (`-32004`). The file keys a login
+by an opaque digest, never the `sid` or the token. A revocation of the
+principal drops the sign-outs it covers, and the sign-out of a token without
+`sid` is dropped once that token expired. A principal keeps at most 64 other
+sign-outs (of `sid` logins, and of tokens without `exp`): the 65th folds the
+oldest into one fence of all the principal's logins, so each login of that
+principal with tokens issued before the folded sign-out plus 30 seconds is
+signed out too, and a login signed in after it keeps working. The fold
+revokes nothing: the principal's schedules keep firing. A binary without
+sign-out keeps the sign-outs in the file but does not enforce them while it
+runs; they apply again after the upgrade.
 
 ### Human consent decisions by Console humans
 

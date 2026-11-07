@@ -180,6 +180,33 @@ def test_exact_login_labels_original_handle_and_owned_worker_close():
     asyncio.run(exercise())
 
 
+def test_oidc_login_enrolls_under_its_token_issuer_and_subject():
+    """An OIDC login's tokens name the front's issuer and the provider's person.
+
+    The enrollment carries the same labels, so the console resolves this
+    login's tokens to it; the account's email stays the principal.
+    """
+    async def exercise():
+        login = ConsoleConnectLogin("person@example.test", "original-signed-sid", 1893456000123,
+            "https://console.example.test", lambda: True, issuer="urn:forge-console:" + "0" * 32,
+            subject='["https://login.example.test","provider-subject-0001"]')
+        enrollment = Enrollment()
+        client = Client(enrollment)
+        owner = NativeConsoleLogin(client, login, issuer=login.issuer)
+        try:
+            assert (owner.issuer, owner.subject) == (login.issuer, login.subject)
+            owner.start()
+            enrollment.result_release.set()
+            assert await owner.ready() is enrollment
+            selection, = client.selections
+            assert (selection.issuer, selection.subject) == (login.issuer, login.subject)
+        finally:
+            enrollment.result_release.set()
+            enrollment.retire_release.set()
+            await owner.close()
+    asyncio.run(exercise())
+
+
 def test_cancelled_ready_retains_entered_begin_and_retires_same_handle():
     async def exercise():
         owner, client, enrollment, _, _ = fixture()

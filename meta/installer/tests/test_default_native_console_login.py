@@ -58,6 +58,10 @@ async def test_ordinary_application_enrolls_before_governed_send_and_retires_on_
             selected.issuer, selected.subject, selected.login_scope_id)
         forwarded.append(request)
         body = json.loads(request.content)
+        if body.get("method") == "meta/console/sign_out":
+            # Logout ends the login in the console too, with a token of it.
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+                "login": "session", "accepts_tokens_issued_from": claims["iat"] + 30}})
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
             "identity": "lead:main", "interaction_id": "interaction-1", "session_id": "session-1",
             "input_frame_id": "frame-1", "cursor": "console:1", "status": "accepted"}})
@@ -89,6 +93,8 @@ async def test_ordinary_application_enrolls_before_governed_send_and_retires_on_
                 value.application.frontend_host()
             assert (await client.post("/logout", headers={"Origin": front.origin})).status_code == 303
             assert enrollment.retire_calls == 1 and private.close_calls == 0
+            assert [json.loads(request.content)["method"] for request in forwarded] == [
+                "meta/console/send", "meta/console/sign_out"]
             assert (await client.post("/console/rpc", headers={"Origin": front.origin}, json={})).status_code == 401
     finally:
         enrollment.result_release.set()

@@ -35,8 +35,9 @@ point; reconnect with a current token. On a route that does not require a
 token, a token the caller sends anyway identifies it to access control; such a
 stream ends the same way, and its reconnect without a current token is
 anonymous. A token without `exp` never lapses. A revocation of the token's
-principal (`meta/console/revoke_sessions`) ends the stream at once, with or
-without `exp`, and its reconnect is refused with **401**.
+principal (`meta/console/revoke_sessions`), or a sign-out of the token's
+login (`meta/console/sign_out`), ends the stream at once, with or without
+`exp`, and its reconnect is refused with **401**.
 
 ## Agent event stream
 

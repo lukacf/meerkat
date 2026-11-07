@@ -2080,6 +2080,93 @@ async fn mutation_rechecks_caller_after_await() -> TestResult {
     Ok(())
 }
 
+/// Signing out of one console login ends that login only: the schedule its
+/// caller defined keeps firing as that caller, since a schedule holds the
+/// mandate it was defined with, not a login. A sign-out that folds the
+/// person's oldest sign-outs into a fence of every login of the person (the
+/// 65th kept sign-out) stops no schedule either: the fold revokes nothing.
+/// Revoking the caller's principal still stops it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_out_keeps_schedules() -> TestResult {
+    use super::console_human_admission_tests::{BOB, state};
+    use super::console_sign_out_tests::{accepted, console_answer, login_token};
+    use super::console_token_lapse_tests::now_seconds;
+    let fixture = delivering_fixture("console-schedules-sign-out").await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let router = signed_in_router(&fixture, fences.clone());
+    let login = login_token(Some("schedule-login"), now_seconds() - 60);
+    let (_, created) = console_answer(
+        &router,
+        Some(&login),
+        "meta/schedule/create",
+        create_params("alpha"),
+    )
+    .await;
+    assert!(created["error"].is_null(), "{created:#?}");
+    let schedule_id = created["result"]["schedule_id"]
+        .as_str()
+        .ok_or("the schedule has an id")?
+        .to_string();
+
+    let (_, signed_out) =
+        console_answer(&router, Some(&login), "meta/console/sign_out", json!({})).await;
+    assert!(signed_out["error"].is_null(), "{signed_out:#?}");
+    assert!(
+        !accepted(&router, &login).await,
+        "the login that signed out is refused"
+    );
+    // 64 more sign-outs, each fenced at a second of its own after this one
+    // (their tokens say they were issued then): the last folds the oldest,
+    // this login's, into a fence of every login of the person.
+    let later = now_seconds() + 1_000;
+    for other in 0..64_u64 {
+        let token = login_token(Some(&format!("later-login-{other}")), later + other);
+        let (_, signed_out) =
+            console_answer(&router, Some(&token), "meta/console/sign_out", json!({})).await;
+        assert!(signed_out["error"].is_null(), "{signed_out:#?}");
+    }
+    assert!(
+        !accepted(
+            &router,
+            &login_token(Some("another-login"), now_seconds() - 60)
+        )
+        .await,
+        "the fold signed out every older login of the person"
+    );
+
+    let doors = doors(
+        &fixture,
+        state().decisions,
+        None,
+        fences.clone(),
+        ungoverned(),
+    );
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &doors, &schedule_id, &key).await?;
+    assert_eq!(sends_under(&fixture, "alpha", &key).await.len(), 1);
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the agent admitted the scheduled send: {:#?}",
+        sends_under(&fixture, "alpha", &key).await
+    );
+
+    fences.revoke_sessions(BOB, std::time::SystemTime::now() + Duration::from_secs(5))?;
+    let refused_key = format!("schedule:{schedule_id}:occurrence:2");
+    refused_because(
+        fire(&fixture, &doors, &schedule_id, &refused_key).await,
+        "revoked",
+    );
+    assert!(
+        sends_under(&fixture, "alpha", &refused_key)
+            .await
+            .is_empty()
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// The revision `schedule_id` is at now.
 async fn revision_of(
     fixture: &Fixture,

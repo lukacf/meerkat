@@ -50,6 +50,24 @@ async def test_login_factory_passes_exact_labels_in_a_host_fenced_projection_wit
         await value.application.stop()
 
 
+async def test_login_factory_passes_the_logins_token_issuer_and_subject(tmp_path, monkeypatch):
+    # An OIDC login's tokens name the front's issuer and the provider's
+    # person; the application's enrollment needs the same two labels.
+    value = package(tmp_path, monkeypatch)
+    try:
+        await value.application.load()
+        value.context.runtime = SimpleNamespace(is_running=True)
+        login = type(value.login)(value.login.principal, value.login.login_scope_id, value.login.expires_at_ms,
+            value.login.origin, value.login.is_current, issuer="urn:forge-console:" + "0" * 32,
+            subject='["https://login.example.test","provider-subject-0001"]')
+        assert value.application.console_login_factory(login) is value.owner
+        selected = value.application.integration.calls[0]
+        assert (selected.principal, selected.issuer, selected.subject) == (login.principal, login.issuer,
+                                                                           login.subject)
+    finally:
+        await value.application.stop()
+
+
 @pytest.mark.parametrize("case", ["missing-runtime", "application-source", "imports-retired", "stop", "login"])
 async def test_stale_application_login_binding_never_enters_trusted_selection(tmp_path, monkeypatch, case):
     value = package(tmp_path, monkeypatch)

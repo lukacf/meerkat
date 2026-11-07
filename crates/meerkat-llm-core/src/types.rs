@@ -142,12 +142,14 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
-    /// The most input (prompt) tokens one request may carry on this
-    /// client's selected account and model, when the provider states one
-    /// (for example a Copilot account's per-model prompt limit). `None`
-    /// states none. A session's default compaction threshold stays below
-    /// it. Wrappers delegate to the client they wrap.
-    fn prompt_token_limit(&self) -> Option<u32> {
+    /// The most input (prompt) tokens one request that asks for
+    /// `output_budget` output tokens may carry on this client's selected
+    /// account and model, when the provider states a limit (for example a
+    /// Copilot account model's prompt limit, or its context window less that
+    /// budget). `None` states none. A session's default compaction threshold
+    /// stays below the limit for the session's own output budget. Wrappers
+    /// delegate to the client they wrap.
+    fn prompt_token_limit(&self, _output_budget: u32) -> Option<u32> {
         None
     }
 

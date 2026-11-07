@@ -66,6 +66,12 @@ test("browser qualification joins current acceptance with admitted native servic
 test("ready replies permit only the exact credential-free observed loopback Console", () => {
   assert.equal(remoteBrowserReplyCurrent(closed, receipt, guide, build), true);
   assert.equal(remoteBrowserReplyCurrent(ready, receipt, guide, build), true);
+  // A Console with named accounts is an authenticated Console too.
+  assert.equal(remoteBrowserReplyCurrent({ ...ready, scope: { ...closed.scope, authentication: "local-accounts" } },
+    receipt, guide, build), true);
+  // So is one whose people sign in at an identity provider.
+  assert.equal(remoteBrowserReplyCurrent({ ...ready, scope: { ...closed.scope, authentication: "oidc" } },
+    receipt, guide, build), true);
   for (const changed of [{ guide_id: "another" }, { guide_version: 5 }, { build_id: "another" },
     { deployment_id: otherId }, { entry_id: "custom-ui" }, { accepted_source_digest: "e".repeat(64) },
     { package_sha256: "e".repeat(64) }, { transferred_source_digest: "e".repeat(64) },
@@ -250,6 +256,24 @@ test("mount and reload observe only; deliberate connect publishes the same-port 
   });
   await mountedAccess(ready, async ({ calls, link }) => {
     assert.equal(calls.length, 1); assert.equal(calls[0].method, "GET"); assert.ok(link());
+  });
+});
+
+test("a ready Console with named accounts tells each person to use their own account", async () => {
+  const named = { ...ready, scope: { ...ready.scope, authentication: "local-accounts" } };
+  await mountedAccess(named, async ({ document, link }) => {
+    assert.ok(link());
+    assert.match(document.body.textContent, /Sign in with your own account name and password/);
+    assert.doesNotMatch(document.body.textContent, /Sign in with the Console password you chose/);
+  });
+});
+
+test("a ready OIDC Console sends each person to the identity provider", async () => {
+  const oidc = { ...ready, scope: { ...ready.scope, authentication: "oidc" } };
+  await mountedAccess(oidc, async ({ document, link }) => {
+    assert.ok(link());
+    assert.match(document.body.textContent, /Sign in with your account at the identity provider/);
+    assert.doesNotMatch(document.body.textContent, /Console password|account name and password/);
   });
 });
 

@@ -1902,6 +1902,15 @@ mod tests {
                 "omitted streamed assistant message 'stray'",
             ),
             (
+                "a terminal item whose output_index is not an unsigned integer",
+                vec![
+                    done_at(0, &reasoning("B", "Plan", "c1")),
+                    completed(json!([{"type":"reasoning","id":"I","output_index":"seven",
+                        "summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"c2"}])),
+                ],
+                "an output_index that is not an unsigned integer",
+            ),
+            (
                 "an argument delta at a message's slot",
                 vec![
                     added_at(0, &message("A", "final_answer", "Done.")),

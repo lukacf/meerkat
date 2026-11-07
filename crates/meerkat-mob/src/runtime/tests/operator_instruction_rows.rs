@@ -806,6 +806,11 @@ async fn a_non_authoritative_launch_delivers_nothing_and_owed_members_stay_owed(
         waves_before,
         "the non-authoritative launch journaled no delivery wave"
     );
+    assert_eq!(
+        candidate.operator_instruction_owed_members(),
+        1,
+        "the launch counts the member it leaves owed"
+    );
     crash_stop_and_release_routes(candidate).await;
 
     let authoritative = CrashedInstructionMob {

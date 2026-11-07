@@ -392,6 +392,11 @@ them.
   status read is the authority. The Python, TypeScript and Web SDKs know the
   event type and keep its payload whole.
 
+- `meerkat-mob`: `MobHandle::operator_instruction_owed_members()` counts the
+  members owed an operator-instruction snapshot their sessions have not
+  recorded, from the mob machine's published state, without reading a
+  session.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -433,6 +438,14 @@ them.
   executor claims each kind it executes with `claim_executor_kind`.
 
 ### Fixed
+
+- `meerkat-mob`: a mob composed non-authoritative
+  (`MobBuilder::with_composition_authority(MobCompositionAuthority::NonAuthoritative)`,
+  a host's candidate launch over the shared mob store, which may not act on
+  it) delivers no operator instruction. A member owed a snapshot stays owed
+  for the authoritative launch, which delivers it. Before, the mob's delivery
+  owner recorded the snapshot in the member's session and journaled the
+  delivery wave in the shared mob store. Affects 0.9.9 and 0.9.10.
 
 - `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
   answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on

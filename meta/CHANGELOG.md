@@ -98,7 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   none. They map onto Meerkat's mob operator instructions and keep no Meta
   state. Host verbs: listed where an identity runtime is configured, never
   agent tools; a candidate launch refuses the two writes with `-32047`
-  `candidate_launch` and answers the read.
+  `candidate_launch` and answers the read. A candidate delivers no
+  instruction either: a member owed its snapshot stays owed until the
+  authoritative launch delivers it, and a `candidate launch census` WARN
+  counts such members.
 
 ### Changed
 

@@ -10753,6 +10753,19 @@ impl MobRuntime {
             let handle = crate::boxed_future::boxed(|| builder.resume())
                 .await
                 .map_err(|error| root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error)))?;
+            // A candidate launch delivers no operator instruction: Meerkat
+            // keeps the delivery owner of a non-authoritative composition
+            // idle, so the members owed a snapshot stay owed for the
+            // authoritative launch, which delivers them at its start.
+            if !spec.composition_authority.speaks_for_composition() {
+                let owed = handle.operator_instruction_owed_members();
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    owed,
+                    "candidate launch census: the members owed an operator-instruction \
+                     snapshot stay owed; the authoritative launch delivers them"
+                );
+            }
             // A Stop an earlier process placed and never finished is a durable
             // barrier: resume hands back a handle that still reads Running, and
             // Core's recovery finishes that Stop afterwards. The phase is read

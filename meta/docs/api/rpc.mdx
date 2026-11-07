@@ -2781,7 +2781,10 @@ of its own here: the three verbs map onto Meerkat's mob
 They are host verbs, listed where an identity runtime is configured, never in
 an agent tool catalog. A candidate launch refuses `meta/set_instruction` and
 `meta/revoke_instruction` with `-32047` `candidate_launch` and still answers
-`meta/instruction_status`.
+`meta/instruction_status`. It delivers no instruction either: a member owed
+its snapshot when the candidate starts stays owed (its status reads `owed`)
+until the authoritative launch delivers it, and a `candidate launch census`
+WARN counts such members.
 
 They replace `meta/member_activate_instruction` (deprecated since 0.9.11) for
 standing instructions: an activation changes one live member's current

@@ -507,6 +507,12 @@ impl CopilotSlots {
             .map(|(index, _)| *index)
     }
 
+    /// Whether a slot holds `output_index`: an event named the item there
+    /// with an id. An item no event names with one has no slot.
+    pub(crate) fn holds(&self, output_index: u64) -> bool {
+        self.slots.contains_key(&output_index)
+    }
+
     /// Pair the terminal `response`'s output with the slots, give each item
     /// its slot's id and order the output by slot. Without slots the output
     /// stays as the provider sent it; an `output` that is not an array is

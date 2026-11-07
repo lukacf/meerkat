@@ -2884,16 +2884,27 @@ impl OpenAiClient {
                             // is committed: an item the stream announced and
                             // never completed (a started tool call included)
                             // ends the response as incomplete, never dropped.
+                            // An item is announced by its `output_item.added`
+                            // at an `output_index` and completed by its
+                            // `output_item.done` there. On the Copilot route
+                            // the slots answer for every item an event named
+                            // with an id, and the indices for one no event
+                            // named so (no slot holds it).
+                            let announced_uncompleted = announced_items
+                                .iter()
+                                .copied()
+                                .filter(|index| !copilot_item_identity || !copilot_slots.holds(*index))
+                                .find(|index| !completed_items.contains_key(&ResponsesOutputIndex(*index)));
                             if copilot_item_identity {
-                                if let Some(index) = copilot_slots.first_uncompleted() {
+                                if let Some(index) = copilot_slots
+                                    .first_uncompleted()
+                                    .or(announced_uncompleted)
+                                {
                                     Err::<(), _>(crate::responses_output::copilot_mismatch(format!(
                                         "output_index {index} was announced but never completed"
                                     )))?;
                                 }
-                            } else if let Some(index) = announced_items
-                                .iter()
-                                .find(|index| !completed_items.contains_key(&ResponsesOutputIndex(**index)))
-                            {
+                            } else if let Some(index) = announced_uncompleted {
                                 Err::<(), _>(LlmError::IncompleteResponse {
                                     message: format!(
                                         "OpenAI Responses stream ended without a terminal response: output_index {index} was announced but never completed"

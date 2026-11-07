@@ -806,12 +806,15 @@ them.
 - `meerkat-llm-core`: a `Retry-After` number of seconds too large for
   milliseconds is the largest delay instead of an overflow
   (`LlmError::parse_retry_after`).
-- `meerkat-openai`: an OpenAI Responses stream (plain or GitHub Copilot) that
-  ends at `[DONE]` without a terminal response no longer drops an item it
-  announced and never completed, a started tool call included, while the
-  turn ends as complete: the response fails with the retryable
-  incomplete-response error naming the item's `output_index`, nothing of it
-  is committed, and the turn is tried again.
+- `meerkat-openai`: an OpenAI Responses stream that ends at `[DONE]` without
+  a terminal response no longer drops an item it added
+  (`response.output_item.added` at an `output_index`) and never completed
+  (no `response.output_item.done` at that index), a started tool call
+  included, while the turn ends as complete, on the plain route and on
+  GitHub Copilot's, an item no event names with an id included: the
+  response fails with the retryable incomplete-response error naming the
+  item's `output_index`, nothing of it is committed, and the turn is tried
+  again.
 
 - `meerkat-runtime`: a host store commit no longer sends its batch past its
   fence token's lease. A commit whose outcome stayed unknown or unavailable

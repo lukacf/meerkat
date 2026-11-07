@@ -239,6 +239,9 @@ async fn exercise(case: Case) {
             assert_eq!(&receipt.input_id, input.id());
             assert!(!receipt.deduplicated);
             assert!(fixture.source.owner.has_admitted_source(&association).unwrap());
+            // Read A's durable binding while this host is open: its settled
+            // close releases the store the binding is read from.
+            let a_association = fixture.binding().await.unwrap().unwrap();
             fixture.source.stop_custody_recovery();
             drop(release_round.take());
             let (native, source) = tokio::join!(close.as_mut().unwrap().join(), fixture.source.join_custody_recovery());
@@ -257,7 +260,6 @@ async fn exercise(case: Case) {
             assert!(native[0].seed.phase == InputLifecycleState::Consumed);
             assert!(native[0].state.persisted_input.is_none(), "actual Core retirement is required");
             verify_exact_replay(&native[0].state, &input).unwrap();
-            let a_association = fixture.binding().await.unwrap().unwrap();
             let a_before = acquisition_approved::native_history(history.as_ref().unwrap().as_ref(), &fixture.session).await;
             assert_eq!(a_before.len(), 1);
             let grants = std::fs::read(fixture.source_path.parent().unwrap().join("grants.jsonl")).unwrap();

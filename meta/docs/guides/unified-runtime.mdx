@@ -633,13 +633,19 @@ is refused (`IdentityHostAdopted`). A member embodied outside the add after
 its freshness read refuses the add (`NotHeld`). In each case the host is
 never asked. In lazy mode, too, the add embodies its member at once.
 
-Before the member exists, the add marks its identity as owing the host a
-held completion (in `<state>/held-completion-owed/`, as a held roster pass
-does), and it clears the mark when it publishes the member. A member whose
-add aborted never got a Core binding, so it can be added again. Until a held
-pass (that re-add, or a held roster pass) publishes it, every other wake or
-reset refuses it (`HeldCompletionOwed`), across a restart too; a delete finds
-nothing to delete, since Core never spawned it, and the mark stays. On the
+The add holds its identity for the host in this process: every declaration
+of it asks Core to create it only under a held pass, and Core, which never
+created it, awaits that held creation. A member whose add aborted never got a
+Core binding, so it can be added again. Until a held pass (that re-add, or a
+held roster pass) publishes it, every other wake or reset refuses it
+(`HeldCompletionOwed`). The hold lasts for the process: after a restart the
+host holds the identity again through its held bootstrap or a re-add, and an
+identity it no longer holds is created as any other. A delete finds nothing
+to delete, since Core never spawned it, and the identity leaves the host's
+hold. The add also marks the identity in `<state>/held-completion-owed/` (or
+the host store), as 0.9.10 does, and clears the mark when it publishes the
+member: the marks are written for a rollback to 0.9.10 only, and nothing
+reads them. On the
 wire this refusal keeps the internal-error code `-32603` with structured data
 `{kind: "held_completion_owed", identity}`, in an RPC error and in a refused
 `meta/reconcile_identity` outcome alike. After an eager roster pass the
@@ -647,6 +653,14 @@ identity's bootstrap status entry is `broken`, with `restore`
 `{stage: "refused", code: -32603, kind: "held_completion_owed"}`. Read it as
 an admission still owed to the host, not as a failed member: only a held
 pass that publishes the member clears it.
+
+A held name is reserved from its declaration on: while Core awaits the
+identity's held creation, a raw spawn under its member id (a spawn without
+the identity entry's custody) is refused (`IdentityMember`). Never raw-spawn
+under a name you declare held. Core does not journal the reservation: after
+a restart it stands again from the held bootstrap's declaration, and a raw
+member that takes the name before that declaration makes Core seat the
+identity outside the held protocol.
 
 List the member from inside the completion, as above, never before the add.
 Until the add ends it holds the bootstrap controller, so no pass of the

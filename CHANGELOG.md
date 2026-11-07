@@ -157,6 +157,35 @@ them.
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
 
+- `meerkat-mob`: `MobError::MemberRestoreFailed` gains `cause_data`
+  (`Option<serde_json::Value>`): the structured data of the failure that
+  broke the member's restore (`MobError::structured_data` of it: a session
+  builder's typed refusal of the member's build, a provider-auth refusal),
+  `None` for a failure without any. Every answer for the Broken member (a
+  wake's, a later wake's, a revival's, a refused member handle's) carries
+  it, so a host classifies the failure by its data instead of parsing
+  `reason`. A pattern that names every field of the variant names it too,
+  or adds `..`; code that builds the variant sets it.
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`: MobMachine
+  records a build preparation the host asked to retry and ends it (see
+  Changed). In `meerkat-machine-schema` (`catalog::dsl::mob_machine`),
+  `MobMachineInput` gains `ResolveMemberBuildPreparation { agent_identity }`
+  and `MobMachineInputVariant` gains `ResolveMemberBuildPreparation`;
+  `MobMachineEffect` gains
+  `MemberBuildPreparationRetryArmed { agent_identity }` and
+  `MobMachineEffectVariant` gains `MemberBuildPreparationRetryArmed`. In
+  `meerkat-machine-kernels` (`generated::mob`), `Input` and `InputKind`
+  gain `ResolveMemberBuildPreparation`, `Effect` and `EffectKind` gain
+  `MemberBuildPreparationRetryArmed`, and `TransitionId` gains
+  `ResolveMemberRevivalRetryableBuildPreparationRunning`,
+  `ResolveMemberBuildPreparationRunning`,
+  `ResolveMemberBuildPreparationStopped` and
+  `ResolveMemberBuildPreparationCompleted`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the public form of MobMachine's
@@ -212,6 +241,20 @@ them.
   Core journaled it. The struct is `#[non_exhaustive]`, so the field is
   additive.
 
+- `meerkat-mob`: `MemberWakeRefusal::BuildPreparationRetry`, a wake
+  MobMachine refuses for the build preparation the member's host asked to
+  retry (`MemberBuildPreparationRefusal::Retryable`), told apart from a
+  first-boot row or an undeclared role move (`HostPreparationPending`). It
+  is retryable, and on the wire it is `host_preparation_pending`, as before
+  (its token and the peer-message refusal). The enum is
+  `#[non_exhaustive]`, so the variant is additive.
+
+- `meerkat-mob`: `MobHandle::resolve_member_build_preparation`: the host
+  retries the build preparation it asked to retry for a member (its door,
+  after a wake refused `BuildPreparationRetry`), which ends the cause, so
+  the member's next wake asks its build preparer again. A member with no
+  such cause is a no-op. A host command: the agent lane never runs it.
+
 ### Changed
 
 - `meerkat-mob`: `DeclaredEntryVerdict`, the verdict a candidate
@@ -227,6 +270,18 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
+- `meerkat-mob`: a build preparation the host asked to retry
+  (`MemberBuildPreparationRefusal::Retryable`) is recorded by MobMachine:
+  the wake answers `MemberWakeRefusal::BuildPreparationRetry` (it answered
+  `HostPreparationPending`), and the next delivery to the member is refused
+  for it, without asking the host again, until the retry timer or the
+  host's resolve (`MobHandle::resolve_member_build_preparation`) ends the
+  cause. The timer runs on the wake retry backoff
+  (`MobBuilder::with_member_wake_retry_backoff`), its delay doubling to the
+  cap; when it fires, work the member still owes wakes it, which asks the
+  host again, and a member that owes none stays Dormant until its next
+  delivery.
 
 ### Fixed
 

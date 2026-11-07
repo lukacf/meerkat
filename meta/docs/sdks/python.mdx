@@ -1128,10 +1128,12 @@ builds the mob) is built, then starts no run until the roster pass has
 published its tools. A member whose identity the roster no longer lists
 starts no run either, until the roster retires it (a host-adopted identity's
 member, which the roster never retires, is not held). A `customize_build`
-that fails refuses the member's build: the member stays as it was, the
-delivery that needed it answers a typed retryable error (the artifact
-refusal itself, typed, when the host's installed artifacts refused the
-tools), and the next delivery tries again. While a member's tools are not
+that fails refuses the member's build: the member stays as it was, and the
+delivery that needed it asks for the build once more. When that fails too,
+the delivery answers a typed retryable error (the artifact refusal itself,
+typed, when the host's installed artifacts refused the tools), and a later
+delivery, or the mob's own retry of work the member owes, tries again.
+While a member's tools are not
 published, its identity status reports `customizer_tools_pending` with the
 reason. A tool from an earlier build that the latest build no longer
 declares is refused, never routed to stale handlers.

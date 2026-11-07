@@ -246,13 +246,22 @@ mod losing {
     use super::LostAnswer;
 
     /// The real mob session bridge, except that after the real governed
-    /// delivery ran its answer is replaced by an unresolved one.
+    /// delivery ran its answer is replaced by an unresolved one (`lose`),
+    /// and that a declared roster may answer without reaching Core
+    /// (`declare_in_core`).
     pub struct LosingBridge {
         pub inner: MobSessionBridge,
-        pub lose: LostAnswer,
+        /// How the governed delivery's answer is lost; `None` keeps it.
+        pub lose: Option<LostAnswer>,
         /// Real native acknowledgements of new work seen before an answer
         /// was replaced.
         pub native_accepted: Arc<AtomicUsize>,
+        /// `false`: a declared roster answers that every identity keeps
+        /// what it has without reaching Core, so the identity registers
+        /// while Core still holds its member as a worker (a member seated
+        /// before identity entries existed, which no declared apply has
+        /// adopted yet).
+        pub declare_in_core: bool,
     }
 
     #[async_trait]
@@ -264,7 +273,13 @@ mod losing {
             input: meerkat_runtime::Input,
             custody: GovernedDeliveryCustody,
         ) -> Result<GovernedDelivery, BridgeAdmissionError> {
-            if matches!(self.lose, LostAnswer::CustodyLost) {
+            let Some(lose) = self.lose else {
+                return self
+                    .inner
+                    .begin_governed_delivery(runtime_id, session_id, input, custody)
+                    .await;
+            };
+            if matches!(lose, LostAnswer::CustodyLost) {
                 // Taken past its guard and lost unsettled: no native
                 // settlement is ever observed.
                 drop((input, custody.submit()));
@@ -288,7 +303,7 @@ mod losing {
             ) {
                 self.native_accepted.fetch_add(1, Ordering::SeqCst);
             }
-            Err(BridgeAdmissionError::GovernedInput(match self.lose {
+            Err(BridgeAdmissionError::GovernedInput(match lose {
                 LostAnswer::Unresolved => GovernedInputError::AdmissionUnresolved {
                     detail: "the admission answer was lost".to_string(),
                 },
@@ -604,6 +619,9 @@ mod losing {
             meerkat_meta::identity_first::DeclaredRosterAnswer,
             meerkat_meta::identity_first::BridgeError,
         > {
+            if !self.declare_in_core {
+                return Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster));
+            }
             self.inner.apply_declared_roster(roster).await
         }
     }
@@ -653,11 +671,24 @@ async fn governed_runtime_composed(
     let bridge: Arc<dyn SessionBridge> = match lose {
         Some((lose, native_accepted)) => Arc::new(losing::LosingBridge {
             inner: bridge,
-            lose,
+            lose: Some(lose),
             native_accepted,
+            declare_in_core: true,
         }),
         None => Arc::new(bridge),
     };
+    governed_runtime_over(bridge, addressability).await
+}
+
+/// The identity runtime over `bridge`, with the fixture's member registered
+/// under `addressability`.
+async fn governed_runtime_over(
+    bridge: Arc<dyn SessionBridge>,
+    addressability: AgentAddressability,
+) -> (
+    Arc<IdentityRuntime>,
+    meerkat_meta::identity_first::AgentIdentity,
+) {
     let store: Arc<dyn ContinuityStore> =
         Arc::new(LocalContinuityStore::in_memory().expect("continuity store"));
     let lease: Arc<dyn LeaseProvider> = Arc::new(LocalLeaseProvider::new());
@@ -1702,4 +1733,174 @@ async fn a_trusted_host_dispatch_reaches_an_addressable_identity_on_a_non_addres
     let outcome = runtime.wait_for_turn(&identity, ticket, WAIT).await;
     assert!(completed_with_answer(&outcome), "{outcome:?}");
     assert_eq!(fixture.provider.requests().len(), 1);
+}
+
+/// A governed send to a registered identity whose member Core still holds
+/// as a worker (a member seated before identity entries existed, which no
+/// declared apply has adopted yet) takes the external door: Core's
+/// addressability rule for the worker applies, so on a member whose
+/// profile admits no external work the send is refused
+/// `NotExternallyAddressable`, its custody withdrawn and nothing run.
+///
+/// Pins the door's branch for a name Core holds as no entry: RED under a
+/// door that sends such a name through the trusted host's internal door,
+/// which admits the input whatever the member's addressability.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_send_to_an_identity_whose_member_is_still_a_worker_takes_the_external_door() {
+    let fixture = Arc::new(Fixture::non_addressable().await);
+    let bridge = MobSessionBridge::new(fixture.handle.clone())
+        .with_controller_pin_source(fixture.service.clone());
+    let (runtime, identity) = governed_runtime_over(
+        Arc::new(losing::LosingBridge {
+            inner: bridge,
+            lose: None,
+            native_accepted: Arc::new(AtomicUsize::new(0)),
+            declare_in_core: false,
+        }),
+        AgentAddressability::Addressable,
+    )
+    .await;
+    assert!(
+        matches!(
+            fixture.handle.identity_entry(&AgentIdentity::from(MEMBER)),
+            Ok(meerkat_mob::IdentityEntryRead::NotAnEntry { worker: Some(_) })
+        ),
+        "Core holds the member as a worker, no entry"
+    );
+    let registered = runtime
+        .registered_spec(&identity)
+        .await
+        .expect("registered row");
+
+    let send_binder = FixtureBinder::authored_from(&fixture, registered.spec);
+    let error = runtime
+        .send_governed_with_turn_ticket(&identity, None, raw_prompt(), send_binder.clone())
+        .await
+        .expect_err("the external door refuses a worker that admits no external work");
+    assert!(
+        matches!(
+            &error,
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(mob))
+                if matches!(**mob, MobError::NotExternallyAddressable(_))
+        ),
+        "{error}"
+    );
+    assert!(send_binder.admitted().is_empty());
+    assert_eq!(send_binder.withdrawn(), 1, "the custody is withdrawn");
+    assert!(fixture.provider.requests().is_empty(), "nothing ran");
+}
+
+/// A host entry fence whose entry, the governed delivery's last step before
+/// submission, tells the test it was reached and then waits until the test
+/// releases it: a barrier between the delivery's reads and its submission.
+struct BarrierFence {
+    reached: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+struct BarrierPermit;
+
+impl GovernedEntryPermit for BarrierPermit {
+    fn finish(self: Box<Self>, _outcome: GovernedEntryOutcome) {}
+}
+
+impl GovernedEntryFence for BarrierFence {
+    fn enter(&self) -> Result<Box<dyn GovernedEntryPermit>, GovernedEntryRefusal> {
+        if let Some(reached) = self.reached.lock().expect("barrier").take() {
+            let _ = reached.send(());
+        }
+        // Blocks this worker thread: the test's other workers run the
+        // rotation meanwhile.
+        let _ = self.release.lock().expect("barrier").recv_timeout(WAIT);
+        Ok(Box::new(BarrierPermit))
+    }
+}
+
+/// A governed send to an identity entry reads the entry's member (its
+/// incarnation, and whether it admits external work) and then submits. A
+/// rotation of the member between the two, by another host caller of the
+/// same mob (here a respawn of the entry while the send waits at its last
+/// step before submission), leaves the incarnation the send read: the input
+/// submitted at that incarnation is refused stale. Nothing is admitted to
+/// the new incarnation, the custody is withdrawn and nothing runs.
+///
+/// RED before the submission named the incarnation the send read: the input
+/// was submitted by identity, to whichever incarnation was current then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_rotated_between_the_governed_read_and_the_submit_refuses_the_input_stale() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_runtime(&fixture, None).await;
+    let member = AgentIdentity::from(MEMBER);
+    assert!(
+        matches!(
+            fixture.handle.identity_entry(&member),
+            Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+        ),
+        "the registration's declaration made the member an identity entry"
+    );
+    let read_incarnation = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .expect("the entry's member")
+        .agent_runtime_id;
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let fence: Arc<dyn GovernedEntryFence> = Arc::new(BarrierFence {
+        reached: Mutex::new(Some(reached_tx)),
+        release: Mutex::new(release_rx),
+    });
+    let binder = fenced_binder(&fixture, Binding::Original, &fence);
+    let sending = {
+        let runtime = Arc::clone(&runtime);
+        let identity = identity.clone();
+        let binder = binder.clone();
+        tokio::spawn(async move {
+            runtime
+                .send_governed_with_turn_ticket(&identity, None, raw_prompt(), binder)
+                .await
+        })
+    };
+    tokio::time::timeout(WAIT, reached_rx)
+        .await
+        .expect("the send reaches its last step before submission")
+        .expect("reached");
+    // Another host caller of the same mob rotates the entry's member onto
+    // a fresh session: its next incarnation is seated at the next
+    // generation.
+    let mut successor = SpawnMemberSpec::new("worker", member.clone()).with_entry_custody(true);
+    successor.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+        continuity_key: member.to_string(),
+    };
+    fixture
+        .handle
+        .rotate_member(successor)
+        .await
+        .expect("the entry's member rotates");
+    let current = fixture
+        .handle
+        .get_member(&member)
+        .await
+        .expect("roster read")
+        .expect("the entry's member")
+        .agent_runtime_id;
+    assert_ne!(current, read_incarnation, "a new incarnation");
+    release_tx.send(()).expect("release the barrier");
+
+    let error = sending
+        .await
+        .expect("the send's task")
+        .expect_err("the input submitted at the incarnation the send read is refused");
+    assert!(
+        matches!(
+            &error,
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Mob(mob))
+                if matches!(**mob, MobError::StaleFenceToken { .. })
+        ),
+        "refused stale: {error}"
+    );
+    assert!(binder.admitted().is_empty(), "nothing was admitted");
+    assert_eq!(binder.withdrawn(), 1, "the custody is withdrawn");
+    assert!(fixture.provider.requests().is_empty(), "nothing ran");
 }

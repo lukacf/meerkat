@@ -1741,21 +1741,25 @@ NotAuditWitnessRecoveredArchiveEnds == [][~AuditWitnessRecoveredArchiveEnds]_var
 \* External work never reaches an identity entry, or a name reserved
 \* unreadable: the entry's host delivers to it through its own door, as
 \* internal work, and an external sender is refused as an identity member
-\* (ResolveSubmitWorkRejectionIdentityMember and its unreadable-name twin).
+\* (ResolveSubmitWorkRejectionIdentityMember and its unreadable-name twin),
+\* whatever session the work names: a stale-session answer would invite a
+\* retry that can only be refused again.
 \* Member 1 recovered externally addressable and bound to its session, its
 \* Declared entry row replayed or not; member 2 recovered externally
 \* addressable or not, bound to its session or not, its peer registered or
 \* not; the scan of either member's created entry row, Present (a Created
 \* entry of a seated local member, or the reservation of a name a Declared
 \* entry holds) or Unreadable (the name reserved); and work of either origin
-\* to either member under either runtime and fence token, with no expected
-\* session: the four admissions and the rejections of a running mob. The
-\* work arms change nothing, so the run counts the arms that answer every
-\* piece of work in every state (ENABLED form).
+\* to either member under either runtime and fence token, naming no
+\* expected session, member 1's or member 2's: the four admissions and the
+\* rejections of a running mob, the stale session's among them. The work
+\* arms change nothing, so the run counts the arms that answer every piece
+\* of work in every state (ENABLED form).
 
 DoorsIds == {Id1, Id2}
 DoorsRids == {Rid1, Rid2}
 DoorsFences == {1, 2}
+DoorsSessions == {None, Some(Sess1), Some(Sess2)}
 DoorsOrigins == {"External", "Internal"}
 \* No guard of the work arms reads the work id or its attribution.
 DoorsWork == "workid_1"
@@ -1773,34 +1777,36 @@ DScan == \E id \in DoorsIds, presence \in {"Present", "Unreadable"} : RecoverArm
 
 \* Every arm that answers a piece of work in a running mob: the admissions
 \* (1-4), the refusals of a member that is not there, not live, not current
-\* or retiring (5-8), the identity member refusals (9-10) and the
-\* addressability refusals (11-12).
-DoorsVerdicts(id, rid, ft, origin) ==
-    << ENABLED SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
-       ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
-       ENABLED SubmitWorkRunningInternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
-       ENABLED SubmitWorkRunningInternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution),
-       ENABLED ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, None, origin),
-       ENABLED ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, None, origin) >>
-DoorsArm(id, rid, ft, origin) ==
-    \/ SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
-    \/ SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
-    \/ SubmitWorkRunningInternal(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
-    \/ SubmitWorkRunningInternalPeerOnly(id, rid, ft, None, DoorsWork, origin, DoorsAttribution)
-    \/ ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, None, origin)
-    \/ ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, None, origin)
+\* or retiring (5-8), the identity member refusals (9-10), the
+\* addressability refusals (11-12) and the stale session refusal (13).
+DoorsVerdicts(id, rid, ft, es, origin) ==
+    << ENABLED SubmitWorkRunningExternal(id, rid, ft, es, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, es, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningInternal(id, rid, ft, es, DoorsWork, origin, DoorsAttribution),
+       ENABLED SubmitWorkRunningInternalPeerOnly(id, rid, ft, es, DoorsWork, origin, DoorsAttribution),
+       ENABLED ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, es, origin),
+       ENABLED ResolveSubmitWorkRejectionStaleSessionBinding(id, rid, ft, es, origin) >>
+DoorsArm(id, rid, ft, es, origin) ==
+    \/ SubmitWorkRunningExternal(id, rid, ft, es, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningExternalPeerOnly(id, rid, ft, es, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningInternal(id, rid, ft, es, DoorsWork, origin, DoorsAttribution)
+    \/ SubmitWorkRunningInternalPeerOnly(id, rid, ft, es, DoorsWork, origin, DoorsAttribution)
+    \/ ResolveSubmitWorkRejectionMemberNotFound(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionCurrentRuntimeNotLive(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionStaleFenceToken(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionRetiringAsMemberNotFound(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionIdentityMember(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionIdentityMemberUnreadableName(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionNotExternallyAddressable(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable(id, rid, ft, es, origin)
+    \/ ResolveSubmitWorkRejectionStaleSessionBinding(id, rid, ft, es, origin)
 
 DoorsNext ==
     \/ D1Recover
@@ -1810,8 +1816,9 @@ DoorsNext ==
     \/ D2Bind
     \/ D2Peer
     \/ DScan
-    \/ \E id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, origin \in DoorsOrigins :
-           DoorsArm(id, rid, ft, origin)
+    \/ \E id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, es \in DoorsSessions,
+          origin \in DoorsOrigins :
+           DoorsArm(id, rid, ft, es, origin)
 
 DoorsSpec == Init /\ [][DoorsNext]_vars
 
@@ -1819,35 +1826,44 @@ DoorsSpec == Init /\ [][DoorsNext]_vars
 DoorsEntry(id) == id \in DOMAIN identity_entry_origins \/ id \in identity_entry_unreadable
 
 \* No external work is admitted to an identity entry or to a name reserved
-\* unreadable, by its session or by its peer.
+\* unreadable, by its session or by its peer, whatever session it names.
 AuditDoorsNoExternalEntryAdmission ==
-    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences :
+    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, es \in DoorsSessions :
         DoorsEntry(id) =>
-            /\ ~ENABLED SubmitWorkRunningExternal(id, rid, ft, None, DoorsWork, "External", DoorsAttribution)
-            /\ ~ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, None, DoorsWork, "External", DoorsAttribution)
+            /\ ~ENABLED SubmitWorkRunningExternal(id, rid, ft, es, DoorsWork, "External", DoorsAttribution)
+            /\ ~ENABLED SubmitWorkRunningExternalPeerOnly(id, rid, ft, es, DoorsWork, "External", DoorsAttribution)
 
 \* At most one arm answers every piece of work: no admission and no two
-\* refusals overlap. (Some work answers no arm here: external work to a
-\* member bound to no session and no peer, which the shell never submits
-\* through these arms.)
+\* refusals overlap. External work to an identity entry, or to a name
+\* reserved unreadable, is checked whatever session it names: the identity
+\* member refusals and the stale session refusal never both answer it.
+\* Other work is checked naming no session: internal work naming a session
+\* to a member bound to no session and no peer, and external work naming a
+\* moved session to a worker whose runtime admits no external work, are
+\* answered by an addressability refusal and the stale session refusal
+\* together, overlaps that predate the doors and that the arm exclusivity
+\* contract's baseline carries. (Some work answers no arm here: external
+\* work to a member bound to no session and no peer, which the shell never
+\* submits through these arms.)
 AuditDoorsAtMostOne ==
     \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, origin \in DoorsOrigins :
-        Cardinality({i \in 1..12 : DoorsVerdicts(id, rid, ft, origin)[i]}) <= 1
+        \A es \in (IF origin = "External" /\ DoorsEntry(id) THEN DoorsSessions ELSE {None}) :
+            Cardinality({i \in 1..13 : DoorsVerdicts(id, rid, ft, es, origin)[i]}) <= 1
 
 \* External work to an identity entry, or to a name reserved unreadable, is
 \* answered by exactly one of the identity member refusals whenever no
 \* refusal of a member that is not there, not live, not current or retiring
-\* answers it.
+\* answers it, whatever session it names.
 AuditDoorsEntryExactlyOne ==
-    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences :
-        LET v == DoorsVerdicts(id, rid, ft, "External") IN
+    \A id \in DoorsIds, rid \in DoorsRids, ft \in DoorsFences, es \in DoorsSessions :
+        LET v == DoorsVerdicts(id, rid, ft, es, "External") IN
             DoorsEntry(id) =>
                 Cardinality({i \in 9..10 : v[i]}) = IF v[5] \/ v[6] \/ v[7] \/ v[8] THEN 0 ELSE 1
 
 \* Witnesses of the doors run. The refusals of an unreadable name, of a
-\* member that is not externally addressable and of a peer-only member
-\* answer exactly the work their guards name: the coverage check, which
-\* requires each to fire in this run, is their witness.
+\* member that is not externally addressable, of a peer-only member and of
+\* a stale session answer exactly the work their guards name: the coverage
+\* check, which requires each to fire in this run, is their witness.
 \* External work to an externally addressable worker is admitted.
 AuditWitnessDoorsExternalWorkerAdmitted ==
     /\ ~DoorsEntry(Id2)
@@ -1865,9 +1881,16 @@ AuditWitnessDoorsExternalEntryRefused ==
 AuditWitnessDoorsExternalCreatedRefused ==
     /\ Created(Id2)
     /\ ResolveSubmitWorkRejectionIdentityMember(Id2, Rid2, 2, None, "External")
+\* External work to a Declared entry that names another session than the
+\* entry's binding is refused as an identity member, not as a stale session.
+AuditWitnessDoorsExternalEntryMovedSessionRefused ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ ResolveSubmitWorkRejectionIdentityMember(Id1, Rid1, 1, Some(Sess2), "External")
 
 NotAuditWitnessDoorsExternalWorkerAdmitted == [][~AuditWitnessDoorsExternalWorkerAdmitted]_vars
 NotAuditWitnessDoorsInternalEntryAdmitted == [][~AuditWitnessDoorsInternalEntryAdmitted]_vars
 NotAuditWitnessDoorsExternalEntryRefused == [][~AuditWitnessDoorsExternalEntryRefused]_vars
 NotAuditWitnessDoorsExternalCreatedRefused == [][~AuditWitnessDoorsExternalCreatedRefused]_vars
+NotAuditWitnessDoorsExternalEntryMovedSessionRefused ==
+    [][~AuditWitnessDoorsExternalEntryMovedSessionRefused]_vars
 ====

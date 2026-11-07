@@ -562,8 +562,10 @@ pub(crate) struct CoreReadsBridge {
     /// The identities Core holds as created entries, whose records the mob's
     /// identity store owns ([`Self::hold_created`]).
     created: Mutex<BTreeSet<AgentIdentity>>,
-    /// The names Core reserves ([`Self::hold_reserved`]).
-    reserved: Mutex<BTreeSet<AgentIdentity>>,
+    /// The names Core holds as removed identities ([`Self::hold_removed`]).
+    removed: Mutex<BTreeSet<AgentIdentity>>,
+    /// The names Core reserves as unreadable ([`Self::hold_unreadable`]).
+    unreadable: Mutex<BTreeSet<AgentIdentity>>,
     /// Set while the declared apply unlists ([`DeclaredSet::apply`]): each
     /// retirement it starts is journaled for that cause, as Core's seal
     /// journals it.
@@ -733,10 +735,19 @@ impl CoreReadsBridge {
             .insert(identity.clone());
     }
 
-    /// Core reserves `identity`'s name: its entry is one Core cannot read,
-    /// or the identity was removed. Core's read names no member of it.
-    pub(crate) fn hold_reserved(&self, identity: &AgentIdentity) {
-        self.reserved
+    /// Core holds `identity` as a removed identity: its name is never an
+    /// entry or a member again. Core's read names no member of it.
+    pub(crate) fn hold_removed(&self, identity: &AgentIdentity) {
+        self.removed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
+    /// Core reserves `identity`'s name as one whose record it cannot read.
+    /// Core's read names no member of it.
+    pub(crate) fn hold_unreadable(&self, identity: &AgentIdentity) {
+        self.unreadable
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(identity.clone());
@@ -926,12 +937,15 @@ impl SessionBridge for CoreReadsBridge {
             });
         }
         self.take_entry_read()?;
-        if self
-            .reserved
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(identity)
-        {
+        let held = |names: &Mutex<BTreeSet<AgentIdentity>>| {
+            names
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(identity)
+        };
+        // This build of Meta reads a removed identity as a name Core
+        // reserves, as it reads an unreadable one.
+        if held(&self.removed) || held(&self.unreadable) {
             return Ok(CoreIdentityEntry::reserved());
         }
         let created = self

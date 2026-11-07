@@ -149,14 +149,16 @@
 #   addressable or not, bound to its session or not, its peer registered or
 #   not; the scan of either member's created entry row (Present or
 #   Unreadable); and work of either origin to either member under either
-#   runtime and fence token: no external work is admitted to an identity
-#   entry or to a name reserved unreadable, by its session or its peer
+#   runtime and fence token, naming no expected session, member 1's or
+#   member 2's: no external work is admitted to an identity entry or to a
+#   name reserved unreadable, by its session or its peer
 #   (AuditDoorsNoExternalEntryAdmission), at most one arm answers every
-#   piece of work (AuditDoorsAtMostOne), and external work to an entry or a
-#   reserved name is refused as an identity member whenever no refusal of a
-#   member that is not there, not live, not current or retiring answers it
-#   (AuditDoorsEntryExactlyOne). Internal work to an entry, the host's own
-#   door, is admitted as to any member.
+#   piece of work, the stale session refusal among them
+#   (AuditDoorsAtMostOne), and external work to an entry or a reserved name
+#   is refused as an identity member, whatever session it names, whenever
+#   no refusal of a member that is not there, not live, not current or
+#   retiring answers it (AuditDoorsEntryExactlyOne). Internal work to an
+#   entry, the host's own door, is admitted as to any member.
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -638,6 +640,7 @@ doors_covered_actions=(
   ResolveSubmitWorkRejectionIdentityMemberUnreadableName
   ResolveSubmitWorkRejectionNotExternallyAddressable
   ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable
+  ResolveSubmitWorkRejectionStaleSessionBinding
 )
 
 # A covered arm a run fires only through a named wrapper whose conjunct
@@ -1078,7 +1081,8 @@ for witness in \
   "unlist:Action property:UnlistedNameRefused" "unlist:Action property:UnlistLeavesCreated" \
   "recovered:Action property:RecoveredRemovalEnds" "recovered:Action property:RecoveredArchiveEnds" \
   "doors:Action property:DoorsExternalWorkerAdmitted" "doors:Action property:DoorsInternalEntryAdmitted" \
-  "doors:Action property:DoorsExternalEntryRefused" "doors:Action property:DoorsExternalCreatedRefused"; do
+  "doors:Action property:DoorsExternalEntryRefused" "doors:Action property:DoorsExternalCreatedRefused" \
+  "doors:Action property:DoorsExternalEntryMovedSessionRefused"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue

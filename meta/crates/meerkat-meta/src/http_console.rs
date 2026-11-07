@@ -24633,6 +24633,118 @@ message = "review"
         Ok(())
     }
 
+    /// A console member mutation of a name no roster pass of this runtime
+    /// will ever register is refused for good, typed, and nothing is
+    /// retired: an identity created at runtime (Core holds it as a created
+    /// entry, whose record the mob's identity store owns) and a removed
+    /// identity are unknown to this runtime (`-32001`), and a name whose
+    /// record Core cannot read needs a repair or an upgrade (`-32014`,
+    /// `identity_name_unreadable`). A read of Core's entry that Core could
+    /// not serve refuses the mutation retryable (`-32052`,
+    /// `identity_history_unavailable`), never as an unknown identity.
+    ///
+    /// RED before the door told them apart: `meta/retire_member` answered
+    /// each of them with an untyped `-32000`.
+    #[tokio::test]
+    async fn console_member_mutation_of_a_name_no_roster_pass_registers_is_refused_typed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-mutation-unregistrable-names").await?;
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "console-mutation-unregistrable-names".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let created = AgentIdentity::parse("console-created")?;
+        crate::identity_first::core_test_bridge::bind_live(
+            &core_bridge.core,
+            &created,
+            &ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )?;
+        core_bridge.hold_created(&created);
+        core_bridge.hold_removed(&AgentIdentity::parse("console-removed")?);
+        core_bridge.hold_unreadable(&AgentIdentity::parse("console-unreadable")?);
+        let retire = |member_id: &str| {
+            let runtime = &runtime;
+            let identity_runtime = identity_runtime.clone();
+            let request =
+                rpc_request_with_params("meta/retire_member", json!({ "member_id": member_id }));
+            async move {
+                Box::pin(handle_console_runtime_rpc(
+                    runtime,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(identity_runtime),
+                    None,
+                    None,
+                    request,
+                    true,
+                ))
+                .await
+            }
+        };
+
+        for (name, code, data) in [
+            ("console-created", json!(-32001), Value::Null),
+            ("console-removed", json!(-32001), Value::Null),
+            (
+                "console-unreadable",
+                json!(crate::rpc::STORAGE_RESOLUTION_CODE),
+                json!({
+                    "kind": "identity_name_unreadable",
+                    "identity": "console-unreadable",
+                    "remedy": "repair_or_upgrade",
+                    "retryable": false,
+                }),
+            ),
+        ] {
+            let response = retire(name).await;
+            assert!(response["result"].is_null(), "{name}: {response:#?}");
+            assert_eq!(
+                (&response["error"]["code"], &response["error"]["data"]),
+                (&code, &data),
+                "{name}: the typed, final refusal: {response:#?}"
+            );
+        }
+        assert!(
+            core_bridge.releases().is_empty(),
+            "a refused mutation releases nothing"
+        );
+        assert!(
+            core_bridge.core.live_member(&created)?.is_some(),
+            "Core's member of the created identity is untouched"
+        );
+
+        // Every read of Core's entry fails: the mutation of a plain name is
+        // refused typed and retryable, never as an unknown identity.
+        core_bridge.fail_entry_reads(0, u64::MAX);
+        let response = retire("console-plain").await;
+        assert!(response["result"].is_null(), "{response:#?}");
+        assert_eq!(
+            (&response["error"]["code"], &response["error"]["data"]),
+            (
+                &json!(crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE),
+                &json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "console-plain",
+                    "retryable": true,
+                })
+            ),
+            "the read fault's typed, retryable refusal: {response:#?}"
+        );
+        Ok(())
+    }
+
     /// A mob refusal from `meta/force_cancel_member` reaches a console caller
     /// with meerkat's typed code and data, the rendering
     /// `meta/stop_member_run` uses, instead of a `-32000` with the refusal

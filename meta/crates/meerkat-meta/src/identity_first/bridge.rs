@@ -4614,6 +4614,11 @@ impl MemberStanding {
 pub struct CoreIdentityEntry {
     /// How Core holds the name.
     pub kind: CoreNameKind,
+    /// Where the entry comes from, when Core holds the name as an identity
+    /// entry: a host's declaration (its roster), or a creation at runtime,
+    /// whose record the mob's identity store owns. `None` for a name that is
+    /// no entry, or that Core reserves.
+    pub origin: Option<meerkat_mob::IdentityEntryOrigin>,
     /// The member that holds the name, if one does: the entry's member, or
     /// the worker member that holds a name Core holds as no entry.
     pub member: Option<CoreMember>,
@@ -4626,9 +4631,10 @@ pub struct CoreIdentityEntry {
 }
 
 impl CoreIdentityEntry {
-    /// Core holds the name as an identity entry.
+    /// Core holds the name as an identity entry a host declared;
+    /// [`Self::with_origin`] names another origin.
     pub fn entry() -> Self {
-        Self::of_kind(CoreNameKind::Entry)
+        Self::of_kind(CoreNameKind::Entry).with_origin(meerkat_mob::IdentityEntryOrigin::Declared)
     }
 
     /// Core holds the name as no identity entry: a worker member holds it
@@ -4646,10 +4652,18 @@ impl CoreIdentityEntry {
     fn of_kind(kind: CoreNameKind) -> Self {
         Self {
             kind,
+            origin: None,
             member: None,
             host_preparation: None,
             archived_session: None,
         }
+    }
+
+    /// The read, with the entry's origin.
+    #[must_use]
+    pub fn with_origin(mut self, origin: meerkat_mob::IdentityEntryOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     /// The read, with the member that holds the name.
@@ -4679,6 +4693,15 @@ impl CoreIdentityEntry {
     /// door but the identity's own.
     pub fn is_entry_or_reserved(&self) -> bool {
         matches!(self.kind, CoreNameKind::Entry | CoreNameKind::Reserved)
+    }
+
+    /// Whether Core holds the name as an identity entry a host declared:
+    /// the one kind of name a roster pass registers with this runtime. A
+    /// created entry (the mob's identity store owns its record) and a name
+    /// Core reserves are never registered by a roster pass.
+    pub fn is_declared_entry(&self) -> bool {
+        self.kind == CoreNameKind::Entry
+            && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Declared)
     }
 
     /// The member's role move Core holds: the host's roster moved the
@@ -5040,7 +5063,7 @@ fn core_identity_entry_of(
 
     Ok(match read {
         meerkat_mob::IdentityEntryRead::Entry(view) => {
-            let mut entry = CoreIdentityEntry::entry();
+            let mut entry = CoreIdentityEntry::entry().with_origin(view.origin);
             if let Some(member) = member_of(&view.standing, view.broken.as_ref())? {
                 entry = entry.with_member(member);
             }

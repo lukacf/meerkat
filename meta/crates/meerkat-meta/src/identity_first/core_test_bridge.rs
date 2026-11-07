@@ -559,6 +559,11 @@ pub(crate) struct CoreReadsBridge {
     wake_refusals: Mutex<BTreeMap<AgentIdentity, ResumeRejectionKind>>,
     /// The identities Core holds declared.
     declared: DeclaredSet,
+    /// The identities Core holds as created entries, whose records the mob's
+    /// identity store owns ([`Self::hold_created`]).
+    created: Mutex<BTreeSet<AgentIdentity>>,
+    /// The names Core reserves ([`Self::hold_reserved`]).
+    reserved: Mutex<BTreeSet<AgentIdentity>>,
     /// Set while the declared apply unlists ([`DeclaredSet::apply`]): each
     /// retirement it starts is journaled for that cause, as Core's seal
     /// journals it.
@@ -713,6 +718,25 @@ impl CoreReadsBridge {
     pub(crate) fn hold_declared(&self, identity: &AgentIdentity) {
         self.declared
             .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
+    /// Core holds `identity` as a created entry: an identity created at
+    /// runtime, whose record the mob's identity store owns, so no roster
+    /// pass declares it.
+    pub(crate) fn hold_created(&self, identity: &AgentIdentity) {
+        self.created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone());
+    }
+
+    /// Core reserves `identity`'s name: its entry is one Core cannot read,
+    /// or the identity was removed. Core's read names no member of it.
+    pub(crate) fn hold_reserved(&self, identity: &AgentIdentity) {
+        self.reserved
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(identity.clone());
@@ -902,6 +926,25 @@ impl SessionBridge for CoreReadsBridge {
             });
         }
         self.take_entry_read()?;
+        if self
+            .reserved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(identity)
+        {
+            return Ok(CoreIdentityEntry::reserved());
+        }
+        let created = self
+            .created
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(identity);
+        if created {
+            return Ok(self
+                .core
+                .identity_entry(identity, true)
+                .with_origin(meerkat_mob::IdentityEntryOrigin::Created));
+        }
         Ok(self
             .core
             .identity_entry(identity, self.declared.contains(identity)))

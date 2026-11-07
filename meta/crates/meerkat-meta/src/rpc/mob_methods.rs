@@ -5498,6 +5498,125 @@ external_addressable = true
         Ok(())
     }
 
+    /// A send by name to an identity created at runtime (Core holds it as a
+    /// created entry, whose record the mob's identity store owns) or to a
+    /// name Core reserves (its entry unreadable, or the identity removed)
+    /// goes through the identity door, which refuses it for good: no roster
+    /// pass ever registers such a name with this runtime, so it is unknown
+    /// to it (`-32001`), not retryable. Nothing is delivered.
+    ///
+    /// RED before the door read the entry's origin: it refused every name
+    /// Core holds as an entry or reserves as retryable (`-32052`), until a
+    /// roster pass that never registers it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_to_a_name_no_roster_pass_registers_is_refused_for_good() -> Result<(), String> {
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "send-to-a-name-no-roster-pass-registers-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let created = crate::identity_first::AgentIdentity::parse("door-created")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        let reserved = crate::identity_first::AgentIdentity::parse("door-reserved")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        // An identity created at runtime: Core holds it as a created entry,
+        // its member seated.
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            &created,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )
+        .map_err(|err| format!("Core's member: {err:?}"))?;
+        bridge.hold_created(&created);
+        // A name Core reserves.
+        bridge.hold_reserved(&reserved);
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "send-to-a-name-no-roster-pass-registers".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        for name in [&created, &reserved] {
+            match resolve_send_message_target(&runtime, Some(&identity_rt), name.as_str()).await {
+                Ok(SendMessageTarget::Identity { identity, .. }) if &identity == name => {}
+                Ok(SendMessageTarget::Identity { identity, .. }) => {
+                    return Err(format!("the send must name {name}, not {identity}"));
+                }
+                Ok(SendMessageTarget::MobMember) => {
+                    return Err(format!(
+                        "{name}: a name Core holds as an entry or reserves never takes the raw \
+                         member door"
+                    ));
+                }
+                Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
+                    return Err(format!(
+                        "{name}: a plain identity takes the identity door, not the \
+                         reserved-alias refusal ({alias})"
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "{name}: Core's entry reads, so the door is chosen: {error}"
+                    ));
+                }
+            }
+            let refused = identity_rt
+                .send(name, &meerkat_core::ContentInput::Text("hello".to_string()))
+                .await;
+            match &refused {
+                Err(
+                    error @ crate::identity_first::IdentityRuntimeError::UnknownIdentity(identity),
+                ) if identity == name && !error.clears_on_its_own() => {
+                    let code = crate::rpc::identity_error_code(error);
+                    if code != -32001 {
+                        return Err(format!("{name}: the refusal answers -32001, not {code}"));
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "{name}: the identity door refuses a name no roster pass registers for \
+                         good, as unknown to this runtime: {other:?}"
+                    ));
+                }
+            }
+        }
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches a member through the refused door".to_string());
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
     /// `meta/run_flow` resolves every `role_targets` member id by the
     /// member-id alias rule before anything runs. Under identity authority a
     /// generated alias that is not the current incarnation is refused with

@@ -153,7 +153,10 @@ them.
   MeerkatMachine gains the input `BindInputRequesterBatchKey`.
   `MeerkatMachineInput` (meerkat-machine-schema
   `catalog::dsl::meerkat_machine` and meerkat-runtime `meerkat_machine::dsl`)
-  gains the variant `BindInputRequesterBatchKey`, the kernel
+  gains the variant `BindInputRequesterBatchKey { input_id,
+  authority_batch_key }`, `MeerkatMachineInputVariant` (meerkat-machine-schema
+  and meerkat-runtime) and `MeerkatMachineRuntimeInternalInput`
+  (meerkat-runtime) gain `BindInputRequesterBatchKey`, the kernel
   `generated::meerkat::Input` and `InputKind` gain `BindInputRequesterBatchKey`
   (with the struct `inputs::BindInputRequesterBatchKey`), and the kernel
   `generated::meerkat::TransitionId` gains `BindInputRequesterBatchKeyIdle`,

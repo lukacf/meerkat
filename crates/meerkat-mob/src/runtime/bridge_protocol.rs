@@ -48,9 +48,10 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeSupervisorRotationTargetReceipt, BridgeTrackedInputCancelOutcome,
     BridgeTrackedInputCancelPayload, BridgeTrackedInputCancelResponse, BridgeTurnCorrelation,
     BridgeTurnDirective, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
-    HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode,
-    MaterializeLaunchOutcome, MemberEventCursor, MemberOperatorOp, MemberOperatorOutcome,
-    MemberOperatorReply, MemberOperatorSpawnSpec, MemberSessionDisposal, RuntimeReleaseCause,
+    HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_INSTRUCTION_TARGET_BIRTH,
+    HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode, MaterializeLaunchOutcome,
+    MemberEventCursor, MemberOperatorOp, MemberOperatorOutcome, MemberOperatorReply,
+    MemberOperatorSpawnSpec, MemberSessionDisposal, RuntimeReleaseCause,
     SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
     SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_INTENT,
     SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
@@ -1129,6 +1130,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         }))
     }
 

@@ -94,16 +94,19 @@ impl BridgeProtocolVersion {
     /// `HostFeatures` probe and the member-addressed
     /// `ReadMemberVisibleTools`. A `MaterializeMember` that asks the host to
     /// report an adopted session's first turn
-    /// (`report_adopted_first_turn`) is a V7 command too, and so are the
+    /// (`report_adopted_first_turn`) is a V7 command too, and so are a
+    /// `Fresh` `MaterializeMember` that carries the new member's
+    /// operator-instruction snapshot (`instruction_target`) and the
     /// host-addressed `RecordMemberInstructionTarget` and
     /// `ReleaseMemberInstructionTarget`. Accepted on decode
     /// and used per command, by shape, but never advertised: a 0.9.4
     /// controller cannot decode a capability report that lists it, so a
     /// controller asks a host with `HostFeatures` instead
     /// ([`HOST_FEATURE_PROMPT_CONTEXT_FORK`],
-    /// [`HOST_FEATURE_ADOPTED_FIRST_TURN`]) before it extends a command, and
-    /// sends a new V7 command as it is: a host that does not serve it
-    /// refuses it typed.
+    /// [`HOST_FEATURE_ADOPTED_FIRST_TURN`],
+    /// [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]) before it extends a
+    /// command, and sends a new V7 command as it is: a host that does not
+    /// serve it refuses it typed.
     pub const V7: Self = Self(7);
     /// Current protocol version implemented by this bridge contract.
     pub const CURRENT: Self = Self::V6;
@@ -337,7 +340,9 @@ impl<'de> Deserialize<'de> for BridgeProtocolVersion {
 ///   of that reference's exact fork session. V2-V5 peers reject these fields
 ///   and commands with a typed minimum-version failure.
 /// - `7`: a `Fresh` `MaterializeMember` may carry `prompt_context_fork`, the
-///   child's fork seed and typed source, and a `Resume` `MaterializeMember`
+///   child's fork seed and typed source, and `instruction_target`, the new
+///   member's operator-instruction snapshot, which the host records in the
+///   session it mints; a `Resume` `MaterializeMember`
 ///   may set `report_adopted_first_turn`, asking the host to report whether
 ///   the adopted session's first turn already started; the host-addressed
 ///   `HostFeatures` probe, the member-addressed `ReadMemberVisibleTools` and
@@ -679,6 +684,7 @@ pub fn decode_bridge_command_accepting(
     let command = serde_json::from_value(value).map_err(BridgeCommandDecodeError::Invalid)?;
     validate_v6_capability_shape(&command)?;
     validate_v7_prompt_context_fork_shape(&command)?;
+    validate_v7_instruction_target_shape(&command)?;
     validate_v7_adopted_first_turn_shape(&command)?;
     Ok(command)
 }
@@ -731,6 +737,28 @@ fn validate_v7_prompt_context_fork_shape(
     )))
 }
 
+/// The operator-instruction snapshot a materialize carries is the one a NEW
+/// session is born with: it rides only a `Fresh` launch, so a resumed
+/// member's session is recorded by delivery, never seeded.
+fn validate_v7_instruction_target_shape(
+    command: &BridgeCommand,
+) -> Result<(), BridgeCommandDecodeError> {
+    let BridgeCommand::MaterializeMember(payload) = command else {
+        return Ok(());
+    };
+    if payload.instruction_target.is_none()
+        || matches!(payload.launch, MaterializeLaunchMode::Fresh {})
+    {
+        return Ok(());
+    }
+    Err(BridgeCommandDecodeError::Invalid(serde_json::Error::io(
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "an operator-instruction snapshot at birth requires a Fresh launch",
+        ),
+    )))
+}
+
 /// Only a `Resume` launch adopts an existing session, so only a `Resume`
 /// launch may ask the host to report that session's first turn.
 fn validate_v7_adopted_first_turn_shape(
@@ -768,6 +796,9 @@ fn bridge_command_minimum_protocol(
             if value
                 .get("prompt_context_fork")
                 .is_some_and(|fork| !fork.is_null())
+                || value
+                    .get("instruction_target")
+                    .is_some_and(|target| !target.is_null())
                 || value
                     .get("report_adopted_first_turn")
                     .and_then(serde_json::Value::as_bool)
@@ -1221,6 +1252,16 @@ pub struct BridgeMaterializePayload {
     /// before reading the payload.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub report_adopted_first_turn: bool,
+    /// V7: the operator-instruction snapshot of the member a `Fresh` launch
+    /// mints, at its mob's generation. The host records it in the session it
+    /// mints, before anything else, so the member's first run applies it,
+    /// and the mob's delivery of that generation then finds it recorded.
+    /// Carrying it is a V7 command, sent only to a host whose `HostFeatures`
+    /// answer lists [`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`]; it is refused
+    /// on any other launch, and a replay of the materialize at its tuple
+    /// records nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_target: Option<BridgeInstructionTarget>,
 }
 
 /// The prompt-context fork a V7 `MaterializeMember` carries. The host
@@ -1512,6 +1553,12 @@ pub const HOST_FEATURE_PROMPT_CONTEXT_FORK: &str = "prompt_context_fork";
 /// The `HostFeatures` feature that reports an adopted session's first turn:
 /// a `Resume` `MaterializeMember` setting `report_adopted_first_turn`.
 pub const HOST_FEATURE_ADOPTED_FIRST_TURN: &str = "adopted_first_turn";
+
+/// The `HostFeatures` feature that records a placed member's
+/// operator-instruction snapshot in the session its materialize mints: a
+/// `Fresh` `MaterializeMember` carrying `instruction_target`. A governed
+/// member host does not serve it.
+pub const HOST_FEATURE_INSTRUCTION_TARGET_BIRTH: &str = "instruction_target_birth";
 
 /// Reply to `HostFeatures`: an open vocabulary. Not `deny_unknown_fields`,
 /// and a reader ignores a feature it does not know, so a field or feature a
@@ -6583,6 +6630,7 @@ mod tests {
                 forked_participant_attachment: None,
                 prompt_context_fork: None,
                 report_adopted_first_turn: false,
+                instruction_target: None,
             })),
             BridgeCommand::ReleaseMember(BridgeReleasePayload {
                 supervisor: sample_peer_spec(),
@@ -6860,6 +6908,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -6892,6 +6941,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         }));
         let mut value = serde_json::to_value(&cmd).expect("serialize command");
         value
@@ -7980,6 +8030,7 @@ mod tests {
             forked_participant_attachment: Some(attachment.clone()),
             prompt_context_fork: None,
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         let v5 = serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize V5 materialize");
@@ -8001,6 +8052,7 @@ mod tests {
             spec: crate::wire::portable_spec::sample_portable_member_spec(),
             spec_digest: "d".repeat(64),
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         assert!(matches!(
             decode_bridge_command(
@@ -8038,6 +8090,7 @@ mod tests {
                 source,
             }),
             report_adopted_first_turn: false,
+            instruction_target: None,
         };
         serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize materialize")
@@ -8494,6 +8547,7 @@ mod tests {
             forked_participant_attachment: None,
             prompt_context_fork: None,
             report_adopted_first_turn: true,
+            instruction_target: None,
         };
         serde_json::to_value(BridgeCommand::MaterializeMember(Box::new(payload)))
             .expect("serialize materialize")

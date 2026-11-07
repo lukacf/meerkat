@@ -464,6 +464,26 @@ impl MobActor {
         )
     }
 
+    /// The snapshot a placed member a `Fresh` spawn mints is born with, for
+    /// its materialize (V7): its whole snapshot at the mob's generation,
+    /// which its member host records in the session it mints.
+    pub(super) fn member_instruction_birth_target(
+        &self,
+        agent_identity: &AgentIdentity,
+        profile_name: &str,
+    ) -> Result<crate::runtime::bridge_protocol::BridgeInstructionTarget, MobError> {
+        crate::runtime::operator_instruction_delivery::member_instruction_record(
+            self.dsl_authority.state(),
+            &self.operator_instructions.bodies,
+            &self.definition.id,
+            agent_identity,
+            profile_name,
+        )
+        .map(|record| {
+            crate::runtime::bridge_protocol::BridgeInstructionTarget::from_record(&record)
+        })
+    }
+
     /// The release verdict of a retiring member
     /// (`ResolveMemberInstructionRelease`) for the session it retires from:
     /// the release to realize, when MobMachine authorizes one. A member

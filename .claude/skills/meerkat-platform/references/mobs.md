@@ -575,7 +575,8 @@ live and store-only while it is dormant, never waking a member (at most
 `MobBuilder::with_member_instruction_delivery_concurrency` dormant deliveries
 at a time, 16 by default), and a member born on a new session carries the
 snapshot from its first build. A placed member gets its snapshot on its
-member host over the supervisor bridge; one whose host runs a release
+member host over the supervisor bridge (born with it when its spawn mints
+its session on a 0.9.11 member host, so its first turn has it); one whose host runs a release
 before 0.9.11 is blocked `member_host_unsupported` until the host runs
 0.9.11 and a write selects it again; so is one on a governed member host
 (the host refuses the record `prepared_authorization_required`), and one

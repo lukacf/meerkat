@@ -73,11 +73,11 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
     BridgePeerTrustPayload, BridgePromptContextFork, BridgeProtocolVersion, BridgeRejectionCause,
     BridgeReleasePayload, BridgeReply, BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck,
-    BridgeTurnOutcomeRecord, HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_PROMPT_CONTEXT_FORK,
-    MaterializeLaunchMode, MaterializeLaunchOutcome,
-    MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
-    WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
-    decode_bridge_command,
+    BridgeTurnOutcomeRecord, HOST_FEATURE_ADOPTED_FIRST_TURN,
+    HOST_FEATURE_INSTRUCTION_TARGET_BIRTH, HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode,
+    MaterializeLaunchOutcome, MemberSessionDisposal as WireMemberSessionDisposal,
+    RuntimeReleaseCause, WireFlowTurnOutcome, WireHostBindingDescriptor,
+    WireHostBindingDescriptorKind, canonicalize_bridge_address, decode_bridge_command,
 };
 use meerkat_contracts::wire::{
     PortableMemberSpec, WireAuthBindingRef, portable_member_spec_digest,
@@ -8369,6 +8369,33 @@ impl MobHostActor {
             return;
         }
 
+        // V7: an operator-instruction snapshot the Fresh launch carries (the
+        // decode refused it on any other launch) is recorded in the session
+        // it mints. A governed member host records none without prepared
+        // authorization, as it refuses a record, and does not list the
+        // feature: a carried one is refused before any effect.
+        if payload.instruction_target.is_some()
+            && self.materializer.as_ref().is_some_and(|materializer| {
+                materializer
+                    .substrate()
+                    .runtime_adapter
+                    .has_native_work_authorization_host()
+            })
+        {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::InstructionTargetRefused {
+                    code: meerkat_core::InstructionSetErrorCode::PreparedAuthorizationRequired,
+                },
+                "materialize member rejected: the member host's runtime is governed, so the \
+                 member cannot be born with its operator-instruction snapshot (it needs \
+                 prepared authorization, which this release does not provide)",
+                Some(reply_address.as_str()),
+            )
+            .await;
+            return;
+        }
+
         let member_key = MemberKey::new(
             AuthorityMobId::from(payload.spec.mob_id.as_str()),
             AuthorityAgentIdentity::from(payload.spec.agent_identity.as_str()),
@@ -8806,6 +8833,14 @@ impl MobHostActor {
                                 seed,
                                 source: &fork.source,
                             }),
+                        // The member's mob and identity own the snapshot:
+                        // the digest-covered spec names them.
+                        instruction_target: payload.instruction_target.clone().map(|target| {
+                            target.into_record(
+                                payload.spec.mob_id.clone(),
+                                payload.spec.agent_identity.clone(),
+                            )
+                        }),
                     },
                 )
                 .await
@@ -10511,13 +10546,25 @@ impl MobHostActor {
         }
         // A prompt-context fork child and a resumed member are member
         // builds: only a host composed with a member substrate serves them.
-        let features = if self.materializer.is_some() {
-            vec![
-                HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
-                HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
-            ]
-        } else {
-            Vec::new()
+        // So is a member born with its operator-instruction snapshot, except
+        // on a governed member host, which records no snapshot without
+        // prepared authorization.
+        let features = match self.materializer.as_ref() {
+            Some(materializer) => {
+                let mut features = vec![
+                    HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
+                    HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+                ];
+                if !materializer
+                    .substrate()
+                    .runtime_adapter
+                    .has_native_work_authorization_host()
+                {
+                    features.push(HOST_FEATURE_INSTRUCTION_TARGET_BIRTH.to_string());
+                }
+                features
+            }
+            None => Vec::new(),
         };
         self.send_reply(
             candidate,

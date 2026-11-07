@@ -185,6 +185,16 @@ them.
   enum is exhaustive, so a downstream exhaustive match needs the new arms,
   or a wildcard arm.
 
+- `meerkat-contracts`: `BridgeMaterializePayload` gains
+  `instruction_target: Option<BridgeInstructionTarget>` (serde default; a
+  placed member born with its operator-instruction snapshot, see Added);
+  `meerkat-mob`: `runtime::host_materialize::MaterializeServingContext`
+  gains `instruction_target: Option<InstructionTargetRecord>`, and
+  `MaterializeServeError` gains `InstructionTargetRefused { code, detail }`.
+  Code that builds the structs with a struct literal sets the new field,
+  normally to `None`; an exhaustive match of `MaterializeServeError` needs
+  the new arm.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -429,6 +439,22 @@ them.
   first. `InstructionRecordDisposition` and `InstructionReleaseDisposition`
   (meerkat-core) derive a JSON schema under the `schema` feature.
 
+- `meerkat-contracts`, `meerkat-mob`: a member placed while its mob has
+  operator instructions is born with its snapshot, as a local member is, so
+  its first turn (its initial message or kickoff) has the instructions. For
+  a spawn that mints the member's session (a `Fresh` launch) of a mob with
+  instructions, the controller asks the member host's features once, before
+  anything is recorded. A host that lists the new `instruction_target_birth`
+  feature (`HOST_FEATURE_INSTRUCTION_TARGET_BIRTH`) is sent the member's
+  snapshot on the protocol 7 `MaterializeMember`
+  (`BridgeMaterializePayload::instruction_target`; refused on a `Resume`
+  launch). It records the snapshot in the session it mints before anything
+  else, so the mob's delivery of that generation finds it recorded
+  (`already_recorded`). A governed member host does not list the feature and
+  refuses a carried snapshot `prepared_authorization_required` before any
+  effect. A snapshot that would not fit the bridge's frame together with the
+  materialize is not carried; the delivery takes it after the spawn.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -653,6 +679,14 @@ them.
   mob's 1 MiB active budget can reach it) is not sent, and the placed
   member is blocked `member_host_unsupported` until a write changes its
   snapshot.
+
+- `meerkat-mob`: a member placed on a member host before 0.9.11, or on a
+  governed one, is not born with its snapshot. Its spawn-time first turn (an
+  initial message or an autonomous kickoff) runs without its mob's operator
+  instructions, and the snapshot reaches it only by delivery after the spawn
+  (on such a host the member is then blocked, see above). The same holds
+  when the snapshot does not fit the bridge's frame together with the
+  materialize.
 
 ## [0.9.10] - 2026-11-04
 

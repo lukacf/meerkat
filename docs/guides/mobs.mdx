@@ -1603,7 +1603,13 @@ it. A reset clears the records and keeps the generation moving forward, so a
 session never sees an older snapshot replace a newer one. A placed member
 (one on another host) receives its snapshot on its member host: the mob
 sends it over the supervisor bridge, and the host records it in the
-member's session the same way, without waking the member. In a mob whose
+member's session the same way, without waking the member. A member placed
+by a spawn that mints its session on a 0.9.11 member host is born with its
+snapshot too: the mob asks the host's features once for the spawn, the
+host records the snapshot in the session it mints, and the member's first
+turn (its initial message or kickoff) already has the instructions. On an
+older or a governed member host the member's first turn runs without them,
+and the snapshot follows by delivery. In a mob whose
 hosts run different releases, a placed member whose member host runs a
 release before 0.9.11 is reported blocked (`member_host_unsupported`): its
 host refuses the record before any effect, nothing is recorded, and the

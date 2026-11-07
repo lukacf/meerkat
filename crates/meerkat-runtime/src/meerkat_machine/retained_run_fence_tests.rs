@@ -194,14 +194,20 @@ async fn a_kept_run(store: &dyn RuntimeStore) -> (SessionId, RunId, Input) {
 /// the writer's realm learns it at its next renew. The settle wakes the
 /// loop, which meets the lost fence before it settles anything: it tells the
 /// run's waiter that its input stays queued for the new owner and tears the
-/// session down. The call answers the refusal of a session that leaves this
-/// process, never `Settled`, and nothing runs. The teardown's unregister
-/// would settle the run its registration retained, but no batch of this
-/// writer lands once its fence is lost: a realm the new owner opens reads the
-/// run's input with no terminal and the run's tail standing, which its own
-/// registration then recovers. The row of this case over the in-memory store
-/// asserts only the refusal: that store does not fence a writer that lost the
-/// fence.
+/// session down. The realm refuses every read and write of a writer that
+/// lost its fence until it is reopened, so the teardown cannot record its
+/// unregister, and the registration needs a durability reload that no
+/// reload in this process can make. The call answers
+/// `RuntimeDriverError::StaleAuthority`, the refusal of a session that leaves
+/// this process, never `Settled` and never the reload refusal, and nothing
+/// runs. The teardown's unregister would settle the run its registration
+/// retained, but no batch of this writer lands once its fence is lost: a
+/// realm the new owner opens reads the run's input with no terminal and the
+/// run's tail standing, which its own registration then recovers. The row of
+/// this case over the in-memory store asserts only the refusal: that store
+/// does not fence a writer that lost the fence. RED before: the call
+/// answered the reload refusal, which sent a host to reload a registration
+/// whose store refuses it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_host_settle_on_a_host_store_writer_that_lost_its_fence_leaves_the_new_owners_work() {
     let timing = FenceTiming::try_new(Duration::from_secs(1), Duration::from_secs(3))
@@ -275,13 +281,10 @@ async fn a_host_settle_on_a_host_store_writer_that_lost_its_fence_leaves_the_new
     assert!(
         matches!(
             refused,
-            Err(crate::RuntimeDriverError::NotReady { .. }
-                | crate::RuntimeDriverError::UnregisterInProgress { .. }
-                | crate::RuntimeDriverError::UnregisterFinalizationOutcomeUnknown { .. }
-                | crate::RuntimeDriverError::ValidationFailed { .. })
+            Err(crate::RuntimeDriverError::StaleAuthority { .. })
         ),
-        "a settle on a writer that lost its store fence answers the refusal of a session that \
-         leaves this process, not {refused:?}"
+        "a settle on a writer whose store fence another writer took answers the stale-authority \
+         refusal of a session that leaves this process, not {refused:?}"
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(

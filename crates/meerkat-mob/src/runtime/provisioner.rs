@@ -10809,14 +10809,15 @@ mod tests {
     use super::session_turn_error_to_mob_error;
 
     /// A runtime refusal of a member's retained-run settle maps to a typed
-    /// mob refusal: a registration that is gone, draining for its unregister
-    /// or owing one answers `MemberSessionNotLive`, one that needs a
-    /// durability reload (its settlement's write failed, say) answers
-    /// `MemberReloadRequired`, and an input of the run whose terminal is not
-    /// readable yet answers the retryable `MemberInputTerminalNotYetReadable`.
-    /// Any other refusal stays internal. RED before: only the absent
-    /// registration was typed, and the rest were `MobError::Internal` text a
-    /// host cannot branch on.
+    /// mob refusal. A registration that is gone, draining for its
+    /// unregister or owing one, or whose store fence another writer took
+    /// (the runtime's stale-authority refusal) answers
+    /// `MemberSessionNotLive`; one that needs a durability reload (its
+    /// settlement's write failed, say) answers `MemberReloadRequired`; and
+    /// an input of the run whose terminal is not readable yet answers the
+    /// retryable `MemberInputTerminalNotYetReadable`. Any other refusal stays
+    /// internal. RED before: only the absent registration was typed, and the
+    /// rest were `MobError::Internal` text a host cannot branch on.
     #[cfg(feature = "runtime-adapter")]
     #[test]
     fn the_retained_run_settle_answers_typed_mob_refusals() {
@@ -10848,6 +10849,12 @@ mod tests {
                     reason: "the teardown-only anchor".to_string(),
                 },
                 true,
+            ),
+            (
+                RuntimeDriverError::StaleAuthority {
+                    reason: "another writer holds the session store's fence".to_string(),
+                },
+                false,
             ),
         ] {
             let refusal = error.to_string();

@@ -101,6 +101,22 @@ for (const [name, mapper] of [["stock", stock], ["shared", shared]] as const) {
     assert.equal((status.runtimeEvent?.payload as Record<string, unknown>).status, "delivery_failed");
   });
 
+  test(`${name}: a held governed input shows its hold until a dispatch clears it`, () => {
+    const hold = { condition: "source_held", waited_ms: 300, binds: 2, retryable: true };
+    const held = mapper(null, [frame("input", "user_input", { content: "Keep this request", delivery_hold: hold }, { status: "accepted", interactionId: "held-run" })], options);
+    const user = held.find(entry => entry.identity.role === "user");
+    assert(user);
+    assert.equal(conversationEntryText(user), "Keep this request");
+    const status = held.find(entry => entry.kind === "message" && entry.identity.role === "system");
+    assert(status && status.kind === "message");
+    assert.equal(status.text, "Message held: nothing was delivered yet. Send it again.");
+    assert.equal(status.interactionId, "held-run");
+    const cleared = mapper(null, [frame("input", "user_input", { content: "Keep this request" }, { status: "accepted", interactionId: "held-run" })], options);
+    assert.equal(cleared.length, 1);
+    const delivered = mapper(null, [frame("input", "user_input", { content: "Keep this request", delivery_hold: hold }, { status: "delivered" })], options);
+    assert.equal(delivered.length, 1);
+  });
+
   test(`${name}: failure-looking input text does not invent a delivery failure`, () => {
     for (const status of [undefined, "accepted", "delivered", "completed", "pending", "unknown"]) {
       const entries = mapper(null, [frame("input", "user_input", { content: "Message delivery failed. delivery_failed" }, { status })], options);

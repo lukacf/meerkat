@@ -3625,6 +3625,12 @@ impl MetaConsoleAggregator {
         Ok(())
     }
 
+    /// Whether a live dispatch owns the send frame `frame_id`.
+    #[cfg(test)]
+    pub(crate) fn send_dispatch_claimed(&self, frame_id: &str) -> bool {
+        self.inner.send_dispatch_claims.is_claimed(frame_id)
+    }
+
     pub async fn mark_interaction_delivered(
         &self,
         input_frame_id: &str,

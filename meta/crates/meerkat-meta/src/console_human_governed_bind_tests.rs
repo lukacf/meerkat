@@ -9,6 +9,7 @@
 mod governed_support;
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -113,6 +114,12 @@ struct ReviewingHost {
     seen: Arc<Mutex<Vec<SeenAtBind>>>,
     bound: Arc<Mutex<Option<meerkat_core::lifecycle::InputId>>>,
     admitted: Arc<Mutex<Vec<GovernedAdmission>>>,
+    /// While set, every bind answers "not now" (the source is held).
+    held: Arc<AtomicBool>,
+    /// The binders' wait budget, when the host sets one.
+    budget: Arc<Mutex<Option<Duration>>>,
+    /// The input id each bind was handed, in order.
+    ids: Arc<Mutex<Vec<meerkat_core::lifecycle::InputId>>>,
 }
 
 impl ReviewingHost {
@@ -128,7 +135,21 @@ impl ReviewingHost {
             seen: Arc::default(),
             bound: Arc::default(),
             admitted: Arc::default(),
+            held: Arc::default(),
+            budget: Arc::default(),
+            ids: Arc::default(),
         })
+    }
+
+    /// Hold the source: every bind answers "not now" until `release`,
+    /// within `budget`.
+    fn hold(&self, budget: Duration) {
+        *self.budget.lock().unwrap() = Some(budget);
+        self.held.store(true, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        self.held.store(false, Ordering::SeqCst);
     }
 }
 
@@ -165,6 +186,9 @@ impl ConsoleGovernedIngress for ReviewingHost {
             seen: Arc::clone(&self.seen),
             bound: Arc::clone(&self.bound),
             admitted: Arc::clone(&self.admitted),
+            held: Arc::clone(&self.held),
+            budget: *self.budget.lock().unwrap(),
+            ids: Arc::clone(&self.ids),
         }))
     }
 }
@@ -176,6 +200,9 @@ struct ReviewedBinder {
     seen: Arc<Mutex<Vec<SeenAtBind>>>,
     bound: Arc<Mutex<Option<meerkat_core::lifecycle::InputId>>>,
     admitted: Arc<Mutex<Vec<GovernedAdmission>>>,
+    held: Arc<AtomicBool>,
+    budget: Option<Duration>,
+    ids: Arc<Mutex<Vec<meerkat_core::lifecycle::InputId>>>,
 }
 
 #[async_trait::async_trait]
@@ -185,9 +212,37 @@ impl GovernedInputBinder for ReviewedBinder {
         context: &GovernedBindContext,
         input: meerkat_runtime::Input,
     ) -> Result<BoundGovernedInput, crate::identity_first::GovernedBindError> {
+        self.ids.lock().unwrap().push(input.id().clone());
+        if self.held.load(Ordering::SeqCst) {
+            let header = input.header();
+            self.seen.lock().unwrap().push(SeenAtBind {
+                send_key: self.send_key.clone(),
+                session_id: context.session_id.clone(),
+                input_key: header.idempotency_key.as_ref().map(|key| key.0.clone()),
+                raw: header.authority_association.is_none() && header.ingress_context.is_none(),
+            });
+            let held = Arc::clone(&self.held);
+            return Err(crate::identity_first::GovernedBindError::NotNow(
+                crate::identity_first::GovernedNotNow {
+                    condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                    until: meerkat_core::authorization::NotNowWait::until_clear(move || {
+                        held.load(Ordering::SeqCst)
+                    }),
+                },
+            ));
+        }
         self.bind_reviewed(context, input)
             .await
             .map_err(|detail| crate::identity_first::GovernedBindRefusal::denied(detail).into())
+    }
+
+    fn wait_budget(&self) -> crate::identity_first::GovernedWaitBudget {
+        match self.budget {
+            Some(budget) => crate::identity_first::GovernedWaitBudget::Bounded(budget),
+            None => crate::identity_first::GovernedWaitBudget::Bounded(
+                meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            ),
+        }
     }
 
     fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
@@ -568,4 +623,388 @@ async fn console_human_governed_send_naming_the_dispatch_door_is_refused_for_an_
         fixture.provider.requests().is_empty(),
         "nothing reached the model"
     );
+}
+
+/// The wait budget a held Console send is given in these rows.
+const HOLD_BUDGET: Duration = Duration::from_millis(300);
+
+/// The send frame once its dispatch answered and ended: held (`accepted`
+/// with a `delivery_hold`, its dispatch owner gone) or settled (`delivered`,
+/// `delivery_failed`).
+async fn answered_frame(
+    aggregator: &MetaConsoleAggregator,
+    accepted: &ConsoleInteractionAccepted,
+) -> crate::console_aggregator::ConsoleFrame {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let page = aggregator
+                .query_timeline(ConsoleTimelineQuery {
+                    identity: Some(accepted.identity.clone()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if let Some(frame) = page
+                .frames
+                .into_iter()
+                .find(|frame| frame.id == accepted.input_frame_id)
+                .filter(|frame| {
+                    (frame.payload.get("delivery_hold").is_some()
+                        && !aggregator.send_dispatch_claimed(&frame.id))
+                        || matches!(
+                            frame.status,
+                            ConsoleFrameStatus::Delivered | ConsoleFrameStatus::DeliveryFailed
+                        )
+                })
+            {
+                return frame;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the console dispatch answers")
+}
+
+/// A governed Console send whose every bind answers "not now"
+/// until its budget ends is held, not failed: its frame stays `accepted`
+/// with a `delivery_hold` (the condition, retryable), and nothing is
+/// submitted. Sending the same Console key again once the source clears
+/// dispatches the same input (the same id and key) and admits it once; the
+/// frame is delivered.
+///
+/// RED before the fix: the held send marks the frame `delivery_failed`, and the
+/// replay replays the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn console_human_governed_send_held_past_its_budget_is_held_then_replayed_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(
+        &fixture,
+        &[(
+            "held-original",
+            Review {
+                content: HUMAN.to_string(),
+                session_id: fixture.session_id.clone(),
+            },
+        )],
+    );
+    host.hold(HOLD_BUDGET);
+
+    let accepted = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("held-original", HUMAN),
+    )
+    .await
+    .expect("accepted for the verified human");
+    let held = answered_frame(&aggregator, &accepted).await;
+    assert_eq!(
+        held.status,
+        ConsoleFrameStatus::Accepted,
+        "a held send is not failed: {held:?}"
+    );
+    let hold = &held.payload["delivery_hold"];
+    assert_eq!(hold["condition"], "source_held", "{hold}");
+    assert_eq!(hold["retryable"], true, "{hold}");
+    assert!(
+        hold["binds"].as_u64().is_some_and(|binds| binds >= 1),
+        "{hold}"
+    );
+    assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
+    assert!(host.bound.lock().unwrap().is_none(), "nothing bound");
+
+    // The source clears; the human sends the same key again.
+    host.release();
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("held-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(replayed.interaction_id, accepted.interaction_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered
+    );
+    let admitted = host.admitted.lock().unwrap().clone();
+    assert_eq!(admitted.len(), 1, "admitted once: {admitted:?}");
+    let ids = host.ids.lock().unwrap().clone();
+    assert!(
+        ids.len() >= 2 && ids.iter().all(|id| *id == ids[0]),
+        "every bind was handed the same input id: {ids:?}"
+    );
+    assert_eq!(admitted[0].input_id, ids[0]);
+    assert!(
+        host.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|seen| seen.input_key == stock_key(&accepted)),
+        "every bind saw the send's own key"
+    );
+}
+
+/// A governed Console steer the host refuses answers its typed
+/// refusal: the Console's error keeps the governed kind, HTTP 409
+/// `governed_input_refused` with the refusal's kind (`denied`) and nothing
+/// submitted; nothing was admitted and the frame is `delivery_failed`.
+///
+/// RED before the fix: the refusal is an untyped dispatch failure (500
+/// `internal_error`, no data).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn console_human_governed_steer_refused_answers_its_typed_refusal() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(
+        &fixture,
+        &[(
+            "refused-steer",
+            Review {
+                content: "another reviewed text".to_string(),
+                session_id: fixture.session_id.clone(),
+            },
+        )],
+    );
+    let mut steer = request("refused-steer", HUMAN);
+    steer.handling_mode = Some("steer".to_string());
+
+    let error = send(&aggregator, &runtime, &host, steer)
+        .await
+        .expect_err("the host refuses the steer at bind");
+    assert!(
+        matches!(
+            &error,
+            ConsoleSendError::RuntimeOperation(runtime_error)
+                if matches!(
+                    runtime_error.as_ref(),
+                    crate::identity_first::IdentityRuntimeError::GovernedInput(
+                        crate::identity_first::GovernedInputError::Refused(refusal)
+                    ) if refusal.kind == crate::identity_first::GovernedBindRefusalKind::Denied
+                )
+        ),
+        "the governed refusal keeps its kind: {error:?}"
+    );
+    let response = super::console_send_error_response(error);
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("HTTP body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["error"], "governed_input_refused", "{body}");
+    assert_eq!(body["data"]["kind"], "governed_input_refused", "{body}");
+    assert_eq!(body["data"]["refusal"], "denied", "{body}");
+    assert_eq!(body["data"]["submitted"], false, "{body}");
+    assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
+    let page = aggregator
+        .query_timeline(ConsoleTimelineQuery::default())
+        .await
+        .unwrap();
+    let input = page
+        .frames
+        .iter()
+        .find(|frame| frame.kind == "user_input")
+        .expect("the steer's input frame");
+    assert_eq!(
+        input.status,
+        ConsoleFrameStatus::DeliveryFailed,
+        "{input:?}"
+    );
+}
+
+/// The Console's answers keep a governed send's kind. Held:
+/// HTTP 503 `governed_input_held` and JSON-RPC -32052, retryable, with its
+/// condition and nothing submitted. Refused: HTTP 409
+/// `governed_input_refused` with the refusal's kind.
+///
+/// RED before the fix: both are untyped dispatch failures (500, -32000, no data).
+#[tokio::test]
+async fn console_governed_held_and_refused_answers_keep_their_kind() {
+    let held = || {
+        crate::identity_first::IdentityRuntimeError::GovernedInput(
+            crate::identity_first::GovernedInputError::Held(crate::identity_first::GovernedHold {
+                condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                waited: Duration::from_millis(300),
+                binds: 2,
+                input_id: meerkat_core::lifecycle::InputId::new(),
+                idempotency_key: None,
+            }),
+        )
+    };
+    let rpc = super::console_send_rpc_error(
+        json!(7),
+        super::identity_runtime_error_to_console_send_error(MEMBER, held()),
+    );
+    assert_eq!(
+        rpc["error"]["code"],
+        json!(crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE)
+    );
+    assert_eq!(rpc["error"]["data"]["kind"], "governed_input_held");
+    assert_eq!(rpc["error"]["data"]["condition"], "source_held");
+    assert_eq!(rpc["error"]["data"]["retryable"], true);
+    assert_eq!(rpc["error"]["data"]["submitted"], false);
+    let response = super::console_send_error_response(
+        super::identity_runtime_error_to_console_send_error(MEMBER, held()),
+    );
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("HTTP body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["error"], "governed_input_held", "{body}");
+    assert_eq!(body["data"]["kind"], "governed_input_held", "{body}");
+
+    let refused = crate::identity_first::IdentityRuntimeError::GovernedInput(
+        crate::identity_first::GovernedInputError::Refused(
+            crate::identity_first::GovernedBindRefusal::closed("the original was cancelled"),
+        ),
+    );
+    let response = super::console_send_error_response(
+        super::identity_runtime_error_to_console_send_error(MEMBER, refused),
+    );
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("HTTP body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(body["error"], "governed_input_refused", "{body}");
+    assert_eq!(body["data"]["refusal"], "closed", "{body}");
+    assert_eq!(body["data"]["retryable"], false, "{body}");
+}
+
+/// Wait until the host's binder was asked once.
+async fn first_bind(host: &ReviewingHost) {
+    tokio::time::timeout(WAIT, async {
+        while host.ids.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the host's binder is asked");
+}
+
+/// The human's Console access revoked while a governed send
+/// waits out a "not now": the next bind verifies the human again and is
+/// refused (`denied`) before the host's binder is asked, so the host never
+/// binds the send and nothing is admitted; the frame is `delivery_failed`.
+///
+/// RED with the human's check at each bind dropped: the host binds the send
+/// after the revocation, which only the entry fence refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn console_access_revoked_during_a_wait_refuses_the_next_bind_before_the_host() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(
+        &fixture,
+        &[(
+            "revoked-original",
+            Review {
+                content: HUMAN.to_string(),
+                session_id: fixture.session_id.clone(),
+            },
+        )],
+    );
+    host.hold(WAIT);
+    let human = super::console_human_input_tests::current_console_human();
+    let subject = human.current().expect("the human is current");
+    let access = crate::access::AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![crate::access::AccessRule {
+            id: "send".to_string(),
+            subjects: vec![subject],
+            actions: vec![crate::access::ACTION_AGENT_SEND.to_string()],
+            agents: vec![MEMBER.to_string()],
+            ..crate::access::AccessRule::default()
+        }],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .expect("the access configuration");
+    let governance = super::ConsoleSendGovernance {
+        ingress: Some(host.clone()),
+        human: Some(human),
+        access: Some(access.clone()),
+        ..Default::default()
+    };
+    let accepted = super::console_send_governed_with_identity_first_fallback(
+        &aggregator,
+        Arc::clone(&runtime),
+        None,
+        request("revoked-original", HUMAN),
+        &governance,
+    )
+    .await
+    .expect("accepted for the verified human");
+    first_bind(&host).await;
+
+    access
+        .delete_rule("send")
+        .expect("the human's access is revoked");
+    host.release();
+    assert_eq!(
+        settled(&aggregator, &accepted).await,
+        ConsoleFrameStatus::DeliveryFailed
+    );
+    assert!(
+        host.bound.lock().unwrap().is_none(),
+        "the host never bound the send after the revocation"
+    );
+    assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
+    assert_eq!(
+        host.ids.lock().unwrap().len(),
+        1,
+        "the host's binder was asked once, before the revocation"
+    );
+}
+
+/// The identity runtime's shutdown (its foreground close) ends
+/// a governed send's "not now" wait at once: the send ends well inside its
+/// budget, with nothing bound or admitted, and its frame is
+/// `delivery_failed`.
+///
+/// RED with the wait's shutdown arm dropped: the send waits out its budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_console_send_ends_at_shutdown_with_nothing_submitted() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(
+        &fixture,
+        &[(
+            "stopped-original",
+            Review {
+                content: HUMAN.to_string(),
+                session_id: fixture.session_id.clone(),
+            },
+        )],
+    );
+    host.hold(WAIT);
+    let accepted = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("stopped-original", HUMAN),
+    )
+    .await
+    .expect("accepted for the verified human");
+    first_bind(&host).await;
+
+    runtime.close_foreground_operations();
+    let ended = tokio::time::timeout(Duration::from_secs(1), settled(&aggregator, &accepted)).await;
+    assert!(
+        matches!(ended, Ok(ConsoleFrameStatus::DeliveryFailed)),
+        "the held send ends at shutdown, inside its budget: {ended:?}"
+    );
+    assert!(host.bound.lock().unwrap().is_none(), "nothing bound");
+    assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
 }

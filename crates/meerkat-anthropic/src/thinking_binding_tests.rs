@@ -470,6 +470,26 @@ async fn default_config_survives_a_tools_change_on_an_enforcing_account() {
     assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
 }
 
+/// A prefix-checked model served under an id the catalog does not carry
+/// (Claude Mythos 5.1 here; a proxy alias or a custom `[models.<id>]` entry
+/// alike) gets the control and the beta once its history replays a signed
+/// thinking block, so the session survives a tools change.
+#[tokio::test]
+async fn an_uncatalogued_prefix_checked_id_survives_a_tools_change() {
+    let model = "claude-mythos-5-1";
+    assert!(!CATALOGUED_PREFIX_CHECKED.contains(&model));
+    let (account, client, server) = spawn_account().await;
+    let (_, second) = session_across_a_tools_change(&client, model, adaptive).await;
+    let sent = account.last();
+    server.abort();
+    assert!(
+        second.succeeded(),
+        "the turn after the tools change completes: {second:?}"
+    );
+    assert_eq!(sent.body["thinking"], expected_binding(), "{}", sent.body);
+    assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
+}
+
 /// Row (c): explicit adaptive thinking carries the control on every
 /// catalogued prefix-checked model, and the session survives a tools change.
 #[tokio::test]

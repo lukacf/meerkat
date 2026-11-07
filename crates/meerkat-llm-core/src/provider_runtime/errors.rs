@@ -145,6 +145,13 @@ pub enum AccountModelRefusal {
         credential: meerkat_core::AuthCredentialIdentity,
         model: String,
     },
+    /// The account lists the model with an empty endpoint list: its
+    /// catalog states that the model has no endpoints.
+    #[error("credential '{credential}' lists model '{model}' with no endpoints")]
+    NoEndpoints {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+    },
     /// The account lists the model, but its policy for it is not
     /// `enabled`; `state` is the policy state the account states (for
     /// example `disabled` or `unconfigured`).

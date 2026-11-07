@@ -493,8 +493,10 @@ pub struct CopilotModel {
     pub capabilities: CopilotModelCapabilities,
     #[serde(default)]
     pub policy: Option<CopilotModelPolicy>,
+    /// The endpoints the entry lists for the model; `None` when the entry
+    /// states no list.
     #[serde(default)]
-    pub supported_endpoints: Vec<CopilotEndpoint>,
+    pub supported_endpoints: Option<Vec<CopilotEndpoint>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,13 +507,17 @@ pub struct CopilotModelOffering {
     pub model_picker_enabled: Option<bool>,
     pub capabilities: CopilotModelCapabilities,
     pub policy: Option<CopilotModelPolicy>,
-    pub supported_endpoints: Vec<CopilotEndpoint>,
+    /// The endpoints the account lists for the model; `None` when its entry
+    /// states no list.
+    pub supported_endpoints: Option<Vec<CopilotEndpoint>>,
 }
 
 impl CopilotModelOffering {
+    /// The endpoints the account lists for the model that Meerkat speaks.
     pub fn endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
         self.supported_endpoints
             .iter()
+            .flatten()
             .copied()
             .filter(|endpoint| *endpoint != CopilotEndpoint::Unknown)
     }
@@ -523,7 +529,8 @@ impl CopilotModelOffering {
     fn served_endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
         let default = self
             .supported_endpoints
-            .is_empty()
+            .as_ref()
+            .is_none_or(Vec::is_empty)
             .then_some(CopilotEndpoint::ChatCompletions);
         self.endpoints().chain(default)
     }
@@ -851,7 +858,10 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::ChatCompletions, CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![
+                CopilotEndpoint::ChatCompletions,
+                CopilotEndpoint::Responses,
+            ]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         let model = snapshot.model("gpt-5").expect("discovered model");
@@ -876,7 +886,10 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Messages, CopilotEndpoint::ChatCompletions],
+            supported_endpoints: Some(vec![
+                CopilotEndpoint::Messages,
+                CopilotEndpoint::ChatCompletions,
+            ]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         let model = snapshot.model("claude").expect("discovered model");
@@ -910,7 +923,7 @@ mod tests {
             policy: Some(CopilotModelPolicy {
                 state: CopilotModelPolicyState::Disabled,
             }),
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         };
         let snapshot = CopilotModelSnapshot::from_models(vec![model]).expect("unique model id");
         assert_eq!(
@@ -938,7 +951,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         };
 
         assert!(matches!(
@@ -1124,7 +1137,7 @@ mod tests {
             model_picker_enabled: Some(true),
             capabilities: CopilotModelCapabilities::default(),
             policy: policy.map(|state| CopilotModelPolicy { state }),
-            supported_endpoints: endpoints,
+            supported_endpoints: Some(endpoints),
         }
     }
 

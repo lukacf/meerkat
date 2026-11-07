@@ -4988,7 +4988,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: crate::CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5132,7 +5132,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: crate::CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5290,7 +5290,7 @@ mod tests {
                 ..Default::default()
             },
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5576,7 +5576,7 @@ mod tests {
                 model_picker_enabled: None,
                 capabilities: Default::default(),
                 policy: policy.map(|state| crate::CopilotModelPolicy { state }),
-                supported_endpoints: vec![CopilotEndpoint::Responses],
+                supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
             };
         let snapshot = CopilotModelSnapshot::from_models(vec![
             listed(

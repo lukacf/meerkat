@@ -378,6 +378,25 @@ mod tests {
         );
     }
 
+    /// A known wait that unwinds ends its exemption too: a wait witnessed on
+    /// the same thread afterwards is reported again.
+    #[test]
+    fn a_known_wait_that_unwinds_ends_its_exemption() {
+        let _section = enter(ProtectedSection::GovernedBind);
+        let unwound = std::panic::catch_unwind(|| {
+            known_wait("test.known.unwinds", || {
+                std::panic::resume_unwind(Box::new("test.known.unwind"))
+            })
+        });
+        assert!(unwound.is_err(), "the known wait unwound");
+        let caught = std::panic::catch_unwind(|| assert_may_wait("test.after_unwind"));
+        assert_eq!(
+            caught.is_err(),
+            cfg!(debug_assertions),
+            "the exemption ends with the known wait, also when it unwinds"
+        );
+    }
+
     /// A synchronous section is witnessed until its guard drops, nested
     /// sections restore the outer one, and a wait inside one panics.
     #[test]

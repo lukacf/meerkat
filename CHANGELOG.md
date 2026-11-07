@@ -263,6 +263,16 @@ them.
   session's memory and the row acknowledged. A settle that fails leaves
   them owed, as before, and never fails the rotation.
 
+### Known limitations
+
+- `meerkat-mob`: a rotation a host starts directly on the mob
+  (`MobHandle::rotate_member`) finalizes a dormant member's owed compaction
+  projection, but Meerkat Meta does not distill its discards into agent
+  memory; use Meta's verbs (delete, reset, a role move, the roster's
+  unlisting) to have them distilled. A crash between the settle and the
+  retirement's side effects of a reset, a role move or an unlisting leaves
+  the records searchable in the old session's memory but never distilled.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

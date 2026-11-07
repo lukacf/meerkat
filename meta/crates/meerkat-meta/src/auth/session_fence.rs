@@ -4,10 +4,11 @@
 //! Console refuses every token of that login.
 //!
 //! A login is the issuer's signed `sid` when a token carries one, else the
-//! token itself. The record keys a login by an opaque digest the Console's
-//! verifier computes; it never holds a `sid` or a token. A login's fence is
-//! dropped once the principal's fence covers it, and the fence of a login
-//! that is one token once that token expired.
+//! token itself, as its issuer signed it (its header and claims, whatever
+//! valid encoding its signature comes in). The record keys a login by an
+//! opaque digest the Console's verifier computes; it never holds a `sid` or
+//! a token. A login's fence is dropped once the principal's fence covers
+//! it, and the fence of a login that is one token once that token expired.
 //!
 //! A principal keeps at most 64 login fences that only a fence of the
 //! principal ends (a `sid` login's, and a token's that never expires). One

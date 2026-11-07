@@ -2312,8 +2312,9 @@ impl VerifiedConsoleToken {
 
 /// The login a Console token belongs to: the issuer's signed `sid` when the
 /// token carries a non-blank one, every token the issuer signs into that
-/// login, else the token alone. The session fence record keys it by `key`,
-/// a digest that names neither the `sid` nor the token.
+/// login, else the token alone, as its issuer signed it. The session fence
+/// record keys it by `key`, a digest that names neither the `sid` nor the
+/// token.
 #[derive(Clone)]
 struct ConsoleLogin {
     key: String,
@@ -2331,7 +2332,10 @@ pub(crate) enum ConsoleLoginKind {
 
 impl ConsoleLogin {
     /// The login of `token`, verified against `issuer`, whose signed `sid`
-    /// is `session_id`.
+    /// is `session_id`. A token without `sid` is keyed by what its issuer
+    /// signed, its JWS signing input (header and claims), never by its
+    /// signature: an ES256 signature `(r, s)` also verifies as `(r, n - s)`,
+    /// and both encodings are the same token.
     fn of(issuer: &str, session_id: Option<&str>, token: &str) -> Self {
         use sha2::{Digest, Sha256};
         let (kind, login) = match session_id.filter(|sid| !sid.trim().is_empty()) {
@@ -2339,10 +2343,13 @@ impl ConsoleLogin {
                 ConsoleLoginKind::Session,
                 serde_json::json!(["session", issuer, sid]),
             ),
-            None => (
-                ConsoleLoginKind::Token,
-                serde_json::json!(["token", issuer, token]),
-            ),
+            None => {
+                let signed = token.rsplit_once('.').map_or(token, |(signed, _)| signed);
+                (
+                    ConsoleLoginKind::Token,
+                    serde_json::json!(["token", issuer, signed]),
+                )
+            }
         };
         let digest = Sha256::digest(
             serde_json::json!(["meta-console-login-v1", login])

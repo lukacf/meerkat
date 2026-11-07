@@ -1940,6 +1940,22 @@ PYTHON_KITS['linux-x86_64']["sources"].update({'selected/provenance/canonical-mc
  'selected/provenance/canonical-mcpb/source.tar.gz': ('docs/verification/20261008-mcpb-canonical-delivery/provenance/source.tar.gz',
                                                       'f2655dd628014ac85e2a9257e6a7d8ac8b17c7f038b7b806e8bbbddb5ddccb66')})
 
+# toolkit-mcpb-install rebuilt with zip 9.0.4 needs two notices that no
+# retained tree carries: typed-path's (new with zip 9) and zip 9.0.4's own
+# license text. The producer copies these exact files out of the locked crate
+# archives into its library source tree before packaging.
+PYTHON_KITS["linux-x86_64"]["sources"].update({
+    'selected/licenses/toolkit-mcpb-install/typed-path-0.12.4/LICENSE-APACHE': (
+        'native-tools/licenses/typed-path-0.12.4/LICENSE-APACHE',
+        '62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a'),
+    'selected/licenses/toolkit-mcpb-install/typed-path-0.12.4/LICENSE-MIT': (
+        'native-tools/licenses/typed-path-0.12.4/LICENSE-MIT',
+        '23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3'),
+    'selected/licenses/toolkit-mcpb-install/zip-9.0.4/LICENSE': (
+        'native-tools/licenses/zip-9.0.4/LICENSE',
+        '58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79'),
+})
+
 
 class PackageError(Exception):
     """A fixed, value-free packaging failure."""

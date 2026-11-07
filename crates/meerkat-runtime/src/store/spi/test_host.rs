@@ -89,6 +89,13 @@ pub(crate) struct Faults {
     /// acquire timeout dropped the call before the grant). The grant's answer
     /// reaches nobody.
     pub(crate) acquire_granted_late: Option<(AcquireMode, Duration)>,
+    /// `Held` answers name their remaining lease rounded down to a
+    /// multiple of this unit: a store that keeps its lease accounting in
+    /// whole units (an integer TTL, a seconds column).
+    pub(crate) held_remaining_floor: Option<Duration>,
+    /// `Held` answers name this remaining lease instead: a store that
+    /// answers outside the contract (a remaining lease beyond any lease).
+    pub(crate) held_remaining_override: Option<Duration>,
     /// How long every acquire takes to answer: the host decides when the
     /// call arrives, and the answer reaches the caller this much later, as
     /// over a slow network.
@@ -299,6 +306,31 @@ impl TestHost {
         decide_acquire(&self.state, self.timing, mode)
     }
 
+    /// `answer` as the store answers it: a `Held` answer's remaining lease
+    /// rounded down ([`Faults::held_remaining_floor`]) or replaced
+    /// ([`Faults::held_remaining_override`]).
+    fn held_remaining_as_answered(
+        &self,
+        answer: Result<FenceGrant, HostStoreError>,
+    ) -> Result<FenceGrant, HostStoreError> {
+        let Err(HostStoreError::Held { holder, remaining }) = answer else {
+            return answer;
+        };
+        let (floor, replaced) = {
+            let faults = self.faults();
+            (faults.held_remaining_floor, faults.held_remaining_override)
+        };
+        let remaining = match (replaced, floor) {
+            (Some(replaced), _) => replaced,
+            (None, Some(unit)) if !unit.is_zero() => {
+                let units = remaining.as_nanos() / unit.as_nanos();
+                unit * u32::try_from(units).unwrap_or(u32::MAX)
+            }
+            _ => remaining,
+        };
+        Err(HostStoreError::Held { holder, remaining })
+    }
+
     /// [`Self::decide_acquire`], except that a grant answers the token it
     /// superseded, which holds the fence again with a fresh lease.
     fn decide_acquire_reusing_token(
@@ -393,6 +425,7 @@ impl HostStore for TestHost {
         if reuse && answer.is_ok() {
             self.faults().grant_reuses_token -= 1;
         }
+        let answer = self.held_remaining_as_answered(answer);
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }

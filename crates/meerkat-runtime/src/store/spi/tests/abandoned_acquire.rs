@@ -264,3 +264,110 @@ async fn a_grant_whose_listing_failed_is_taken_over_as_the_writers_own() {
         .await
         .expect("writes resume under token 3");
 }
+
+// A renew stop at 1 s; the re-acquire's exclusive acquire at 2 s never
+// answers and times out at 3 s; the tick at 3 s acquires token 2 (token 1's
+// lease ended) and the writer resumes. A grant clears the count of acquires
+// that timed out: once the writer stops again and another writer opens with
+// token 3, the next re-acquire meets token 3 as the holder and loses the
+// realm at once, as a writer with no timed-out acquire does. Had the grant
+// kept the count, the writer would wait out another writer's lease instead
+// (review mutant M9).
+#[tokio::test(start_paused = true)]
+async fn a_grant_clears_the_count_of_timed_out_acquires() {
+    let host = fast_host();
+    let (realm, _store) = open_fast(&host, AcquireMode::Exclusive).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1;
+        faults.acquire_hang = 1;
+    }
+    tokio::time::sleep(Duration::from_millis(4500)).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "{:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert_eq!(
+        realm.fence().get(),
+        2,
+        "granted after the timed-out acquire"
+    );
+    host.faults.lock().unwrap().renew_unavailable = 1;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(!realm.lease_is_live(), "stopped again");
+    host.expire_lease();
+    let (other_realm, _other_store) = open_fast(&host, AcquireMode::Exclusive).await;
+    assert_eq!(other_realm.fence().get(), 3);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let cause = realm
+        .realm_poisoned()
+        .expect("with no acquire timed out since the last grant, an unknown holder poisons");
+    assert!(cause.contains("token 3 holds the realm"), "{cause}");
+}
+
+// As `a_reacquire_that_meets_its_own_late_takeover_waits_out_its_lease_and_resumes`
+// (the writer's own takeover granted late: token 2, its lease until 5.5 s),
+// through a store that answers `Held` with its remaining lease rounded down
+// to whole seconds. At 3 s the re-acquire meets token 2 with 2.5 s left,
+// answered as 2 s, so the writer's recorded end (5 s) comes before the
+// store's own. The acquire at 5 s meets token 2 again, with 0.5 s left: its
+// recorded end did not move, so nobody renewed it, and the writer waits out
+// the rest and resumes on token 3. Before, meeting the same holder after its
+// recorded end lost the realm as if token 2 had renewed its lease.
+#[tokio::test(start_paused = true)]
+async fn a_rounded_down_remaining_lease_does_not_poison_the_writers_own_late_grant() {
+    let host = fast_host();
+    let (realm, _store) = open_fast(&host, AcquireMode::Exclusive).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1;
+        faults.acquire_granted_late = Some((AcquireMode::Takeover, Duration::from_millis(500)));
+        faults.held_remaining_floor = Some(Duration::from_secs(1));
+    }
+    tokio::time::sleep(Duration::from_millis(7500)).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "a holder nobody renewed is not another writer: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert_eq!(
+        realm.fence().get(),
+        3,
+        "on a fresh grant after token 2's lease"
+    );
+}
+
+// A renew stop at 1 s; the exclusive acquire at 2 s never answers and times
+// out at 3 s; another writer takes the fence over at 2.5 s (token 2). The
+// re-acquire then meets token 2 through a store that answers `Held` with a
+// remaining lease beyond any lease (outside the contract). The writer caps
+// it at its declared lease and waits; it does not panic. Before, the
+// recorded end overflowed the clock, the re-acquire task panicked, and the
+// realm neither renewed nor recovered.
+#[tokio::test(start_paused = true)]
+async fn an_out_of_contract_remaining_lease_does_not_panic_the_reacquire() {
+    let host = fast_host();
+    let (realm, _store) = open_fast(&host, AcquireMode::Exclusive).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_unavailable = 1;
+        faults.acquire_hang = 1;
+        faults.held_remaining_override = Some(Duration::MAX);
+    }
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let (_other_realm, _other_store) = open_fast(&host, AcquireMode::Takeover).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let answer = realm.ensure_lease().await;
+    let text = format!("{answer:?}");
+    assert!(
+        !text.contains("panicked"),
+        "the re-acquire task panicked: {text}"
+    );
+    assert!(
+        matches!(answer, Err(SpiError::LeaseLapsed(_))),
+        "the writer waits out the holder's capped lease: {answer:?}"
+    );
+}

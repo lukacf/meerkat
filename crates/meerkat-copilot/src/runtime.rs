@@ -5454,11 +5454,11 @@ mod tests {
     fn an_outage_not_before_stays_between_a_second_and_an_hour() {
         let now = Utc::now();
         assert_eq!(
-            exchange_not_before(now, StdDuration::from_secs(60)),
+            exchange_not_before(now, StdDuration::from_mins(1)),
             now + Duration::seconds(60)
         );
         assert_eq!(
-            exchange_not_before(now, StdDuration::from_secs(7_200)),
+            exchange_not_before(now, StdDuration::from_hours(2)),
             now + Duration::seconds(3_600),
             "an hour at most"
         );
@@ -5564,7 +5564,7 @@ mod tests {
         let now = Utc::now();
         let (state, env, credential_identity) = discovery_account("derived", now).await;
         let unavailable = || CopilotHttpResponse {
-            retry_after: Some(StdDuration::from_secs(120)),
+            retry_after: Some(StdDuration::from_mins(2)),
             ..json_response(503, serde_json::json!({"message": "unavailable"}))
         };
         BackgroundModelDiscovery {

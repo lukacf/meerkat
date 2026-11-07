@@ -5,6 +5,8 @@ import { ConsoleApp } from "../ConsoleApp";
 import type { ConsoleCommandRequest, ConsoleWhoami, MetaConsoleTransport } from "./headless";
 import { useVoiceController } from "./use-voice-controller";
 import { createNativeMcpAppsHost } from "../mcp-apps/native-host";
+import { createConsoleSendAttempt } from "../../../packages/console-core/src/send-attempt";
+import { consoleSendStorageKey, saveConsoleSendAttempts } from "./send-attempt-storage";
 
 // The console's caller belongs to the console instance: one whoami read per
 // instance, never rebound by a later answer, named on every change (voice and
@@ -187,6 +189,62 @@ describe("the caller is bound to the console instance", () => {
     await compose("Sent once the caller is known");
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     expect(send.mock.calls[0][0].expectedCallerScope).toBe("caller-a");
+  });
+});
+
+describe("while the console knows no caller", () => {
+  it("keeps a queued message queued, and drains it naming the caller once a read binds", async () => {
+    const namespace = JSON.stringify(["", "console-storage:v1:a"]);
+    saveConsoleSendAttempts(window.localStorage, namespace, identity, [createConsoleSendAttempt({
+      id: "queued-a", scope: namespace, destination: identity, origin: "console:pane", idempotencyKey: "key-a", text: "Queued by a", now: 1,
+    })]);
+    const savedStates = () => (JSON.parse(window.localStorage.getItem(consoleSendStorageKey(namespace, identity)) ?? "{\"attempts\":[]}").attempts as Array<{ state: string; failureKind?: string }>)
+      .map((attempt) => `${attempt.state}${attempt.failureKind ? `/${attempt.failureKind}` : ""}`);
+    let failing = true;
+    const send = vi.fn(async (input: Parameters<MetaConsoleTransport["send"]>[0]) => ({ interaction_id: "sent", identity: input.identity }));
+    const fake = transport(async () => {
+      if (failing) throw Object.assign(new Error("whoami unavailable"), { httpStatus: 503 });
+      return whoamiFor("a");
+    }, send);
+    let receive: ((frame: never) => void) | undefined;
+    fake.subscribeTimeline = (_input, next) => { receive = next as never; return () => {}; };
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(receive).toBeTypeOf("function"));
+    await settle(1_000);
+    // The agent is idle, but no caller is known: nothing is sent, and the
+    // message stays queued instead of turning into Not sent.
+    expect(send).not.toHaveBeenCalled();
+    expect(savedStates()).toEqual(["draft"]);
+    // A read answers with the next experience load: the message drains,
+    // naming the caller.
+    failing = false;
+    await act(async () => { receive?.({ id: "refresh", event: "topology_updated", timestampMs: 2, data: {} } as never); });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1), { timeout: 3_000 });
+    expect(send.mock.calls[0][0].expectedCallerScope).toBe("caller-a");
+  });
+
+  it("loads again at once when another tab signs in", async () => {
+    const state: { caller: Caller; failing: boolean } = { caller: "a", failing: true };
+    const fake = transport(async () => {
+      if (state.failing) throw Object.assign(new Error("whoami unavailable"), { httpStatus: 503 });
+      return whoamiFor(state.caller);
+    });
+    fake.loadExperience = vi.fn(async () => experienceFor(state.caller, {
+      agent_sidebar: { live_snapshot: { agents: [{ identity, member_id: identity, agent_id: identity, label: `Agent seen by ${state.caller}`, kind: "member", state: "running", addressable: true, affordances: { can_send_message: true }, model_capabilities: { image_input: false } }] } },
+    })) as never;
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await waitFor(() => expect(screen.queryAllByText("Agent seen by a").length).toBeGreaterThan(0));
+    await settle();
+    // b signs in in another tab of this browser, which announces b.
+    state.caller = "b"; state.failing = false;
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "meta-console-caller:v1:", newValue: JSON.stringify({ caller: "caller-b", at: Date.now() }) }));
+    });
+    await settle(1_000);
+    // a's views are gone without waiting for the next experience read.
+    expect(screen.queryAllByText("Agent seen by a")).toHaveLength(0);
+    await waitFor(() => expect(screen.getByTestId("identity-chip")).toHaveTextContent("b@example.test"));
   });
 });
 

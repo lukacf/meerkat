@@ -113,6 +113,63 @@ describe("storage hygiene", () => {
     await waitFor(() => expect(leave).toHaveBeenCalledTimes(1));
   });
 
+  it("sign-out waits for a stalled IndexedDB purge for at most 1.5 seconds", async () => {
+    const state: { caller: Caller } = { caller: "a" };
+    render(<ConsoleApp baseUrl="" transport={transport(state, { sign_out: { href: "/logout", method: "post" } })} />);
+    const chip = await screen.findByTestId("identity-chip");
+    await settle();
+    // An IndexedDB whose open request never answers: the purge stalls.
+    vi.stubGlobal("indexedDB", { open: () => ({}) });
+    fireEvent.click(within(chip).getByRole("button", { name: /a@example\.test/ }));
+    const signOut = await screen.findByRole("button", { name: "Sign out" });
+    const leave = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+    fireEvent.submit(signOut.closest("form")!);
+    await settle(300);
+    // Not at once: the browser waits for the purge.
+    expect(leave).not.toHaveBeenCalled();
+    await settle(1_500);
+    // And not for good: it leaves once the bound passed.
+    expect(leave).toHaveBeenCalledTimes(1);
+  });
+
+  it("files staged when a's login ended never reach b's console", async () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
+      static revokeObjectURL = vi.fn();
+    });
+    const state: { caller: Caller } = { caller: "a" };
+    const fake = transport(state);
+    fake.loadExperience = vi.fn(async () => {
+      const experience = experienceFor(state.caller);
+      experience.agent_sidebar.live_snapshot.agents[0].model_capabilities.image_input = true;
+      return experience;
+    }) as never;
+    fake.send = vi.fn(async () => {
+      throw Object.assign(new Error("meta/console/send request failed 401"), {
+        httpStatus: 401, responseRpcError: { code: -32600, message: "unauthorized", data: { kind: "unauthenticated" } },
+      });
+    });
+    fake.upload = async () => ({ blob_id: "blob" }) as never;
+    fake.blobUrl = (id) => `/blobs/${id}`;
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await settle(300);
+    const file = new File([new Uint8Array([1, 2, 3])], "a-private.png", { type: "image/png" });
+    fireEvent.drop(document.querySelector(".composer__shell")!, { dataTransfer: { files: [file], items: [], types: ["Files"], getData: () => "" } });
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1));
+    await compose("a's message with a's file");
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    // b signs in to this browser in another tab.
+    state.caller = "b";
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: CALLER_KEY, newValue: JSON.stringify({ caller: "caller-b", at: Date.now() }) }));
+    });
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(screen.getByTestId("identity-chip")).toHaveTextContent("b@example.test"));
+    await settle(300);
+    expect(screen.queryAllByRole("button", { name: "Remove attachment" })).toHaveLength(0);
+  });
+
   it("a tab told of a sign-out removes its own drafts", async () => {
     const state: { caller: Caller } = { caller: "a" };
     render(<ConsoleApp baseUrl="" transport={transport(state)} />);

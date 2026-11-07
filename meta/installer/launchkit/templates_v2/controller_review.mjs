@@ -244,6 +244,8 @@ const COPY = {
   denied: "Review denied",
   unavailable: "The protected review is unavailable",
   pending_reconciliation: "The result needs reconciliation",
+  approver_unauthenticated: "Sign in with your own named account to answer this review",
+  not_administrator: "Only Console administrators answer this review",
 };
 
 /** Dedicated authenticated view, using only the existing state/answer routes.
@@ -325,10 +327,19 @@ export function mountControllerReview(container, {
         : { Accept: "application/json", "Content-Type": "application/json" },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     });
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
       clearAuthentication(); throw new Error("Authentication ended");
     }
     const source = await response.text();
+    if (response.status === 403) {
+      let code;
+      try { code = JSON.parse(source)?.error?.code; } catch {}
+      // An account people share, or a person who is not an administrator,
+      // answers no review; the session itself goes on.
+      if (code === "approver_unauthenticated" || code === "not_administrator")
+        throw Object.assign(new Error("Protected review refused"), { refusal: code });
+      clearAuthentication(); throw new Error("Authentication ended");
+    }
     if (!response.ok) {
       let code;
       try { code = JSON.parse(source)?.error?.code; } catch {}
@@ -353,9 +364,9 @@ export function mountControllerReview(container, {
         if (state.status === "prompt" && state.prompt.expires_at !== null
             && expiry(state.prompt.expires_at) <= now()) state = { status: "prompt_expired" };
         render(); pollLater(); return true;
-      } catch {
+      } catch (error) {
         if (current() && owner.generation === generation) {
-          clearTimers(); state = { status: "outcome_unknown" }; render();
+          clearTimers(); state = { status: error?.refusal ?? "outcome_unknown" }; render();
         }
         return false;
       } finally { if (reading === owner) reading = null; }
@@ -381,9 +392,9 @@ export function mountControllerReview(container, {
       if (response.status !== 202 || responseState(source).status !== "answer_submitted")
         throw new Error("Unconfirmed answer");
       sending = false; state = { status: "answer_submitted" }; render(); pollLater(); return true;
-    } catch {
+    } catch (error) {
       if (current() && token === generation) {
-        sending = false; state = { status: "outcome_unknown" }; render();
+        sending = false; state = { status: error?.refusal ?? "outcome_unknown" }; render();
       }
       return false;
     }

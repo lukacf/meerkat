@@ -17,7 +17,7 @@ import pytest
 from launchkit.templates_v2 import console_auth as console_module
 from launchkit.templates_v2.console_auth import ConsoleFront
 from test_application_callback_bridge import load_package
-from test_console_auth import FIELDS, login, metadata
+from test_console_auth import FIELDS, login, metadata, named
 
 PATH = "/console/forge/frontends"
 HOST = {"protocol": 1, "host_id": "forge:" + "1" * 64,
@@ -46,8 +46,10 @@ class Owner:
 async def boundary(tmp_path, owner=None, host=None):
     metadata(tmp_path)
     native = []
+    # Approving a frontend change needs a person: the installation's own
+    # account as a named account.
     front = ConsoleFront(tmp_path, 8855, "owner", "local-password-123",
-        transport=httpx.MockTransport(lambda request: native.append(request) or httpx.Response(200, json={"native": True})))
+        **named(lambda request: native.append(request) or httpx.Response(200, json={"native": True})))
     if owner is not None:
         front.frontend_management = owner
         front.frontend_host = lambda: deepcopy(HOST if host is None else host)
@@ -152,7 +154,8 @@ async def test_changed_or_unapproved_proposal_never_reaches_submit_owner(tmp_pat
         if alteration == "expiry": body["approval"]["expires_at"] = 0
         if alteration == "proof": body["approval"]["proof"] = "0" * 64
         if alteration == "source": host["source_digest"] = "3" * 64
-        if alteration == "principal": front.principal = "different-configured-user"
+        # The proof binds the account of the login that prepared it.
+        if alteration == "principal": front._logins[client.cookies[front.cookie]].principal = "different-configured-user"
         response = await client.post(PATH + "/submit", json=body, headers={"Origin": front.origin})
         assert response.status_code == 403
         assert [request.operation for request in owner.calls] == ["prepare"]

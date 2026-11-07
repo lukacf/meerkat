@@ -229,6 +229,13 @@ export interface ConsoleAttentionUiConfig {
   sources?: ConsoleAttentionSourceConfig[];
 }
 
+/** The host's sign-out (console configuration `[sign_out]`): a same-origin
+ * path, followed with a GET link or submitted as a POST form. */
+export interface ConsoleSignOutConfig {
+  href: string;
+  method?: "get" | "post";
+}
+
 export interface ConsoleUiConfig {
   /** Trusted same-origin ES modules exporting a ConsolePanel. */
   panel_modules?: string[];
@@ -244,6 +251,7 @@ export interface ConsoleUiConfig {
   agent_list?: ConsoleAgentListConfig;
   actions?: ConsoleActionsUiConfig;
   attention?: ConsoleAttentionUiConfig;
+  sign_out?: ConsoleSignOutConfig;
 }
 
 export interface ConsolePolicyConfig {

@@ -6,20 +6,21 @@ catalog. Describe a task, review the proposed access and let Connect guide setup
 
 ## Install and use
 
-Connect 0.9.10 supports Apple Silicon macOS 13.5 or later and Linux x86_64 with
-glibc 2.39. Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
+Connect 0.9.10 is released for Linux x86_64 with glibc 2.39. Its Apple Silicon
+macOS archives (macOS 13.5 or later) are not built yet and follow later.
+Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for the ordinary `rkat` agent. Connect supplies its own Python, Node/npm,
 integration library and setup resources.
 
 Download the complete Connect CLI archive and verify its checksum:
 
 ```sh
-platform=macos-arm64 # Use linux-x86_64 on Linux.
+platform=linux-x86_64 # 0.9.10 has no macos-arm64 archive yet.
 archive="meerkat-connect-0.9.10-$platform.tar.gz"
 release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
 curl -fLO "$release/$archive"
 curl -fLO "$release/$archive.sha256"
-shasum -a 256 -c "$archive.sha256" # On Linux: sha256sum -c "$archive.sha256"
+sha256sum -c "$archive.sha256" # On macOS: shasum -a 256 -c "$archive.sha256"
 tar -xpf "$archive"
 export PATH="$PWD/meerkat-connect-$platform/bin:$PATH"
 ```

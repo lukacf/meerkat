@@ -4,12 +4,12 @@ description: "Inspect packages, validate selections and compose native setup."
 icon: "rust"
 ---
 
-The root workspace owns `toolkit-package`; `native-candidate` owns Connect,
-its native adapters and `toolkit-store`. The native workspace selects exact
-Core and Meta development Git sources for 0.9.5, including the Core code generator.
-This is not a published release tuple. The manifests declare Rust 1.94. Follow
-[BUILDING.md](https://github.com/lukacf/meerkat-connect/blob/main/BUILDING.md)
-for the selected sources and resource-bound native build commands.
+Connect's six crates are members of the Meerkat repository's root Cargo
+workspace. They take Core and Meta from the same checkout, pinned at `=0.9.10`,
+and the manifests declare Rust 1.97.0. Build and test them from the repository
+root, for example `./scripts/repo-cargo build -p meerkat-connect`. Follow
+[BUILDING.md](https://github.com/lukacf/meerkat/blob/main/connect/BUILDING.md)
+for the resource-bound native build commands.
 
 ## Crate map
 
@@ -20,7 +20,7 @@ for the selected sources and resource-bound native build commands.
 | `toolkit-store` | `ToolkitStore`, `SqliteStore`, `ConditionalAdmissionStore` | Atomic feature records/effects; no policy or external exactly-once guarantee |
 | `toolkit-mobkit` | `discovery::DiscoveryTools`, `FindAndInstallTool` | Discovery and acquisition admission; execution requires the installed native owner |
 | `meerkat-toolkit` | Setup, request, binding and continuation modules | Host composition retains native grants, lifecycle and currentness |
-| `meerkat-connect` | `service_preparation::NativeSetup`, `SessionStartup`, `session::ResumedStandalone` | Reusable native setup conversation in the separate `native-candidate` workspace; source dependency |
+| `meerkat-connect` | `service_preparation::NativeSetup`, `SessionStartup`, `session::ResumedStandalone` | Reusable native setup conversation; source dependency |
 
 ## Embed the native setup conversation
 

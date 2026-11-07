@@ -6,8 +6,8 @@
 //! settles it. The settle ends at its retry budget, typed, the runtime's
 //! scope is poisoned and the realm keeps its fence. The checkpoint answers
 //! the teardown class: the live session is torn down for a reload from what
-//! the store holds, its waiter is told it was unregistered before the run's
-//! terminal, and the store keeps the run open. The process
+//! the store holds, and since the store keeps the run's input queued, its
+//! waiter is told it stays queued for the next start. The process
 //! ends as a crash ends it (its runtime is shut down, and nothing of it runs
 //! or writes again), the store answers again, and a restart over the same
 //! store opens the session: its registration resumes the run from the last
@@ -270,15 +270,16 @@ async fn unsettled_then_restarted(
 
 /// What the first process must have done: the settle ended at its budget
 /// with the outcome unknown, the runtime's scope alone is poisoned, the
-/// realm keeps its fence, and the checkpoint's teardown class unregistered
-/// the live session before the run's terminal, which the waiter is told.
+/// realm keeps its fence, and the checkpoint's teardown class tore the live
+/// session down; the store keeps the run's input queued, so its waiter is
+/// told it stays queued for the next start, as at a lost fence.
 fn assert_unsettled_past_its_budget(first: &FirstProcess) {
     assert!(
-        first.answer.as_deref().is_some_and(|answer| {
-            answer.starts_with("Err(AuthorityUnavailable")
-                && answer.contains("unregistered before terminal failure")
-        }),
-        "the waiter is told the session was unregistered before the run's terminal: {first:#?}"
+        first
+            .answer
+            .as_deref()
+            .is_some_and(|answer| answer.starts_with("Err(RequeuedAcrossStop")),
+        "the waiter is told its input stays queued for the next start: {first:#?}"
     );
     assert_eq!(
         first.model_requests, 2,

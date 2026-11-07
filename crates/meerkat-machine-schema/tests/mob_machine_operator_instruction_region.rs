@@ -37,7 +37,7 @@ const OTHER_SLOT: &str = "[\"app.example\",\"style\"]";
 const BODY_LIMIT: u64 = 256 * 1024;
 const ACTIVE_BUDGET: u64 = 1024 * 1024;
 
-const ARMS: [&str; 31] = [
+const ARMS: [&str; 30] = [
     "SetOperatorInstructionBodyTooLarge",
     "SetOperatorInstructionSlotLimitExceeded",
     "SetOperatorInstructionNewOverBudget",
@@ -57,7 +57,6 @@ const ARMS: [&str; 31] = [
     "RecoverOperatorInstructionApplied",
     "RecoverOperatorInstructionStale",
     "PrepareMemberInstructionDeliveryNotOwed",
-    "PrepareMemberInstructionDeliveryPlaced",
     "PrepareMemberInstructionDeliveryUnborn",
     "PrepareMemberInstructionDeliveryUnbound",
     "PrepareMemberInstructionDeliveryRetiring",

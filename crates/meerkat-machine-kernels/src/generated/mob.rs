@@ -16830,8 +16830,6 @@ pub enum TransitionId {
     RecoverOperatorInstructionGenerationHighwaterKept,
     PrepareMemberInstructionDeliveryNotOwedRunning,
     PrepareMemberInstructionDeliveryNotOwedStopped,
-    PrepareMemberInstructionDeliveryPlacedRunning,
-    PrepareMemberInstructionDeliveryPlacedStopped,
     PrepareMemberInstructionDeliveryUnbornRunning,
     PrepareMemberInstructionDeliveryUnbornStopped,
     PrepareMemberInstructionDeliveryUnboundRunning,

@@ -3,10 +3,11 @@
 //! one `notifications/cancelled` for that read, and a response that arrives
 //! after the abandonment is dropped without a second one.
 //!
-//! The transport worker reads a JSON answer inline, so while the abandoned
-//! read is still open nothing else can be posted on the connection: the
-//! cancellation goes out once the server answers. The caller is never held
-//! for it.
+//! The abandoned read's own HTTP exchange ends at once, so the transport is
+//! free and the cancellation goes out right away; the server, whose request
+//! went with the exchange, never answers it. (Without that abort the worker,
+//! which reads a JSON answer inline, would hold the cancellation until the
+//! server answered.) The caller is never held for it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::McpConnection;
@@ -173,8 +174,8 @@ async fn a_json_read_past_its_deadline_returns_promptly_and_is_cancelled_once() 
         "the caller returned at its deadline, not later: {waited:?}"
     );
 
-    // The abandoned read still occupies the transport; once the server
-    // answers it, the cancellation goes out, and only one.
+    // The cancellation goes out at once, and only one. Releasing the server's
+    // handler changes nothing: its exchange already ended with the abandon.
     fixture.server.release.add_permits(1);
     let _ =
         tokio::time::timeout(Duration::from_secs(3), fixture.traffic.cancelled.notified()).await;

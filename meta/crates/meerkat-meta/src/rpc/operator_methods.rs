@@ -559,7 +559,7 @@ enum InstructionTargetView {
 impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
     fn from(target: meerkat_contracts::WireInstructionTarget) -> Self {
         match target {
-            meerkat_contracts::WireInstructionTarget::Mob => Self::Mob,
+            meerkat_contracts::WireInstructionTarget::Mob {} => Self::Mob,
             meerkat_contracts::WireInstructionTarget::Profile { profile } => {
                 Self::Profile { profile }
             }

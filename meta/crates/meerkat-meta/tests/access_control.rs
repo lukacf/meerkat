@@ -2879,8 +2879,9 @@ async fn seeded_memory_store(
         )
         .await
         .expect("realm record");
-    // Operator scope is live (P4 provisional keying) and carries cross-mob
-    // personal facts — the panel gates it on operator.memory.read.
+    // Operator scope carries a person's cross-mob facts: the panel gates it
+    // on operator.memory.read, and another person's on
+    // operator.memory.read_any as well.
     let operator_record = store
         .remember_authored(
             &MemoryScope::Operator {
@@ -3387,6 +3388,29 @@ async fn memory_panel_enforces_scope_actions_end_to_end() {
             ..AccessRule::default()
         })
         .expect("live operator grant");
+    // `operator.memory.read` reads the caller's own operator memory; this
+    // record is another person's, so it needs `operator.memory.read_any`.
+    let other_person = rpc(
+        &app,
+        "meta/memory/panel/record",
+        json!({ "memory_id": operator_id }),
+    )
+    .await;
+    assert_eq!(
+        other_person["error"]["data"]["action"],
+        json!("operator.memory.read_any"),
+        "{other_person:#?}"
+    );
+    controller
+        .upsert_rule(AccessRule {
+            id: "operator-reader".to_string(),
+            actions: vec![
+                "operator.memory.read".to_string(),
+                "operator.memory.read_any".to_string(),
+            ],
+            ..AccessRule::default()
+        })
+        .expect("live read-any grant");
     let operator_detail = rpc(
         &app,
         "meta/memory/panel/record",
@@ -4103,6 +4127,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
     for (missing, rules) in [
@@ -4127,6 +4152,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
                     "agent.view",
                     "agent.memory.read",
                     "operator.memory.read",
+                    "operator.memory.read_any",
                     "memory.quarantine.review",
                 ],
             )],
@@ -4194,6 +4220,7 @@ async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
                     "agent.memory.read".to_string(),
                     "mob.memory.read".to_string(),
                     "operator.memory.read".to_string(),
+                    "operator.memory.read_any".to_string(),
                     "memory.quarantine.review".to_string(),
                 ],
                 ..AccessRule::default()
@@ -4334,6 +4361,7 @@ async fn memory_panel_dream_history_needs_the_review_grant_while_a_record_is_qua
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
     ];
 
     runtime.set_access_controller(unscoped_reader(&every_scope));
@@ -4619,6 +4647,7 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
         "agent.view",
         "agent.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
 
@@ -4678,6 +4707,7 @@ fn promotion_reviewer(deny_router: bool) -> AccessController {
             "agent.memory.read".to_string(),
             "mob.memory.read".to_string(),
             "operator.memory.read".to_string(),
+            "operator.memory.read_any".to_string(),
             "memory.quarantine.review".to_string(),
         ],
         ..AccessRule::default()
@@ -4881,6 +4911,7 @@ async fn memory_panel_pending_promotion_of_a_proposal_needs_its_scope() {
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
     let without_operator = [

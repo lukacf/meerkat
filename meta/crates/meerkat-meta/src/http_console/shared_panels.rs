@@ -69,6 +69,7 @@ pub(super) async fn dispatch(
     aggregator: &MetaConsoleAggregator,
     request: &JsonRpcRequest,
     access_view: Option<&AccessView>,
+    operator: Option<&str>,
 ) -> Value {
     let id = request.id.clone().unwrap_or(Value::Null);
     let mut params = request.params.clone();
@@ -101,6 +102,7 @@ pub(super) async fn dispatch(
     let caller = MemoryPanelCaller {
         view: access_view,
         namespace: &selected.namespace,
+        operator,
     };
     let stale_id = id.clone();
     let response = match request.method.as_str() {

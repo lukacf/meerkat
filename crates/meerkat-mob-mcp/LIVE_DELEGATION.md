@@ -47,11 +47,12 @@ not the separate Responses/function-bridge execution contract.
 - Cancellation requires generated authority for the exact live operation. It
   abandons that queued input or cancels its exact running input through
   MeerkatMachine. It never invokes member-wide interruption or retirement.
-- A channel close cancels none of this work: a delegated turn already running
-  finishes in the member's session, and a request admitted before the close
-  that has not started yet runs after it, on the operation's own closed
-  channel. Its request row, executor input and answer commit to the member's
-  canonical session as for a turn that ran while the channel was open.
+- A channel close cancels only blocked work (the member handed the item back
+  to wait for another item): a delegated turn already running finishes in the
+  member's session, and a request admitted before the close that has not
+  started yet runs after it, on the operation's own closed channel. Its
+  request row, executor input and answer commit to the member's canonical
+  session as for a turn that ran while the channel was open.
 - Terminal, result eligibility, cancellation, and release remain generated
   lifecycle decisions. For borrowed members, authorized worker retirement means
   releasing delegation custody, not retiring the underlying member.

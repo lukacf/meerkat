@@ -261,13 +261,13 @@ them.
 - `meerkat-mob-mcp`, `meerkat-runtime`: a GPT Live voice request that the
   voice model had turned into a client delegation just before its channel
   closed (Turbo S S107), or that was still waiting behind a running
-  delegation when the user ended the call (a console voice session runs one
-  delegated turn at a time), now still runs after the close. The close
-  cancelled every admitted delegation whose worker had not started as work
-  that never started, so the spoken request was neither executed nor
-  recorded, and nothing said so. A delegation admitted before the close now
-  starts after it once a worker slot frees, on its operation's own closed
-  channel: the generated `ReconcileLiveDelegationTranscript*`,
+  delegation when the user ended the call (a channel whose own member
+  executes its delegations runs one at a time), now still runs after the
+  close. The close cancelled every admitted delegation whose worker had not
+  started as work that never started, so the spoken request was neither
+  executed nor recorded, and nothing said so. A delegation admitted before
+  the close now starts after it once a worker slot frees, on its operation's
+  own closed channel: the generated `ReconcileLiveDelegationTranscript*`,
   `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`
   and `RequeueUnstartedLiveDelegation` guards also admit a channel that
   carries no runtime, fence or generation binding at all, on the exact

@@ -731,8 +731,9 @@ authority. Its result reaches the session instead of the closed channel: a
 durable fork's result merges into the member as a new turn, and an existing
 member's own turn already holds it. Until a durable fork's result has merged,
 a channel reopened on the session is told that work from the earlier call is
-still finishing. Only blocked work (a fork that handed its item back to wait
-for another item) ends at the close, as cancelled.
+still finishing. Only blocked work (a worker handed its item back to wait for
+another item) is cancelled: at the close, or when its worker hands it back
+after the close.
 
 On open and reopen, the selected canonical dialogue is supplied in native
 `session.input` at provider session creation. User text and visible assistant
@@ -888,10 +889,10 @@ admission. Concurrent ordinary text remains independent work. Supersession
 cancels the exact voice operation; a close lets it finish, and a request
 admitted before the close starts after it. Neither retires the existing
 member or interrupts whichever unrelated user turn happens to be running.
-Operation
-ownership is retained with recovery evidence rather than reconstructed from the
-host's current policy. Compose the returned coordinator into the same shared
-context-mirror/activation host as the default coordinator.
+Operation ownership is retained with recovery evidence rather than
+reconstructed from the host's current policy. Compose the returned coordinator
+into the same shared context-mirror/activation host as the default
+coordinator.
 
 After a restart, the coordinator reconciles each voice delegation the previous
 process left, once, without resubmitting it, and it never wakes a member to do

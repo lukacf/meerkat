@@ -7058,9 +7058,10 @@ impl ResumedMemberView {
 ///   its seat named: [`customize_resume`](Self::customize_resume) too, with
 ///   the build inputs of the seat's spec already on the request, as a
 ///   spawn's caller sets them before `customize_spawn`.
-/// - Every spawn and rebuild placed on another host, once it resolved its
-///   profile: [`check_placed_profile`](Self::check_placed_profile), whatever
-///   its source.
+/// - Every spawn and respawn placed on another host, once it resolved its
+///   profile, whatever its source, and the revival of a placed member, which
+///   sends the member's stored spec to its host again, with the profile that
+///   spec carries: [`check_placed_profile`](Self::check_placed_profile).
 ///
 /// # Which spawns never ask it
 ///
@@ -7109,9 +7110,17 @@ pub trait SpawnMemberCustomizer: Send + Sync {
     /// spawn compiles it into the member's portable spec: the definition's
     /// inline profile, the realm profile its role names, or the spawn's own
     /// override profile, with the spawn's model and tool category overrides
-    /// applied. Every placed spawn and rebuild asks it, whatever its source,
-    /// and before the spawn reaches the member host. An error refuses the
-    /// spawn and reaches its caller unchanged; nothing is compiled or sent.
+    /// applied. Every placed spawn asks it, whatever its source, before the
+    /// spawn reaches the member host. An error refuses the spawn and reaches
+    /// its caller unchanged; nothing is compiled or sent.
+    ///
+    /// A placed respawn asks it with its successor's profile before it
+    /// retires anything, so a refusal keeps the member as it is. The revival
+    /// of a placed member, which sends the member's stored spec to its host
+    /// again, asks it with the profile that spec carries
+    /// (`SpawnSource::Resume`): a refusal fails the revival before anything
+    /// is sent, and the member is broken ([`MobError::MemberRestoreFailed`]).
+    ///
     /// The default admits every profile, so a customizer that composes others
     /// forwards it to each of them, as [`SpawnMemberCustomizerChain`] does.
     fn check_placed_profile(

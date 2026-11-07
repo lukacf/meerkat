@@ -373,12 +373,18 @@ them.
 - `meerkat-mob`: a host checks the profile a placed spawn resolved before
   the spawn compiles it into the member's portable spec:
   `SpawnMemberCustomizer::check_placed_profile`, a provided method that
-  admits every profile. Every spawn and rebuild placed on another host asks
+  admits every profile. Every spawn and respawn placed on another host asks
   it with the definition's inline profile, the realm profile its role
   names, or the spawn's own override profile, with the spawn's model and
   tool category overrides applied, before it asks the member host anything.
   An error refuses the spawn and reaches its caller unchanged, with nothing
-  compiled, recorded or sent. `SpawnMemberCustomizerChain` forwards it.
+  compiled, recorded or sent. A placed respawn asks it before it retires
+  anything, so a refused respawn keeps the member. The revival of a placed
+  member, which sends the member's stored spec to its host again, asks it
+  with the profile that spec carries, and a refusal fails the revival
+  before anything is sent: the member is broken
+  (`MobError::MemberRestoreFailed`). `SpawnMemberCustomizerChain` forwards
+  it.
 
 ### Changed
 

@@ -411,3 +411,100 @@ async fn a_refused_placed_respawn_keeps_the_member() {
 
     fixture.shutdown().await;
 }
+
+/// Admits the first check of each placed respawn, the one before the
+/// retirement, and refuses the second, the placed lane's own check of the
+/// successor.
+struct SecondRespawnCheckJudge {
+    respawn_checks: std::sync::atomic::AtomicUsize,
+}
+
+impl SpawnMemberCustomizer for SecondRespawnCheckJudge {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), meerkat_mob::MobError> {
+        Ok(())
+    }
+
+    fn check_placed_profile(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        _profile: &meerkat_mob::Profile,
+    ) -> Result<(), meerkat_mob::MobError> {
+        if ctx.spawn_source == SpawnSource::Respawn
+            && self
+                .respawn_checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+        {
+            return Err(meerkat_mob::MobError::WiringError(
+                "refused by the lane's own check".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The placed lane checks a respawn's successor again after the retirement:
+/// a refusal there ends the respawn with the refusal as its cause, and no
+/// successor runs on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_respawn_checks_its_successor_again_in_the_lane() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("respawn-lane-check-host").with_member_build(),
+    )
+    .await
+    .expect("member-build fixture");
+    let judge = Arc::new(SecondRespawnCheckJudge {
+        respawn_checks: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let controlling =
+        create_controlling_mob_with_customizer("respawn-lane-check", Some(judge.clone())).await;
+    let report = controlling.bind_fixture(&fixture).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("placed spawn commits");
+
+    let error = controlling
+        .handle
+        .respawn(AgentIdentity::from("b2"), None)
+        .await
+        .expect_err("the lane's own check refuses the successor");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("SpawnAfterRetireWithCause")
+            && rendered.contains("refused by the lane's own check"),
+        "the lane's refusal is the respawn's cause: {error:?}"
+    );
+    assert_eq!(
+        judge
+            .respawn_checks
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the respawn checked its successor before the retirement and again in the lane"
+    );
+    assert!(
+        !controlling
+            .handle
+            .list_members()
+            .await
+            .iter()
+            .any(|entry| entry.agent_identity == "b2"),
+        "no successor joined the roster"
+    );
+    assert!(
+        fixture
+            .host_binding_record(controlling.mob_id.as_ref())
+            .await
+            .materialized
+            .get("b2")
+            .is_none(),
+        "no successor runs on the host"
+    );
+
+    fixture.shutdown().await;
+}

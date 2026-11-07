@@ -16334,6 +16334,27 @@ impl MobActor {
                  digest; revival refuses a divergent re-issue"
             )));
         }
+        // The stored profile is checked as a placed spawn's is before it is
+        // sent again (`check_placed_profile`): the host's rules may have
+        // changed since the member was placed, and a refusal fails the
+        // revival closed with nothing sent to the host.
+        if let Some(customizer) = self.spawn_member_customizer.as_ref() {
+            let stored_profile = crate::portable_profile::rehydrate_portable_profile(
+                &record.spec.profile,
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "the stored profile of placed member '{agent_identity}' is unreadable: {error}"
+                ))
+            })?;
+            customizer.check_placed_profile(
+                &self.placed_profile_check_context(
+                    super::handle::SpawnSource::Resume,
+                    ProfileName::from(record.spec.profile_name.as_str()),
+                ),
+                &stored_profile,
+            )?;
+        }
 
         let host_peer = TrustedPeerDescriptor::unsigned_with_pubkey(
             host.as_str(),
@@ -38925,6 +38946,84 @@ impl MobActor {
         )
     }
 
+    /// The profile a spawn placed on another host resolves before it is
+    /// compiled into the member's portable spec: the spawn's own override
+    /// profile with the role's current tool restriction, or else the role's
+    /// profile (the definition's inline profile or the realm profile it
+    /// names), then the spawn's model and tool category overrides. The placed
+    /// lane resolves the profile it compiles here, and a placed respawn
+    /// resolves its successor's here to check it before anything is retired.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    async fn resolve_placed_spawn_profile(
+        &self,
+        role: &ProfileName,
+        override_profile: Option<crate::profile::Profile>,
+        model_override: Option<String>,
+        tool_category_overrides: meerkat_core::ToolCategoryOverrides,
+    ) -> Result<crate::profile::Profile, MobError> {
+        let mut profile = match override_profile {
+            Some(mut profile) => {
+                // The member host builds from the portable profile alone, so
+                // the role's current restriction rides it (see
+                // `build::build_agent_config`).
+                if let Some(role_profile) = build::current_role_profile(
+                    &self.definition,
+                    role,
+                    self.realm_profile_store.as_ref(),
+                )
+                .await?
+                {
+                    build::conjoin_role_tool_restriction(&mut profile.tools, &role_profile.tools);
+                }
+                profile
+            }
+            None => {
+                self.definition
+                    .resolve_profile(role, self.realm_profile_store.as_ref())
+                    .await?
+            }
+        };
+        if let Some(model) = model_override {
+            profile.model = model;
+        }
+        super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
+        Ok(profile)
+    }
+
+    /// What the spawn customizer is told when it checks a placed profile no
+    /// spawner's request resolved: a placed respawn's successor, or the
+    /// profile a placed member's stored spec carries when it is woken on its
+    /// host again.
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    fn placed_profile_check_context(
+        &self,
+        spawn_source: super::handle::SpawnSource,
+        requested_profile: ProfileName,
+    ) -> super::handle::SpawnCustomizationContext {
+        super::handle::SpawnCustomizationContext {
+            mob_id: self.definition.id.clone(),
+            spawn_source,
+            spawner_identity: None,
+            spawner_runtime_id: None,
+            requested_profile,
+        }
+    }
+
+    /// Ask the spawn customizer, when one is installed, to check the profile
+    /// a spawn or respawn placed on another host resolved
+    /// (`check_placed_profile`).
+    #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    fn ask_placed_profile_check(
+        &self,
+        ctx: &super::handle::SpawnCustomizationContext,
+        profile: &crate::profile::Profile,
+    ) -> Result<(), MobError> {
+        match self.spawn_member_customizer.as_ref() {
+            Some(customizer) => customizer.check_placed_profile(ctx, profile),
+            None => Ok(()),
+        }
+    }
+
     /// Multi-host §7.3 remote spawn lane: the spawn customizer's check of the
     /// resolved profile (`placed_profile_check`) → compile → digest-authorized
     /// ladder open (`BeginSpawnExecRemote` at enqueue) → durable operator
@@ -39154,48 +39253,23 @@ impl MobActor {
         // final composed profile (not the pre-model input) in MemberSpawned.
         let full_profile_override_requested = override_profile.is_some();
         let effective_model_override = model_override.clone();
-        let mut profile = match override_profile {
-            Some(mut p) => {
-                // The member host builds from the portable profile alone, so
-                // the role's current restriction rides it (see
-                // `build::build_agent_config`).
-                match build::current_role_profile(
-                    &self.definition,
-                    &profile_name,
-                    self.realm_profile_store.as_ref(),
-                )
-                .await
-                {
-                    Ok(Some(role)) => {
-                        build::conjoin_role_tool_restriction(&mut p.tools, &role.tools);
-                    }
-                    Ok(None) => {}
-                    Err(error) => fail!(error),
-                }
-                p
-            }
-            None => {
-                match self
-                    .definition
-                    .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
-                    .await
-                {
-                    Ok(profile) => profile,
-                    Err(error) => fail!(error),
-                }
-            }
+        let mut profile = match self
+            .resolve_placed_spawn_profile(
+                &profile_name,
+                override_profile,
+                model_override,
+                tool_category_overrides,
+            )
+            .await
+        {
+            Ok(profile) => profile,
+            Err(error) => fail!(error),
         };
-        if let Some(model) = model_override {
-            profile.model = model;
-        }
-        super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         // The host's spawn customizer checks the profile this placed spawn
         // resolved, whichever source it came from, before the member host is
         // asked anything and before compile: its refusal reaches the caller
         // unchanged, with nothing compiled, recorded or sent.
-        if let Some(customizer) = self.spawn_member_customizer.as_ref()
-            && let Err(error) = customizer.check_placed_profile(&placed_profile_check, &profile)
-        {
+        if let Err(error) = self.ask_placed_profile_check(&placed_profile_check, &profile) {
             fail!(error);
         }
         let effective_profile_override = (full_profile_override_requested
@@ -51525,6 +51599,26 @@ impl MobActor {
         if !snapshot.cleanup_retry {
             self.admit_fresh_life_respawn(&agent_identity, &snapshot)?;
         }
+        // The successor's profile is checked before anything is retired, so
+        // a refusal keeps the member as it is. The placed lane checks it
+        // again when the successor spawns.
+        let successor_profile = self
+            .resolve_placed_spawn_profile(
+                &replacement_spec.role_name,
+                replacement_spec.override_profile.clone(),
+                replacement_spec.model_override.clone(),
+                replacement_spec.tool_category_overrides,
+            )
+            .await
+            .map_err(MobRespawnError::from)?;
+        self.ask_placed_profile_check(
+            &self.placed_profile_check_context(
+                super::handle::SpawnSource::Respawn,
+                replacement_spec.role_name.clone(),
+            ),
+            &successor_profile,
+        )
+        .map_err(MobRespawnError::from)?;
 
         Ok(self
             .start_respawn_retirement(agent_identity, replacement_spec, snapshot)

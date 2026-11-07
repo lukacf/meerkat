@@ -226,6 +226,39 @@ them.
   Fixed). Code that builds it literally, or destructures it without `..`,
   must name them; a factory that only reads its fields is unaffected.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`: GrantAuthorityMachine
+  (version 3) ends a grant owner's custody at its host's close or after an
+  append whose outcome is unknown (see Added). The catalog's
+  `catalog::dsl::grant_authority::GrantAuthorityPhase` (meerkat-machine-schema)
+  and the kernel `generated::grant_authority::Phase` gain `Released` and
+  `Uncertain`. `GrantAuthorityInput` and `GrantAuthorityInputVariant`
+  (meerkat-machine-schema), and the kernel `Input` and `InputKind`, gain
+  `ReleaseCustody` and `RecordUncertainAppend`. `GrantAuthorityEffect` and
+  `GrantAuthorityEffectVariant` (meerkat-machine-schema), and the kernel
+  `Effect` and `EffectKind`, gain `CustodyReleased` and `CustodyUncertain`.
+  The kernel `generated::grant_authority::TransitionId` gains
+  `ReleaseCustody`, `RecordUncertainAppend`, `ReleaseUncertainCustody` and
+  `ReleaseCustodyAgain`. Every new variant is appended last, so no existing
+  variant's implicit discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-session`,
+  `meerkat-runtime`: `PersistentSessionService::try_shutdown` and `shutdown`,
+  once the shutdown completes, end the custody of the grant owner a governed
+  realm's open restored (`MeerkatMachine::release_realm_custody`, see Added).
+  From then on that owner refuses every change and use as
+  `GrantRefusal::Unavailable`, so the closed realm's machine serves no more
+  governed work; open the realm again to continue. A machine without such an
+  owner (an ungoverned realm, or a grant owner a host supplied) is unchanged.
+
+- Behaviour-only (not measured by the gate): `meerkat-authorization`:
+  `LocalGrantAuthority::reconstruct` of an owner whose custody ended (its
+  host's close, or an append whose outcome is unknown) answers
+  `GrantReconstructionError::RestartRequired`. Before, an owner with an
+  uncertain append reconstructed and stayed unavailable; it is unusable
+  either way.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the

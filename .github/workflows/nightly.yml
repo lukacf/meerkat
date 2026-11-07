@@ -48,17 +48,21 @@ name: Nightly
 #      in parallel);
 #   2. then five sequential chains: each job `needs` the previous one and
 #      runs under !cancelled(), so a red job never skips the rest:
-#        release-packaging (140 min) > meta-docs-lag
-#        e2e-system (100) > sdk-web (24) > audit > machine-verify-deep
-#          (new, up to its 90-minute timeout)
-#        feature-matrix (89) > workspace-int (46)
-#        release-stack-budget (55) > minimal-and-modularity (42) > e2e-fast
-#          (18) > sdk-host (14)
-#        machine-verify (38) > workspace-unit (24) > clippy-full (24) >
-#          dense-topology (24) > wasm-contract (16)
-# Minutes are from the 2026-10-01 run. Each chain is at most about 145
-# minutes, so nightly takes about three hours instead of about two and a
-# half. A new job joins the shortest chain; a new chain is a new slot.
+#        release-packaging (143-304 min) > meta-docs-lag (2)
+#        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
+#          machine-verify-deep (3-8)
+#        feature-matrix (170-267) > workspace-int (134-180)
+#        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
+#          e2e-fast (3-34) > sdk-host (3-52)
+#        machine-verify (30-43) > workspace-unit (117-173) > clippy-full
+#          (30-63) > dense-topology (24-31) > wasm-contract (4-26)
+# Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
+# out of time counted at its limit and a run that lost its runner left
+# out; most jobs swing several-fold from night to night. machine-verify's
+# and workspace-unit's are estimates for their current settings. The
+# longest chain, feature-matrix > workspace-int, takes up to about seven
+# and a half hours, and nightly took 4 h 46 min to 7 h 23 min. A new job
+# joins the shortest chain; a new chain is a new slot.
 #
 # A red run on main opens or updates the "Nightly failures" issue through
 # nightly-failure-issue.yml, which starts once this workflow's run has

@@ -494,11 +494,14 @@ const OPERATOR_INSTRUCTION_ACTOR: &str = "host";
 
 /// The members an operator instruction selects, as Meta's host verbs name
 /// them: every member of the gateway's mob, the members of one profile, or
-/// one identity.
+/// one identity. A target refuses a field its kind does not have (`Mob` is a
+/// struct variant for that: serde lets a unit variant ignore the fields
+/// beside its tag), so an identity or profile sent with the mob kind never
+/// widens a write to every member.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum InstructionTargetParams {
-    Mob,
+    Mob {},
     Profile { profile: String },
     Member { identity: String },
 }
@@ -771,7 +774,7 @@ pub(super) async fn handle_set_instruction(
         Err(response) => return *response,
     };
     let target = match params.target {
-        InstructionTargetParams::Mob => meerkat_mob::OperatorInstructionTarget::Mob,
+        InstructionTargetParams::Mob {} => meerkat_mob::OperatorInstructionTarget::Mob,
         InstructionTargetParams::Profile { profile } => {
             meerkat_mob::OperatorInstructionTarget::Profile {
                 profile: meerkat_mob::ProfileName::from(profile),

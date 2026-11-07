@@ -329,6 +329,14 @@ impl PrivateOriginals {
                     }
                 } else {
                     record.service_setup_children.push(observation);
+                    // A bind attempt's durable effect: no "not now" may
+                    // follow it. It is the attempt's first write when an
+                    // earlier attempt issued the child and ended before
+                    // recording it (its observation refused, or the process
+                    // stopped): this attempt found the grant.
+                    meerkat_core::protected_section::note_effect(
+                        "original.service_setup_observation",
+                    );
                     stored = self
                         .retain_service_setup_observations(&stored, &record)
                         .await?;

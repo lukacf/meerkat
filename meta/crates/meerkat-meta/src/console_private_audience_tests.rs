@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 
 use super::console_human_admission_tests::BOB;
 use super::console_private_side_chat_tests::{
-    PRIVATE_TO, TestResult, alice_claims, bearer, bob_claims, enforced_console, fork_on_console,
-    fork_with_labels, row, runtime, sidebar,
+    PRIVATE_TO, ROOT, TestResult, alice_claims, bearer, bob_claims, enforced_console,
+    fork_on_console, fork_with_labels, root_claims, row, runtime, sidebar,
 };
 use super::console_side_chat_tests::{
     persistent_console_spec, persistent_gateway_runtime_in, seeded_member,
@@ -178,9 +178,20 @@ fn every_console_method_is_in_the_member_field_table() {
         include_str!("console_voice.rs"),
         include_str!("http_console/shared_panels.rs"),
         include_str!("http_console/schedules.rs"),
+        include_str!("http_console/audit.rs"),
+        include_str!("http_console/mcp_apps.rs"),
     ] {
         literals(source, &mut methods);
     }
+    // The console's own methods its dispatch names by constant.
+    methods.extend(
+        [
+            crate::rpc::CONSOLE_WHOAMI_METHOD,
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
+            crate::rpc::CONSOLE_AUDIT_METHOD,
+        ]
+        .map(str::to_string),
+    );
     methods.extend(
         crate::rpc::workgraph_methods::WORKGRAPH_READ_METHODS
             .iter()
@@ -1562,5 +1573,178 @@ async fn the_voice_preface_names_no_private_peer() -> TestResult {
         !preface.contains("alpha-side"),
         "the preface names no private peer: {preface}"
     );
+    Ok(())
+}
+
+/// One record set of the console audit log (`changes` or `tool_calls`), as
+/// the holder of `bearer` reads it.
+async fn audit_records(app: &Router, bearer: &str, log: &str) -> Vec<Value> {
+    let read = console_rpc_as(
+        app,
+        Some(bearer),
+        crate::rpc::CONSOLE_AUDIT_METHOD,
+        json!({ "log": log, "limit": 500 }),
+    )
+    .await;
+    read["result"]["records"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("the audit log answers: {read:#}"))
+}
+
+/// An MCP app tool call on `identity` on the console route, as the holder of
+/// `bearer`: the console refuses it (no app serves the member), and the call
+/// writes its row all the same.
+async fn call_tool_on(app: &Router, bearer: &str, identity: &str) {
+    use tower::ServiceExt;
+    let body = json!({
+        "identity": identity,
+        "sessionId": meerkat_core::types::SessionId::new().to_string(),
+        "toolCallId": format!("call-{identity}"),
+        "name": "file_ticket",
+        "arguments": {},
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/mcp-apps/call-tool")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("tool call request"),
+        )
+        .await
+        .expect("tool call response");
+    let _ = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+}
+
+/// The console audit log names no member a reader's audience hides: the
+/// change rows (a private side chat's fork, a change on it) and the MCP app
+/// tool call row whose member is another person's private side chat are left
+/// out of the read, with or without an access configuration, and the rows
+/// that name a member the reader may know stay. The side chat's owner, and an
+/// access admin, read every row.
+#[tokio::test]
+async fn the_audit_read_leaves_out_rows_naming_a_hidden_member() -> TestResult {
+    let (_temp_dir, runtime) = runtime("private-audit-rows").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let store: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    let log = Arc::new(
+        crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .ok_or("the store keeps realm documents")?,
+    );
+    let audited = |access: Option<AccessController>| {
+        console_json_router_with_state(ConsoleJsonState {
+            console_audit: Some(Arc::clone(&log)),
+            ..enforced_console(&runtime, access)
+        })
+    };
+    let unconfigured = audited(None);
+    let enforced = audited(Some(
+        AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![ROOT.to_string()],
+            rules: vec![
+                AccessRule {
+                    id: "everyone-drives-every-agent".to_string(),
+                    subjects: vec!["*".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                },
+                AccessRule {
+                    id: "everyone-reads-the-audit".to_string(),
+                    subjects: vec!["*".to_string()],
+                    actions: vec!["audit.view".to_string()],
+                    ..AccessRule::default()
+                },
+            ],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .map_err(|error| format!("{error:?}"))?,
+    ));
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let root = bearer(root_claims());
+
+    let forked = fork_on_console(&unconfigured, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    for identity in ["alpha-side", "alpha"] {
+        let _ = console_rpc_as(
+            &unconfigured,
+            Some(&alice),
+            "meta/reset",
+            json!({ "identity": identity }),
+        )
+        .await;
+        call_tool_on(&unconfigured, &alice, identity).await;
+    }
+
+    let naming_side_chat = |rows: &[Value]| -> Vec<Value> {
+        rows.iter()
+            .filter(|row| row.to_string().contains("alpha-side"))
+            .cloned()
+            .collect()
+    };
+    let naming_alpha_only = |rows: &[Value]| -> usize {
+        rows.iter()
+            .filter(|row| row["target"]["identity"] == json!("alpha"))
+            .count()
+    };
+    for (posture, app) in [("unconfigured", &unconfigured), ("enforced", &enforced)] {
+        let changes = audit_records(app, &bob, "changes").await;
+        let calls = audit_records(app, &bob, "tool_calls").await;
+        assert_eq!(
+            naming_side_chat(&changes),
+            Vec::<Value>::new(),
+            "{posture}: Bob reads no change row naming Alice's side chat"
+        );
+        assert_eq!(
+            naming_side_chat(&calls),
+            Vec::<Value>::new(),
+            "{posture}: Bob reads no tool call row naming Alice's side chat"
+        );
+        assert_eq!(
+            naming_alpha_only(&changes),
+            1,
+            "{posture}: the change on alpha stays: {changes:#?}"
+        );
+        assert_eq!(
+            naming_alpha_only(&calls),
+            1,
+            "{posture}: the tool call on alpha stays: {calls:#?}"
+        );
+    }
+    // The fork may be asked again while alpha settles its last turn: each
+    // ask writes a row, so the reads are compared by method.
+    let methods = |rows: &[Value]| -> BTreeSet<String> {
+        naming_side_chat(rows)
+            .iter()
+            .filter_map(|row| row["method"].as_str().map(str::to_string))
+            .collect()
+    };
+    for (reader, app, bearer) in [
+        ("the owner", &unconfigured, &alice),
+        ("an access admin", &enforced, &root),
+    ] {
+        let changes = audit_records(app, bearer, "changes").await;
+        let calls = audit_records(app, bearer, "tool_calls").await;
+        assert_eq!(
+            methods(&changes),
+            BTreeSet::from(["meta/fork_member".to_string(), "meta/reset".to_string()]),
+            "{reader} reads the fork and the change on the side chat: {changes:#?}"
+        );
+        assert_eq!(
+            naming_side_chat(&calls).len(),
+            1,
+            "{reader} reads the tool call on the side chat: {calls:#?}"
+        );
+    }
     Ok(())
 }

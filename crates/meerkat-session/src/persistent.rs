@@ -395,13 +395,15 @@ const OBSERVATION_LOAD_ATTEMPTS: usize = 8;
 /// Bound on the wait for a session's turn-finalization boundary before a
 /// tail settle that does not hold it: a strict read running a settle an
 /// observation deferred (`settle_deferred_ended_tail_for_strict_read`), and a
-/// cold attach's settle (`prepare_cold_attach_hosted`). A settle commits only
-/// between runtime loop laps; this covers the short holders while a tail
-/// stands: the post-commit work of a finished lap, a lap whose run the
-/// standing tail refuses before its model call, and a lap whose resumed-run
-/// admission answers once a stop or retire settled that run. A boundary
-/// still held after it leaves the tail standing, and the caller's committed
-/// read refuses as before.
+/// cold attach's settle (`prepare_cold_attach_hosted`). The cold settle of a
+/// session's owed compaction projections
+/// (`settle_owed_compaction_projections_hosted`) waits as long, and refuses
+/// busy past it. A settle commits only between runtime loop laps; this
+/// covers the short holders while a tail stands: the post-commit work of a
+/// finished lap, a lap whose run the standing tail refuses before its model
+/// call, and a lap whose resumed-run admission answers once a stop or retire
+/// settled that run. A boundary still held after it leaves the tail
+/// standing, and the caller's committed read refuses as before.
 const TAIL_SETTLE_BOUNDARY_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How the settle of an ended turn's tail takes the per-session recovery
@@ -21905,7 +21907,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///
     /// It runs under this runtime owner's hosting claim for the session
     /// (#1813): a session another runtime owner hosts is refused with
-    /// [`SessionError::ServedElsewhere`] before anything is read. Under the
+    /// [`SessionError::ServedElsewhere`] before anything is read. It then
+    /// takes the session's turn-finalization boundary, waiting for it as
+    /// long as the durable-tail settle does: a runtime loop lap that holds
+    /// it longer refuses the settle [`SessionError::Busy`]. Under the
     /// session's recovery gate a concurrent materialization waits, and an
     /// actor that went live first answers `Live`. While a run's provisional
     /// tail stands ahead of the committed boundary, the run owns that

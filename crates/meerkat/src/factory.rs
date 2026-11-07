@@ -9648,7 +9648,13 @@ impl AgentFactory {
                                 .as_ref()
                                 .is_some_and(|host| host.untrusted_source(source.path));
                             let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
-                                trust.decide(source) == crate::HookSourceDecision::Untrusted
+                                // Exhaustive on purpose: a decision added
+                                // later is classified here, never trusted
+                                // by default.
+                                match trust.decide(source) {
+                                    crate::HookSourceDecision::Trusted => false,
+                                    crate::HookSourceDecision::Untrusted => true,
+                                }
                             });
                             confined || untrusted
                         })

@@ -60,6 +60,7 @@ impl fmt::Debug for HookSourceDigest {
 /// A hook source file as the factory read it: where, and the digest of the
 /// bytes it parsed its hooks from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookSource<'a> {
     /// The convention file, as the factory joined it from its root
     /// (`<root>/.rkat/config.toml`).
@@ -70,6 +71,7 @@ pub struct HookSource<'a> {
 
 /// The host's decision over a [`HookSource`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HookSourceDecision {
     /// The hooks this content states may run as the host.
     Trusted,

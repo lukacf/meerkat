@@ -410,9 +410,11 @@ pub use meerkat_workgraph::{
 // AgentFactory and build_agent types
 #[cfg(not(target_arch = "wasm32"))]
 mod command_hook_confinement;
+#[cfg(not(target_arch = "wasm32"))]
 mod hook_source_trust;
 #[cfg(not(target_arch = "wasm32"))]
 mod host_confinement;
+#[cfg(not(target_arch = "wasm32"))]
 pub use hook_source_trust::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
 #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 mod skill_stdio_confinement;

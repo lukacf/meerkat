@@ -3302,11 +3302,11 @@ impl std::error::Error for GovernedInputError {
 /// The row is read with the Active/session check, under the identity's
 /// lifecycle lock, which this delivery holds through native submission and
 /// which every row writer takes: a host that compares it with the row its
-/// input was authored from, inside [`GovernedInputBinder::bind`], checks the
-/// row the input is admitted under, and refusing there submits nothing. It
-/// is the registered row, not the roster provider's desired row and not
-/// proof that the member's actor adopted every field. `bind` must not await
-/// any operation on the same identity that takes its lifecycle lock (a
+/// input was authored from, inside [`GovernedInputBinder::try_bind`], checks
+/// the row the input is admitted under, and refusing there submits nothing.
+/// It is the registered row, not the roster provider's desired row and not
+/// proof that the member's actor adopted every field. `try_bind` must not
+/// await any operation on the same identity that takes its lifecycle lock (a
 /// reset, send, materialization or row update): that lock is held here.
 pub struct GovernedBindContext {
     pub session_id: meerkat_core::types::SessionId,

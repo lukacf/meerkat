@@ -253,6 +253,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_delegation_steer_delivered_by_continuation`: `Map<String, Bool>`
 - `live_delegation_operation_by_interaction`: `Map<String, OperationId>`
 - `live_delegation_channel_by_operation`: `Map<OperationId, String>`
+- `live_delegation_member_turn_reasoning_by_operation`: `Map<OperationId, LiveMemberTurnReasoning>`
 - `live_delegation_schedule_state_by_operation`: `Map<OperationId, LiveDelegationScheduleState>`
 - `live_delegation_active_worker_count_by_channel`: `Map<String, u64>`
 - `live_delegation_channel_worker_cap`: `u64`

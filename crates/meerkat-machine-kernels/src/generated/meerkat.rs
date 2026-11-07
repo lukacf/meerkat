@@ -14390,6 +14390,8 @@ pub struct State {
     pub live_delegation_steer_delivered_by_continuation: std::collections::BTreeMap<String, bool>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_member_turn_reasoning_by_operation:
+        std::collections::BTreeMap<OperationId, LiveMemberTurnReasoning>,
     pub live_delegation_schedule_state_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationScheduleState>,
     pub live_delegation_active_worker_count_by_channel: std::collections::BTreeMap<String, u64>,
@@ -15396,6 +15398,10 @@ impl std::fmt::Debug for State {
             .field(
                 "live_delegation_channel_by_operation",
                 &self.live_delegation_channel_by_operation,
+            )
+            .field(
+                "live_delegation_member_turn_reasoning_by_operation",
+                &self.live_delegation_member_turn_reasoning_by_operation,
             )
             .field(
                 "live_delegation_schedule_state_by_operation",
@@ -26414,6 +26420,7 @@ pub fn initial_state() -> State {
         live_delegation_steer_delivered_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
+        live_delegation_member_turn_reasoning_by_operation: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),
         live_delegation_active_worker_count_by_channel: Default::default(),
         live_delegation_channel_worker_cap: 4,

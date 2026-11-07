@@ -71,10 +71,10 @@ fn live_delegation_worker_binding_matches(
 /// under the channel's current exact binding, or (mirroring the generated
 /// `ResolveLiveDelegationWorkerStart` guards) once the operation's own channel
 /// carries no runtime, fence, or generation binding at all, because it closed
-/// after the start was authorized (Turbo S S104 R7). Every open mints a fresh
-/// channel id, so a retired channel id never aliases a later incarnation; a
-/// still-bound channel with a different fence or generation is refused as
-/// before.
+/// after the start was authorized (Turbo S S104 R7), while its session is
+/// still registered. Every open mints a fresh channel id, so a retired
+/// channel id never aliases a later incarnation; a still-bound channel with a
+/// different fence or generation is refused as before.
 fn live_delegation_worker_start_binding_admits(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
     runtime_id: &crate::identifiers::LogicalRuntimeId,
@@ -105,6 +105,7 @@ fn live_delegation_worker_start_binding_admits(
         && !state
             .live_execution_generation_by_channel
             .contains_key(&channel)
+        && state.session_id.is_some()
         && state
             .live_delegation_channel_by_operation
             .get(&operation_id)

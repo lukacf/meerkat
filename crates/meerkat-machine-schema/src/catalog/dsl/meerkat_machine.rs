@@ -4305,6 +4305,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // equality joins.
             live_delegation_operation_by_interaction: Map<String, OperationId>,
             live_delegation_channel_by_operation: Map<OperationId, String>,
+            // The member-turn reasoning preference the operation's channel
+            // sealed when the operation was admitted: a worker that starts
+            // after that channel closed still carries it.
+            live_delegation_member_turn_reasoning_by_operation: Map<OperationId, Enum<LiveMemberTurnReasoning>>,
             live_delegation_schedule_state_by_operation: Map<OperationId, Enum<LiveDelegationScheduleState>>,
             live_delegation_active_worker_count_by_channel: Map<String, u64>,
             live_delegation_channel_worker_cap: u64,
@@ -5003,6 +5007,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             live_delegation_steer_delivered_by_continuation = EmptyMap,
             live_delegation_operation_by_interaction = EmptyMap,
             live_delegation_channel_by_operation = EmptyMap,
+            live_delegation_member_turn_reasoning_by_operation = EmptyMap,
             live_delegation_schedule_state_by_operation = EmptyMap,
             live_delegation_active_worker_count_by_channel = EmptyMap,
             live_delegation_channel_worker_cap = 4,
@@ -29784,6 +29789,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 }
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                if self.live_member_turn_reasoning_by_channel.contains_key(channel_id) {
+                    self.live_delegation_member_turn_reasoning_by_operation.insert(
+                        operation_id,
+                        self.live_member_turn_reasoning_by_channel.get_copied(channel_id).get("value")
+                    );
+                }
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     LiveDelegationScheduleState::Created
@@ -29847,6 +29858,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.live_active_interaction_by_channel.insert(channel_id, interaction_id);
                 self.live_delegation_operation_by_interaction.insert(interaction_id, operation_id);
                 self.live_delegation_channel_by_operation.insert(operation_id, channel_id);
+                if self.live_member_turn_reasoning_by_channel.contains_key(channel_id) {
+                    self.live_delegation_member_turn_reasoning_by_operation.insert(
+                        operation_id,
+                        self.live_member_turn_reasoning_by_channel.get_copied(channel_id).get("value")
+                    );
+                }
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     LiveDelegationScheduleState::Created
@@ -29880,7 +29897,15 @@ macro_rules! meerkat_catalog_machine_dsl {
         // later incarnation, and a still-bound channel with a different fence
         // or generation is refused as before. A closed channel holds no worker
         // count: close removed it, and the revoked-worker reconciliation that
-        // settles a worker of a closed channel never releases a slot.
+        // settles a worker of a closed channel never releases a slot. The
+        // number of workers started after the close is therefore bounded by
+        // the coordinator's schedule (its per-channel worker limit), not by
+        // the machine. The post-close terms also need the session still
+        // registered: unregistering keeps delegation custody, but no
+        // delegation of an unregistered session reconciles, starts, steers or
+        // requeues after its channel closed. The worker carries the
+        // member-turn reasoning preference its operation was admitted under,
+        // which outlives the channel's own.
         transition AuthorizeLiveDelegationWorkerStart {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationWorkerStart {
@@ -29893,6 +29918,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -29900,6 +29926,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -29907,6 +29934,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
@@ -29959,7 +29987,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 operation_id: operation_id,
                 worker_identity: worker_identity,
                 worker_ownership: worker_ownership,
-                member_turn_reasoning: self.live_member_turn_reasoning_by_channel.get_copied(channel_id)
+                member_turn_reasoning: self.live_delegation_member_turn_reasoning_by_operation.get_copied(operation_id)
             }
         }
 
@@ -29984,6 +30012,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -29991,6 +30020,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -29998,6 +30028,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_worker_start_authority" {
@@ -30067,6 +30098,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -30074,6 +30106,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -30081,6 +30114,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
@@ -30130,6 +30164,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -30137,6 +30172,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -30144,6 +30180,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
@@ -30193,6 +30230,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -30200,6 +30238,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -30207,6 +30246,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
@@ -30799,13 +30839,16 @@ macro_rules! meerkat_catalog_machine_dsl {
                     LiveDelegationWorkerPhase::Retired
                 );
                 // The revoked worker's schedule state settles with its
-                // recorded terminal, exactly as a live terminal record does.
+                // recorded terminal, as a live terminal record does, except
+                // that a blocked hand-back settles Cancelled: its channel is
+                // unbound, and a requeue needs the binding, so nothing could
+                // ever serve it again.
                 self.live_delegation_schedule_state_by_operation.insert(
                     operation_id,
                     if terminal == LiveDelegationWorkerTerminalKind::Completed {
                         LiveDelegationScheduleState::Completed
                     } else { if terminal == LiveDelegationWorkerTerminalKind::Blocked {
-                        LiveDelegationScheduleState::Blocked
+                        LiveDelegationScheduleState::Cancelled
                     } else { if terminal == LiveDelegationWorkerTerminalKind::Cancelled {
                         LiveDelegationScheduleState::Cancelled
                     } else {
@@ -30869,6 +30912,17 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveDelegationWorkerPhase::Retired
                 );
+                // A blocked terminal recorded while the channel was bound
+                // settles Cancelled once the channel is unbound: a requeue
+                // needs the binding, so nothing could ever serve it again.
+                if terminal == LiveDelegationWorkerTerminalKind::Blocked
+                    && self.live_delegation_schedule_state_by_operation.get_copied(operation_id)
+                        == Some(LiveDelegationScheduleState::Blocked) {
+                    self.live_delegation_schedule_state_by_operation.insert(
+                        operation_id,
+                        LiveDelegationScheduleState::Cancelled
+                    );
+                }
                 self.live_delegation_late_terminal_operations.insert(operation_id);
                 self.live_delegation_result_eligible_operations.remove(operation_id);
             }
@@ -31076,6 +31130,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -31083,6 +31138,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -31090,6 +31146,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
@@ -31252,7 +31309,12 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // Speech that continues a user's utterance after the provider created
         // its delegation (the delegation fired at a pause mid-sentence) is
-        // delivered to that delegation's worker as a steer. The protocol has
+        // delivered to that delegation's worker as a steer. A delegation
+        // admitted before its channel closed starts after the close (Turbo S
+        // S107), and a continuation held for it while it waited joins that
+        // start, so the steer family (this authorization, its delivery and its
+        // reconciliation below) takes the post-close binding terms of
+        // `AuthorizeLiveDelegationWorkerStart`. The protocol has
         // no utterance identity: the continuation is the next finished user
         // turn after a delegation that took an open user turn, before any
         // other delegation, which is the closest typed stand-in for "the
@@ -31277,12 +31339,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -31333,12 +31410,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer_awaiting_delivery" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31370,12 +31462,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31411,12 +31518,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31450,12 +31572,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "not_committed" { continuation_committed == false }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_steer" {
                 self.live_delegation_steer_operation_by_continuation.get_cloned(continuation_id) == Some(operation_id)
@@ -31494,6 +31631,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
@@ -31501,6 +31639,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
@@ -31508,6 +31647,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
                     && !self.live_execution_fence_by_channel.contains_key(channel_id)
                     && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.session_id != None
                     && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "interaction_is_admitted_and_not_abandoned" {

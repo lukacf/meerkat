@@ -5,35 +5,45 @@
 \* The delegation keeps its generated admission through the close. Its
 \* transcript reconciliation (ReconcileLiveDelegationTranscript*), worker
 \* start (AuthorizeLiveDelegationWorkerStart), consequential-effect authority
-\* (AuthorizeLiveConsequentialEffect) and busy-source requeue
-\* (RequeueUnstartedLiveDelegation) are each admitted under the channel's
-\* exact runtime/fence/generation binding or, once the operation's OWN
-\* channel carries no binding at all (close unbinds it), on the exact
-\* operation join alone, as ResolveLiveDelegationWorkerStart already is
-\* (Turbo S S104 R7). This audit keeps the generated MeerkatMachine model
-\* unchanged. A deterministic prefix reaches one experimental channel with an
-\* admitted delegation (schedule Created, reconciliation Provisional, no
-\* worker). The body explores the channel's close and close settlement, every
-\* reconciliation outcome, worker-start authorization, consequential-effect
-\* authority, worker-start resolution (started or not), the busy-source
-\* requeue and the queued cancellation, each through the operation's own
-\* channel and through a foreign never-bound channel, and the worker's
-\* terminal record and revoked-worker reconciliation. Every explored state is
-\* checked against every generated invariant plus:
+\* (AuthorizeLiveConsequentialEffect), busy-source requeue
+\* (RequeueUnstartedLiveDelegation) and the steer of a continuation the user
+\* spoke while it waited (AuthorizeLiveDelegationSteer,
+\* ResolveLiveDelegationSteerDelivery, ReconcileLiveDelegationSteer*) are each
+\* admitted under the channel's exact runtime/fence/generation binding or,
+\* once the operation's OWN channel carries no binding at all (close unbinds
+\* it) and its session is still registered, on the exact operation join
+\* alone, as ResolveLiveDelegationWorkerStart already is (Turbo S S104 R7). A
+\* worker that hands its item back blocked once the channel is unbound
+\* settles Cancelled: no requeue can serve it again. This audit keeps the
+\* generated MeerkatMachine model unchanged. A deterministic prefix reaches
+\* one experimental channel with an admitted delegation (schedule Created,
+\* reconciliation Provisional, no worker). The body explores the channel's
+\* close and close settlement, every reconciliation outcome, worker-start
+\* authorization, consequential-effect authority, worker-start resolution
+\* (started or not), the busy-source requeue, the queued cancellation, the
+\* steer and its delivery and reconciliation, each through the operation's
+\* own channel and through a foreign never-bound channel, and the worker's
+\* terminal record (completed, failed or blocked) and revoked-worker
+\* reconciliation (fresh, or of a terminal recorded while bound). Every
+\* explored state is checked against every generated invariant plus:
 \*   AuditForeignChannelNeverServes: no reconciliation, worker start,
-\*     consequential effect, start resolution or requeue of the operation is
-\*     enabled through a channel other than its own;
+\*     consequential effect, start resolution, requeue or steer of the
+\*     operation is enabled through a channel other than its own;
 \*   AuditStaleBindingNeverServes: while the channel is still bound, none of
 \*     them is enabled under a fence or generation other than the channel's;
 \*   AuditClosedChannelHoldsNoWorkerCount: once the channel closed it holds
 \*     no worker count (close removed it, and a worker started after the
 \*     close never takes a slot the revoked-worker reconciliation would have
-\*     to release).
+\*     to release);
+\*   AuditRevokedBlockedIsCancelled: a blocked hand-back reconciled on the
+\*     unbound channel leaves the operation Cancelled.
 \* Goals (each required violated): after the close, the transcript reconciles
 \* confirmed; it reconciles as a conflict or missing; the worker start is
 \* authorized; the consequential effect is authorized; a start that failed
-\* requeues; and a worker authorized after the close settles through the
-\* revoked-worker reconciliation.
+\* requeues; a worker authorized after the close settles through the
+\* revoked-worker reconciliation; a steer is authorized, delivered and
+\* reconciled; and a blocked hand-back settles, fresh and from a terminal
+\* recorded while the channel was bound.
 EXTENDS model
 
 CONSTANT AuditMaxSteps
@@ -51,20 +61,33 @@ AuditOperation == "operation_1"
 AuditTurn == "turn_1"
 AuditWorker == "worker_1"
 AuditAuthority == "authority_1"
+AuditContinuation == "continuation_1"
+AuditContinuationDigest == "digest_c"
 AuditPrefixLength == 13
 
-VARIABLES
-    audit_closed,                    \* the channel's close was recorded
-    audit_confirmed_after_close,     \* the transcript reconciled confirmed after that close
-    audit_unconfirmed_after_close,   \* it reconciled as a conflict or missing after that close
-    audit_authorized_after_close,    \* the worker start was authorized after that close
-    audit_consequential_after_close, \* the consequential effect was authorized after that close
-    audit_requeued_after_close,      \* a failed start requeued after that close
-    audit_settled_after_close        \* a worker authorized after the close settled
+\* The audit's history of the operation, one flag each:
+\*   closed           the channel's close was recorded;
+\*   confirmed        the transcript reconciled confirmed after that close;
+\*   unconfirmed      it reconciled as a conflict or missing after that close;
+\*   authorized       the worker start was authorized after that close;
+\*   consequential    the consequential effect was authorized after that close;
+\*   requeued         a failed start requeued after that close;
+\*   settled          a worker authorized after the close settled;
+\*   steer_authorized the steer was authorized after the close;
+\*   steer_resolved   that steer's delivery then resolved after the close;
+\*   steer_settled    that steer then reconciled after the close;
+\*   fresh_blocked    a blocked hand-back was reconciled on the unbound channel;
+\*   custody_blocked  so was a blocked terminal recorded while the channel was bound.
+VARIABLE audit
 
-auditVars == <<audit_closed, audit_confirmed_after_close, audit_unconfirmed_after_close,
-               audit_authorized_after_close, audit_consequential_after_close,
-               audit_requeued_after_close, audit_settled_after_close>>
+AuditFlags == {"closed", "confirmed", "unconfirmed", "authorized", "consequential",
+               "requeued", "settled", "steer_authorized", "steer_resolved",
+               "steer_settled", "fresh_blocked", "custody_blocked"}
+
+AuditInit == audit = [flag \in AuditFlags |-> FALSE]
+
+\* Set `flag` when `holds`; every other flag keeps its value.
+Mark(flag, holds) == audit' = [audit EXCEPT ![flag] = @ \/ holds]
 
 \* A deterministic prefix reaches a bound experimental channel with an
 \* admitted delegation and no worker.
@@ -88,7 +111,7 @@ AuditChannelUnbound ==
     /\ AuditChannel \notin DOMAIN live_execution_fence_by_channel
     /\ AuditChannel \notin DOMAIN live_execution_generation_by_channel
 
-AuditAfterClose == audit_closed /\ AuditChannelUnbound
+AuditAfterClose == audit.closed /\ AuditChannelUnbound
 
 \* Each action of the operation through `channel` under fence and generation
 \* `binding` (the channel's own binding is 1).
@@ -125,6 +148,27 @@ RequeueUnstarted(channel, binding) ==
     \/ RequeueUnstartedLiveDelegationAttached(channel, AuditRuntime, binding, binding, AuditInteraction, AuditOperation)
     \/ RequeueUnstartedLiveDelegationRunning(channel, AuditRuntime, binding, binding, AuditInteraction, AuditOperation)
 
+AuthorizeSteer(channel, binding) ==
+    \/ AuthorizeLiveDelegationSteerIdle(channel, AuditRuntime, binding, binding, AuditInteraction, AuditOperation, AuditTurn, AuditContinuation, AuditContinuationDigest)
+    \/ AuthorizeLiveDelegationSteerAttached(channel, AuditRuntime, binding, binding, AuditInteraction, AuditOperation, AuditTurn, AuditContinuation, AuditContinuationDigest)
+    \/ AuthorizeLiveDelegationSteerRunning(channel, AuditRuntime, binding, binding, AuditInteraction, AuditOperation, AuditTurn, AuditContinuation, AuditContinuationDigest)
+
+ResolveSteer(channel, binding, delivered) ==
+    \/ ResolveLiveDelegationSteerDeliveryIdle(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, delivered)
+    \/ ResolveLiveDelegationSteerDeliveryAttached(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, delivered)
+    \/ ResolveLiveDelegationSteerDeliveryRunning(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, delivered)
+
+ReconcileSteer(channel, binding) ==
+    \/ ReconcileLiveDelegationSteerConfirmedIdle(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, TRUE)
+    \/ ReconcileLiveDelegationSteerConfirmedAttached(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, TRUE)
+    \/ ReconcileLiveDelegationSteerConfirmedRunning(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, TRUE)
+    \/ ReconcileLiveDelegationSteerMaterialConflictIdle(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, FALSE)
+    \/ ReconcileLiveDelegationSteerMaterialConflictAttached(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, FALSE)
+    \/ ReconcileLiveDelegationSteerMaterialConflictRunning(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, TRUE, FALSE)
+    \/ ReconcileLiveDelegationSteerMissingIdle(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, FALSE, FALSE)
+    \/ ReconcileLiveDelegationSteerMissingAttached(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, FALSE, FALSE)
+    \/ ReconcileLiveDelegationSteerMissingRunning(channel, AuditRuntime, binding, binding, AuditOperation, AuditContinuation, FALSE, FALSE)
+
 \* Whether any of those actions is enabled through `channel` under `binding`.
 Serves(channel, binding) ==
     \/ ENABLED ReconcileConfirmed(channel, binding)
@@ -134,6 +178,10 @@ Serves(channel, binding) ==
     \/ ENABLED ResolveStart(channel, binding, TRUE)
     \/ ENABLED ResolveStart(channel, binding, FALSE)
     \/ ENABLED RequeueUnstarted(channel, binding)
+    \/ ENABLED AuthorizeSteer(channel, binding)
+    \/ ENABLED ResolveSteer(channel, binding, TRUE)
+    \/ ENABLED ResolveSteer(channel, binding, FALSE)
+    \/ ENABLED ReconcileSteer(channel, binding)
 
 CancelQueued ==
     \/ CancelQueuedLiveDelegationIdle(AuditChannel, AuditRuntime, 1, 1, AuditInteraction, AuditOperation)
@@ -154,6 +202,13 @@ ReconcileRevoked(terminal) ==
     \/ ReconcileRevokedLiveDelegationWorkerAfterRestartFreshRetired(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
     \/ ReconcileRevokedLiveDelegationWorkerAfterRestartFreshStopped(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
 
+ReconcileRevokedCustody(terminal) ==
+    \/ ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyIdle(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
+    \/ ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyAttached(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
+    \/ ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRunning(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
+    \/ ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyRetired(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
+    \/ ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustodyStopped(AuditSession, AuditChannel, AuditInteraction, AuditOperation, AuditWorker, terminal)
+
 Close ==
     \E sequence \in 0..2 :
         \/ RecordLiveCloseClosedIdle(AuditSession, AuditChannel, sequence)
@@ -169,70 +224,48 @@ CloseSettlement ==
     \/ ResolveLiveCloseSettlementRunning(AuditSession, AuditChannel)
 
 Channels == {AuditChannel, AuditForeignChannel}
+Terminals == {"Completed", "Failed", "Blocked"}
 
 AuditBody ==
-    \/ Close
-       /\ audit_closed' = TRUE
-       /\ UNCHANGED <<audit_confirmed_after_close, audit_unconfirmed_after_close,
-                      audit_authorized_after_close, audit_consequential_after_close,
-                      audit_requeued_after_close, audit_settled_after_close>>
-    \/ CloseSettlement /\ UNCHANGED auditVars
+    \/ Close /\ Mark("closed", TRUE)
+    \/ CloseSettlement /\ UNCHANGED audit
     \/ \E channel \in Channels :
-        /\ ReconcileConfirmed(channel, 1)
-        /\ audit_confirmed_after_close' = (audit_confirmed_after_close \/ AuditAfterClose)
-        /\ UNCHANGED <<audit_closed, audit_unconfirmed_after_close, audit_authorized_after_close,
-                       audit_consequential_after_close, audit_requeued_after_close,
-                       audit_settled_after_close>>
+        ReconcileConfirmed(channel, 1) /\ Mark("confirmed", AuditAfterClose)
     \/ \E channel \in Channels :
-        /\ ReconcileUnconfirmed(channel, 1)
-        /\ audit_unconfirmed_after_close' = (audit_unconfirmed_after_close \/ AuditAfterClose)
-        /\ UNCHANGED <<audit_closed, audit_confirmed_after_close, audit_authorized_after_close,
-                       audit_consequential_after_close, audit_requeued_after_close,
-                       audit_settled_after_close>>
+        ReconcileUnconfirmed(channel, 1) /\ Mark("unconfirmed", AuditAfterClose)
     \/ \E channel \in Channels :
-        /\ AuthorizeStart(channel, 1)
-        /\ audit_authorized_after_close' = (audit_authorized_after_close \/ AuditAfterClose)
-        /\ UNCHANGED <<audit_closed, audit_confirmed_after_close, audit_unconfirmed_after_close,
-                       audit_consequential_after_close, audit_requeued_after_close,
-                       audit_settled_after_close>>
+        AuthorizeStart(channel, 1) /\ Mark("authorized", AuditAfterClose)
     \/ \E channel \in Channels :
-        /\ AuthorizeConsequential(channel, 1)
-        /\ audit_consequential_after_close' = (audit_consequential_after_close \/ AuditAfterClose)
-        /\ UNCHANGED <<audit_closed, audit_confirmed_after_close, audit_unconfirmed_after_close,
-                       audit_authorized_after_close, audit_requeued_after_close,
-                       audit_settled_after_close>>
+        AuthorizeConsequential(channel, 1) /\ Mark("consequential", AuditAfterClose)
     \/ \E channel \in Channels, started \in BOOLEAN :
-        /\ ResolveStart(channel, 1, started)
-        /\ UNCHANGED auditVars
+        ResolveStart(channel, 1, started) /\ UNCHANGED audit
     \/ \E channel \in Channels :
-        /\ RequeueUnstarted(channel, 1)
-        /\ audit_requeued_after_close' = (audit_requeued_after_close \/ AuditAfterClose)
-        /\ UNCHANGED <<audit_closed, audit_confirmed_after_close, audit_unconfirmed_after_close,
-                       audit_authorized_after_close, audit_consequential_after_close,
-                       audit_settled_after_close>>
-    \/ CancelQueued /\ UNCHANGED auditVars
-    \/ \E terminal \in {"Completed", "Failed"} : RecordTerminal(terminal) /\ UNCHANGED auditVars
-    \/ \E terminal \in {"Completed", "Failed"} :
+        RequeueUnstarted(channel, 1) /\ Mark("requeued", AuditAfterClose)
+    \/ \E channel \in Channels :
+        AuthorizeSteer(channel, 1) /\ Mark("steer_authorized", AuditAfterClose)
+    \/ \E channel \in Channels, delivered \in BOOLEAN :
+        /\ ResolveSteer(channel, 1, delivered)
+        /\ Mark("steer_resolved", AuditAfterClose /\ audit.steer_authorized)
+    \/ \E channel \in Channels :
+        /\ ReconcileSteer(channel, 1)
+        /\ Mark("steer_settled", AuditAfterClose /\ audit.steer_resolved)
+    \/ CancelQueued /\ UNCHANGED audit
+    \/ \E terminal \in Terminals : RecordTerminal(terminal) /\ UNCHANGED audit
+    \/ \E terminal \in Terminals :
         /\ ReconcileRevoked(terminal)
-        /\ audit_settled_after_close' = (audit_settled_after_close \/ audit_authorized_after_close)
-        /\ UNCHANGED <<audit_closed, audit_confirmed_after_close, audit_unconfirmed_after_close,
-                       audit_authorized_after_close, audit_consequential_after_close,
-                       audit_requeued_after_close>>
+        /\ audit' = [audit EXCEPT !.settled = @ \/ audit.authorized,
+                                  !.fresh_blocked = @ \/ terminal = "Blocked"]
+    \/ \E terminal \in Terminals :
+        ReconcileRevokedCustody(terminal) /\ Mark("custody_blocked", terminal = "Blocked")
 
 AuditNext ==
-    \/ AuditPrefix /\ UNCHANGED auditVars
+    \/ AuditPrefix /\ UNCHANGED audit
     \/ (model_step_count >= AuditPrefixLength /\ AuditBody)
 
 AuditSpec ==
     /\ Init
-    /\ audit_closed = FALSE
-    /\ audit_confirmed_after_close = FALSE
-    /\ audit_unconfirmed_after_close = FALSE
-    /\ audit_authorized_after_close = FALSE
-    /\ audit_consequential_after_close = FALSE
-    /\ audit_requeued_after_close = FALSE
-    /\ audit_settled_after_close = FALSE
-    /\ [][AuditNext]_<<vars, auditVars>>
+    /\ AuditInit
+    /\ [][AuditNext]_<<vars, audit>>
 
 AuditStateConstraint == model_step_count <= AuditMaxSteps
 
@@ -250,11 +283,20 @@ AuditStaleBindingNeverServes ==
 AuditClosedChannelHoldsNoWorkerCount ==
     AuditAfterClose => AuditChannel \notin DOMAIN live_delegation_active_worker_count_by_channel
 
+\* Safety: a blocked hand-back reconciled on the unbound channel leaves the
+\* operation Cancelled (nothing can requeue it).
+AuditRevokedBlockedIsCancelled ==
+    (audit.fresh_blocked \/ audit.custody_blocked)
+        => live_delegation_schedule_state_by_operation[AuditOperation] = "Cancelled"
+
 \* Goals (expected violated).
-AuditNeverConfirmedAfterClose == ~audit_confirmed_after_close
-AuditNeverUnconfirmedAfterClose == ~audit_unconfirmed_after_close
-AuditNeverAuthorizedAfterClose == ~audit_authorized_after_close
-AuditNeverConsequentialAfterClose == ~audit_consequential_after_close
-AuditNeverRequeuedAfterClose == ~audit_requeued_after_close
-AuditNeverSettledAfterClose == ~audit_settled_after_close
+AuditNeverConfirmedAfterClose == ~audit.confirmed
+AuditNeverUnconfirmedAfterClose == ~audit.unconfirmed
+AuditNeverAuthorizedAfterClose == ~audit.authorized
+AuditNeverConsequentialAfterClose == ~audit.consequential
+AuditNeverRequeuedAfterClose == ~audit.requeued
+AuditNeverSettledAfterClose == ~audit.settled
+AuditNeverSteerSettledAfterClose == ~audit.steer_settled
+AuditNeverFreshBlockedSettled == ~audit.fresh_blocked
+AuditNeverCustodyBlockedSettled == ~audit.custody_blocked
 ====

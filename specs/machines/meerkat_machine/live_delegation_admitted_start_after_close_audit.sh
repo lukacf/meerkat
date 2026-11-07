@@ -1,32 +1,37 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of a client delegation admitted under its channel's exact
 # binding whose worker starts only after that channel closed (Turbo S S107):
-# its transcript reconciliation, worker start, consequential-effect authority
-# and busy-source requeue resolve through the operation's own retired channel,
-# never through a foreign channel or a stale binding, and a worker started
-# after the close settles through the revoked-worker reconciliation.
+# its transcript reconciliation, worker start, consequential-effect authority,
+# busy-source requeue and the steer of a continuation held for it resolve
+# through the operation's own retired channel, never through a foreign
+# channel or a stale binding; a worker started after the close settles
+# through the revoked-worker reconciliation; and a blocked hand-back on the
+# unbound channel settles Cancelled.
 #
 # usage: live_delegation_admitted_start_after_close_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's finite
-# model values, its three safety invariants, its step bound and its
+# model values, its four safety invariants, its step bound and its
 # deterministic-prefix constraint. It runs TLC once with every generated
 # invariant (safety), then once per goal with that goal as an extra
 # invariant, and requires TLC to report each goal violated: the bound
 # provably reaches every post-close arm, so the invariants are not vacuously
-# true. With --mutants it then seeds seven defects into a copy of the
-# generated model and requires the audit to refuse each: five restore the
+# true. With --mutants it then seeds twelve defects into a copy of the
+# generated model and requires the audit to refuse each: eight restore the
 # bound-channel-only guards of one family of arms (reconciliation confirmed;
 # reconciliation as a conflict or missing; worker start; consequential
-# effect; busy-source requeue), and that family's goal must become
-# unreachable; one drops the close from the worker start's post-close
-# disjunct, which AuditStaleBindingNeverServes must refuse; and one counts a
-# worker started after the close against the closed channel, which
-# AuditClosedChannelHoldsNoWorkerCount must refuse. Nothing is hand-copied, so
-# a DSL change regenerates ci.cfg and the audit follows it; an anchor this
-# script expects but cannot find fails the run instead of silently narrowing
-# the check.
+# effect; busy-source requeue; steer authorization; steer delivery; steer
+# reconciliation), and that family's goal must become unreachable; one drops
+# the close from the worker start's post-close disjunct, which
+# AuditStaleBindingNeverServes must refuse; one counts a worker started after
+# the close against the closed channel, which
+# AuditClosedChannelHoldsNoWorkerCount must refuse; and two leave a blocked
+# hand-back Blocked on the unbound channel (fresh, and from a terminal
+# recorded while bound), which AuditRevokedBlockedIsCancelled must refuse.
+# Nothing is hand-copied, so a DSL change regenerates ci.cfg and the audit
+# follows it; an anchor this script expects but cannot find fails the run
+# instead of silently narrowing the check.
 set -euo pipefail
 
 usage="usage: live_delegation_admitted_start_after_close_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -38,7 +43,7 @@ if [[ "${1:-}" == "--mutants" ]]; then
   shift
 fi
 if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 18 )); then
-  echo "error: max-steps must be an integer >= 18 (the deepest goal needs 17 steps)" >&2
+  echo "error: max-steps must be an integer >= 18 (the deepest goal, a steer reconciled after the close, needs 18)" >&2
   exit 2
 fi
 
@@ -70,11 +75,12 @@ write_cfg() {
   replace_exact_line "  AgentRuntimeIdValues = {}" '  AgentRuntimeIdValues = {"runtime_1"}' "${cfg}"
   replace_exact_line "  SessionLlmIdentityValues = {}" '  SessionLlmIdentityValues = {"identity_1"}' "${cfg}"
   replace_exact_line "  OperationIdValues = {}" '  OperationIdValues = {"operation_1"}' "${cfg}"
-  replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "channel_b", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1", "digest_s", "append_boot", "append_2", "digest_1", "commit_1", "interaction_1", "turn_1", "worker_1", "authority_1"}' "${cfg}"
+  replace_exact_line "  StringValues = {}" '  StringValues = {"", "channel_a", "channel_b", "profile_1", "pending_a", "owner_1", "ready_1", "activation_a", "lease_1", "digest_s", "append_boot", "append_2", "digest_1", "commit_1", "interaction_1", "turn_1", "worker_1", "authority_1", "continuation_1", "digest_c"}' "${cfg}"
   replace_exact_line "INVARIANTS" "INVARIANTS
   AuditForeignChannelNeverServes
   AuditStaleBindingNeverServes
-  AuditClosedChannelHoldsNoWorkerCount${extra}" "${cfg}"
+  AuditClosedChannelHoldsNoWorkerCount
+  AuditRevokedBlockedIsCancelled${extra}" "${cfg}"
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditMaxSteps = ${max_steps}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
@@ -130,6 +136,9 @@ goals=(
   AuditNeverConsequentialAfterClose
   AuditNeverRequeuedAfterClose
   AuditNeverSettledAfterClose
+  AuditNeverSteerSettledAfterClose
+  AuditNeverFreshBlockedSettled
+  AuditNeverCustodyBlockedSettled
 )
 # Each goal must be reachable within the bound: TLC has to report it violated.
 for goal in "${goals[@]}"; do
@@ -223,6 +232,12 @@ PY
     "${bound_only_edit}" "AuthorizeLiveConsequentialEffect"
   mutate requeue_bound_only unreachable AuditNeverRequeuedAfterClose \
     "${bound_only_edit}" "RequeueUnstartedLiveDelegation"
+  mutate steer_authorization_bound_only unreachable AuditNeverSteerSettledAfterClose \
+    "${bound_only_edit}" "AuthorizeLiveDelegationSteer"
+  mutate steer_delivery_bound_only unreachable AuditNeverSteerSettledAfterClose \
+    "${bound_only_edit}" "ResolveLiveDelegationSteerDelivery"
+  mutate steer_reconciliation_bound_only unreachable AuditNeverSteerSettledAfterClose \
+    "${bound_only_edit}" "ReconcileLiveDelegationSteerConfirmed ReconcileLiveDelegationSteerMaterialConflict ReconcileLiveDelegationSteerMissing"
 
   # The worker start's post-close disjunct forgets that the channel must be
   # unbound: a still-bound channel then takes a stale fence.
@@ -272,6 +287,34 @@ for phase in ("Idle", "Attached", "Running"):
     text = text[:start] + "\n".join(lines) + text[end:]
 open(path, "w").write(text)
 PY
-  echo "live delegation admitted start after close audit refused 7 mutants"
+
+  # A blocked hand-back reconciled on the unbound channel stays Blocked, as a
+  # bound terminal record leaves it, so nothing ever settles it. ARMS carries
+  # the revoked-worker arm, its blocked settle and the defect, split by `|`;
+  # every per-phase variant of the arm must hold the settle exactly once.
+  blocked_stays_edit="${work_dir}/blocked_stays_blocked.py"
+  cat > "${blocked_stays_edit}" <<'PY'
+import os
+path = os.environ["MODEL"]
+arm, settle, keep = os.environ["ARMS"].split("|")
+text = open(path).read()
+for phase in ("Idle", "Attached", "Running", "Retired", "Stopped"):
+    name = f"{arm}{phase}("
+    start = text.find("\n" + name)
+    assert start >= 0, f"{name} not found"
+    end = text.find("\n\n", start + 1)
+    block = text[start:end]
+    count = block.count(settle)
+    assert count == 1, f"expected one blocked settle in {name}, found {count}"
+    text = text[:start] + block.replace(settle, keep) + text[end:]
+open(path, "w").write(text)
+PY
+  mutate fresh_blocked_stays_blocked violated AuditRevokedBlockedIsCancelled \
+    "${blocked_stays_edit}" \
+    'ReconcileRevokedLiveDelegationWorkerAfterRestartFresh|(IF (terminal = "Blocked") THEN "Cancelled"|(IF (terminal = "Blocked") THEN "Blocked"'
+  mutate custody_blocked_stays_blocked violated AuditRevokedBlockedIsCancelled \
+    "${blocked_stays_edit}" \
+    'ReconcileRevokedLiveDelegationWorkerAfterRestartTerminalCustody|MapSet(live_delegation_schedule_state_by_operation, operation_id, "Cancelled")|MapSet(live_delegation_schedule_state_by_operation, operation_id, "Blocked")'
+  echo "live delegation admitted start after close audit refused 12 mutants"
 fi
-echo "live delegation admitted start after close audit passed at model_step_count <= ${max_steps} (6 goals reached)"
+echo "live delegation admitted start after close audit passed at model_step_count <= ${max_steps} (9 goals reached)"

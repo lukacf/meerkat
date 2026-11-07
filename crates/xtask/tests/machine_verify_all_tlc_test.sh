@@ -493,14 +493,16 @@ fi
 # whose worker starts after the close (Turbo S S107): from an admitted
 # delegation with no worker it explores the close and close settlement,
 # every transcript reconciliation outcome, worker-start authorization,
-# consequential-effect authority, start resolution and the busy-source
-# requeue through the operation's own channel and a foreign never-bound one,
-# the queued cancellation, terminal recording and the revoked-worker
-# reconciliation, under every generated invariant plus
-# AuditForeignChannelNeverServes, AuditStaleBindingNeverServes and
-# AuditClosedChannelHoldsNoWorkerCount. Its six goals (each post-close arm
-# fired, and a worker started after the close settled) must be reached, and
-# with --mutants its seven seeded defects refused.
+# consequential-effect authority, start resolution, the busy-source requeue
+# and the steer of a continuation held for it (authorization, delivery and
+# reconciliation) through the operation's own channel and a foreign
+# never-bound one, the queued cancellation, terminal recording (blocked
+# included) and the revoked-worker reconciliation, under every generated
+# invariant plus AuditForeignChannelNeverServes, AuditStaleBindingNeverServes,
+# AuditClosedChannelHoldsNoWorkerCount and AuditRevokedBlockedIsCancelled.
+# Its nine goals (each post-close arm fired, a worker started after the close
+# settled, and a blocked hand-back settled fresh and from bound custody) must
+# be reached, and with --mutants its twelve seeded defects refused.
 live_admitted_start_after_close_audit="${workspace_root}/specs/machines/meerkat_machine/live_delegation_admitted_start_after_close_audit.sh"
 if [[ ! -x "${live_admitted_start_after_close_audit}" ]]; then
   echo "error: live admitted start after close audit runner is missing from workspace runfiles: ${live_admitted_start_after_close_audit}" >&2

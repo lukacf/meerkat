@@ -192,14 +192,12 @@ impl LayeredHooks {
             .user_file
             .as_ref()
             .map(|user| untrusted(user.as_source()));
+        // Every file the layering read is decided, whether or not one of
+        // its entries survived the layering (the build config may shadow
+        // them all): the trust's contract is once per read source.
         let project_untrusted = self
             .project_file
             .as_ref()
-            .filter(|_| {
-                self.file_entries
-                    .iter()
-                    .any(|(_, file, _)| *file == HookFile::Project)
-            })
             .map(|project| untrusted(project.as_source()));
         let user_trusted = user_untrusted == Some(false);
         self.file_entries
@@ -1339,6 +1337,29 @@ mod tests {
             refused,
             vec![HookId::new("p0"), HookId::new("p1"), HookId::new("p2")]
         );
+    }
+
+    /// A project file whose every entry the build config shadows is still
+    /// decided once: the build read it, and the trust's contract is once
+    /// per read source. Nothing is refused, since no entry of it survived.
+    #[tokio::test]
+    async fn untrusted_entries_decides_a_fully_shadowed_project_file_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context_root = temp.path().join("context");
+        write_config_with_hooks(&context_root, vec![mk_hook("p0", "echo project")]).await;
+        let project_file = context_root.join(".rkat").join("config.toml");
+        let mut config = Config::default();
+        config.hooks.entries = vec![mk_hook("p0", "echo build")];
+
+        let layered = resolve_layered_hooks(Some(&context_root), None, &config).await;
+        let asked = std::sync::Mutex::new(Vec::new());
+        let refused = layered.untrusted_entries(|source| {
+            asked.lock().unwrap().push(source.path.to_path_buf());
+            true
+        });
+
+        assert_eq!(asked.into_inner().unwrap(), vec![project_file]);
+        assert!(refused.is_empty(), "{refused:?}");
     }
 
     #[tokio::test]

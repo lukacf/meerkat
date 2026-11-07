@@ -489,6 +489,28 @@ if run_part audits-c; then
   TLC_WORKERS="${tlc_workers}" "${live_worker_start_after_close_audit}" "${LIVE_WORKER_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-22}"
 fi
 
+# Bounded audit of a client delegation admitted before its channel closed
+# whose worker starts after the close (Turbo S S107): from an admitted
+# delegation with no worker it explores the close and close settlement,
+# every transcript reconciliation outcome, worker-start authorization,
+# consequential-effect authority, start resolution and the busy-source
+# requeue through the operation's own channel and a foreign never-bound one,
+# the queued cancellation, terminal recording and the revoked-worker
+# reconciliation, under every generated invariant plus
+# AuditForeignChannelNeverServes, AuditStaleBindingNeverServes and
+# AuditClosedChannelHoldsNoWorkerCount. Its six goals (each post-close arm
+# fired, and a worker started after the close settled) must be reached, and
+# with --mutants its seven seeded defects refused.
+live_admitted_start_after_close_audit="${workspace_root}/specs/machines/meerkat_machine/live_delegation_admitted_start_after_close_audit.sh"
+if [[ ! -x "${live_admitted_start_after_close_audit}" ]]; then
+  echo "error: live admitted start after close audit runner is missing from workspace runfiles: ${live_admitted_start_after_close_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded live admitted start after close TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${live_admitted_start_after_close_audit}" "${LIVE_ADMITTED_START_AFTER_CLOSE_AUDIT_MAX_STEPS:-19}" --mutants
+fi
+
 # The queued heard-speech replays behind a late summary are delivered as one
 # causal-tail batch append over their exact cursor run (Turbo S S99). A
 # hand-written audit over the same generated model explores the batch edge
@@ -1337,7 +1359,9 @@ run_machine_verify() {
 # audits-c = materialization-rollback keep with --mutants 267-309, live
 # worker start after close 25-29, approval entered-step with --mutants
 # 20-24: 656-663 s with the run-start hold audit (242-293), which moved to
-# audits-q, so about 370-375 s;
+# audits-q, so about 370-375 s; and the live admitted start after close audit
+# with --mutants (fourteen runs, not yet measured hosted; the live worker
+# start after close audit's three runs take 25-29 s): about 490-510 s;
 # audits-d = durable-tail recovery ownership with --mutants 143-238,
 # live-context outbox 100-146, peer request maps with --mutants 87-134,
 # live-context result barrier with --mutants 25-39: 383-555 s;

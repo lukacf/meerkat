@@ -9932,8 +9932,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             // An abandoned interaction never leaves a live delegation behind:
             // its operation was refused at reconciliation, reached a worker
             // terminal, carries a cancellation reason, ended Cancelled or
-            // Failed, or never bound a worker at all (a queued item that the
-            // shell cancels on the same channel close).
+            // Failed, or never bound a worker at all (an item still queued
+            // for its worker).
             && for_all(operation_id in self.live_delegation_interaction_by_operation.keys(),
                 !self.live_abandoned_interactions.contains(
                     self.live_delegation_interaction_by_operation.get_cloned(operation_id).get("value"))
@@ -29868,6 +29868,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation admitted under the channel's exact binding keeps its
+        // admission when the channel closes before its worker starts (Turbo
+        // S S107: the delegation reached the host as the close began, and
+        // the close cancelled it as work that never started). Close unbinds
+        // the channel, so, as for `ResolveLiveDelegationWorkerStart`, the
+        // worker start is authorized either under the current exact binding
+        // or, once the operation's own channel carries no runtime, fence, or
+        // generation binding at all, on the exact operation join alone. Every
+        // open mints a fresh channel id, so a retired channel never aliases a
+        // later incarnation, and a still-bound channel with a different fence
+        // or generation is refused as before. A closed channel holds no worker
+        // count: close removed it, and the revoked-worker reconciliation that
+        // settles a worker of a closed channel never releases a slot.
         transition AuthorizeLiveDelegationWorkerStart {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveDelegationWorkerStart {
@@ -29877,12 +29890,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "worker_identity_present" { worker_identity != "" }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -29911,10 +29936,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                     operation_id,
                     LiveDelegationScheduleState::Claimed
                 );
-                if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id) {
-                    self.live_delegation_active_worker_count_by_channel.increment(channel_id, 1);
-                } else {
-                    self.live_delegation_active_worker_count_by_channel.insert(channel_id, 1);
+                if self.live_execution_runtime_id_by_channel.contains_key(channel_id) {
+                    if self.live_delegation_active_worker_count_by_channel.contains_key(channel_id) {
+                        self.live_delegation_active_worker_count_by_channel.increment(channel_id, 1);
+                    } else {
+                        self.live_delegation_active_worker_count_by_channel.insert(channel_id, 1);
+                    }
                 }
                 self.live_delegation_worker_identity_by_operation.insert(operation_id, worker_identity);
                 if worker_ownership == LiveDelegationWorkerOwnership::ExistingMember {
@@ -30017,6 +30044,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A delegation admitted before its channel closed still reconciles
+        // its canonical transcript after the close (Turbo S S107), on the same
+        // terms as `AuthorizeLiveDelegationWorkerStart`: under the channel's
+        // current exact binding or, once the operation's own channel carries
+        // no runtime, fence, or generation binding at all, on the exact
+        // operation join alone. The conflict and missing arms below take the
+        // same binding guards.
         transition ReconcileLiveDelegationTranscriptConfirmed {
             per_phase [Idle, Attached, Running]
             on input ReconcileLiveDelegationTranscript {
@@ -30030,12 +30064,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -30081,12 +30127,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -30132,12 +30190,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -30991,7 +31061,11 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // A worker start that failed before anything physical existed (the
         // source member was still mid-turn after the bounded wait) leaves the
-        // item queued: the same exact operation may bind a worker again.
+        // item queued: the same exact operation may bind a worker again. The
+        // item keeps that admission when its channel closes (Turbo S S107),
+        // so the requeue also resolves on the exact operation join alone
+        // once the operation's own channel carries no runtime, fence, or
+        // generation binding at all.
         transition RequeueUnstartedLiveDelegation {
             per_phase [Idle, Attached, Running]
             on input RequeueLiveDelegation {
@@ -30999,12 +31073,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "exact_operation_join" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)
@@ -31391,6 +31477,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // A worker started after its channel closed (Turbo S S107) still
+        // needs its consequential-effect authority: under the channel's
+        // current exact binding or, once the operation's own channel carries
+        // no runtime, fence, or generation binding at all, on the exact
+        // operation join alone, as for `AuthorizeLiveDelegationWorkerStart`.
         transition AuthorizeLiveConsequentialEffect {
             per_phase [Idle, Attached, Running]
             on input AuthorizeLiveConsequentialEffect {
@@ -31400,12 +31491,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "authority_present" { authority_id != "" }
             guard "runtime_binding_matches" {
                 self.live_execution_runtime_id_by_channel.get_cloned(channel_id) == Some(runtime_id)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "fence_binding_matches" {
                 self.live_execution_fence_by_channel.get_copied(channel_id) == Some(fence_token)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "generation_binding_matches" {
                 self.live_execution_generation_by_channel.get_copied(channel_id) == Some(generation)
+                || (!self.live_execution_runtime_id_by_channel.contains_key(channel_id)
+                    && !self.live_execution_fence_by_channel.contains_key(channel_id)
+                    && !self.live_execution_generation_by_channel.contains_key(channel_id)
+                    && self.live_delegation_channel_by_operation.get_cloned(operation_id) == Some(channel_id))
             }
             guard "interaction_is_admitted_and_not_abandoned" {
                 self.live_interaction_channel_by_id.get_cloned(interaction_id) == Some(channel_id)

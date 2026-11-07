@@ -2511,16 +2511,6 @@ macro_rules! mob_catalog_machine_dsl {
             // The replay of a seat row whose origin this build does not know
             // passes Unreadable too.
             RecoverCreatedIdentityEntry { agent_identity: AgentIdentity, presence: Enum<RecoveredPresence>, last_session: Option<SessionId> },
-            // The boot's recovery of one owned edge from its owner's created
-            // entry row (0.9.11), after the scan of the created entry rows
-            // and before the boot plan is sealed.
-            RecoverOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
-            // The boot's scan found no row of an entry's name (0.9.11), after
-            // the scan of the created entry rows and before the boot plan is
-            // sealed: one per entry name the scan read no row for. A Created
-            // entry's row was purged before a downgrade: its name is
-            // reserved until an import restores the row.
-            RecoverRowlessCreatedEntry { agent_identity: AgentIdentity },
             // Operator instructions (0.9.9): a host's write of one slot (the
             // body's digest and byte length; the target as its kind, the
             // profile name of a Profile target and the member of a Member
@@ -2553,6 +2543,16 @@ macro_rules! mob_catalog_machine_dsl {
             RecordMemberCustodyUnrestored { agent_identity: AgentIdentity, restore: Enum<MemberCustodyRestoreKind>, cause: Enum<MemberCustodyCauseKind> },
             // A re-attempt restored the member's custody.
             ResolveMemberCustodyRestored { agent_identity: AgentIdentity },
+            // The boot's recovery of one owned edge from its owner's created
+            // entry row (0.9.11), after the scan of the created entry rows
+            // and before the boot plan is sealed.
+            RecoverOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
+            // The boot's scan found no row of an entry's name (0.9.11), after
+            // the scan of the created entry rows and before the boot plan is
+            // sealed: one per entry name the scan read no row for. A Created
+            // entry's row was purged before a downgrade: its name is
+            // reserved until an import restores the row.
+            RecoverRowlessCreatedEntry { agent_identity: AgentIdentity },
         }
 
         effect MobMachineEffect {

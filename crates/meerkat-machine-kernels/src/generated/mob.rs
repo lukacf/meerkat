@@ -13842,15 +13842,6 @@ pub mod signals {
         pub last_session: Option<SessionId>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RecoverOwnedIdentityEdge {
-        pub edge: WiringEdge,
-        pub owner: AgentIdentity,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RecoverRowlessCreatedEntry {
-        pub agent_identity: AgentIdentity,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetOperatorInstruction {
         pub slot: String,
         pub revision: u64,
@@ -13912,6 +13903,15 @@ pub mod signals {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveMemberCustodyRestored {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRowlessCreatedEntry {
         pub agent_identity: AgentIdentity,
     }
 }
@@ -14011,8 +14011,6 @@ pub enum Signal {
     RecoverMemberRotationIntent(signals::RecoverMemberRotationIntent),
     RecoverIdentityEntryRetiring(signals::RecoverIdentityEntryRetiring),
     RecoverCreatedIdentityEntry(signals::RecoverCreatedIdentityEntry),
-    RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
-    RecoverRowlessCreatedEntry(signals::RecoverRowlessCreatedEntry),
     SetOperatorInstruction(signals::SetOperatorInstruction),
     RevokeOperatorInstruction(signals::RevokeOperatorInstruction),
     RecoverOperatorInstruction(signals::RecoverOperatorInstruction),
@@ -14025,6 +14023,8 @@ pub enum Signal {
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
     RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
     ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
+    RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
+    RecoverRowlessCreatedEntry(signals::RecoverRowlessCreatedEntry),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -14156,8 +14156,6 @@ impl Signal {
             Self::RecoverMemberRotationIntent(_) => SignalKind::RecoverMemberRotationIntent,
             Self::RecoverIdentityEntryRetiring(_) => SignalKind::RecoverIdentityEntryRetiring,
             Self::RecoverCreatedIdentityEntry(_) => SignalKind::RecoverCreatedIdentityEntry,
-            Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
-            Self::RecoverRowlessCreatedEntry(_) => SignalKind::RecoverRowlessCreatedEntry,
             Self::SetOperatorInstruction(_) => SignalKind::SetOperatorInstruction,
             Self::RevokeOperatorInstruction(_) => SignalKind::RevokeOperatorInstruction,
             Self::RecoverOperatorInstruction(_) => SignalKind::RecoverOperatorInstruction,
@@ -14172,6 +14170,8 @@ impl Signal {
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
             Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
             Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
+            Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
+            Self::RecoverRowlessCreatedEntry(_) => SignalKind::RecoverRowlessCreatedEntry,
         }
     }
 }
@@ -14268,8 +14268,6 @@ pub enum SignalKind {
     RecoverMemberRotationIntent,
     RecoverIdentityEntryRetiring,
     RecoverCreatedIdentityEntry,
-    RecoverOwnedIdentityEdge,
-    RecoverRowlessCreatedEntry,
     SetOperatorInstruction,
     RevokeOperatorInstruction,
     RecoverOperatorInstruction,
@@ -14280,6 +14278,8 @@ pub enum SignalKind {
     ResolveMemberInstructionRelease,
     RecordMemberCustodyUnrestored,
     ResolveMemberCustodyRestored,
+    RecoverOwnedIdentityEdge,
+    RecoverRowlessCreatedEntry,
 }
 
 pub mod effects {

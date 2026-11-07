@@ -701,8 +701,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverMemberRotationIntent`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, target: RotationTarget, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, profile_name: String)
 - `RecoverIdentityEntryRetiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverCreatedIdentityEntry`(agent_identity: AgentIdentity, presence: RecoveredPresence, last_session: Option<SessionId>)
-- `RecoverOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
-- `RecoverRowlessCreatedEntry`(agent_identity: AgentIdentity)
 - `SetOperatorInstruction`(slot: String, revision: u64, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>)
 - `RevokeOperatorInstruction`(slot: String, revision: u64)
 - `RecoverOperatorInstruction`(slot: String, revision: u64, effect: InstructionEffect, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>, generation: u64)
@@ -713,6 +711,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveMemberInstructionRelease`(agent_identity: AgentIdentity, session_id: SessionId, disposal: MemberSessionDisposal)
 - `RecordMemberCustodyUnrestored`(agent_identity: AgentIdentity, restore: MemberCustodyRestoreKind, cause: MemberCustodyCauseKind)
 - `ResolveMemberCustodyRestored`(agent_identity: AgentIdentity)
+- `RecoverOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
+- `RecoverRowlessCreatedEntry`(agent_identity: AgentIdentity)
 
 ## Effects
 - `HoldMemberRunStarts`

@@ -637,6 +637,29 @@ if run_part audits-r; then
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
 
+# The GrantAuthorityMachine custody end (the host's close, ReleaseCustody,
+# into the terminal Released; an append whose outcome is unknown,
+# RecordUncertainAppend, into Uncertain, which a later close releases) is
+# model-checked by a hand-written audit over the same generated model: every
+# generated arm over the generated domains, under every generated invariant
+# plus three invariants (an ended custody accepts no input but a release; a
+# release ends in Released; an uncertain append ends the custody until a
+# release) and two action properties (an ended custody never returns to
+# Active and Released never changes; the ending step and every later step
+# keep the owner's identity, revision, records and revocations). It requires
+# its four witnesses reached and refuses eleven seeded defects (--mutants),
+# each by its target property alone. 6 steps reach every witness and mutant.
+# It runs in shard audits-r.
+grant_custody_end_audit="${workspace_root}/specs/machines/grant_authority/custody_end_audit.sh"
+if [[ ! -x "${grant_custody_end_audit}" ]]; then
+  echo "error: grant custody end audit runner is missing from workspace runfiles: ${grant_custody_end_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded grant custody end TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${grant_custody_end_audit}" "${GRANT_CUSTODY_END_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
 # The AuthMachine source-credential publication (a publisher that re-reads
 # its credential value from a source asks ResolveSourceCredentialPublication
 # with the value's fingerprint and fires Acquire naming it only on Publish)
@@ -1395,7 +1418,9 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s;
+# 248-375 s, and the GrantAuthorityMachine custody end audit with --mutants
+# (sixteen runs, not yet measured hosted; 17 s locally with 4 TLC workers,
+# about 40 s at 2.3x): about 290-415 s;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

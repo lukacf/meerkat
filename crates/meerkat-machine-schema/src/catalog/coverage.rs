@@ -336,10 +336,10 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[machine_anchor(
                 "grant_authority", "GrantAuthorityMachine",
                 "crates/meerkat-authorization/src/grants/mod.rs",
-                "generated local grant issuance, revocation and full-lineage resolution; no persistence or caller authentication claim",
+                "generated local grant issuance, revocation, full-lineage resolution and the custody end at the host's close or after an uncertain append; no persistence or caller authentication claim",
                 CoverageClaims::none()
-                    .transitions(&["Configure", "IssueRoot", "IssueChild", "RevokeNew", "RevokeAlready", "ResolveUse"])
-                    .effects(&["Configured", "Issued", "Revoked", "UseResolved"])
+                    .transitions(&["Configure", "IssueRoot", "IssueChild", "RevokeNew", "RevokeAlready", "ResolveUse", "ReleaseCustody", "RecordUncertainAppend", "ReleaseUncertainCustody", "ReleaseCustodyAgain"])
+                    .effects(&["Configured", "Issued", "Revoked", "UseResolved", "CustodyReleased", "CustodyUncertain"])
                     .invariants(&["configured_identity_is_present", "revoked_records_remain_present"]),
             )],
             &[
@@ -349,6 +349,20 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     CoverageClaims::none()
                         .transitions(&["Configure", "IssueRoot", "IssueChild", "ResolveUse"])
                         .effects(&["Configured", "Issued", "UseResolved"]),
+                ),
+                scenario(
+                    "grant-custody-release-at-close",
+                    "grants/durable_tests.rs::a_released_owner_frees_its_lease_while_a_reference_is_still_held releases the owner's custody at its host's close while another reference is held: the store restores at once, the straggler's change, revocation, resolution and lookup are refused, a second release changes nothing, and the straggler's last drop leaves the successor's lease intact",
+                    CoverageClaims::none()
+                        .transitions(&["ReleaseCustody", "ReleaseCustodyAgain"])
+                        .effects(&["CustodyReleased"]),
+                ),
+                scenario(
+                    "grant-uncertain-append-then-close",
+                    "grants/durable_tests.rs::an_uncertain_owner_still_releases_its_lease_at_close makes an append uncertain, refuses every later change and use, then releases the lease at the host's close so a successor restores what the store retained",
+                    CoverageClaims::none()
+                        .transitions(&["RecordUncertainAppend", "ReleaseUncertainCustody"])
+                        .effects(&["CustodyUncertain", "CustodyReleased"]),
                 ),
                 scenario(
                     "grant-revoked-ancestor",

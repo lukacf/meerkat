@@ -181,6 +181,105 @@ async fn a_steer_from_another_requester_waits_for_its_own_run() {
     );
 }
 
+/// A background completion steered as request-only context: an input
+/// without a requester.
+fn background_completion() -> Input {
+    let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
+    continuation.turn_append = Some(notice_append(
+        "background result",
+        ConversationAppendRole::SystemNotice,
+    ));
+    Input::Continuation(continuation)
+}
+
+/// After the steer `earlier` (not of `busy`'s requester) took its boundary
+/// decision in `busy`'s running turn, the model streams to the end of that
+/// turn, so no boundary opens again, and person a, the turn's own requester,
+/// steers once more. Returns that later steer's id, the batches of the next
+/// two runs, and the (steer, queue) lanes after `earlier`'s decision and after
+/// the later steer's.
+async fn steer_again_after_another_requester_s_steer(
+    rig: &DurableSteerRig,
+    outcomes: &mut BoundaryWorkOutcomes,
+    busy: &InputId,
+    earlier: &InputId,
+) -> (InputId, Vec<Vec<InputId>>, String) {
+    let mut settled = Vec::new();
+    wait_for_boundary_decision(rig, outcomes, &mut settled, earlier).await;
+    let lanes_after_earlier = (rig.steer_queue().await, rig.queue().await);
+
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenStream)
+        .await;
+    let later_from_a = steer_from("later from a", person("a"));
+    let later = later_from_a.id().clone();
+    rig.admit(later_from_a).await;
+    wait_for_boundary_decision(rig, outcomes, &mut settled, &later).await;
+    let lanes_after_later = (rig.steer_queue().await, rig.queue().await);
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(3).await;
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [busy, earlier, &later] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    let runs = rig.script.primitives()[1..3].to_vec();
+    let lanes = format!(
+        "(steer, queue) lanes after the earlier steer's decision {lanes_after_earlier:?}, \
+         after the later steer's {lanes_after_later:?}"
+    );
+    (later, runs, lanes)
+}
+
+/// The Steer lane is FIFO across requesters. Person b's steer may not join
+/// person a's running turn: it keeps its place in the Steer lane. Person a's
+/// later steer, which missed every boundary of a's turn, waits behind it, so
+/// b's earlier steer runs first, each in a run of its own.
+#[tokio::test]
+async fn an_earlier_steer_of_another_requester_runs_before_a_later_one() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let busy = start_busy_turn_for(&rig, person("a")).await;
+
+    let from_b = steer_from("from b", person("b"));
+    let b = from_b.id().clone();
+    rig.admit(from_b).await;
+    let (later, runs, lanes) =
+        steer_again_after_another_requester_s_steer(&rig, &mut outcomes, &busy, &b).await;
+    assert_eq!(
+        runs,
+        vec![vec![b.clone()], vec![later.clone()]],
+        "b's steer, admitted first, runs before a's later steer; {lanes}, b = {b}, later = {later}"
+    );
+}
+
+/// The order holds for a requester-less steer too: a background completion
+/// steered while person a's turn runs (request-only context, which may not
+/// join a person's turn) keeps its place in the Steer lane, and a's later
+/// steer that missed the turn runs after it.
+#[tokio::test]
+async fn a_requester_less_steer_keeps_its_place_ahead_of_a_later_steer() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let busy = start_busy_turn_for(&rig, person("a")).await;
+
+    let continuation = background_completion();
+    let continuation_id = continuation.id().clone();
+    rig.admit(continuation).await;
+    let (later, runs, lanes) =
+        steer_again_after_another_requester_s_steer(&rig, &mut outcomes, &busy, &continuation_id)
+            .await;
+    assert_eq!(
+        runs,
+        vec![vec![continuation_id.clone()], vec![later.clone()]],
+        "the requester-less steer, admitted first, runs before a's later steer; {lanes}, \
+         continuation = {continuation_id}, later = {later}"
+    );
+}
+
 /// Absence is a requester value too: an input without a requester (here a
 /// background completion steered as request-only context) never joins a
 /// person's running turn. It runs in a turn of its own after that run ends.
@@ -191,12 +290,7 @@ async fn a_requester_less_steer_never_joins_a_person_s_run() {
     let mut settled = Vec::new();
     let busy = start_busy_turn_for(&rig, person("a")).await;
 
-    let mut continuation = crate::input::ContinuationInput::detached_background_op_completed();
-    continuation.turn_append = Some(notice_append(
-        "background result",
-        ConversationAppendRole::SystemNotice,
-    ));
-    let continuation = Input::Continuation(continuation);
+    let continuation = background_completion();
     let continuation_id = continuation.id().clone();
     rig.admit(continuation).await;
     wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &continuation_id).await;

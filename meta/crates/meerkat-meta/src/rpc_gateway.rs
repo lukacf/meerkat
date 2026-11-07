@@ -13501,6 +13501,43 @@ impl CallbackToolDispatcher {
         }
     }
 
+    /// Send one `callback/call_tool` request for `call`, naming `requester`
+    /// when the run it serves has one, and turn the SDK host's answer into
+    /// the call's result.
+    async fn call_tool(
+        &self,
+        call: ToolCallView<'_>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let params = crate::identity_first::gateway_bridges::callback_call_tool_params(
+            &self.scope_id,
+            call,
+            requester,
+        )?;
+        match self.bridge.call("callback/call_tool", params).await {
+            Ok(result) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: crate::identity_first::gateway_bridges::callback_result_to_content(
+                    &result,
+                ),
+                is_error: false,
+                settlement_failures: Vec::new(),
+            }
+            .into()),
+            Err(err) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!("Tool execution failed: {err}"),
+                }],
+                is_error: true,
+                settlement_failures: Vec::new(),
+            }
+            .into()),
+        }
+    }
+
     async fn submit_detached(
         &self,
         call: ToolCallView<'_>,
@@ -14001,38 +14038,17 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value =
-            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
-                name: call.name.to_string(),
-                reason: e.to_string(),
-            })?;
-        let params = json!({
-            "scope_id": self.scope_id,
-            "tool": call.name,
-            "arguments": args,
-        });
-        match self.bridge.call("callback/call_tool", params).await {
-            Ok(result) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: crate::identity_first::gateway_bridges::callback_result_to_content(
-                    &result,
-                ),
-                is_error: false,
-                settlement_failures: Vec::new(),
-            }
-            .into()),
-            Err(err) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("Tool execution failed: {err}"),
-                }],
-                is_error: true,
-                settlement_failures: Vec::new(),
-            }
-            .into()),
-        }
+        self.call_tool(call, None).await
+    }
+
+    /// A `callback/call_tool` request that names the original requester of
+    /// the run the call serves, from its dispatch context.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        self.call_tool(call, context.requester()).await
     }
 
     async fn dispatch_resolved_with_context(
@@ -14042,7 +14058,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         plan: &meerkat_core::ResolvedToolExecutionPlan,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         match plan.mode() {
-            ToolExecutionMode::Fast => self.dispatch(call).await,
+            ToolExecutionMode::Fast => self.dispatch_with_context(call, context).await,
             ToolExecutionMode::Detached => self.submit_detached(call, context, plan).await,
             ToolExecutionMode::Streaming => Err(ToolError::unavailable(
                 call.name,
@@ -14132,7 +14148,10 @@ fn detached_callback_job_spec(
     .with_credential_context_refs(match plan.credential_context_refs() {
         meerkat_core::ToolExecutionApplicability::Applicable(references) => references.clone(),
         meerkat_core::ToolExecutionApplicability::NotApplicable => Vec::new(),
-    });
+    })
+    // The submitting run's requester, from its dispatch context: every
+    // attempt of the job names it to the SDK host.
+    .with_requester(context.requester().cloned());
     Ok((spec, arguments))
 }
 
@@ -14381,7 +14400,7 @@ async fn start_detached_callback_attempt(
         arguments,
         credential_scopes,
         resume_checkpoint: claim.resume_checkpoint.as_ref().map(ToString::to_string),
-        requester: None,
+        requester: stored.spec.requester.clone(),
     };
     spawn_callback_lease_tracker(runtime.clone(), bridge.clone(), params.authority.clone());
     let result: meerkat_contracts::CallbackJobStartResult = serde_json::from_value(

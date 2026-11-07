@@ -530,6 +530,34 @@ pub fn callback_result_to_content(result: &Value) -> Vec<ContentBlock> {
 /// it strictly by kind and source id.
 pub(crate) const SDK_CALLBACK_SOURCE_ID: &str = "meta-callback:sdk-host";
 
+/// The params of one `callback/call_tool` request: the build's routing
+/// `scope_id`, the tool, its arguments, and `requester`, the original
+/// requester of the run the call serves, when the run has one. The requester
+/// comes from the run's dispatch context only; a `requester` inside the
+/// arguments is just an argument.
+pub(crate) fn callback_call_tool_params(
+    scope_id: &str,
+    call: ToolCallView<'_>,
+    requester: Option<&meerkat_core::TurnRequester>,
+) -> Result<Value, ToolError> {
+    let arguments: Value =
+        serde_json::from_str(call.args.get()).map_err(|err| ToolError::InvalidArguments {
+            name: call.name.to_string(),
+            reason: err.to_string(),
+        })?;
+    let mut params = json!({
+        "scope_id": scope_id,
+        "tool": call.name,
+        "arguments": arguments,
+    });
+    if let Some(requester) = requester {
+        params["requester"] = serde_json::to_value(requester).map_err(|error| {
+            ToolError::execution_failed(format!("failed to encode the call's requester: {error}"))
+        })?;
+    }
+    Ok(params)
+}
+
 struct GatewayCallbackToolDispatcher {
     bridge: Arc<dyn CallbackBridge>,
     scope_id: String,
@@ -577,6 +605,37 @@ impl GatewayCallbackToolDispatcher {
             tool_defs,
         }
     }
+
+    /// Send one `callback/call_tool` request for `call`, naming `requester`
+    /// when the run it serves has one, and turn the SDK host's answer into
+    /// the call's result.
+    async fn call_tool(
+        &self,
+        call: ToolCallView<'_>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let params = callback_call_tool_params(&self.scope_id, call, requester)?;
+        match self.bridge.call("callback/call_tool", params).await {
+            Ok(result) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                settlement_failures: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: callback_result_to_content(&result),
+                is_error: false,
+            }
+            .into()),
+            Err(err) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                settlement_failures: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!("Tool execution failed: {err}"),
+                }],
+                is_error: true,
+            }
+            .into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -603,36 +662,17 @@ impl AgentToolDispatcher for GatewayCallbackToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value =
-            serde_json::from_str(call.args.get()).map_err(|err| ToolError::InvalidArguments {
-                name: call.name.to_string(),
-                reason: err.to_string(),
-            })?;
-        let params = json!({
-            "scope_id": self.scope_id,
-            "tool": call.name,
-            "arguments": args,
-        });
-        match self.bridge.call("callback/call_tool", params).await {
-            Ok(result) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                settlement_failures: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: callback_result_to_content(&result),
-                is_error: false,
-            }
-            .into()),
-            Err(err) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                settlement_failures: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("Tool execution failed: {err}"),
-                }],
-                is_error: true,
-            }
-            .into()),
-        }
+        self.call_tool(call, None).await
+    }
+
+    /// A `callback/call_tool` request that names the original requester of
+    /// the run the call serves, from its dispatch context.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        self.call_tool(call, context.requester()).await
     }
 }
 

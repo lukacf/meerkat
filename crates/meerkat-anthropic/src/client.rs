@@ -242,6 +242,66 @@ fn catalog_beta_value(
         .map(|header| header.header_value)
 }
 
+/// The thinking-binding beta header value for `request`, whose wire body is
+/// `body`: the model's catalog row decides when it has one (a row without the
+/// beta, such as an older model, gets none). An id with no catalog row at all
+/// (a LiteLLM proxy alias, a dated snapshot, a custom `[models.<id>]` entry)
+/// may serve a prefix-checked model, so it gets the beta only when both hold:
+/// the request configures `adaptive` or `enabled` thinking itself (a legacy
+/// budget lowers to `enabled`), and the body replays a signed thinking block,
+/// the only moment the binding check can fire. With thinking omitted an
+/// uncatalogued id gets nothing: no catalog row says what its default is (the
+/// alias may serve an `enabled`-only model that refuses `adaptive`), and a
+/// replayed block from an earlier turn is not evidence of one.
+///
+/// Sending the control to an uncatalogued id that serves a model without
+/// the prefix check is safe: the control is documented to work across
+/// models ("Models that don't run the prefix check accept the object and
+/// report only blocks dropped because the model can't read them, so one
+/// request body works across models"). The documented refusals are the
+/// object without its beta header, and the object beside `between_tools` on
+/// Claude Sonnet 5.5 or `disabled` on Claude Haiku 5.5, which
+/// [`thinking_block_binding`] never places it beside.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+fn thinking_binding_beta_value(request: &LlmRequest, body: &Value) -> Option<&'static str> {
+    use meerkat_core::model_profile::capabilities::BetaFeature;
+    if meerkat_models::capabilities_for(Provider::Anthropic, &request.model).is_some() {
+        return catalog_beta_value(request, BetaFeature::ThinkingBindingControls);
+    }
+    let configures_thinking = thinking_block_binding(
+        anthropic_tag(request),
+        request.tool_choice.forces_a_tool_call(),
+    ) == ThinkingBlockBinding::BesideConfiguredThinking;
+    if !configures_thinking || !replays_signed_thinking(body) {
+        return None;
+    }
+    // The value the catalog's prefix-checked rows carry, so it is defined
+    // once, in meerkat-models.
+    meerkat_models::all_capabilities()
+        .filter(|row| row.provider == Provider::Anthropic)
+        .flat_map(|row| row.beta_headers.iter())
+        .find(|header| header.feature == BetaFeature::ThinkingBindingControls)
+        .map(|header| header.header_value)
+}
+
+/// Whether the wire body replays a signed thinking block (`thinking` with a
+/// signature, or `redacted_thinking`) in an assistant message.
+fn replays_signed_thinking(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .any(|block| {
+            matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking" | "redacted_thinking")
+            )
+        })
+}
+
 fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
     let header = meerkat_models::capabilities_for(Provider::Anthropic, &request.model)?
         .context_window_beta?
@@ -250,8 +310,9 @@ fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
 }
 
 /// Where Anthropic's thinking-block binding control goes in a request to a
-/// model whose catalog row lists the binding beta, on a backend that
-/// documents it.
+/// model whose catalog row lists the binding beta, or to an uncatalogued id
+/// whose request configures thinking and replays a signed thinking block
+/// ([`thinking_binding_beta_value`]), on a backend that documents it.
 ///
 /// The control (`thinking.block_binding.prefix_mismatch_behavior:
 /// "drop_block"`) is accepted beside `adaptive` and `enabled` thinking only;
@@ -263,9 +324,11 @@ enum ThinkingBlockBinding {
     /// Beside the configured `adaptive` or `enabled` thinking (a legacy
     /// budget lowers to `enabled`).
     BesideConfiguredThinking,
-    /// Thinking omitted: beside the model's own default, adaptive. Every row
-    /// that lists the beta is documented thinking-on by default, so naming
-    /// the default turns nothing on.
+    /// Thinking omitted, catalogued rows only: beside the model's own
+    /// default, adaptive. Every row that lists the beta is documented
+    /// thinking-on by default, so naming the default turns nothing on. An
+    /// uncatalogued id never names a default ([`thinking_binding_beta_value`]
+    /// sends it no control with thinking omitted).
     BesideModelDefault,
     /// No control: `between_tools` and `disabled` refuse it, and a request
     /// that forces a tool call with thinking omitted keeps today's shape
@@ -1407,17 +1470,18 @@ impl AnthropicClient {
     ///
     /// Only where it is valid: the backend documents the beta, the model's
     /// catalog row lists it (the prefix-checked models, each thinking by
-    /// default), and [`thinking_block_binding`] places it. Thinking omitted
-    /// is named as the model's own default, adaptive, so the control has a
-    /// type to sit beside; no thinking is turned on. The stream path sends
-    /// the beta header exactly when the body carries the control.
+    /// default) or the id has no catalog row, the request configures
+    /// `adaptive` or `enabled` thinking and the body replays a signed thinking
+    /// block ([`thinking_binding_beta_value`]: a proxy alias or a custom entry
+    /// may serve a prefix-checked model), and [`thinking_block_binding`]
+    /// places it. On a catalogued row, thinking omitted is named as the
+    /// model's own default, adaptive, so the control has a type to sit
+    /// beside; no thinking is turned on. An uncatalogued id with thinking
+    /// omitted keeps today's shape. The stream path sends the beta header
+    /// exactly when the body carries the control.
     fn apply_thinking_block_binding(&self, request: &LlmRequest, body: &mut Value) {
         if !self.thinking_binding_controls_supported
-            || catalog_beta_value(
-                request,
-                meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
-            )
-            .is_none()
+            || thinking_binding_beta_value(request, body).is_none()
         {
             return;
         }
@@ -2074,10 +2138,7 @@ impl AnthropicClient {
                 .get("thinking")
                 .and_then(|thinking| thinking.get("block_binding"))
                 .is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
-                )
+                && let Some(beta) = thinking_binding_beta_value(request, &body)
             {
                 betas.push(beta.to_string());
             }
@@ -8244,6 +8305,192 @@ mod thinking_binding_unit_tests {
                 "{model}"
             );
         }
+    }
+
+    const UNCATALOGUED: &str = "litellm-claude";
+    const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+    fn drop_block() -> Value {
+        serde_json::json!({"prefix_mismatch_behavior": "drop_block"})
+    }
+
+    /// A resumed history: the first turn's signed thinking block (or its
+    /// redacted form) is replayed ahead of the next question.
+    fn replaying(model: &str, meta: meerkat_core::ProviderMeta) -> LlmRequest {
+        LlmRequest::new(
+            model,
+            vec![
+                Message::User(UserMessage::text("hello")),
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                    vec![
+                        meerkat_core::AssistantBlock::Reasoning {
+                            text: "thinking it over".to_string(),
+                            meta: Some(Box::new(meta)),
+                        },
+                        meerkat_core::AssistantBlock::Text {
+                            text: "hi".to_string(),
+                            meta: None,
+                        },
+                    ],
+                    meerkat_core::StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("and now?")),
+            ],
+        )
+    }
+
+    fn signed() -> meerkat_core::ProviderMeta {
+        meerkat_core::ProviderMeta::Anthropic {
+            signature: "sig".to_string(),
+        }
+    }
+
+    fn redacted() -> meerkat_core::ProviderMeta {
+        meerkat_core::ProviderMeta::AnthropicRedacted {
+            data: "opaque".to_string(),
+        }
+    }
+
+    /// The body and the beta the stream path would send beside it.
+    fn wire(client: &AnthropicClient, request: &LlmRequest) -> (Value, Option<&'static str>) {
+        let body = client.build_request_body(request).unwrap();
+        let beta = body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("block_binding"))
+            .and_then(|_| thinking_binding_beta_value(request, &body));
+        (body, beta)
+    }
+
+    /// An uncatalogued id (a proxy alias) with thinking omitted names no
+    /// default, even when its history replays a signed or redacted thinking
+    /// block: the alias may serve an `enabled`-only model (Sonnet 4.5 refuses
+    /// `adaptive`) or a thinking-off default, and a block from an earlier
+    /// turn is not evidence of either. The request keeps today's shape: no
+    /// `thinking` object and no beta.
+    #[test]
+    fn an_uncatalogued_id_with_thinking_omitted_names_no_default() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        for meta in [signed(), redacted()] {
+            let request = replaying(UNCATALOGUED, meta.clone());
+            let (body, beta) = wire(&client, &request);
+            assert!(body.get("thinking").is_none(), "{meta:?}: {body}");
+            assert_eq!(beta, None, "{meta:?}");
+            assert_eq!(
+                thinking_binding_beta_value(&request, &body),
+                None,
+                "{meta:?}"
+            );
+        }
+    }
+
+    /// Configured thinking on an uncatalogued id without a replayed signed
+    /// block gets no control: the binding check cannot fire.
+    #[test]
+    fn an_uncatalogued_id_configuring_thinking_without_a_replay_gets_nothing() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = hello(UNCATALOGUED).with_anthropic_tag_merge(|tag| {
+            tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+        });
+        let (body, beta) = wire(&client, &request);
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(beta, None);
+        assert_eq!(thinking_binding_beta_value(&request, &body), None);
+    }
+
+    /// Without a replayed signed block the binding check cannot fire, so an
+    /// uncatalogued id gets neither the control nor the beta.
+    #[test]
+    fn an_uncatalogued_id_without_signed_thinking_gets_nothing() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let (body, beta) = wire(&client, &hello(UNCATALOGUED));
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(beta, None);
+        assert_eq!(
+            thinking_binding_beta_value(&hello(UNCATALOGUED), &body),
+            None
+        );
+    }
+
+    /// Configured `adaptive` or `enabled` thinking (or a legacy budget, which
+    /// lowers to `enabled`) on an uncatalogued id carries the control beside
+    /// it when a signed block is replayed.
+    #[test]
+    fn an_uncatalogued_id_puts_the_control_beside_configured_thinking() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        for (thinking, expected) in [
+            (
+                AnthropicThinkingConfig::Adaptive,
+                serde_json::json!({"type": "adaptive", "block_binding": drop_block()}),
+            ),
+            (
+                AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 2048,
+                },
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": 2048,
+                    "block_binding": drop_block(),
+                }),
+            ),
+        ] {
+            let request = replaying(UNCATALOGUED, signed())
+                .with_anthropic_tag_merge(|tag| tag.thinking = Some(thinking.clone()));
+            let (body, beta) = wire(&client, &request);
+            assert_eq!(body["thinking"], expected, "{thinking:?}");
+            assert_eq!(beta, Some(BINDING_BETA), "{thinking:?}");
+        }
+        let legacy = replaying(UNCATALOGUED, signed())
+            .with_anthropic_tag_merge(|tag| tag.thinking_budget_tokens = Some(2048));
+        let (body, beta) = wire(&client, &legacy);
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": 2048,
+                "block_binding": drop_block(),
+            }),
+            "{body}"
+        );
+        assert_eq!(beta, Some(BINDING_BETA));
+    }
+
+    /// A catalogued row that does not list the beta keeps the catalog's word:
+    /// no control, even when it replays a signed block.
+    #[test]
+    fn a_catalogued_row_without_the_beta_gets_nothing_on_replay() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let model = "claude-opus-4-8";
+        assert!(meerkat_models::capabilities_for(Provider::Anthropic, model).is_some());
+        let omitted = replaying(model, signed());
+        let (body, beta) = wire(&client, &omitted);
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(beta, None);
+        assert_eq!(thinking_binding_beta_value(&omitted, &body), None);
+        let (body, beta) = wire(
+            &client,
+            &replaying(model, signed()).with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+            }),
+        );
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(beta, None);
+    }
+
+    /// A backend without the controls sends none to an uncatalogued id either.
+    #[test]
+    fn a_backend_without_the_controls_sends_none_to_an_uncatalogued_id() {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .thinking_binding_controls_supported(false)
+            .build()
+            .unwrap();
+        let (body, beta) = wire(
+            &client,
+            &replaying(UNCATALOGUED, signed()).with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+            }),
+        );
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(beta, None);
     }
 
     #[test]

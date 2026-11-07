@@ -27,6 +27,20 @@ pub struct CanonicalPart {
     pub part_digest: Sha256Digest,
 }
 
+impl CanonicalPart {
+    /// Part `index` of a split of `count` parts whose bytes hash to
+    /// `part_digest`, as a presenter states it. Whether it is a part of a
+    /// held rendering is decided against [`canonical_parts`].
+    #[must_use]
+    pub fn new(index: u32, count: u32, part_digest: Sha256Digest) -> Self {
+        Self {
+            index,
+            count,
+            part_digest,
+        }
+    }
+}
+
 /// The byte ranges of the canonical split of `rendering`: one range for the
 /// whole rendering when `max_part_bytes` is `None` or the rendering fits in
 /// one part, else consecutive ranges of at most `max_part_bytes` bytes that
@@ -95,7 +109,8 @@ pub enum PresentationAudience {
 }
 
 /// One durable record of a presentation of a decision's rendering. Built by
-/// [`Self::complete`]; it may gain fields.
+/// [`Self::complete`], or by [`Self::new`] from what a presenter states it
+/// showed; it may gain fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -118,6 +133,33 @@ pub struct PresentationRecord {
 }
 
 impl PresentationRecord {
+    /// The record of a presentation as its presenter states it: the parts
+    /// it showed of the rendering whose digest is `subject_digest`, split at
+    /// `max_part_bytes`, in the channel and message it names, at the host
+    /// clock reading `at_ms`. A decision counts it only when it shows every
+    /// canonical part of the held rendering ([`Self::shows_every_part_of`]).
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        audience: PresentationAudience,
+        subject_digest: Sha256Digest,
+        max_part_bytes: Option<NonZeroU32>,
+        parts_shown: Vec<CanonicalPart>,
+        channel_ref: DecisionReference,
+        message_ref: DecisionReference,
+        at_ms: u64,
+    ) -> Self {
+        Self {
+            audience,
+            subject_digest,
+            max_part_bytes,
+            parts_shown,
+            channel_ref,
+            message_ref,
+            at_ms,
+        }
+    }
+
     /// The record of a presentation that showed every canonical part of
     /// `rendering` for the part size `max_part_bytes`.
     #[must_use]

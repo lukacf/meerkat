@@ -326,6 +326,17 @@ def _symbols_type_marked_deprecated(text: str) -> tuple[str, ...] | None:
     return _path_symbols(match.group(1)) if match else None
 
 
+def _symbols_trait_method_marked_deprecated(text: str) -> tuple[str, ...] | None:
+    # method claim_executor in trait meerkat_core::approval::decision::DecisionStore
+    match = re.fullmatch(
+        r"method\s+([A-Za-z0-9_]+)\s+in\s+trait\s+([A-Za-z0-9_:]+)",
+        text,
+    )
+    if not match:
+        return None
+    return _path_symbols(match.group(2)) + (match.group(1),)
+
+
 STRUCTURAL_EXTRACTORS = {
     "auto_trait_impl_removed": _symbols_auto_trait_impl_removed,
     "constructible_struct_adds_field": _symbols_constructible_struct_adds_field,
@@ -398,6 +409,10 @@ STRUCTURAL_EXTRACTORS = {
     # template; first seen on the 0.9.2 integration report for
     # `meerkat::mcp::standalone_router`). Names only the function.
     "function_marked_deprecated": _symbols_function_missing,
+    # "method <name> in trait <path> in <file>:<line>" (v0.50.0 template;
+    # first seen measuring the 0.9.11 notes against v0.9.10 for
+    # `DecisionStore::claim_executor`). Names the trait and the method.
+    "trait_method_marked_deprecated": _symbols_trait_method_marked_deprecated,
 }
 
 

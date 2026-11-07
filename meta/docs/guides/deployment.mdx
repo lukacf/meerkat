@@ -301,12 +301,16 @@ that store:
   (it kept them in memory) are not run.
 
 A compaction a dormant member still owed is distilled only when one of
-Meta's verbs ends its session: a delete distills the discards it settles in
-Core at once, while a reset, a role move or the roster's unlisting keeps
-them in process until the retirement's side effects run, so a kill in
-between leaves them searchable in the old session's memory but never
-distilled. A rotation a host starts directly on the mob finalizes the
-projection without distilling its discards.
+Meta's verbs ends its session. A delete distills the discards it settles in
+Core at once; a reset, a role move or the roster's unlisting keeps them in
+process until the retirement's side effects run. When Core's settle answers
+no discards or fails, those side effects read the compaction's discards from
+the session's memory instead, and a harvest that fails is recorded
+(`lifecycle_effect_failed`) and attempted again through that read, bounded
+like the other side effects. A kill before the side effects ran leaves the
+discards searchable in the old session's memory but never distilled. A
+rotation a host starts directly on the mob finalizes the projection without
+distilling its discards.
 
 What a stopped gateway still owed when the next one starts runs in the
 background after init answers; `meta/status` (`lifecycle_projection.owed_events`)

@@ -155,7 +155,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   life lost them. The step now settles the projection in Core before it
   asks Core to end the session, and the distiller reads the settled
   discards before it distills the transcript (and, for a delete, before the
-  session's memory scope is dropped).
+  session's memory scope is dropped). When the settle answers no discards
+  (an earlier finalization published them), fails or is busy, the
+  distiller reads the compaction's discards from the session's memory
+  instead, once Core ended the session. A harvest that times out, is
+  denied by the realm's budget or fails is recorded as the retirement's
+  failed distillation (`lifecycle_effect_failed`) and attempted again
+  through that read, bounded like the other side effects.
+
+### Known limitations
+
+- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
+  with no Meta verb behind it, finalizes a dormant member's owed compaction
+  projection, but its discards are not distilled into agent memory; use a
+  delete, reset, role move or the roster's unlisting to have them
+  distilled.
+
+- The compaction harvest a step owes the session it ends (the settled
+  batch, or the fallback read of the session's memory) is kept in process
+  until the retirement's side effects run: a restart in between leaves the
+  records searchable in the old session's memory but never distilled.
 
 ## [0.9.10] - 2026-11-04
 

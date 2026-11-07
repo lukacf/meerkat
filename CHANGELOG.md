@@ -684,9 +684,18 @@ them.
   (`MobHandle::rotate_member`) finalizes a dormant member's owed compaction
   projection, but Meerkat Meta does not distill its discards into agent
   memory; use Meta's verbs (delete, reset, a role move, the roster's
-  unlisting) to have them distilled. A crash between the settle and the
-  retirement's side effects of a reset, a role move or an unlisting leaves
-  the records searchable in the old session's memory but never distilled.
+  unlisting) to have them distilled.
+
+- `meerkat-mob`: a worker's `respawn` and a mob's destroy end a member's
+  session for good without settling it: a dormant worker that owes a
+  compaction projection keeps its batch staged and its outbox row pending,
+  as before.
+
+- Meerkat Meta keeps the compaction harvest a step owes the session it
+  ends (the settled batch, or the fallback read of the session's memory)
+  in process until the retirement's side effects run: a restart in
+  between leaves the records searchable in the old session's memory but
+  never distilled.
 
 ## [0.9.10] - 2026-11-04
 

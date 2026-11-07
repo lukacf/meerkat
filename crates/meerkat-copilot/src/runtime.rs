@@ -5359,7 +5359,9 @@ mod tests {
     /// The routed client states the account limits of the route it serves:
     /// the gated route's prompt limit and output limit reach the factory
     /// through it (the prompt limit bounds the session's compaction
-    /// threshold).
+    /// threshold). The route's model states a context window and no prompt
+    /// limit, so its prompt limit is the window less the session's output
+    /// budget, which the routed client hands on.
     #[tokio::test]
     async fn a_routed_client_states_its_routes_account_limits() {
         let runtime = Arc::new(CopilotRuntime::new());
@@ -5385,7 +5387,6 @@ mod tests {
             model_picker_enabled: None,
             capabilities: crate::CopilotModelCapabilities {
                 limits: crate::CopilotModelLimits {
-                    max_prompt_tokens: Some(64_000),
                     max_context_window_tokens: Some(128_000),
                     max_output_tokens: Some(16_000),
                     ..Default::default()
@@ -5444,7 +5445,11 @@ mod tests {
             factory,
         )
         .expect("routed client");
-        assert_eq!(client.prompt_token_limit(16_000), Some(64_000));
+        assert_eq!(
+            client.prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
         assert_eq!(client.output_token_limit(), Some(16_000));
     }
 

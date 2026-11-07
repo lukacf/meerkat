@@ -1322,6 +1322,70 @@ mod tests {
         assert_eq!(LlmError::parse_retry_after("-5"), None);
     }
 
+    /// `Retry-After` given as an HTTP date (IMF-fixdate, or the obsolete
+    /// RFC 850 and asctime forms every recipient must read) is the delay
+    /// until that date, and a date already past is no delay. (Fails-old: only
+    /// a number of seconds was read, so a date gave no hint.)
+    #[test]
+    fn an_http_date_retry_after_is_the_delay_until_that_date() {
+        let at = chrono::Utc::now() + chrono::Duration::seconds(120);
+        for (form, value) in [
+            (
+                "IMF-fixdate",
+                at.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+            ),
+            (
+                "RFC 850",
+                at.format("%A, %d-%b-%y %H:%M:%S GMT").to_string(),
+            ),
+            ("asctime", at.format("%a %b %e %H:%M:%S %Y").to_string()),
+        ] {
+            let delay = LlmError::parse_retry_after(&value);
+            assert!(
+                delay.is_some_and(|ms| (100_000..=120_000).contains(&ms)),
+                "{form} {value:?}: {delay:?}"
+            );
+        }
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        assert_eq!(LlmError::parse_retry_after(&past), Some(0));
+    }
+
+    /// A rate limit whose `Retry-After` is an HTTP date carries the delay
+    /// until that date. (Fails-old: the date gave no hint.)
+    #[test]
+    fn a_rate_limit_with_an_http_date_retry_after_carries_the_delay() {
+        let at = (chrono::Utc::now() + chrono::Duration::seconds(60))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_str(&at).expect("a header value"),
+        );
+        let error = LlmError::from_http_response(429, "rate limited".to_string(), &headers);
+        assert!(
+            matches!(
+                error,
+                LlmError::RateLimited {
+                    retry_after_ms: Some(ms)
+                } if (40_000..=60_000).contains(&ms)
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// A number of seconds too large for milliseconds is the largest delay,
+    /// never an overflow. (Fails-old: the multiplication overflowed.)
+    #[test]
+    fn a_retry_after_too_large_for_milliseconds_saturates() {
+        assert_eq!(
+            LlmError::parse_retry_after("18446744073709551615"),
+            Some(u64::MAX)
+        );
+    }
+
     #[test]
     fn test_from_http_status_429_with_retry_after() {
         let err = LlmError::from_http_status(429, "rate limited".to_string(), Some(5000));

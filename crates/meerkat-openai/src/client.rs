@@ -5650,6 +5650,60 @@ mod tests {
         );
     }
 
+    /// A Responses `response.completed` event line, without its line break.
+    const RESPONSES_COMPLETED_EVENT: &str = r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":3}}}"#;
+
+    /// A Responses body whose last line ends without a line break is read to
+    /// its end: the event on that line counts. (Fails-old: the bytes after the
+    /// last line break were dropped, so the stream ended without its terminal
+    /// event.)
+    #[tokio::test]
+    async fn a_responses_body_whose_last_line_has_no_line_break_is_read() {
+        let payload = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}}\n\n{RESPONSES_COMPLETED_EVENT}"
+        );
+        let (text, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(done, Some(LlmDoneOutcome::Success { .. })),
+            "{done:?}"
+        );
+    }
+
+    /// One Responses event whose data spans several `data:` lines is one
+    /// event: its lines are joined with a line break, as the SSE format says.
+    /// (Fails-old: each `data:` line was parsed on its own, so the event
+    /// failed as invalid JSON.)
+    #[tokio::test]
+    async fn a_responses_event_whose_data_spans_lines_is_one_event() {
+        let payload = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\ndata: \"delta\":\"ok\"}}\n\n{RESPONSES_COMPLETED_EVENT}\n\n"
+        );
+        let (text, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(done, Some(LlmDoneOutcome::Success { .. })),
+            "{done:?}"
+        );
+    }
+
+    /// A Responses event whose `data:` field is empty is a parse error: an
+    /// empty string is no event.
+    #[tokio::test]
+    async fn an_empty_responses_data_field_is_a_parse_error() {
+        let payload = format!("data:\n\n{RESPONSES_COMPLETED_EVENT}\n\n");
+        let (_, done) = stream_responses_paced_bytes(vec![payload.into_bytes()]).await;
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
+    }
+
     /// The streamed image path (ChatGPT backend) reads a provider message
     /// split inside a multi-byte character exactly. (Fails-old: the split
     /// character became U+FFFD in the reported failure.)

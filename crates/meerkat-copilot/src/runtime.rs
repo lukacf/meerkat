@@ -4488,6 +4488,44 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());
     }
 
+    /// The production transport reads a `Retry-After` given as an HTTP date
+    /// as the delay until that date, as it reads a number of seconds: an
+    /// exchange outage paces its retry by it, and a 403 that carries one is a
+    /// rate limit. (Fails-old: only a number of seconds was read, so the date
+    /// gave no delay and the 403 was no rate limit.)
+    #[tokio::test]
+    async fn an_http_date_retry_after_is_read_from_a_real_answer() {
+        let at = (Utc::now() + Duration::seconds(120)).format("%a, %d %b %Y %H:%M:%S GMT");
+        let header = format!("retry-after: {at}\r\n");
+        let (base, hits) = spawn_github_answers(vec![
+            github_answer(503, &header, r#"{"message":"service unavailable"}"#),
+            github_answer(403, &header, r#"{"message":"slow down"}"#),
+        ])
+        .await;
+        let transport = ReqwestCopilotHttpTransport::new();
+
+        let outage = transport
+            .get(
+                &format!("{base}/copilot_internal/v2/token"),
+                HeaderMap::new(),
+            )
+            .await
+            .expect("the outage answer");
+        assert!(
+            outage
+                .retry_after
+                .is_some_and(|delay| (100..=120).contains(&delay.as_secs())),
+            "{:?}",
+            outage.retry_after
+        );
+        let limited = transport
+            .get(&format!("{base}/copilot_internal/user"), HeaderMap::new())
+            .await
+            .expect("the rate limit answer");
+        assert!(limited.rate_limited, "{:?}", limited.retry_after);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     use meerkat_core::auth::TokenStore;
     use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
     use meerkat_core::{

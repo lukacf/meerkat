@@ -599,6 +599,15 @@ lists every read and the re-base rule.
   unavailable. Only the session listing, the controller custody of governed
   administration and the delivery backlog total refuse while a session's
   scope is poisoned.
+- **Conflicted scope.** If your store ends up holding two batches at one
+  version of a scope (a batch that reached it outside the contract) and
+  fails the scope's load with a typed conflict, Core quarantines that scope
+  and serves the rest of the realm. The scope refuses every call that needs
+  it, typed, naming the conflict and the repair, and the reads across
+  sessions count it as they count a poisoned scope. Repair it in your
+  store, then open the realm again: a reopen alone quarantines it again.
+  The [Host Store SPI reference](/reference/host-store-spi#a-conflicted-scope)
+  describes the repair.
 - **Lost fence.** Losing the fence poisons the whole realm.
 
 ### Limits And Exceptions

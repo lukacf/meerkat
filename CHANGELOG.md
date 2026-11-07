@@ -109,6 +109,33 @@ them.
   contract and now loses its realm at its next re-acquire (see Upgrade
   notes).
 
+- `meerkat-core`: `HeadPage` gains `conflicts` (`Vec<ScopeConflict>`) and is
+  `#[non_exhaustive]`. A host store builds its listing pages with
+  `HeadPage::new(heads, next)` and adds the scopes it reports conflicted
+  with `HeadPage::with_conflicts`; a `HeadPage` struct literal outside
+  `meerkat-core` no longer compiles (see Upgrade notes).
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a host store
+  that meets obligation 4 at load, failing the load of a scope two batches
+  hold one version of with a typed conflict, now lists such a scope per
+  scope: `list_heads` reports it in `HeadPage::conflicts`, with the version
+  that holds the two batches and their commit ids, never among the heads
+  and never by failing the page, and a page holds at most `limit` entries
+  across both lists. The load's `Conflict` names that version as `current`.
+  A store that must wait before it can decide what a lower token's batch
+  shows answers the page `Unavailable`, never a conflict. Before, the
+  contract said nothing of such a scope's listing, and a store that failed
+  the page for it kept the whole realm from opening (see Changed).
+
+- `meerkat-runtime`: `SpiRealm::pinned_values` takes the scope's state as
+  `&mut ScopeState` (it took `&ScopeState`): a chunk whose load answers a
+  typed conflict quarantines the scope there. A caller passes the scope
+  state it locked mutably.
+
+- `meerkat-mob`: `SpiStoredMob` gains `quarantined` (`Option<String>`) and is
+  `#[non_exhaustive]`: a struct literal outside `meerkat-mob` no longer
+  compiles.
+
 - Behaviour-only (not measured by the gate): `meerkat-runtime`,
   `meerkat-mob`, `meerkat-store-conformance`: a resumed-run admission
   (`ResumedRunAdmissionDecision::Unavailable`), or a durable worker's resume
@@ -191,9 +218,10 @@ them.
   fence of a host store realm: the writer's phase (live, stopped, acquiring,
   proving a grant, resuming, waiting out a holder, or lost), the token it
   commits with, the grant it has not installed, the acquires it gave up on,
-  the holder it waits out, and why it stopped or lost the realm. The realm
-  drives it; the rules it keeps are unchanged except the token order (see
-  Breaking).
+  the holder it waits out, why it stopped or lost the realm, and which of
+  the realm's scopes are poisoned or quarantined, and why. The realm drives
+  it; the rules it keeps are unchanged except the token order (see
+  Breaking) and the containment of a conflicted scope (see Changed).
 
 - `meerkat-store-conformance`: the host store chapter's token order row:
   every grant must answer a token above every earlier grant of the realm, a
@@ -215,6 +243,36 @@ them.
   listing of the chapter also checks that names strictly increase across
   pages.
 
+- `meerkat-core`: `ScopeConflict` (`#[non_exhaustive]`, built with
+  `ScopeConflict::new(name, version, commit_ids)`), a scope a host store
+  listing reports conflicted, in `HeadPage::conflicts`, with the
+  constructors `HeadPage::new` and `HeadPage::with_conflicts`.
+
+- `meerkat-runtime`: `SpiRealm::quarantined_scopes` and `QuarantinedScope`
+  (`scope`, `names`, `cause`): the scopes of a host store realm quarantined
+  because the store reports a conflict for them, each with its conflicted
+  incarnations and the cause its refusals carry. `SpiError::ScopeQuarantined`
+  answers a call on such a scope, and `SpiError::ScopesQuarantined` a read
+  across scopes while one of a family it reads is quarantined (naming the
+  poisoned ones too); both reach a runtime store's caller as
+  `RuntimeStoreError::ScopeRefused`. With them `SpiRealm::scope_refused`
+  (poisoned or quarantined), `ScopeState::quarantine` and
+  `ScopeState::refusal`.
+
+- `meerkat-store-conformance`: the host store chapter's
+  `a_conflicted_scope_is_listed_typed` row, after `same_version_twice`: a
+  scope whose load answers a typed conflict is listed under
+  `HeadPage::conflicts` with the version its load names and its commit ids
+  (ascending, without repeats, or none), the other scopes of its kind are
+  listed as usual, and listing it again reports the same version and ids. A
+  store that refuses the second batch at commit, or picks one by a fixed
+  rule, holds no such scope, and the row checks nothing more. A canary store
+  in the crate's tests that fails the page for such a scope fails it.
+  `HostStoreFactory::fold_now` (it does nothing by default) runs the fold of
+  a store that decides between such batches only when it folds. Every
+  listing of the chapter takes both lists of each page: at most `limit`
+  entries a page across them, every name once.
+
 - `meerkat-runtime`: `NativeWorkAuthorizationHost::authenticate_kept_original`,
   the host's answer for a kept governed input's controller: it re-attests
   the original through the host's own custody record, decides the
@@ -234,6 +292,36 @@ them.
   writer stopped on a slow store resumes sooner; the retry budget and the
   fencing are unchanged. A store now sees up to four `list_heads` calls of
   one realm at once, never two of one kind.
+
+- `meerkat-runtime`, `meerkat-mob`: a host store realm contains a scope the
+  store reports conflicted (two batches at one of its versions, its load
+  failing with a typed conflict) instead of failing. The open quarantines
+  each scope its listing reports in `HeadPage::conflicts`, logs it once at
+  error level, and opens the rest of the realm; a load that meets such a
+  conflict later quarantines its scope then (a chunk's, the scope that
+  refers to the chunk), and when a scope was deleted and created again, a
+  conflict on the deleted incarnation quarantines the live one too. A
+  quarantined scope refuses every call that needs it with a typed refusal
+  (`RuntimeStoreError::ScopeRefused`) whose cause names each conflicted
+  incarnation, its version and commit ids, and the repair; no run starts or
+  resumes on its runtime, and the inputs the store keeps for it stay
+  queued. The reads across scopes count it as they count a poisoned scope
+  of its family: the recovery-work scan lists its runtime as holding work,
+  the delivery authority listing per runtime names it unavailable (both
+  refuse typed while it is a runtime whose scope name keeps only a hash of
+  its id and no call named it yet), the session catalog listing, the
+  controller custody and the delivery backlog total refuse typed, and so
+  does the tool grant listing while a grant scope is quarantined. Its
+  chunks are never swept, and a mob storage lists a mob whose scope is
+  quarantined as quarantined. A re-acquire's listing must report each
+  recorded conflict unchanged (its version, and its commit ids where both
+  sides name them, in any order); a conflict on another scope, or a
+  recorded one at another version, with other ids, listed among the heads
+  or gone, is a batch this writer did not write and loses the realm. Only
+  a repair in the store, then a reopen, lifts a quarantine. Before, a store
+  that failed the listing page for such a scope kept the whole realm from
+  opening until the scope was repaired. A head Core cannot decode still
+  fails the open.
 
 - `meerkat-runtime`: a kept governed input whose host cannot say yet whether
   it supplies its controller client (a `Readiness` answer other than
@@ -368,6 +456,30 @@ them.
   this release Core also lists the four scope kinds at once, so up to four
   `list_heads` calls of one realm run concurrently. Run the chapter against
   your store before you upgrade.
+
+- Host store implementers: build each listing page with
+  `HeadPage::new(heads, next)`; a `HeadPage` struct literal no longer
+  compiles. A store that meets obligation 4 by failing a scope's load with a
+  typed conflict reports that scope per scope in `HeadPage::conflicts`, as
+  `ScopeConflict::new(name, version, commit_ids)`: the version that holds the
+  two batches (the `current` its load's `Conflict` names) and their commit
+  ids, ascending, without repeats and the same each time it lists the
+  unchanged conflict, or none. Never list such a scope among the heads or
+  fail the page for it, keep a page to `limit` entries across both lists,
+  and answer a page you cannot decide yet (a pending acquire cut)
+  `Unavailable`, never with a conflict. A store that still fails the page
+  keeps the realm from opening and fails the chapter's new
+  `a_conflicted_scope_is_listed_typed` row; one that decides between such
+  batches only when it folds them implements `HostStoreFactory::fold_now`
+  for the chapter. Run the chapter against your store before you upgrade.
+
+- Hosts on a host store: a realm whose store reports a conflicted scope now
+  opens with that scope quarantined, and every call that needs it refuses
+  (see Changed). To lift it, repair the scope in your store (keep one of the
+  two batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  promptly and retry the restore of each mob quarantined meanwhile
+  (`mob/restore_retry`). A reopen without the repair quarantines it again.
 
 - Hosts with a governed composition whose controller owner supplies clients
   again after a stop or a restart: a governed prompt kept across a graceful

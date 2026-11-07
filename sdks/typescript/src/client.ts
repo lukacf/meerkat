@@ -199,6 +199,15 @@ import type {
   BlobPayload as RpcBlobPayload,
   CreateProfileParams as RpcCreateProfileParams,
   CreateScheduleRequest as RpcCreateScheduleRequest,
+  DecisionGetParams as RpcDecisionGetParams,
+  DecisionListParams as RpcDecisionListParams,
+  DecisionListResult as RpcDecisionListResult,
+  DecisionPresentationRequest as RpcDecisionPresentationRequest,
+  DecisionPresentParams as RpcDecisionPresentParams,
+  DecisionRenderingParams as RpcDecisionRenderingParams,
+  DecisionRenderingResult as RpcDecisionRenderingResult,
+  DecisionResult as RpcDecisionResult,
+  DecisionWithdrawParams as RpcDecisionWithdrawParams,
   DeferredCreateResult as RpcDeferredCreateResult,
   DeviceCompleteParams as RpcDeviceCompleteParams,
   DeviceStartParams as RpcDeviceStartParams,
@@ -2425,6 +2434,128 @@ export class MeerkatClient {
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;
     return this.request("tool_grants/audit", params);
+  }
+
+  /**
+   * List a page of the server's durable decisions, in decision id order.
+   * Every given filter must match; `requester` is a principal key. A page
+   * holds 100 decisions unless `limit` asks for another size, at most 500.
+   * While the result carries `next_after`, pass it as the next page's
+   * `after`. A server whose persistence keeps no durable decisions answers
+   * capability unavailable. Needs a Meerkat 0.9.11 or newer server: an
+   * older one answers method not found (`-32601`), raised as a
+   * `MeerkatError` that names the method.
+   *
+   * A list on the stdio connection this client opens is more than a read
+   * when the server is a Unix build with local authorization: before it
+   * answers, the server shows the connection's operator each decision of the
+   * page that is open, waits for a human and is held for an approver id the
+   * operator acts for (once per connection), and records each presentation.
+   * It writes a `decision/notice` for each decision it shows; this client
+   * drops those notices.
+   */
+  async listDecisions(options?: {
+    kind?: string;
+    phase?: RpcDecisionListParams["phase"];
+    approverId?: string;
+    requester?: string;
+    after?: string;
+    limit?: number;
+  }): Promise<RpcDecisionListResult> {
+    const params: RpcDecisionListParams = {};
+    if (options?.kind !== undefined) params.kind = options.kind;
+    if (options?.phase !== undefined) params.phase = options.phase;
+    if (options?.approverId !== undefined) params.approver_id = options.approverId;
+    if (options?.requester !== undefined) params.requester = options.requester;
+    if (options?.after !== undefined) params.after = options.after;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    return this.request("decision/list", params).catch(
+      MeerkatClient.decisionMethodServed("decision/list"),
+    );
+  }
+
+  /**
+   * Read one durable decision, its expiry recorded once its deadline
+   * passed. The held request is in the answer only with `includeRequest`.
+   * Needs a Meerkat 0.9.11 or newer server: an older one answers method not
+   * found (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async getDecision(
+    decisionId: string,
+    options?: { includeRequest?: boolean },
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionGetParams = { decision_id: decisionId };
+    if (options?.includeRequest) params.include_request = true;
+    return this.request("decision/get", params).catch(
+      MeerkatClient.decisionMethodServed("decision/get"),
+    );
+  }
+
+  /**
+   * Read a durable decision's rendering and its canonical parts for a part
+   * size; without `maxPartBytes` the rendering is one part. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async decisionRendering(
+    decisionId: string,
+    options?: { maxPartBytes?: number },
+  ): Promise<RpcDecisionRenderingResult> {
+    const params: RpcDecisionRenderingParams = { decision_id: decisionId };
+    if (options?.maxPartBytes !== undefined) params.max_part_bytes = options.maxPartBytes;
+    return this.request("decision/rendering", params).catch(
+      MeerkatClient.decisionMethodServed("decision/rendering"),
+    );
+  }
+
+  /**
+   * Record what a host presenter showed of a durable decision: the audience,
+   * the subject digest shown, the parts shown, the channel and message
+   * references and the host clock reading `at_ms`. It counts only when it
+   * shows every canonical part to the party that decides now. Needs a
+   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async presentDecision(
+    decisionId: string,
+    presentation: RpcDecisionPresentationRequest,
+  ): Promise<RpcDecisionResult> {
+    const params: RpcDecisionPresentParams = { decision_id: decisionId, presentation };
+    return this.request("decision/present", params).catch(
+      MeerkatClient.decisionMethodServed("decision/present"),
+    );
+  }
+
+  /**
+   * Withdraw an open durable decision as the host; a decision no longer
+   * open is refused with the `not_open` decision refusal. Needs a Meerkat
+   * 0.9.11 or newer server: an older one answers method not found
+   * (`-32601`), raised as a `MeerkatError` that names the method.
+   */
+  async withdrawDecision(decisionId: string): Promise<RpcDecisionResult> {
+    const params: RpcDecisionWithdrawParams = { decision_id: decisionId };
+    return this.request("decision/withdraw", params).catch(
+      MeerkatClient.decisionMethodServed("decision/withdraw"),
+    );
+  }
+
+  /**
+   * The `decision/*` methods need a 0.9.11 or newer server. The SDK sets no
+   * contract floor for them: an older server answers method not found
+   * (`-32601`), which already fails closed, in words that need not name the
+   * method. Raise that answer as an error that names it.
+   */
+  private static decisionMethodServed(method: string): (error: unknown) => never {
+    return (error: unknown) => {
+      if (error instanceof MeerkatError && error.code === "-32601") {
+        throw new MeerkatError(
+          error.code,
+          `${method} needs a Meerkat 0.9.11 or newer server: ${error.message}`,
+          error.details,
+        );
+      }
+      throw error;
+    };
   }
 
   async listArtifacts(

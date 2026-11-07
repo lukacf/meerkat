@@ -42,6 +42,14 @@ from .types import (
     ConfigWriteResult,
     CreateProfileParams,
     CreateScheduleRequest,
+    DecisionGetParams,
+    DecisionListParams,
+    DecisionListResult,
+    DecisionPresentParams,
+    DecisionRenderingParams,
+    DecisionRenderingResult,
+    DecisionResult,
+    DecisionWithdrawParams,
     DeferredCreateResult,
     DeviceCompleteParams,
     DeviceStartParams,
@@ -886,6 +894,46 @@ class RpcRequest(Protocol):
         params: ToolGrantAuditParams,
         /,
     ) -> Awaitable[ToolGrantAuditResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/list"],
+        params: DecisionListParams,
+        /,
+    ) -> Awaitable[DecisionListResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/get"],
+        params: DecisionGetParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/rendering"],
+        params: DecisionRenderingParams,
+        /,
+    ) -> Awaitable[DecisionRenderingResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/present"],
+        params: DecisionPresentParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["decision/withdraw"],
+        params: DecisionWithdrawParams,
+        /,
+    ) -> Awaitable[DecisionResult]: ...
 
     @overload
     def __call__(

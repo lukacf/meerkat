@@ -267,9 +267,17 @@ pub fn stock_governed_jsonl_setup(
 /// that requires person authentication refuses it). Without review rules
 /// nothing is composed and no reviewer is built.
 ///
+/// On a Unix build the same operator, in the same scope, decides the realm's
+/// durable decisions on the pipe: `decision/list` presents the decisions of
+/// each listed page addressed to an approver id `config` lists for the
+/// operator (`[governance.decisions] operator_approver_ids`), and
+/// `decision/decide` decides one the pipe presented. The list is `config` as
+/// the pipe starts; a change reaches the pipe at its next start.
+///
 /// # Errors
 /// An invalid review section, a reviewer the factory cannot build as
-/// selected, or an operator that cannot be named as an approval requester.
+/// selected, or an operator that cannot be named as an approval requester
+/// or approver.
 pub async fn stock_governed_jsonl_setup_reviewed(
     stock: &Arc<StockGovernance>,
     config: Config,
@@ -300,6 +308,8 @@ pub async fn stock_governed_jsonl_setup_reviewed(
         tools,
         connector_authority,
     )?;
+    #[cfg(unix)]
+    setup.connection.serve_decisions_as(consent.approver()?);
     setup.consent = review.is_some().then_some(consent);
     setup.operation_review = review;
     Ok(setup)

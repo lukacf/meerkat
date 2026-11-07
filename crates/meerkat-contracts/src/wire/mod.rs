@@ -6,6 +6,7 @@ mod auth;
 mod comms;
 mod config;
 mod connection;
+mod decision;
 mod error;
 mod event;
 mod help;
@@ -84,6 +85,16 @@ pub use connection::{
     WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
     WireScopeEvidence,
+};
+pub use decision::{
+    DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
+    DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
+    DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
+    WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionErrorData,
+    WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
+    WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
+    WireDecisionTier, WirePresentationAudience, WirePresentationRecord, WireUnreadableDecision,
 };
 pub use operator_instruction::{
     InstructionSetErrorData, MobInstructionStatusParams, MobInstructionStatusResult,

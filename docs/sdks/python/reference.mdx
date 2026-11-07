@@ -379,6 +379,27 @@ a typed live-stream lag marker. A live subscriber is an observation surface,
 not the persistence boundary. Explicitly ephemeral memory realms do not expose
 the replay APIs.
 
+### Durable decisions
+
+A server whose persistence keeps durable decisions reads, presents and
+withdraws them; one that keeps none answers capability unavailable. The
+methods need a Meerkat 0.9.11 or newer server: an older one answers method
+not found (`-32601`), raised as a `MeerkatError` that names the method.
+
+```python
+page = await client.list_decisions(phase="open", approver_id="team:owners", limit=50)
+decision = await client.get_decision(decision_id, include_request=True)
+rendering = await client.decision_rendering(decision_id, max_part_bytes=4096)
+await client.present_decision(decision_id, presentation)
+await client.withdraw_decision(decision_id)
+```
+
+`present_decision` records what a host presenter showed; the presentation
+counts only when it shows every canonical part of the rendering to the party
+that decides now. No SDK method decides a durable decision: a host's trusted
+adapter decides one with the human's authenticated event. See
+[durable decisions](/api/rpc#durable-decisions).
+
 ## Mob profile and events surfaces
 
 ### Multi-host operator surface

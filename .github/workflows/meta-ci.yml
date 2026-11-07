@@ -1546,7 +1546,7 @@ jobs:
               jobs = [
                   job
                   for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
                   )
                   for job in page["jobs"]
               ]

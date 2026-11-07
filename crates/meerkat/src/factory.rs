@@ -16198,6 +16198,128 @@ mod tests {
         assert_eq!(requested_output_budget(Some(1_024)).await, 1_024);
     }
 
+    /// A client whose selected account states a prompt limit (as a Copilot
+    /// account model does) and whose provider measures every request's
+    /// prompt at `input_tokens`.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    struct AccountPromptLimitedClient {
+        prompt_limit: u32,
+        input_tokens: u64,
+    }
+
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[async_trait]
+    impl LlmClient for AccountPromptLimitedClient {
+        fn prompt_token_limit(&self) -> Option<u32> {
+            Some(self.prompt_limit)
+        }
+
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a LlmRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+            Box::pin(stream::iter(vec![
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        Provider::OpenAI,
+                        &request.model,
+                        meerkat_core::Usage {
+                            input_tokens: self.input_tokens,
+                            output_tokens: 1,
+                            ..Default::default()
+                        },
+                    ),
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::EndTurn),
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// Whether the second turn of a fresh `gpt-5.5` session, on a client
+    /// whose account allows prompts of at most 128_000 tokens, starts by
+    /// compacting after a first turn whose prompt measured `input_tokens`;
+    /// `threshold` is the build's explicit threshold override.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    async fn second_turn_compacts(input_tokens: u64, threshold: Option<u64>) -> bool {
+        let session_id = SessionId::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("session runtime bindings");
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.resume_session = Some(Session::with_id(session_id));
+        build.llm_client_override = Some(Arc::new(AccountPromptLimitedClient {
+            prompt_limit: 128_000,
+            input_tokens,
+        }));
+        build.auto_compact_threshold_override = threshold.and_then(std::num::NonZeroU64::new);
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let temp = tempfile::tempdir().expect("temp session store");
+        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let mut agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("agent on the prompt-limited client");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("first".into()))
+            .await
+            .expect("first turn");
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        agent
+            .run_with_events(meerkat_core::ContentInput::Text("second".into()), tx)
+            .await
+            .expect("second turn");
+        let mut compacted = false;
+        while let Ok(event) = rx.try_recv() {
+            compacted |= matches!(event, meerkat_core::AgentEvent::CompactionStarted { .. });
+        }
+        compacted
+    }
+
+    /// The selected account's prompt limit reaches the session's compactor:
+    /// on `gpt-5.5` (whose own default threshold is 840_000) an account that
+    /// allows 128_000 prompt tokens compacts from 102_400, four-fifths of its
+    /// limit, and an explicit 150_000 is lowered to the 128_000 limit.
+    #[cfg(all(feature = "session-compaction", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_account_prompt_limit_reaches_the_session_compactor() {
+        assert!(second_turn_compacts(110_000, None).await);
+        assert!(!second_turn_compacts(100_000, None).await);
+        assert!(second_turn_compacts(130_000, Some(150_000)).await);
+        assert!(!second_turn_compacts(125_000, Some(150_000)).await);
+    }
+
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mod live_member_mcp {
         use super::*;

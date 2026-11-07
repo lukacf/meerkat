@@ -352,4 +352,58 @@ mod tests {
             if refusal.kind() == OperationRefusalKind::Denied)
         );
     }
+
+    /// A client whose account states its limits.
+    struct AccountLimitedClient;
+    #[async_trait]
+    impl LlmClient for AccountLimitedClient {
+        fn output_token_limit(&self) -> Option<u32> {
+            Some(16_000)
+        }
+        fn prompt_token_limit(&self) -> Option<u32> {
+            Some(64_000)
+        }
+        fn stream<'a>(&'a self, _: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    /// The selected-target wrapper states the account limits of the client
+    /// it wraps: the factory reads them through it (the prompt limit bounds
+    /// the session's compaction threshold, the output limit its default
+    /// output budget).
+    #[test]
+    fn the_selected_target_wrapper_states_its_clients_account_limits() {
+        let client = SelectedTargetClient::new(
+            Arc::new(AccountLimitedClient),
+            ResolvedModelAuthorizationTarget {
+                identity: Arc::new(SessionLlmIdentity {
+                    model: "fixture".to_owned(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                }),
+                backend_profile_id: Arc::from("profile"),
+                backend_kind: Arc::from("backend"),
+                credential: AuthCredentialIdentity::from_auth_binding(
+                    &meerkat_core::AuthBindingRef {
+                        realm: meerkat_core::RealmId::parse("dev").unwrap(),
+                        binding: meerkat_core::BindingId::parse("fixture").unwrap(),
+                        profile: None,
+                        origin: meerkat_core::BindingOrigin::Configured,
+                    },
+                ),
+                credential_requirement: meerkat_core::ControllerCredentialRequirement::Required,
+            },
+        );
+        assert_eq!(client.prompt_token_limit(), Some(64_000));
+        assert_eq!(client.output_token_limit(), Some(16_000));
+    }
 }

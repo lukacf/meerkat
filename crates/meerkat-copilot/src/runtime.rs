@@ -5356,6 +5356,98 @@ mod tests {
         }
     }
 
+    /// The routed client states the account limits of the route it serves:
+    /// the gated route's prompt limit and output limit reach the factory
+    /// through it (the prompt limit bounds the session's compaction
+    /// threshold).
+    #[tokio::test]
+    async fn a_routed_client_states_its_routes_account_limits() {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (env, _) = resolver_environment(&auth_binding).await;
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: crate::CopilotModelCapabilities {
+                limits: crate::CopilotModelLimits {
+                    max_prompt_tokens: Some(64_000),
+                    max_context_window_tokens: Some(128_000),
+                    max_output_tokens: Some(16_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let authorizer = Arc::new(CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding: binding.clone(),
+            env,
+            transport: Arc::new(ScriptedTransport::new([])),
+        });
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: binding.backend(),
+            backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    authorizer,
+                    AuthMetadata::default(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                ),
+            ),
+        };
+        runtime.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: binding.credential_identity().clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        let factory: CopilotRouteClientFactory = Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+        let client = routed_client(
+            Arc::clone(&runtime),
+            connection,
+            Provider::OpenAI,
+            "gpt-test".to_string(),
+            factory,
+        )
+        .expect("routed client");
+        assert_eq!(client.prompt_token_limit(), Some(64_000));
+        assert_eq!(client.output_token_limit(), Some(16_000));
+    }
+
     /// Structured output on every Copilot route: the routed client (and the
     /// account capability gate in front of the adapter) hands the adapter the
     /// exact request the agent loop composed, schema section and native

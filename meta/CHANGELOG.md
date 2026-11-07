@@ -187,11 +187,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   embedding host through the library, records `deciding_assurance`
   `device_trusted` in its audit entry.
 
-- The stock console names its caller (`expected_caller_scope`, the
-  `caller_scope` of its `meta/console/whoami` read) on every console
-  request, voice and MCP Apps tool calls included; its first change waits
-  for that read. A send refused with `caller_changed` reads **Not sent**, and
-  the console loads again as the caller the gateway now serves.
+- The stock console reads `meta/console/whoami` once per console instance
+  and names that caller (`expected_caller_scope`) on every console request,
+  voice and MCP Apps tool calls included; a later answer for someone else
+  never changes whom it names. Its first change waits for that read, and
+  while no read has answered a change is not sent at all (it reads
+  **Not sent**, and the console reads its caller again with its next
+  experience read). A change refused with `caller_changed` reads
+  **Not sent**, and the console loads again as the caller the gateway now
+  serves; a voice call, an MCP Apps tool call or a blob upload refused that
+  way, or with an ended login, does the same as a send.
 - Console requests do not follow redirects (`redirect: "manual"`), and a
   queued message the stock console sends on its own (when its agent becomes
   idle) waits for a fresh read of the console experience first.
@@ -205,7 +210,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   console's unscoped queue, the predecessor console's queue, or a queue kept
   under a host namespace alone), so no other user of the browser is offered
   it. **Sign out** removes the user's queued messages and drafts from the
-  browser, in every tab of the console; preferences stay.
+  browser, in every tab of the console; preferences stay. Both also remove
+  the copy of a queue the storage lock keeps in IndexedDB on an origin
+  without Web Locks, and the browser leaves for the sign-out once that is
+  done.
 
 ### Fixed
 
@@ -218,7 +226,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   console request to its sign-in page) shows one sign-in state instead of
   stale data. Approvals are no longer marked denied for good and the
   timeline stream no longer stops without a word; signing in again in
-  another tab, or coming back to the tab, brings the console back.
+  another tab, or coming back to the tab, brings the console back, with
+  the message the person was writing and its images.
 - A console send that a front redirected to its sign-in page reads
   **Not sent** (the request never reached the gateway). Before, it read as
   an unknown outcome that no check could settle.
@@ -229,9 +238,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Pins set in two tabs of the stock console are both kept, and every tab
   follows them. A tab left open no longer rewrites the panel layout another
   tab arranged each time it reloads the console experience.
-- **Needs you** counts only the approval requests that wait for you, not
-  the ones routed to another approver. Before, it counted every pending
-  request, and a request decided elsewhere vanished at the next poll.
+- **Needs you** and the sidebar's Approvals count only the approval
+  requests that wait for you, not the ones routed to another approver.
+  Before, they counted every pending request, and a request decided
+  elsewhere vanished at the next poll.
 
 ## [0.9.10] - 2026-11-04
 

@@ -416,7 +416,8 @@ Approval cards are personal. A request pinned to an approver id the caller does
 not hold reads **Waiting for** that approver and offers no decision; for a
 signed-in person, a request pinned to an id they hold, or pinned to no one,
 reads **For you**. **Needs you** counts only the requests that are not waiting
-for someone else (with any host items). A request for the caller that someone
+for someone else (with any host items), and the sidebar's **Approvals** count
+counts the same requests. A request for the caller that someone
 else decides keeps its card, which says how and by whom (for example
 "Approved by" the deciding person, read from the gating audit), or "Decided
 elsewhere" when the audit cannot say.
@@ -1262,17 +1263,22 @@ names no person), a service, or **Not signed in** on an open console. Its menu
 offers **Sign out** when the console configuration names `[sign_out]` (see
 [sign-out](/reference/configuration#sign-out)).
 
-The stock console names that caller on every console request
-(`expected_caller_scope`, and `expectedCallerScope` on an MCP Apps tool call):
-the `caller_scope` its `whoami` read reported. Its first change waits for that
-read. The gateway refuses a change made for another caller (`caller_changed`),
-so a message queued by one person is never sent as another.
+The stock console reads `whoami` once for each console it loads and names that
+caller on every console request (`expected_caller_scope`, and
+`expectedCallerScope` on an MCP Apps tool call): the `caller_scope` that read
+reported. A later answer for someone else never changes whom it names. Its
+first change waits for that read, and while no read has answered, a change is
+not sent at all: a message reads **Not sent**, and the console reads its caller
+again with its next read of the console experience. The gateway refuses a
+change made for another caller (`caller_changed`), so a message queued by one
+person is never sent as another.
 
 When someone else signs in to the same browser, every tab of the console
 notices at once: a tab that learns its caller tells this browser's other tabs
 of the console, and a tab whose caller differs, or whose request was refused
-with `caller_changed`, drops what it shows (transcripts, approvals, host items,
-the previous caller's queued messages and drafts), stops its streams and loads
+with `caller_changed` (a voice call, an MCP Apps tool call or a blob upload
+included), drops what it shows (transcripts, approvals, host items, the
+previous caller's queued messages and drafts), stops its streams and loads
 again as the new caller. A queued message the console sends on its own (an
 agent became idle) waits for a fresh read of the console experience first, so
 it is never sent under a login that changed meanwhile.
@@ -1281,10 +1287,11 @@ A login that ends puts the console in one sign-in state: a 401,
 `caller_not_current`, or a front that redirects a console request to its
 sign-in page. No view of the ended login stays on screen. **Sign in** reloads
 the console page so the front can sign the browser in again, and signing in
-again in another tab, or coming back to the tab, brings the console back.
-Console requests do not follow redirects, so a front's redirect to its sign-in
-page reads as "sign in", never as an unknown outcome: a send it stopped reads
-**Not sent**. Messages already queued stay saved in this browser.
+again in another tab, or coming back to the tab, brings the console back, with
+the message being written and the images attached to it. Console requests do
+not follow redirects, so a front's redirect to its sign-in page reads as "sign
+in", never as an unknown outcome: a send it stopped reads **Not sent**.
+Messages already queued stay saved in this browser.
 
 ### What this browser keeps
 
@@ -1298,7 +1305,10 @@ only when it changes it, so a tab left open does not undo what another tab
 arranged.
 
 **Sign out** removes the user's queued messages and drafts from this browser,
-in every tab of the console; preferences stay. A queue an earlier console kept
+in every tab of the console; preferences stay. On an origin without Web Locks
+(plain HTTP), the queue's storage lock keeps a copy of each queue in IndexedDB;
+signing out removes those copies too, and the browser leaves for the sign-out
+once they are gone. A queue an earlier console kept
 for everyone using the browser (one that named no user, or a host namespace
 alone) is offered once as **Older queued messages**: importing it moves it to
 the user who imported it and removes the earlier copy, so no other user of

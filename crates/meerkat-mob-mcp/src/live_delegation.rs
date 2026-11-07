@@ -1832,6 +1832,40 @@ pub struct ExperimentalLiveDelegationCoordinator {
     /// worker-start authority was granted, before anything physical starts.
     #[cfg(test)]
     source_busy_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test gate on the next worker terminal's realization, entered once it
+    /// read the machine's settlement and before it takes the schedule lock:
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    realization_lock_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test stand-in for the machine's answer to the reports that an
+    /// authorized worker start did not start.
+    #[cfg(test)]
+    start_report_faults_for_test: Arc<StartReportFaultsForTest>,
+    /// Test gate on the lifecycle seam's next delegation admission, entered
+    /// once the seam read its started turn and before the machine admits the
+    /// delegation: `(entered, resume)`.
+    #[cfg(test)]
+    delegation_admission_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the lifecycle seam's next completed-turn custody, entered
+    /// once the machine admitted the delegation and before the seam records
+    /// its custody: `(entered with the admitted operation, resume)`.
+    #[cfg(test)]
+    delegation_custody_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<OperationId>, oneshot::Receiver<()>)>>>,
+}
+
+/// Test stand-in for the machine's answer to a report that an authorized
+/// worker start did not start: `transient` next reports fail with a
+/// mechanical error first, then every report is refused while `refused`
+/// holds. `reports` counts every report.
+#[cfg(test)]
+#[derive(Default)]
+struct StartReportFaultsForTest {
+    transient: std::sync::atomic::AtomicUsize,
+    refused: std::sync::atomic::AtomicBool,
+    reports: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2512,6 +2546,14 @@ impl ExperimentalLiveDelegationCoordinator {
             start_gate_for_test: Arc::default(),
             #[cfg(test)]
             source_busy_starts_for_test: Arc::default(),
+            #[cfg(test)]
+            realization_lock_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            start_report_faults_for_test: Arc::default(),
+            #[cfg(test)]
+            delegation_admission_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            delegation_custody_gate_for_test: Arc::default(),
         }
     }
 
@@ -4485,6 +4527,18 @@ impl ExperimentalLiveDelegationCoordinator {
         // running: arrival never cancels or supersedes them. Canonical
         // transcript reconciliation and all executor authority remain
         // control-owned below.
+        #[cfg(test)]
+        {
+            let gate = self
+                .delegation_admission_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
         self.runtime
             .admit_live_delegation(&runtime_binding, &operation, &provisional)
             .await
@@ -4508,6 +4562,18 @@ impl ExperimentalLiveDelegationCoordinator {
             finished.binding().channel_id().clone(),
             finished.provider_turn_ref().to_string(),
         );
+        #[cfg(test)]
+        {
+            let gate = self
+                .delegation_custody_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(operation.operation_id().clone());
+                let _ = resume.await;
+            }
+        }
         if self
             .completed_delegation_turns
             .lock()
@@ -6063,6 +6129,46 @@ impl ExperimentalLiveDelegationCoordinator {
         service.start(request).await
     }
 
+    /// Report to the machine that an authorized worker start did not start
+    /// (nothing physical exists).
+    async fn report_unstarted_start(
+        &self,
+        runtime_binding: &LiveDelegationRuntimeBinding,
+        admission: &LiveDelegationExecutionAdmission,
+    ) -> Result<(), meerkat_runtime::RuntimeDriverError> {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let faults = &self.start_report_faults_for_test;
+            faults.reports.fetch_add(1, Ordering::AcqRel);
+            if faults
+                .transient
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    "transient fault of a test start report".to_string(),
+                ));
+            }
+            if faults.refused.load(Ordering::Acquire) {
+                return Err(meerkat_runtime::RuntimeDriverError::ValidationFailed {
+                    reason: "the machine refused a test start report".to_string(),
+                });
+            }
+        }
+        self.runtime
+            .resolve_live_delegation_worker_start(
+                runtime_binding.runtime_id(),
+                runtime_binding.fence_token(),
+                runtime_binding.generation(),
+                admission,
+                false,
+            )
+            .await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "this exact delegation boundary carries independent provider, runtime, fork, and operation authorities"
@@ -6215,13 +6321,7 @@ impl ExperimentalLiveDelegationCoordinator {
                 // Failed), and the schedule retires the request: it never runs
                 // without the words the user spoke for it.
                 retry_reconciled_cleanup_step("refused-continuation-start-report", || {
-                    self.runtime.resolve_live_delegation_worker_start(
-                        runtime_binding.runtime_id(),
-                        runtime_binding.fence_token(),
-                        runtime_binding.generation(),
-                        &admission,
-                        false,
-                    )
+                    self.report_unstarted_start(&runtime_binding, &admission)
                 })
                 .await;
                 tracing::warn!(
@@ -6265,13 +6365,7 @@ impl ExperimentalLiveDelegationCoordinator {
                     // Record the failed start so the machine can requeue the
                     // exact operation; no child retirement is owed.
                     retry_reconciled_cleanup_step("busy-source-start-report", || {
-                        self.runtime.resolve_live_delegation_worker_start(
-                            runtime_binding.runtime_id(),
-                            runtime_binding.fence_token(),
-                            runtime_binding.generation(),
-                            &admission,
-                            false,
-                        )
+                        self.report_unstarted_start(&runtime_binding, &admission)
                     })
                     .await;
                     return Err(failure);
@@ -6550,6 +6644,18 @@ impl ExperimentalLiveDelegationCoordinator {
                 .ok()
                 .flatten()
                 == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled);
+        #[cfg(test)]
+        {
+            let gate = self
+                .realization_lock_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
         {
             let mut schedules = self.schedules.lock().await;
             if let Some(schedule) = schedules.get_mut(channel_key) {

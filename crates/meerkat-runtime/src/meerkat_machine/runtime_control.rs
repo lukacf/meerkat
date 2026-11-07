@@ -75,7 +75,7 @@ fn live_delegation_worker_binding_matches(
 /// still registered. Every open mints a fresh channel id, so a retired
 /// channel id never aliases a later incarnation; a still-bound channel with a
 /// different fence or generation is refused as before.
-fn live_delegation_worker_start_binding_admits(
+pub(super) fn live_delegation_worker_start_binding_admits(
     state: &crate::meerkat_machine::dsl::MeerkatMachineState,
     runtime_id: &crate::identifiers::LogicalRuntimeId,
     fence_token: u64,

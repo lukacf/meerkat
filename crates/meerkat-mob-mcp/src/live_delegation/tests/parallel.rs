@@ -2441,6 +2441,805 @@ async fn a_delegation_started_after_its_channel_closed_keeps_the_channel_reasoni
     }
 }
 
+/// A continuation held for a queued fork joins that fork's start, and the
+/// start then meets a busy source at the fork cut: nothing physical started,
+/// so the request is deferred and retried. The retry runs the same request,
+/// with the words the user spoke for it, and the machine records them
+/// delivered only once a worker started with them.
+#[tokio::test]
+async fn a_continuation_folded_into_a_start_joins_its_busy_source_retry() {
+    folded_continuation_joins_the_busy_source_retry(false).await;
+}
+
+/// The same for a start after the channel closed.
+#[tokio::test]
+async fn a_continuation_folded_into_a_start_after_the_close_joins_its_busy_source_retry() {
+    folded_continuation_joins_the_busy_source_retry(true).await;
+}
+
+async fn folded_continuation_joins_the_busy_source_retry(close_first: bool) {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("second", "continuation-q", " with three headings")
+        .await;
+    assert!(
+        !fx.steered("continuation-q").await,
+        "the continuation is held for the queued delegation"
+    );
+    if close_first {
+        fx.coordinator
+            .cancel_channel_binding(&fx.provider_binding)
+            .await;
+        fx.runtime
+            .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+            .await
+            .expect("channel closes");
+    }
+    fx.coordinator
+        .source_busy_starts_for_test
+        .store(1, Ordering::Release);
+    fx.client.release(head.index);
+    // Every model call is released until the queued delegation's first
+    // start has met the busy source.
+    let started = std::time::Instant::now();
+    let mut calls = Vec::new();
+    while fx
+        .coordinator
+        .source_busy_starts_for_test
+        .load(Ordering::Acquire)
+        != 0
+    {
+        assert!(
+            started.elapsed() < WAIT,
+            "the queued delegation's first start is attempted"
+        );
+        while let Ok(call) = fx.entered.try_recv() {
+            fx.client.release(call.index);
+            calls.push(call);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Read before the retry: the deferred start ran nothing.
+    let delivered_before_retry = fx
+        .runtime
+        .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+        .await
+        .expect("machine state");
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(State::Completed),
+        "the busy-source retry runs"
+    );
+    let tail = calls
+        .iter()
+        .find(|call| call.task_text.contains("serial task two"))
+        .expect("the retried start's worker ran");
+    assert!(
+        tail.task_text.contains("with three headings"),
+        "the held continuation reaches the retried start's task: {tail:?}"
+    );
+    assert_eq!(
+        delivered_before_retry, None,
+        "a start that met a busy source delivered nothing"
+    );
+    assert!(fx.steered("continuation-q").await);
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+            .await
+            .expect("machine state"),
+        Some(true)
+    );
+    fx.wait_for_completed(&[first, second]).await;
+    if close_first {
+        fx.release_until_post_close_work_settles().await;
+        fx.handle.shutdown().await.expect("shutdown");
+    } else {
+        fx.close().await;
+    }
+}
+
+/// A fork hands its item back blocked while its channel is still bound. Its
+/// realization read the machine's settlement (Blocked) when the close's sweep
+/// and the machine's unbind land, before it takes the schedule lock. Blocked
+/// work a close finds is cancelled, so this hand-back ends Cancelled too, in
+/// the machine and in the WorkGraph, and the closed schedule keeps nothing to
+/// requeue.
+#[tokio::test]
+async fn a_blocked_hand_back_realized_across_the_close_is_cancelled() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(true).await;
+    let first = fx.delegate("first", "collect the quarterly numbers").await;
+    let second = fx
+        .delegate("second", "write the summary from the numbers")
+        .await;
+    let first_call = fx.next_call().await;
+    let second_call = fx.next_call().await;
+    let (first_call, second_call) = if first_call.task_text.contains("quarterly") {
+        (first_call, second_call)
+    } else {
+        (second_call, first_call)
+    };
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: first_item.id.clone(),
+            to_id: second_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge");
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: second_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: second_item.revision,
+        })
+        .await
+        .expect("release behind the blocker");
+
+    let (entered_tx, entered) = oneshot::channel();
+    let (resume, resume_rx) = oneshot::channel();
+    *fx.coordinator
+        .realization_lock_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, resume_rx));
+    fx.client.release(second_call.index);
+    tokio::time::timeout(WAIT, entered)
+        .await
+        .expect("the blocked hand-back's realization reaches the schedule lock")
+        .expect("realization gate");
+    assert_eq!(
+        fx.schedule_state(&second).await,
+        Some(State::Blocked),
+        "the machine recorded the hand-back while the channel was bound"
+    );
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    let _ = resume.send(());
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(
+        fx.schedule_state(&second).await,
+        Some(State::Cancelled),
+        "a blocked hand-back realized across the close is cancelled"
+    );
+    assert_eq!(
+        fx.voice_item_titled("write the summary from the numbers")
+            .await
+            .status,
+        meerkat::WorkStatus::Cancelled
+    );
+    assert!(
+        !fx.coordinator
+            .schedules
+            .lock()
+            .await
+            .values()
+            .any(|schedule| schedule.pending.contains_key(&second)),
+        "the closed schedule keeps nothing to requeue"
+    );
+
+    // The fork it waited on finishes after the close; its result merges.
+    fx.client.release(first_call.index);
+    let (settled, _) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(settled, Some(State::Completed));
+    fx.release_until_post_close_work_settles().await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// How a worker's completed turn was classified against its item, recorded
+/// while the channel was bound, for the restart rows below.
+#[derive(Clone, Copy, Debug)]
+enum RecordedClassification {
+    /// The worker handed its item back blocked behind another item.
+    Blocked,
+    /// The item was closed Failed while the worker ran.
+    ItemFailed,
+    /// The item was closed Cancelled while the worker ran.
+    ItemCancelled,
+}
+
+/// A worker's turn completes and its item's state turns that completion into
+/// Blocked, Failed or Cancelled; the machine records it while the channel is
+/// bound and the worker is retired. The process then stops, leaving the
+/// channel revoked, and restart recovery observes the Mob's durable work of
+/// the retired worker: a completed turn. The recorded classification stands:
+/// the operation settles as the in-process close settles it (a blocked
+/// hand-back Cancelled, a failed or cancelled item as recorded), its item
+/// ends the same, and the report says it reconciled without completing.
+async fn restart_recovery_settles_a_recorded_classification(
+    classification: RecordedClassification,
+) {
+    use meerkat_runtime::live_execution::{
+        LiveDelegationRecoveryPhase, LiveDelegationScheduleState as State,
+        LiveDelegationWorkerTerminalKind as Terminal,
+    };
+    let mut fx = fixture(true).await;
+    let title = "write the summary from the numbers";
+    let (operation, blocker_call, recorded, settled, item_status) = match classification {
+        RecordedClassification::Blocked => {
+            let _first = fx.delegate("first", "collect the quarterly numbers").await;
+            let second = fx.delegate("second", title).await;
+            let call_one = fx.next_call().await;
+            let call_two = fx.next_call().await;
+            let (first_call, second_call) = if call_one.task_text.contains("quarterly") {
+                (call_one, call_two)
+            } else {
+                (call_two, call_one)
+            };
+            let workgraph = fx.workgraph.clone().expect("workgraph");
+            let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+            let second_item = fx.voice_item_titled(title).await;
+            workgraph
+                .link(meerkat::LinkWorkItemsRequest {
+                    realm_id: None,
+                    namespace: None,
+                    kind: meerkat::WorkEdgeKind::Blocks,
+                    from_id: first_item.id.clone(),
+                    to_id: second_item.id.clone(),
+                })
+                .await
+                .expect("blocks edge");
+            let second_item = fx.voice_item_titled(title).await;
+            workgraph
+                .release(meerkat::ReleaseWorkItemRequest {
+                    id: second_item.id.clone(),
+                    realm_id: None,
+                    namespace: None,
+                    expected_revision: second_item.revision,
+                })
+                .await
+                .expect("release behind the blocker");
+            fx.client.release(second_call.index);
+            fx.wait_for_schedule_state(&second, State::Blocked).await;
+            (
+                second,
+                Some(first_call),
+                Terminal::Blocked,
+                State::Cancelled,
+                meerkat::WorkStatus::Cancelled,
+            )
+        }
+        RecordedClassification::ItemFailed | RecordedClassification::ItemCancelled => {
+            let operation = fx.delegate("only", title).await;
+            let call = fx.next_call().await;
+            let (status, recorded, settled) = match classification {
+                RecordedClassification::ItemFailed => {
+                    (meerkat::WorkStatus::Failed, Terminal::Failed, State::Failed)
+                }
+                _ => (
+                    meerkat::WorkStatus::Cancelled,
+                    Terminal::Cancelled,
+                    State::Cancelled,
+                ),
+            };
+            fx.close_item_as(title, status).await;
+            fx.client.release(call.index);
+            fx.wait_for_schedule_state(&operation, settled).await;
+            (operation, None, recorded, settled, status)
+        }
+    };
+    let snapshot_of = |fx: &Fixture| {
+        let runtime = Arc::clone(&fx.runtime);
+        let session_id = fx.session_id.clone();
+        let operation = operation.clone();
+        async move {
+            runtime
+                .live_delegation_recovery_snapshots(&session_id)
+                .await
+                .expect("snapshots")
+                .into_iter()
+                .find(|snapshot| snapshot.operation_id() == &operation)
+        }
+    };
+    // The bound realization finishes its worker's retirement.
+    wait_until(WAIT, || async {
+        snapshot_of(&fx)
+            .await
+            .is_some_and(|snapshot| snapshot.phase() == LiveDelegationRecoveryPhase::Retired)
+    })
+    .await;
+    // The process stops: nothing sweeps the schedule, and the restart finds
+    // the provider channel revoked.
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel revoked as a restart leaves it");
+    let snapshot = snapshot_of(&fx)
+        .await
+        .expect("the recorded operation has a recovery snapshot");
+    assert_eq!(snapshot.terminal(), Some(recorded), "{classification:?}");
+    let disposition = fx
+        .coordinator
+        .reconcile_one_client_context_snapshot(
+            &fx.handle,
+            &snapshot,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await;
+    assert_eq!(
+        disposition,
+        ExperimentalClientContextRestartDisposition::Reconciled { completed: false },
+        "{classification:?}: restart recovery reconciles the recorded classification"
+    );
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(settled),
+        "{classification:?}: the operation settles as the close settles it"
+    );
+    let reconciled = snapshot_of(&fx)
+        .await
+        .expect("the reconciled operation keeps its snapshot");
+    assert_eq!(reconciled.terminal(), Some(recorded), "{classification:?}");
+    assert!(reconciled.late(), "{classification:?}");
+    assert!(!reconciled.result_eligible(), "{classification:?}");
+    assert_eq!(
+        fx.voice_item_titled(title).await.status,
+        item_status,
+        "{classification:?}: its item ends as the close leaves it"
+    );
+
+    if let Some(call) = blocker_call {
+        // The fork the blocked one waited on finishes; its result merges.
+        fx.client.release(call.index);
+    }
+    fx.release_until_post_close_work_settles().await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn restart_recovery_settles_a_recorded_blocked_hand_back_cancelled() {
+    restart_recovery_settles_a_recorded_classification(RecordedClassification::Blocked).await;
+}
+
+#[tokio::test]
+async fn restart_recovery_settles_a_completed_turn_whose_item_failed() {
+    restart_recovery_settles_a_recorded_classification(RecordedClassification::ItemFailed).await;
+}
+
+#[tokio::test]
+async fn restart_recovery_settles_a_completed_turn_whose_item_was_cancelled() {
+    restart_recovery_settles_a_recorded_classification(RecordedClassification::ItemCancelled).await;
+}
+
+/// The provider marks the same continuation twice for a queued delegation:
+/// it is one steer. It joins the delegation's task once, and the request
+/// runs.
+#[tokio::test]
+async fn a_continuation_observed_twice_joins_its_start_once() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("second", "continuation-q", " with three headings")
+        .await;
+    fx.continue_utterance("second", "continuation-q", " with three headings")
+        .await;
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(first_settled, Some(State::Completed));
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(State::Completed),
+        "a continuation observed twice does not retire its request"
+    );
+    let tail = calls
+        .iter()
+        .find(|call| call.task_text.contains("serial task two"))
+        .expect("the queued delegation's worker ran");
+    assert_eq!(
+        tail.task_text.matches("with three headings").count(),
+        1,
+        "the continuation joins the task once: {tail:?}"
+    );
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+            .await
+            .expect("machine state"),
+        Some(true)
+    );
+    fx.close().await;
+}
+
+/// Two continuations are held for a queued delegation; the machine authorizes
+/// the first and refuses the second (its identity already steered another
+/// delegation's worker). The start is retired, and the steer it had already
+/// authorized is recorded as not delivered: the words never reached a worker.
+#[tokio::test]
+async fn a_refused_fold_records_the_steers_it_authorized_as_undelivered() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("first", "continuation-shared", " with three headings")
+        .await;
+    assert!(
+        fx.steered("continuation-shared").await,
+        "the shared continuation steered the running worker"
+    );
+    fx.continue_utterance("second", "continuation-own", " as a table")
+        .await;
+    fx.continue_utterance("second", "continuation-shared", " with three headings")
+        .await;
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(first_settled, Some(State::Completed));
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(State::Failed),
+        "a start whose held continuation cannot join is retired"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task two")),
+        "the retired request's worker never started: {calls:?}"
+    );
+    assert!(
+        fx.steered("continuation-own").await,
+        "the start authorized the first held continuation"
+    );
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-own")
+            .await
+            .expect("machine state"),
+        Some(false),
+        "the steer a retired start authorized is recorded as not delivered"
+    );
+    fx.close().await;
+}
+
+/// Stand down the mob state and return what it reported unsettled among the
+/// live delegation work a start or the schedule pump holds.
+async fn delegation_start_holds_left(fx: &Fixture) -> Vec<String> {
+    fx.coordinator
+        .mobs
+        .state_tasks
+        .stand_down(std::time::Instant::now() + WAIT)
+        .await
+        .into_iter()
+        .filter(|unsettled| {
+            unsettled.starts_with("live delegation worker")
+                || unsettled.starts_with("live delegation schedule pump")
+        })
+        .collect()
+}
+
+/// A held continuation the machine refuses fails its delegation's start, and
+/// the machine then refuses the report that the start did not start (a
+/// mechanical fault before it is offered again). That refusal cannot change:
+/// the report is not retried, the start is retired as a refused fold retires
+/// it, the schedule moves on to the next request, and nothing is left
+/// holding the mob state's stand-down.
+#[tokio::test]
+async fn a_refused_start_report_after_a_refused_fold_retires_the_start() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let third = fx.delegate("third", "serial task three").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("first", "continuation-shared", " with three headings")
+        .await;
+    assert!(fx.steered("continuation-shared").await);
+    fx.continue_utterance("second", "continuation-shared", " with three headings")
+        .await;
+    let faults = Arc::clone(&fx.coordinator.start_report_faults_for_test);
+    faults.transient.store(1, Ordering::Release);
+    faults.refused.store(true, Ordering::Release);
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(first_settled, Some(State::Completed));
+    let (third_settled, later_calls) = fx.settle_releasing_calls(&third).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        third_settled,
+        Some(State::Completed),
+        "the schedule moves on past the retired start"
+    );
+    assert_eq!(
+        faults.reports.load(Ordering::Acquire),
+        2,
+        "a mechanical fault is offered again; the refusal ends the report"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task two")),
+        "the retired request never ran: {calls:?}"
+    );
+    assert!(
+        !fx.coordinator
+            .schedules
+            .lock()
+            .await
+            .values()
+            .any(|schedule| schedule.pending.contains_key(&second)),
+        "the retired request left the schedule"
+    );
+    wait_until(WAIT, || async {
+        fx.narrations()
+            .await
+            .iter()
+            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
+    })
+    .await;
+    let left = delegation_start_holds_left(&fx).await;
+    assert!(left.is_empty(), "{left:?}");
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// A delegation's start meets a busy source at the fork cut, and the machine
+/// refuses the report that the start did not start (a mechanical fault before
+/// it is offered again). That refusal cannot change: the report is not
+/// retried and the request is not requeued; the start is retired, the
+/// schedule moves on to the next request, and nothing is left holding the mob
+/// state's stand-down.
+#[tokio::test]
+async fn a_refused_start_report_after_a_busy_source_retires_the_start() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let faults = Arc::clone(&fx.coordinator.start_report_faults_for_test);
+    faults.transient.store(1, Ordering::Release);
+    faults.refused.store(true, Ordering::Release);
+    fx.coordinator
+        .source_busy_starts_for_test
+        .store(1, Ordering::Release);
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let (settled, calls) = fx.settle_releasing_calls(&second).await;
+    assert_eq!(
+        settled,
+        Some(State::Completed),
+        "the schedule moves on past the retired start"
+    );
+    assert_eq!(
+        faults.reports.load(Ordering::Acquire),
+        2,
+        "a mechanical fault is offered again; the refusal ends the report"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task one")),
+        "the retired request never ran: {calls:?}"
+    );
+    assert!(
+        !fx.coordinator
+            .schedules
+            .lock()
+            .await
+            .values()
+            .any(|schedule| schedule.pending.contains_key(&first)),
+        "the retired request left the schedule"
+    );
+    wait_until(WAIT, || async {
+        fx.narrations()
+            .await
+            .iter()
+            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
+    })
+    .await;
+    let left = delegation_start_holds_left(&fx).await;
+    assert!(left.is_empty(), "{left:?}");
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+impl Fixture {
+    /// The coordinator's custody of this channel as a running channel loop
+    /// leaves it, without the loop: the lifecycle seam accepts observations.
+    async fn run_bound_channel_custody(&self) {
+        reserve_bound_channel(&self.coordinator.bound_channels, self.binding.clone())
+            .await
+            .expect("channel custody reserved");
+        begin_bound_channel_run(&self.coordinator.bound_channels, &self.binding)
+            .await
+            .expect("channel custody running");
+    }
+
+    /// A provider user turn started through the lifecycle seam: the turn
+    /// and the delegation the provider will join to it.
+    async fn seam_turn_started(
+        &self,
+        key: &str,
+    ) -> (LiveSidebandTurnRef, LiveSidebandDelegationRef) {
+        let turn = LiveSidebandTurnRef::__from_provider_observation(
+            self.binding.channel_id(),
+            format!("{key}-turn"),
+            format!("{key}-provider-turn"),
+        )
+        .expect("turn");
+        let delegation = LiveSidebandDelegationRef::__from_provider_observation(
+            format!("{key}-delegation"),
+            format!("{key}-provider-delegation"),
+        )
+        .expect("delegation");
+        self.coordinator
+            .observe_provider_lifecycle(&LiveSidebandObservation::new(
+                self.provider_binding.clone(),
+                LiveSidebandObservationKind::TurnStarted {
+                    turn: turn.clone(),
+                    role: meerkat_live::LiveSidebandTurnRole::User,
+                },
+            ))
+            .await
+            .expect("user turn starts through the seam");
+        (turn, delegation)
+    }
+
+    /// The provider's joined delegation for `turn`, on its own task through
+    /// the lifecycle seam.
+    fn spawn_seam_delegation(
+        &self,
+        turn: LiveSidebandTurnRef,
+        delegation: LiveSidebandDelegationRef,
+        request: &str,
+    ) -> tokio::task::JoinHandle<Result<(), ExperimentalLiveLifecycleObservationError>> {
+        let coordinator = Arc::clone(&self.coordinator);
+        let observation = LiveSidebandObservation::new(
+            self.provider_binding.clone(),
+            LiveSidebandObservationKind::DelegationRequested {
+                turn,
+                delegation,
+                final_transcript: request.to_string(),
+                request_transcript: request.to_string(),
+                assistant_context: String::new(),
+                represented_user_rows: Vec::new(),
+            },
+        );
+        tokio::spawn(async move { coordinator.observe_provider_lifecycle(&observation).await })
+    }
+
+    /// A retirement of the channel's coordinator custody: the loop's run is
+    /// cancelled and ends with its own sweep, then the deactivation sweeps
+    /// again. The machine's channel stays bound.
+    async fn retire_bound_channel_custody(&self) {
+        let coordinator = Arc::clone(&self.coordinator);
+        let binding = self.binding.clone();
+        let deactivation =
+            tokio::spawn(async move { coordinator.deactivate_bound_channel(&binding).await });
+        let key = (self.session_id.clone(), self.binding.channel_id().clone());
+        wait_until(WAIT, || async {
+            self.coordinator
+                .bound_channels
+                .lock()
+                .await
+                .get(&key)
+                .is_some_and(|custody| custody.phase == BoundChannelPhase::StopRequested)
+        })
+        .await;
+        self.coordinator
+            .cancel_channel_binding(&self.provider_binding)
+            .await;
+        finish_bound_channel_run(&self.coordinator.bound_channels, &self.binding).await;
+        deactivation
+            .await
+            .expect("deactivation task")
+            .expect("custody released");
+    }
+
+    /// Whether completed-turn custody of this channel is left behind.
+    async fn completed_turn_custody_left(&self) -> bool {
+        self.coordinator
+            .completed_delegation_turns
+            .lock()
+            .await
+            .keys()
+            .any(|(session_id, channel_id, _)| {
+                session_id == &self.session_id && channel_id == self.binding.channel_id()
+            })
+    }
+}
+
+/// The provider's joined delegation reaches the lifecycle seam as a
+/// retirement closes the channel: the seam found the channel running and read
+/// its started turn, then the close's sweeps ran to completion before it
+/// admitted the delegation. The machine refuses that admission, so no
+/// operation is admitted that no channel loop can claim and no sweep settles.
+#[tokio::test]
+async fn a_delegation_reaching_the_seam_after_the_close_sweeps_is_refused_admission() {
+    let fx = fixture(true).await;
+    fx.run_bound_channel_custody().await;
+    let (turn, delegation) = fx.seam_turn_started("late").await;
+    let (entered_tx, entered) = oneshot::channel();
+    let (resume, resume_rx) = oneshot::channel();
+    *fx.coordinator
+        .delegation_admission_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, resume_rx));
+    let seam = fx.spawn_seam_delegation(turn, delegation, "write a haiku about tides");
+    tokio::time::timeout(WAIT, entered)
+        .await
+        .expect("the seam reaches its admission")
+        .expect("admission gate");
+    fx.retire_bound_channel_custody().await;
+    let _ = resume.send(());
+    let admitted = seam.await.expect("seam task");
+    assert!(
+        !fx.completed_turn_custody_left().await,
+        "no admitted delegation is left without a loop or a sweep after the close"
+    );
+    assert!(
+        admitted.is_err(),
+        "the closed channel's delegation intake refused the admission"
+    );
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// The lifecycle seam admitted the delegation while the channel was open, but
+/// recorded its custody only after the close's sweeps ran: no channel loop
+/// can claim it and no sweep will settle it. The seam settles it: the machine
+/// cancels it, as the close cancels an admitted delegation no loop claimed,
+/// and no custody is left behind.
+#[tokio::test]
+async fn a_delegation_whose_custody_lands_after_the_close_sweeps_is_cancelled() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let fx = fixture(true).await;
+    fx.run_bound_channel_custody().await;
+    let (turn, delegation) = fx.seam_turn_started("late").await;
+    let (entered_tx, entered) = oneshot::channel();
+    let (resume, resume_rx) = oneshot::channel();
+    *fx.coordinator
+        .delegation_custody_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((entered_tx, resume_rx));
+    let seam = fx.spawn_seam_delegation(turn, delegation, "write a haiku about tides");
+    let operation = tokio::time::timeout(WAIT, entered)
+        .await
+        .expect("the seam admitted the delegation")
+        .expect("custody gate");
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(State::Created),
+        "the machine admitted the delegation while the channel was open"
+    );
+    fx.retire_bound_channel_custody().await;
+    let _ = resume.send(());
+    let _ = seam.await.expect("seam task");
+    assert!(
+        !fx.completed_turn_custody_left().await,
+        "no admitted delegation is left without a loop or a sweep after the close"
+    );
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(State::Cancelled),
+        "the admission whose custody landed after the close is settled cancelled"
+    );
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test]
 async fn without_a_workgraph_store_delegations_run_strictly_serially_and_never_supersede() {
     let mut fx = fixture(false).await;

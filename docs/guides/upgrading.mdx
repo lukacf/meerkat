@@ -144,7 +144,11 @@ tooling refuses while the census counts any row. A downgrade to 0.9.9 or
    as the host operator. One store transaction removes every row of the
    set, and nothing else (no session, journal row or host-adopted intent),
    only while the rows are still the export's. The mob then refuses every
-   identity change (`purged`) until it restarts.
+   identity change (`purged`) until it restarts. A purge or an import
+   commits at most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones
+   included): a mob with more rows is refused `batch_too_large`, with
+   nothing removed, and has no supported downgrade below 0.9.9 in this
+   release.
 6. Downgrade.
 7. After the roll-forward, import the export:
    `MobHandle::import_created_identities`, as the host operator, under

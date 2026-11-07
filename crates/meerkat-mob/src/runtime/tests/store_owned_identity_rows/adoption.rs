@@ -1,7 +1,6 @@
 //! Adoption into store custody (0.9.11): an existing member's move into
-//! store custody as one change (R4.1 to R4.7), and the rulings on an
-//! adopted identity's edges, its former spawner and an unseated roster
-//! entry.
+//! store custody as one change, an adopted identity's edges and its former
+//! spawner, an unseated roster entry, and the shapes no adoption takes.
 
 use super::*;
 use crate::identity::{

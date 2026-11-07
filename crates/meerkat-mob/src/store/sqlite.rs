@@ -4900,9 +4900,6 @@ fn read_identity_record_rows_at_sync(
     })?)
 }
 
-/// Count every row of `mob_id`'s created identity scan inside the caller's
-/// read transaction, page by page, as
-/// [`crate::runtime::IdentityRecordRows`] counts a store's scan.
 /// Every one of `mob_id`'s created identity rows, by identity, read page by
 /// page as the created identity scan reads them, over the caller's
 /// connection (inside its transaction): what a purge decides over.
@@ -4934,6 +4931,9 @@ fn query_all_created_rows(
     }
 }
 
+/// Count every row of `mob_id`'s created identity scan inside the caller's
+/// read transaction, page by page, as
+/// [`crate::runtime::IdentityRecordRows`] counts a store's scan.
 fn count_identity_record_rows(
     conn: &Connection,
     mob_id: &MobId,

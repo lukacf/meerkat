@@ -226,8 +226,9 @@ impl super::MobHandle {
     /// store-owned identity, a name the source does not hold, a placed
     /// member, a member bound to no session, a roster-owned identity hosted
     /// on its first use or awaiting its held creation or its host's
-    /// preparation, a worker spawned with a profile or model override), a
-    /// stale generation ([`IdentityChangeRefusal::PredecessorMismatch`]), a
+    /// preparation, retryable once its host settled it, a worker spawned
+    /// with a profile or model override), a stale generation
+    /// ([`IdentityChangeRefusal::PredecessorMismatch`]), a
     /// member step in flight ([`IdentityChangeRefusal::AdmissionUnsettled`],
     /// retryable), an open declared apply
     /// ([`IdentityChangeRefusal::DeclaredApplyOpen`], retryable), a roster

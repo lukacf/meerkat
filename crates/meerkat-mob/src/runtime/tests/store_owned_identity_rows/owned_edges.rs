@@ -1,8 +1,8 @@
 //! Owned edges (0.9.11): the edges an identity change declares, each owned
-//! by the identity whose change declared it, realized while both its ends
-//! are seated, and ended only by its owner's change, a policy reload that
-//! denies it, the removal of either end and the mob's destroy (R3.1 to R3.7,
-//! and the rulings on an edge's end and realization).
+//! by the identity whose change declared it, in force while both its ends
+//! are identity entries, realized while both are seated, and ended only by
+//! its owner's change, a policy reload that denies it, the removal of
+//! either end and the mob's destroy.
 
 use super::*;
 use crate::identity::{OwnedEdgeAdmission, OwnedIdentityEdge};

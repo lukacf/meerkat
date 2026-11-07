@@ -725,7 +725,9 @@ composition without the built-in identity and member store commits no change
   refused `predecessor_mismatch`, and a shape no adoption takes
   `not_adoptable` with its reason (`NotAdoptableReason`: a placed member or
   one bound to no session, a roster-owned identity awaiting its host, a
-  worker spawned with a profile or model override, and others). No start,
+  worker spawned with a profile or model override, and others), retryable
+  for a roster-owned identity its host still settles (hosted on its first
+  use, awaiting its held creation or its host's preparation). No start,
   reconcile or declared apply adopts; a roster that keeps listing an adopted
   identity gets the quiet `OwnedByStore` note.
 - **The downgrade cycle (0.9.11).** A release before 0.9.9 does not read a
@@ -737,7 +739,8 @@ composition without the built-in identity and member store commits no change
   identity changes, of a mob that holds such rows: none is refused
   `purge_refused`, `nothing_to_purge`) removes the rows in one transaction
   when their digest is the export's, and nothing else; the mob then refuses
-  identity changes (`purged`) until it restarts.
+  identity changes (`purged`) until it restarts. A purge or an import
+  commits at most 256 identities (`batch_too_large` above).
   A start that reads no row of a store-owned
   identity's name reserves the name (it reads unreadable, and nothing seats
   it). `MobHandle::import_created_identities` (the host operator, imported

@@ -632,7 +632,8 @@ pub enum IdentityChangeRefusal {
         peer: AgentIdentity,
     },
     /// An adoption into store custody takes no identity of this shape:
-    /// `reason` says why.
+    /// `reason` says why. Retryable for a roster-owned identity its host
+    /// still settles ([`NotAdoptableReason::is_retryable`]).
     NotAdoptable {
         identity: AgentIdentity,
         reason: NotAdoptableReason,
@@ -757,6 +758,18 @@ impl NotAdoptableReason {
         }
     }
 
+    /// Whether an adoption refused for this reason may commit later
+    /// unchanged: a roster-owned identity its host still settles (hosted
+    /// on its first use, awaiting its held creation or its host's
+    /// preparation) is adopted once its host settled it.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::HostedOnFirstUse | Self::AwaitingHeldCreation | Self::AwaitingHostPreparation
+        )
+    }
+
     /// The reason MobMachine's verdict names.
     pub(super) fn from_machine(reason: mob_dsl::IdentityNotAdoptableReason) -> Self {
         match reason {
@@ -828,17 +841,20 @@ impl IdentityChangeRefusal {
 
     /// Whether the same request may commit later unchanged: a changes hold
     /// ends by itself, an identity's pending preparation ends with its
-    /// settle, and a member step in flight and an open declared apply end
-    /// with their own steps.
+    /// settle, a member step in flight and an open declared apply end with
+    /// their own steps, and an adoption of a roster-owned identity its host
+    /// still settles ([`NotAdoptableReason::is_retryable`]) commits once
+    /// the host settled it.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::ChangesHeld
-                | Self::HostPreparationPending { .. }
-                | Self::AdmissionUnsettled { .. }
-                | Self::DeclaredApplyOpen
-        )
+            | Self::HostPreparationPending { .. }
+            | Self::AdmissionUnsettled { .. }
+            | Self::DeclaredApplyOpen => true,
+            Self::NotAdoptable { reason, .. } => reason.is_retryable(),
+            _ => false,
+        }
     }
 }
 

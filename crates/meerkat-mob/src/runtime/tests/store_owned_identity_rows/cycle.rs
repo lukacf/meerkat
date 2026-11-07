@@ -1,9 +1,9 @@
 //! The downgrade cycle (0.9.11): the export of a mob's rows of schema
 //! version 2 and later with their session references, the host operator's
 //! purge of them before a downgrade, the reservation of a Created entry
-//! whose row was purged (L4), and the import that restores them after the
-//! roll-forward (R4.8 to R4.11), with the in-process legs and the fixtures
-//! of the cycle's rollback rows.
+//! whose row was purged, and the import that restores them after the
+//! roll-forward, with the in-process legs and the fixtures of the cycle's
+//! rollback rows.
 
 use super::*;
 use crate::identity::{
@@ -914,6 +914,59 @@ async fn a_purge_with_no_row_to_purge_is_refused_nothing_to_purge() {
     committed(
         mob.create(host_create("create-alpha", &["alpha"]), ALLOW)
             .await,
+    );
+}
+
+/// Row: a purge and an import each commit at most one change's identities
+/// (`IDENTITY_CHANGE_BATCH_MAX`, tombstones included): a mob with more
+/// rows is refused `batch_too_large` at its purge, with nothing removed,
+/// and an export of more records at its import, with nothing written.
+#[tokio::test]
+async fn a_purge_and_an_import_above_the_batch_bound_are_refused_batch_too_large() {
+    let mob = StoreOwnedMob::new("cycle-batch-bound").await;
+    let names = (0..=IDENTITY_CHANGE_BATCH_MAX)
+        .map(|index| format!("member-{index:03}"))
+        .collect::<Vec<_>>();
+    let (first, second) = names.split_at(IDENTITY_CHANGE_BATCH_MAX);
+    for (operation_id, batch) in [("create-first", first), ("create-second", second)] {
+        committed(
+            mob.create(
+                StoreOwnedIdentityCreate::new(
+                    operation(operation_id),
+                    IdentityChangeRequesterInput::host("console"),
+                    batch
+                        .iter()
+                        .map(|name| CreatedIdentityRequest::new(spec(name, "worker")))
+                        .collect(),
+                ),
+                ALLOW,
+            )
+            .await,
+        );
+    }
+    mob.hold_changes(true).await;
+    let export = mob.export_set().await;
+    assert_eq!(export.identities.len(), IDENTITY_CHANGE_BATCH_MAX + 1);
+    let bound = IdentityChangeRefusal::BatchTooLarge {
+        max: IDENTITY_CHANGE_BATCH_MAX,
+    };
+    assert_eq!(
+        refusal(mob.purge("purge-too-many", &export.export_digest).await),
+        bound
+    );
+    assert_eq!(
+        mob.rows().await.len(),
+        IDENTITY_CHANGE_BATCH_MAX + 1,
+        "nothing is removed"
+    );
+    assert_eq!(refusal(mob.import("import-too-many", export).await), bound);
+    assert!(
+        mob.handle
+            .identity_operation("import-too-many")
+            .await
+            .expect("the receipt read answers")
+            .is_none(),
+        "nothing is written"
     );
 }
 

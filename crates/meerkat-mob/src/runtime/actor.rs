@@ -36148,7 +36148,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: error.durable_resume_hold(),
-                cause_data: error.structured_data(),
+                cause_data: error.restore_cause_data(),
                 registration_refusal: None,
             },
         )

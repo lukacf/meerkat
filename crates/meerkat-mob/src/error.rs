@@ -2826,6 +2826,23 @@ impl MobError {
         data
     }
 
+    /// The structured data a member's restore failure keeps of this error,
+    /// the failure that broke the restore: the cause data a restore failure
+    /// already carries (read through the shared failure wrappers), and
+    /// otherwise this error's own [`Self::structured_data`]. A step that
+    /// records a restore failure for an error a member's own restore
+    /// answered keeps that restore's cause, which `structured_data` of a
+    /// restore failure (none without a hold) would drop.
+    pub(crate) fn restore_cause_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::MemberRestoreFailed { cause_data, .. } => cause_data.clone(),
+            Self::SharedLifecycleFailure(inner) | Self::SharedRetirementFailure(inner) => {
+                inner.restore_cause_data()
+            }
+            _ => self.structured_data(),
+        }
+    }
+
     /// Structured data carried by an underlying domain error.
     ///
     /// Session materialization failures use this to preserve typed

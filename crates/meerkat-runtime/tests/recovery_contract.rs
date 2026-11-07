@@ -7223,8 +7223,9 @@ async fn a_host_settle_whose_settlement_write_fails_is_refused_until_the_reload(
 /// lifecycle row), so the tail still stands and the registration needs a
 /// durability reload: the call answers the reload refusal, and the run's
 /// input holds its committed terminal. The run's input ended, so the
-/// reload's recovery closes the tail and the reloaded registration keeps no
-/// run: a settle then answers `NotRetained`. Nothing runs. The loop's
+/// reloaded registration keeps no run (the tail is the session's next
+/// durable-tail recovery's to close): a settle then answers `NotRetained`,
+/// and nothing ends the input again. Nothing runs. The loop's
 /// publication of the run's end is held open, so the call takes the
 /// session's gate before anything that follows that publication. RED
 /// before: the loop released the gate before it asked for the reload, so the
@@ -7279,7 +7280,7 @@ async fn a_host_settle_whose_tail_repair_fails_is_refused_until_the_reload() {
 
     // The reload: the degraded registration is discarded, and the session
     // registers again from the store, under the host's staged hold. The
-    // run's input ended, so its recovery closes the tail and keeps no run.
+    // run's input ended, so the registration keeps no run.
     let witness = machine
         .current_session_registration_witness(&session_id)
         .await
@@ -7296,14 +7297,6 @@ async fn a_host_settle_whose_tail_repair_fails_is_refused_until_the_reload() {
         machine.resumable_run_id(&session_id).await,
         None,
         "the reloaded registration keeps no run"
-    );
-    assert!(
-        store
-            .load_whole_blob_provisional_tail(&runtime_id)
-            .await
-            .expect("read the provisional tail")
-            .is_none(),
-        "the reload's recovery closed the settled run's tail"
     );
     let answer = tokio::time::timeout(
         std::time::Duration::from_secs(10),

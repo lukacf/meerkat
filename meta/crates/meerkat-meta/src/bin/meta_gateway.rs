@@ -651,12 +651,13 @@ fn personal_accounts_unavailable(error: meerkat::HostAuthError) -> anyhow::Error
 }
 
 /// The account modes of `config/mcp_accounts.toml`, checked against the MCP
-/// servers `definition`'s profiles declare; `None` without the file or when
-/// it names no personal server.
+/// servers `definition`'s profiles declare, as the owner check this launch's
+/// member factory installs; `None` without the file or when it names no
+/// personal server.
 fn load_personal_accounts(
     paths: &ConventionalPaths,
     definition: &meerkat_mob::MobDefinition,
-) -> anyhow::Result<Option<Arc<meerkat_meta::PersonalMcpAccounts>>> {
+) -> anyhow::Result<Option<meerkat_meta::PersonalAccountOwnerCheck>> {
     let Some(path) = &paths.mcp_accounts_toml else {
         return Ok(None);
     };
@@ -667,7 +668,7 @@ fn load_personal_accounts(
         .map_err(|refusal| anyhow!("{}: {refusal}", path.display()))?;
     Ok(config
         .has_personal_servers()
-        .then(|| meerkat_meta::PersonalMcpAccounts::new(config)))
+        .then(|| meerkat_meta::PersonalMcpAccounts::new(config).owner_check()))
 }
 
 /// Returns (session_service, runtime_adapter, binary_blob_store).
@@ -688,7 +689,7 @@ fn build_persistent_session_service(
     compaction: Option<&meerkat_core::config::CompactionRuntimeConfig>,
     member_mcp_custody: &Arc<meerkat_meta::MemberMcpCustody>,
     provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
-    personal_accounts: Option<&Arc<meerkat_meta::PersonalMcpAccounts>>,
+    personal_accounts: Option<&meerkat_meta::PersonalAccountOwnerCheck>,
 ) -> anyhow::Result<PersistentSessionServiceParts> {
     let store_dir = layout.state_dir().to_path_buf();
     fs::create_dir_all(&store_dir)
@@ -753,8 +754,8 @@ fn build_persistent_session_service(
     // Personal accounts on MCP servers: the owner check on every member's
     // MCP adapter, and the people's accounts in this factory's credential
     // store. The members connect to every other server without OAuth.
-    if let Some(accounts) = personal_accounts {
-        accounts
+    if let Some(check) = personal_accounts {
+        check
             .keep_accounts_in(
                 &factory,
                 adapter.provider_auth_runtime_authority(),
@@ -762,7 +763,7 @@ fn build_persistent_session_service(
                 None,
             )
             .map_err(personal_accounts_unavailable)?;
-        factory = factory.with_mcp_adapter_composer(accounts.composer(None));
+        factory = check.install(factory, None);
     }
 
     let config = gateway_agent_config(host_config, compaction)?;
@@ -3180,8 +3181,8 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         factory = member_mcp_custody.install(factory);
         // As in the persistent arm: the owner check and the people's
         // accounts in this factory's credential store.
-        if let Some(accounts) = &personal_accounts {
-            accounts
+        if let Some(check) = &personal_accounts {
+            check
                 .keep_accounts_in(
                     &factory,
                     adapter.provider_auth_runtime_authority(),
@@ -3189,7 +3190,7 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
                     None,
                 )
                 .map_err(personal_accounts_unavailable)?;
-            factory = factory.with_mcp_adapter_composer(accounts.composer(None));
+            factory = check.install(factory, None);
         }
         // Same producer as the persistent arm: host config first, the
         // compaction declaration on top.
@@ -3314,9 +3315,10 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         (spec, None, workgraph_service, None)
     };
     let (session_spec, schedule_host_inputs, workgraph_service, voice_inputs) = session_bootstrap;
-    // Every member build classifies the personal servers it carries.
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
     let session_spec = match &personal_accounts {
-        Some(accounts) => session_spec.with_personal_mcp_accounts(Arc::clone(accounts)),
+        Some(check) => session_spec.with_personal_mcp_accounts(check.clone()),
         None => session_spec,
     };
     let mob_spec = session_spec.with_options(MobBootstrapOptions {
@@ -3937,10 +3939,10 @@ command = "files-server"
             config.join("mcp_accounts.toml"),
             "[servers.notes]\naccounts = \"personal\"\n",
         )?;
-        let Some(accounts) = load()? else {
+        let Some(check) = load()? else {
             anyhow::bail!("a personal server must compose personal accounts");
         };
-        assert!(accounts.config().is_personal("notes"));
+        assert!(check.accounts().config().is_personal("notes"));
 
         std::fs::write(
             config.join("mcp_accounts.toml"),

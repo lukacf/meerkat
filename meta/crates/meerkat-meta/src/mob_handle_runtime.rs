@@ -1379,14 +1379,14 @@ fn with_pre_build_hook(
 /// personal accounts.
 fn with_personal_accounts(
     factory: AgentFactory,
-    accounts: Option<&Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+    check: Option<&crate::personal_accounts::PersonalAccountOwnerCheck>,
     runtime: &meerkat_runtime::MeerkatMachine,
     realm: meerkat_core::RealmId,
 ) -> AgentFactory {
-    let Some(accounts) = accounts else {
+    let Some(check) = check else {
         return factory;
     };
-    if let Err(error) = accounts.keep_accounts_in(
+    if let Err(error) = check.keep_accounts_in(
         &factory,
         runtime.provider_auth_runtime_authority(),
         realm,
@@ -1398,24 +1398,25 @@ fn with_personal_accounts(
              personal server"
         );
     }
-    factory.with_mcp_adapter_composer(accounts.composer(None))
+    check.install(factory, None)
 }
 
 /// `hook`, then the classification of the build's personal servers with
-/// `accounts` (see [`crate::personal_accounts`]), for a stock constructor's
-/// own layer. Its hook (the host's session hook, its document bindings) runs
-/// after the spec's base layer has classified the build, so a personal
-/// server that hook adds is classified here too; classifying a build again
-/// changes nothing the first pass decided.
+/// `check`, the owner check of this constructor's own member factory (see
+/// [`crate::personal_accounts`]), for a stock constructor's own layer. Its
+/// hook (the host's session hook, its document bindings) runs after the
+/// spec's base layer has classified the build, so a personal server that
+/// hook adds is classified here too; classifying a build again changes
+/// nothing the first pass decided.
 fn classifying_personal_servers(
     hook: PreBuildHook,
-    accounts: Option<&Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+    check: Option<&crate::personal_accounts::PersonalAccountOwnerCheck>,
 ) -> PreBuildHook {
-    let Some(accounts) = accounts else {
+    let Some(check) = check else {
         return hook;
     };
     let slot = crate::personal_accounts::build::PersonalAccountsSlot::default();
-    slot.fill(Arc::clone(accounts));
+    slot.fill(check.clone());
     slot.after_hook(hook)
 }
 
@@ -7203,19 +7204,20 @@ impl MobBootstrapSpec {
     }
 
     /// Classify every member build of this spec's personal MCP servers with
-    /// `accounts` (see [`crate::personal_accounts`]): a member private to its
+    /// `check` (see [`crate::personal_accounts`]): a member private to its
     /// owner keeps them and carries its owner's credential source, every
-    /// other member gets none. The member factory the spec's session service
-    /// builds with must compose its MCP adapters with
-    /// [`crate::PersonalMcpAccounts::composer`] and keep the accounts in its
-    /// credential store ([`crate::PersonalMcpAccounts::keep_accounts_in`]); a
-    /// build whose factory does neither keeps no personal server.
+    /// other member gets none. `check` is the owner check of the member
+    /// factory the spec's session service builds with: installed there
+    /// ([`crate::PersonalAccountOwnerCheck::install`]) and keeping the
+    /// accounts in its credential store
+    /// ([`crate::PersonalAccountOwnerCheck::keep_accounts_in`]). Through a
+    /// check that does not do both, no member build keeps a personal server.
     #[must_use]
     pub fn with_personal_mcp_accounts(
         self,
-        accounts: Arc<crate::personal_accounts::PersonalMcpAccounts>,
+        check: crate::personal_accounts::PersonalAccountOwnerCheck,
     ) -> Self {
-        self.personal_accounts_slot.fill(accounts);
+        self.personal_accounts_slot.fill(check);
         self
     }
 
@@ -8646,9 +8648,10 @@ impl MobBootstrapSpec {
     /// default before the member builder takes it, so every agent of the
     /// composition resolves and persists provider credentials there.
     ///
-    /// `personal_accounts` are the composition's personal accounts on MCP
-    /// servers, when it has any: the factory gets their owner check and
-    /// keeps them in its own credential store.
+    /// `personal_accounts` is the owner check of the composition's personal
+    /// accounts on MCP servers, when it has any: it is installed on the
+    /// factory, which keeps the accounts in its own credential store, and the
+    /// spec is given the same check.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn persistent_inner_with_provider_stores(
         definition: MobDefinition,
@@ -8673,7 +8676,7 @@ impl MobBootstrapSpec {
         authority: PersistentAuthority,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
-        personal_accounts: Option<Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+        personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
     ) -> Result<Self, StorageResolutionError> {
         // The startup checks and the composition record need to know whether
         // the mob store outlives the process.
@@ -9206,7 +9209,8 @@ impl MobBootstrapSpec {
     ///
     /// `provider_auth_persistence` is the host's provider credential store
     /// when it names one, held in place of the process default as in
-    /// [`persistent_inner_with_provider_stores`](Self::persistent_inner_with_provider_stores).
+    /// [`persistent_inner_with_provider_stores`](Self::persistent_inner_with_provider_stores),
+    /// and `personal_accounts` is installed on the factory as there.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ephemeral_runtime_backed_with_provider_stores(
         definition: MobDefinition,
@@ -9226,7 +9230,7 @@ impl MobBootstrapSpec {
         operation_refusal_observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
-        personal_accounts: Option<Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+        personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
     ) -> Result<Self, StorageResolutionError> {
         caps.image_generation |= mob_definition_may_use_image_generation(&definition);
         let config = crate::compaction_policy::with_meta_compaction_defaults(
@@ -11192,6 +11196,15 @@ impl MobRuntime {
         &self,
     ) -> Option<Arc<crate::personal_accounts::PersonalMcpAccounts>> {
         self.personal_accounts.accounts()
+    }
+
+    /// The owner check the composition gave its spec, when it has personal
+    /// accounts on MCP servers.
+    #[cfg(test)]
+    pub(crate) fn personal_account_owner_check(
+        &self,
+    ) -> Option<crate::personal_accounts::PersonalAccountOwnerCheck> {
+        self.personal_accounts.check()
     }
 
     /// The verified side chat lineages of this runtime's member incarnations,

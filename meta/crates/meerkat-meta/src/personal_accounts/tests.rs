@@ -14,6 +14,7 @@ use meerkat_core::{
     ToolError, TrustDomainId, TurnRequester,
 };
 use meerkat_mcp::McpAuthResolver;
+use meerkat_session::SessionAgentBuilder as _;
 
 use super::gate::PersonalAccountGate;
 use super::*;
@@ -317,12 +318,22 @@ fn private_side_chat(
     (labels, fork_source_of(source))
 }
 
-/// A composition whose `notes` server is personal, with the owner check
-/// installed on its member factories.
+/// A composition whose `notes` server is personal.
 fn accounts() -> Arc<PersonalMcpAccounts> {
-    let accounts = PersonalMcpAccounts::new(personal(&["notes"]));
-    let _ = accounts.composer(None);
-    accounts
+    PersonalMcpAccounts::new(personal(&["notes"]))
+}
+
+/// The owner check of a member factory of a composition whose `notes`
+/// server is personal, installed on that factory.
+fn checked() -> PersonalAccountOwnerCheck {
+    installed(&accounts())
+}
+
+/// A new owner check over `accounts`, installed on a member factory.
+fn installed(accounts: &Arc<PersonalMcpAccounts>) -> PersonalAccountOwnerCheck {
+    let check = accounts.owner_check();
+    let _factory = check.install(meerkat::AgentFactory::minimal(), None);
+    check
 }
 
 /// Where a test composition keeps its people's accounts: a credential store
@@ -334,7 +345,7 @@ struct AccountStore {
 }
 
 fn keep_accounts(
-    accounts: &PersonalMcpAccounts,
+    check: &PersonalAccountOwnerCheck,
     system: Option<Arc<dyn McpAuthResolver>>,
 ) -> AccountStore {
     let dir = tempfile::tempdir().expect("dir");
@@ -349,7 +360,7 @@ fn keep_accounts(
         None,
     )
     .expect("runtime machine");
-    accounts.bind_credentials(PersonalAccountCredentials::new(
+    check.bind_credentials(PersonalAccountCredentials::new(
         meerkat::HostAuthService::new(persistence, runtime.provider_auth_runtime_authority()),
         meerkat_core::RealmId::parse("meta").expect("realm"),
         system,
@@ -472,14 +483,14 @@ fn private_owner_key_of_a_principal_is_the_whoami_caller_scope() {
     assert_eq!(private_owner_key_of_principal(&unqualified), None);
 }
 
-/// R2. A shared agent's build gets no personal server (its system server
+/// A shared agent's build gets no personal server (its system server
 /// stays), and a call that still reaches a personal server in a shared
 /// member is refused before the router: nothing reaches the server and no
 /// other account is tried.
 #[tokio::test]
 async fn personal_account_refused_in_shared_thread() {
-    let accounts = accounts();
-    let _store = keep_accounts(&accounts, None);
+    let check = checked();
+    let _store = keep_accounts(&check, None);
     let (url, notes) = endpoint().await;
     let mut shared = request(
         BTreeMap::from([("team".to_string(), "review".to_string())]),
@@ -489,7 +500,7 @@ async fn personal_account_refused_in_shared_thread() {
         ],
         None,
     );
-    accounts.classify_build(&mut shared);
+    check.classify_build(&mut shared);
     assert_eq!(
         server_names(&shared),
         vec!["wiki".to_string()],
@@ -501,7 +512,7 @@ async fn personal_account_refused_in_shared_thread() {
     );
 
     let adapter = member_adapter(&url).await;
-    let refused = call_notes(&gate(&adapter, &accounts, None), &direct("alice")).await;
+    let refused = call_notes(&gate(&adapter, check.accounts(), None), &direct("alice")).await;
     assert_eq!(
         denial(&refused).as_deref(),
         Some("personal_account_shared_thread"),
@@ -511,7 +522,7 @@ async fn personal_account_refused_in_shared_thread() {
     adapter.shutdown().await;
 }
 
-/// R3. In a member private to Alice, a run for anyone else (an access admin
+/// In a member private to Alice, a run for anyone else (an access admin
 /// included) is refused; Alice's own run reaches the server.
 #[tokio::test]
 async fn admin_in_private_member_cannot_use_owners_account() {
@@ -534,7 +545,7 @@ async fn admin_in_private_member_cannot_use_owners_account() {
     adapter.shutdown().await;
 }
 
-/// R5. A requester carried across a peer hop never selects an account: in
+/// A requester carried across a peer hop never selects an account: in
 /// the owner's own member it is not the owner, in a shared member the
 /// thread is shared. A run without a requester acts for nobody.
 #[tokio::test]
@@ -573,14 +584,14 @@ async fn carried_requester_never_selects_an_account() {
     adapter.shutdown().await;
 }
 
-/// R6. Approved work runs in an approval branch, which is private to no
+/// Approved work runs in an approval branch, which is private to no
 /// person: its build gets no personal server even when it carries every
 /// label of its owner's private side chat and a fork source the side chat
 /// marker names, and a call there is refused as a shared thread.
 #[tokio::test]
 async fn approved_work_in_an_approval_branch_refuses_personal_servers() {
-    let accounts = accounts();
-    let _store = keep_accounts(&accounts, None);
+    let check = checked();
+    let _store = keep_accounts(&check, None);
     let (url, notes) = endpoint().await;
     let (mut labels, fork_source) = private_side_chat("assistant", "alice");
     labels.insert(APPROVAL_BRANCH_LABEL.to_string(), "decision-1".to_string());
@@ -590,21 +601,17 @@ async fn approved_work_in_an_approval_branch_refuses_personal_servers() {
         Some(fork_source),
     );
     let session = session_of(&branch);
-    accounts.classify_build(&mut branch);
+    check.classify_build(&mut branch);
     assert!(
         server_names(&branch).is_empty(),
         "{:?}",
         server_names(&branch)
     );
     assert!(carried_source(&branch).is_none());
-    assert_eq!(
-        accounts.take_plan(&session),
-        None,
-        "no owner for the branch"
-    );
+    assert_eq!(check.take_plan(&session), None, "no owner for the branch");
 
     let adapter = member_adapter(&url).await;
-    let refused = call_notes(&gate(&adapter, &accounts, None), &direct("alice")).await;
+    let refused = call_notes(&gate(&adapter, check.accounts(), None), &direct("alice")).await;
     assert_eq!(
         denial(&refused).as_deref(),
         Some("personal_account_shared_thread"),
@@ -614,20 +621,20 @@ async fn approved_work_in_an_approval_branch_refuses_personal_servers() {
     adapter.shutdown().await;
 }
 
-/// R7 (shared target). A schedule that fires into a shared agent carries
+/// A schedule that fires into a shared agent carries
 /// its sender as the run's requester; the shared agent's build has no
 /// personal server, and a call there is refused.
 #[tokio::test]
 async fn schedule_into_shared_agent_refuses() {
-    let accounts = accounts();
-    let _store = keep_accounts(&accounts, None);
+    let check = checked();
+    let _store = keep_accounts(&check, None);
     let (url, notes) = endpoint().await;
     let mut target = request(
         BTreeMap::new(),
         vec![personal_http_server("notes", &url)],
         None,
     );
-    accounts.classify_build(&mut target);
+    check.classify_build(&mut target);
     assert!(
         server_names(&target).is_empty(),
         "{:?}",
@@ -635,7 +642,7 @@ async fn schedule_into_shared_agent_refuses() {
     );
 
     let adapter = member_adapter(&url).await;
-    let fired = call_notes(&gate(&adapter, &accounts, None), &direct("alice")).await;
+    let fired = call_notes(&gate(&adapter, check.accounts(), None), &direct("alice")).await;
     assert_eq!(
         denial(&fired).as_deref(),
         Some("personal_account_shared_thread"),
@@ -645,7 +652,7 @@ async fn schedule_into_shared_agent_refuses() {
     adapter.shutdown().await;
 }
 
-/// R11 (Meta). A connector-bound or stdio server cannot be personal, nor
+/// A connector-bound or stdio server cannot be personal, nor
 /// can a definition with a fixed account, a static Authorization header or
 /// no account the person proves: the configuration is refused, and a build
 /// withholds such a server even in its owner's private member.
@@ -698,12 +705,11 @@ async fn personal_mode_refused_for_connector_servers() {
             refused.err().map(|refusal| refusal.kind()),
             Some("personal_accounts_unsupported")
         );
-        let accounts = PersonalMcpAccounts::new(config.clone());
-        let _ = accounts.composer(None);
-        let _store = keep_accounts(&accounts, None);
+        let check = installed(&PersonalMcpAccounts::new(config.clone()));
+        let _store = keep_accounts(&check, None);
         let (labels, fork_source) = private_side_chat("assistant", "alice");
         let mut build = request(labels, vec![definition], Some(fork_source));
-        accounts.classify_build(&mut build);
+        check.classify_build(&mut build);
         assert!(server_names(&build).is_empty(), "withheld at the build");
     }
     assert_eq!(
@@ -725,8 +731,8 @@ async fn personal_mode_refused_for_connector_servers() {
 /// side chat marker that names another source than its typed fork source.
 #[tokio::test]
 async fn a_forged_private_owner_label_selects_no_owner() {
-    let accounts = accounts();
-    let _store = keep_accounts(&accounts, None);
+    let check = checked();
+    let _store = keep_accounts(&check, None);
     let url = "https://notes.example.test/mcp";
     let (labels, fork_source) = private_side_chat("assistant", "alice");
 
@@ -736,11 +742,11 @@ async fn a_forged_private_owner_label_selects_no_owner() {
         Some(fork_source),
     );
     let session = session_of(&genuine);
-    accounts.classify_build(&mut genuine);
+    check.classify_build(&mut genuine);
     assert_eq!(server_names(&genuine), vec!["notes".to_string()]);
     assert!(carried_source(&genuine).is_some(), "the owner's source");
     assert_eq!(
-        accounts.take_plan(&session).map(|owner| owner.key),
+        check.take_plan(&session).map(|owner| owner.key),
         Some(private_owner_key(ISSUER, "alice")),
         "the composition takes the owner the build established"
     );
@@ -753,7 +759,7 @@ async fn a_forged_private_owner_label_selects_no_owner() {
         vec![personal_http_server("notes", url)],
         None,
     );
-    accounts.classify_build(&mut label_only);
+    check.classify_build(&mut label_only);
     assert!(server_names(&label_only).is_empty());
     assert!(carried_source(&label_only).is_none());
 
@@ -762,19 +768,19 @@ async fn a_forged_private_owner_label_selects_no_owner() {
         vec![personal_http_server("notes", url)],
         Some(fork_source_of("helper")),
     );
-    accounts.classify_build(&mut other_source);
+    check.classify_build(&mut other_source);
     assert!(server_names(&other_source).is_empty());
     assert!(carried_source(&other_source).is_none());
 }
 
-/// A build keeps a personal server only when the owner check is installed
-/// on its member factory and the composition keeps its people's accounts.
+/// A build keeps a personal server only through an owner check installed on
+/// a member factory that keeps its people's accounts.
 #[tokio::test]
 async fn a_build_without_the_owner_check_keeps_no_personal_server() {
     let url = "https://notes.example.test/mcp";
     let (labels, fork_source) = private_side_chat("assistant", "alice");
 
-    let unchecked = PersonalMcpAccounts::new(personal(&["notes"]));
+    let unchecked = accounts().owner_check();
     let _store = keep_accounts(&unchecked, None);
     let mut build = request(
         labels.clone(),
@@ -785,7 +791,7 @@ async fn a_build_without_the_owner_check_keeps_no_personal_server() {
     assert!(server_names(&build).is_empty());
     assert!(carried_source(&build).is_none());
 
-    let unkept = accounts();
+    let unkept = checked();
     let mut build = request(
         labels,
         vec![personal_http_server("notes", url)],
@@ -807,14 +813,14 @@ async fn a_build_without_the_owner_check_keeps_no_personal_server() {
 /// when the member's session was created, not when it was rebuilt.
 #[tokio::test]
 async fn every_build_of_a_private_member_carries_its_owners_source() {
-    let accounts = accounts();
+    let check = checked();
     let system = Arc::new(CountingSource::default());
     let _store = keep_accounts(
-        &accounts,
+        &check,
         Some(Arc::clone(&system) as Arc<dyn McpAuthResolver>),
     );
     let slot = build::PersonalAccountsSlot::default();
-    slot.fill(Arc::clone(&accounts));
+    slot.fill(check.clone());
     let hook = slot.after_hook(Arc::new(|_req: &mut CreateSessionRequest| {
         Box::pin(async { Ok(()) })
     }));
@@ -849,7 +855,7 @@ async fn every_build_of_a_private_member_carries_its_owners_source() {
         hook(&mut build).await.expect("the hook runs");
         assert_eq!(server_names(&build), vec!["notes".to_string()], "{kind}");
         let source = carried_source(&build).unwrap_or_else(|| panic!("{kind}: the owner's source"));
-        let plan = accounts
+        let plan = check
             .take_plan(&session)
             .unwrap_or_else(|| panic!("{kind}: the owner kept"));
         assert_eq!(plan.key, private_owner_key(ISSUER, "alice"), "{kind}");
@@ -909,7 +915,7 @@ async fn a_private_member_built_without_its_owners_source_refuses_personal_serve
 
     let (url, endpoint) = endpoint().await;
     let adapter = member_adapter(&url).await;
-    let composer = accounts.composer(None);
+    let composer = gate::composer(checked(), None);
     let unplanned = composer
         .compose(&adapter, &meerkat_core::SessionId::new(), None)
         .expect("composed");
@@ -1045,9 +1051,9 @@ async fn a_revoked_owner_s_accounts_are_suspended_in_earlier_private_members() {
 /// never the installation's own slot.
 #[tokio::test]
 async fn each_owner_keeps_personal_accounts_in_a_realm_of_their_own() {
-    let accounts = accounts();
-    let _store = keep_accounts(&accounts, None);
-    let credentials = accounts.credentials().expect("kept");
+    let check = checked();
+    let _store = keep_accounts(&check, None);
+    let credentials = check.credentials().expect("kept");
     let alice = credentials
         .owner_realm(&private_owner_key(ISSUER, "alice"))
         .expect("alice's realm");
@@ -1122,7 +1128,7 @@ async fn hosted(
         .with_runtime_delivery(crate::MobRuntimeDelivery::new(store, jobs))
         .with_agent_mob_tools(Arc::new(std::sync::RwLock::new(None)))
         .expect("install the agent mob tools")
-        .with_personal_mcp_accounts(accounts());
+        .with_personal_mcp_accounts(checked());
     let runtime = Box::pin(crate::MobRuntime::bootstrap(spec))
         .await
         .expect("bootstrap");
@@ -1210,7 +1216,7 @@ async fn hosted_member_refuses_personal_server() {
     let definition = meerkat_mob::MobDefinition::from_toml(&format!(
         r#"
 [mob]
-id = "team"
+id = "personal-hosted-inline"
 
 [profiles.assistant]
 model = "gpt-5.5"
@@ -1268,7 +1274,7 @@ async fn hosted_member_refuses_a_realm_profiles_personal_server() {
     let definition = meerkat_mob::MobDefinition::from_toml(
         r#"
 [mob]
-id = "team"
+id = "personal-hosted-realm"
 
 [profiles.plain]
 model = "gpt-5.5"
@@ -1311,7 +1317,9 @@ realm_profile = "org-assistant"
 async fn hosted_member_refuses_a_realm_profile_naming_a_personal_server_in_another_shape() {
     use meerkat_mob::store::RealmProfileStore as _;
 
-    let mut toml = String::from("[mob]\nid = \"team\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n");
+    let mut toml = String::from(
+        "[mob]\nid = \"personal-hosted-shapes\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n",
+    );
     for index in 0..3 {
         toml.push_str(&format!(
             "\n[profiles.shared-{index}]\nrealm_profile = \"org-{index}\"\n"
@@ -1360,7 +1368,7 @@ async fn hosted_member_refuses_a_realm_profile_naming_a_personal_server_in_anoth
 #[tokio::test]
 async fn hosted_member_refuses_an_agent_created_child_mobs_personal_server() {
     let root = meerkat_mob::MobDefinition::from_toml(
-        "[mob]\nid = \"team\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n",
+        "[mob]\nid = \"personal-hosted-root\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n",
     )
     .expect("root definition");
     let hosted = hosted(root, meerkat_mob::MobStorage::in_memory()).await;
@@ -1372,7 +1380,7 @@ async fn hosted_member_refuses_an_agent_created_child_mobs_personal_server() {
     let mut toml = format!(
         r#"
 [mob]
-id = "child"
+id = "personal-hosted-child"
 
 [profiles.personal]
 model = "gpt-5.5"
@@ -1413,4 +1421,507 @@ oauth_account_selection = "discover"
     );
     assert!(members(&child).await.is_empty());
     let _ = hosted.runtime.handle().shutdown().await;
+}
+
+/// An MCP adapter with no server, for a composition that only needs one.
+fn empty_adapter() -> Arc<meerkat_mcp::McpRouterAdapter> {
+    Arc::new(meerkat_mcp::McpRouterAdapter::new(
+        meerkat_mcp::McpRouter::new_with_surface_handle_and_stdio_profile(
+            Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+            meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+        ),
+    ))
+}
+
+/// Hold the credential slot of `target` the way a sign-in in progress holds
+/// it: a read that reaches the slot answers busy until the guard drops.
+async fn hold_slot(
+    target: &meerkat::McpServerIdentity,
+) -> (
+    meerkat_core::AuthLoginLifecycleGuard,
+    meerkat_core::AuthLoginLifecycleRetention,
+) {
+    let lease = target.lease_key().expect("lease");
+    let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease).await;
+    let retained = meerkat_core::retain_auth_login_lifecycle_exclusion(&lease).expect("retained");
+    (guard, retained)
+}
+
+/// Whether a read reached a slot that [`hold_slot`] holds.
+fn read_a_held_slot(read: &Result<Option<String>, meerkat::McpOAuthError>) -> bool {
+    matches!(
+        read,
+        Err(meerkat::McpOAuthError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+            ..
+        })
+    )
+}
+
+/// The people's accounts serve only the builds an owner check composed. A
+/// spec given the owner check another member factory installed (shared with
+/// a factory that composes no owner check) keeps a private member's
+/// personal server and carries its owner's source, since classification
+/// cannot see which factory builds the member. The source serves nothing
+/// until that check's composition of this very build takes its plan: built
+/// by the factory without the check, nothing composes it, so its
+/// connection gets no credential and no sign-in, and the owner's slot is
+/// never read. The composition of another build changes nothing here; the
+/// composition of this one serves the owner's own slot.
+#[tokio::test]
+async fn a_build_by_a_factory_without_the_owner_check_gets_no_credential() {
+    let check = checked();
+    let _store = keep_accounts(&check, None);
+    // An owner of this row's own: the owner lifecycle leases are process
+    // wide, and other rows hold or read other owners' slots.
+    let (labels, fork_source) = private_side_chat("assistant", "erin");
+    let notes = personal_http_server("notes", NOTES_URL);
+    let mut build = request(
+        labels.clone(),
+        vec![notes.clone()],
+        Some(fork_source.clone()),
+    );
+    let session = session_of(&build);
+    check.classify_build(&mut build);
+    assert_eq!(server_names(&build), vec!["notes".to_string()]);
+    let source = carried_source(&build).expect("the owner's source");
+
+    let target = identity(&notes);
+    let owners_slot = target.clone().in_realm(
+        check
+            .credentials()
+            .expect("kept")
+            .owner_realm(&private_owner_key(ISSUER, "erin"))
+            .expect("the owner's realm"),
+    );
+    let _held = hold_slot(&owners_slot).await;
+    let patience = Duration::from_millis(300);
+    assert!(
+        tokio::time::timeout(patience, source.stored_bearer_token(&target))
+            .await
+            .is_err(),
+        "no credential for a build no owner check composed"
+    );
+    assert!(
+        tokio::time::timeout(patience, source.interactive_login(&target, None))
+            .await
+            .is_err(),
+        "and no sign-in"
+    );
+    assert_eq!(
+        source.selected_account(&target),
+        meerkat_core::OperationAccount::Unavailable
+    );
+
+    let composer = gate::composer(check.clone(), None);
+    let adapter = empty_adapter();
+    let mut other = request(labels, vec![notes], Some(fork_source));
+    check.classify_build(&mut other);
+    let _other = composer
+        .compose(&adapter, &session_of(&other), None)
+        .expect("another build composed");
+    assert!(
+        tokio::time::timeout(patience, source.stored_bearer_token(&target))
+            .await
+            .is_err(),
+        "another build's composition serves nothing here"
+    );
+
+    let _composed = composer
+        .compose(&adapter, &session, None)
+        .expect("this build composed");
+    let read = tokio::time::timeout(Duration::from_secs(20), source.stored_bearer_token(&target))
+        .await
+        .expect("the composed build's read is answered");
+    assert!(
+        read_a_held_slot(&read),
+        "the composed build reads its owner's own slot: {read:?}"
+    );
+    adapter.shutdown().await;
+}
+
+/// The owner's source reads the owner's own credential slot: with Alice's
+/// slot held, Alice's source answers busy and Bob's source reads nothing of
+/// hers; with the installation's slot held, Alice's source is not affected.
+#[tokio::test]
+async fn the_owners_source_reads_the_owners_own_slot() {
+    let check = checked();
+    let _store = keep_accounts(&check, None);
+    let credentials = check.credentials().expect("kept");
+    let config = Arc::new(personal(&["notes"]));
+    let alice = private_owner_key(ISSUER, "alice");
+    let bob = private_owner_key(ISSUER, "bob");
+    // Sources of builds the owner check composed.
+    let composed = || tokio::sync::watch::channel(true).1;
+    let alice_source = credentials
+        .owner_source(Arc::clone(&config), &alice, composed())
+        .expect("alice's source");
+    let bob_source = credentials
+        .owner_source(Arc::clone(&config), &bob, composed())
+        .expect("bob's source");
+    let notes = identity(&personal_http_server("notes", NOTES_URL));
+    {
+        let _held = hold_slot(
+            &notes
+                .clone()
+                .in_realm(credentials.owner_realm(&alice).expect("alice's realm")),
+        )
+        .await;
+        let read = alice_source.stored_bearer_token(&notes).await;
+        assert!(
+            read_a_held_slot(&read),
+            "Alice's source reads Alice's own slot: {read:?}"
+        );
+        let read = bob_source.stored_bearer_token(&notes).await;
+        assert!(
+            matches!(read, Ok(None)),
+            "Bob's source never reads Alice's slot: {read:?}"
+        );
+    }
+    {
+        let _held = hold_slot(&notes).await;
+        let read = alice_source.stored_bearer_token(&notes).await;
+        assert!(
+            matches!(read, Ok(None)),
+            "Alice's source never reads the installation's slot: {read:?}"
+        );
+    }
+}
+
+/// A system server is not the owner check's to refuse: a call to it in a
+/// shared member reaches the server.
+#[tokio::test]
+async fn a_system_server_call_passes_the_owner_check_in_a_shared_member() {
+    let (url, endpoint) = endpoint().await;
+    let mut router = meerkat_mcp::McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+    );
+    router
+        .stage_add(http_server("wiki", &url))
+        .expect("stage add");
+    router.apply_staged().await.expect("apply staged add");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let _ = router.take_external_updates();
+        if router.active_server_names() == vec!["wiki".to_string()] {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the wiki server never connected"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(router));
+    let served = call_notes(&gate(&adapter, &accounts(), None), &direct("alice")).await;
+    assert!(
+        served.is_ok(),
+        "a system server's call in a shared member passes: {served:?}"
+    );
+    assert_eq!(endpoint.calls(), 1);
+    adapter.shutdown().await;
+}
+
+/// A host composer that records each adapter it composes and publishes it
+/// unchanged.
+#[derive(Default)]
+struct RecordingComposer {
+    adapters: std::sync::Mutex<Vec<Arc<meerkat_mcp::McpRouterAdapter>>>,
+}
+
+impl RecordingComposer {
+    fn last(&self) -> Arc<meerkat_mcp::McpRouterAdapter> {
+        self.adapters
+            .lock()
+            .expect("adapters")
+            .last()
+            .cloned()
+            .expect("an adapter was composed")
+    }
+}
+
+impl meerkat::McpAdapterComposer for RecordingComposer {
+    fn compose(
+        &self,
+        adapter: &Arc<meerkat_mcp::McpRouterAdapter>,
+        _session_id: &meerkat_core::types::SessionId,
+        _member: Option<&meerkat_core::MobMemberBinding>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, meerkat::McpAdapterComposeRefusal> {
+        self.adapters
+            .lock()
+            .expect("adapters")
+            .push(Arc::clone(adapter));
+        Ok(Arc::clone(adapter) as Arc<dyn AgentToolDispatcher>)
+    }
+}
+
+/// `request` for a real member build: a model the test client answers.
+fn member_build(
+    labels: BTreeMap<String, String>,
+    servers: Vec<McpServerConfig>,
+    fork_source: Option<meerkat_core::ForkBuildSource>,
+) -> CreateSessionRequest {
+    CreateSessionRequest {
+        model: "mock-model".to_string(),
+        ..request(labels, servers, fork_source)
+    }
+}
+
+/// The member factory `rpc_gateway` composes for personal accounts
+/// (`compose_personal_accounts`) serves no personal server's target from its
+/// own credential source, and composes every member's MCP adapter with the
+/// owner check, over the host's own composer. A build that reached it
+/// without its owner's source awaits a sign-in for its personal server
+/// without reading the installation's slot. A private side chat's build is
+/// composed by the owner check, which takes the build's plan, so the
+/// owner's source answers (here: no account connected, a sign-in awaited).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_rpc_gateway_member_factory_serves_no_personal_target_and_composes_the_owner_check() {
+    let dir = tempfile::tempdir().expect("dir");
+    let realm = meerkat_core::RealmId::parse("meta").expect("realm");
+    let persistence = meerkat::TokenStoreBackend::File {
+        root: dir.path().join("credentials"),
+    }
+    .open_with_refresh_authority()
+    .expect("credential store");
+    let runtime = crate::mob_handle_runtime::persistent_runtime_machine(
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+        None,
+    )
+    .expect("runtime machine");
+    let storage = crate::gateway_mcp_composition::meerkat_level_realm_storage(
+        &dir.path().join("state"),
+        &realm,
+    );
+    let host = Arc::new(RecordingComposer::default());
+    let check = accounts().owner_check();
+    let factory = crate::gateway_mcp_composition::compose_personal_accounts(
+        &check,
+        meerkat::AgentFactory::new(dir.path().join("sessions"))
+            .with_provider_auth_persistence(persistence),
+        Some(Arc::clone(&host) as Arc<dyn meerkat::McpAdapterComposer>),
+        &runtime,
+        &storage,
+    )
+    .expect("the gateway's member factory");
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
+    builder.default_llm_client = Some(Arc::new(meerkat_client::TestClient::default()));
+    let notes = personal_http_server("notes", NOTES_URL);
+    let installation = identity(&notes);
+    let settle = Duration::from_secs(20);
+
+    let held = hold_slot(&installation).await;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let unclassified = builder
+        .build_agent(
+            &member_build(BTreeMap::new(), vec![notes.clone()], None),
+            event_tx,
+        )
+        .await
+        .expect("a member without its owner's source builds");
+    let adapter = host.last();
+    adapter
+        .wait_until_ready(settle)
+        .await
+        .expect("its connection settled");
+    assert_eq!(
+        adapter.servers_awaiting_authorization().await,
+        vec![installation.clone()],
+        "it awaits a sign-in, and the installation's slot was not read"
+    );
+    drop(held);
+
+    let (labels, fork_source) = private_side_chat("assistant", "carol");
+    let mut private = member_build(labels, vec![notes], Some(fork_source));
+    let session = session_of(&private);
+    check.classify_build(&mut private);
+    assert_eq!(server_names(&private), vec!["notes".to_string()]);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+    let side_chat = builder
+        .build_agent(&private, event_tx)
+        .await
+        .expect("the private side chat builds");
+    assert_eq!(
+        check.take_plan(&session),
+        None,
+        "the owner check composed the build and took its plan"
+    );
+    let adapter = host.last();
+    adapter
+        .wait_until_ready(settle)
+        .await
+        .expect("the owner's source answered");
+    assert_eq!(
+        adapter.servers_awaiting_authorization().await,
+        vec![installation],
+        "it awaits its owner's sign-in"
+    );
+    drop((unclassified, side_chat));
+}
+
+/// What one member build carried to the host's session hook, after the
+/// spec's own classification: its session, its MCP servers, and whether it
+/// carries a credential source of its own.
+type SeenBuild = (Option<meerkat_core::types::SessionId>, Vec<String>, bool);
+
+/// The builds a host's session hook saw.
+#[derive(Default)]
+struct SeenBuilds {
+    builds: std::sync::Mutex<Vec<SeenBuild>>,
+}
+
+#[async_trait::async_trait]
+impl crate::SessionHook for SeenBuilds {
+    async fn before_create(
+        &self,
+        req: &mut CreateSessionRequest,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        let build = req.build.as_ref();
+        let seen = (
+            build
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.id().clone()),
+            server_names(req),
+            build.is_some_and(|build| build.mcp_auth_resolver_override.is_some()),
+        );
+        self.builds.lock().expect("builds").push(seen);
+        Ok(())
+    }
+}
+
+/// The composition `UnifiedRuntimeBuilder::mcp_accounts` builds composes its
+/// member factory with the owner check: the private side chat a person
+/// opens keeps the personal server and carries its owner's source, and the
+/// side chat's MCP adapter composition takes the owner its build
+/// established. The agent it was forked from, shared, gets no personal
+/// server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_unified_runtime_composes_the_owner_check_on_its_member_factory() {
+    let dir = tempfile::tempdir().expect("dir");
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+        r#"
+[mob]
+id = "personal-builder"
+
+[profiles.worker]
+model = "gpt-5.5"
+
+[[profiles.worker.tools.mcp_servers]]
+name = "notes"
+url = "{NOTES_URL}"
+oauth_account_selection = "discover"
+"#
+    ))
+    .expect("definition");
+    let seen = Arc::new(SeenBuilds::default());
+    let runtime = crate::UnifiedRuntime::builder()
+        .definition(definition)
+        .persistent_state(dir.path().join("state"))
+        .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+        .provider_auth_persistence(
+            meerkat::TokenStoreBackend::File {
+                root: dir.path().join("credentials"),
+            }
+            .open_with_refresh_authority()
+            .expect("credential store"),
+        )
+        .mcp_accounts(personal(&["notes"]))
+        .session_hook(Arc::clone(&seen) as Arc<dyn crate::SessionHook>)
+        .build()
+        .await
+        .expect("the composition");
+    let mob = runtime.mob_runtime();
+    let source = meerkat_mob::AgentIdentity::from("alpha");
+    Box::pin(
+        mob.handle()
+            .spawn_spec(meerkat_mob::SpawnMemberSpec::new("worker", source.clone())),
+    )
+    .await
+    .expect("spawn the shared agent");
+    mob.handle()
+        .member(&source)
+        .await
+        .expect("the shared agent")
+        .start_turn(
+            meerkat_core::ContentInput::Text("The code word is heron.".to_string()),
+            meerkat_core::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await
+        .expect("a turn")
+        .wait()
+        .await
+        .expect("the turn settled");
+    let owner = private_owner_key(ISSUER, "alice");
+    let mut forked = None;
+    for _ in 0..50 {
+        match crate::side_chat::fork_side_chat(
+            mob,
+            None,
+            "alpha",
+            "alpha-side",
+            None,
+            Some("alice@example.test"),
+            Some(owner.as_str()),
+        )
+        .await
+        {
+            Ok(fork) => {
+                forked = Some(fork);
+                break;
+            }
+            Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
+                meerkat_mob::MobError::ForkSourceUnavailable { .. },
+            ))) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(error) => panic!("the side chat fork: {error:?}"),
+        }
+    }
+    let fork = forked.expect("the side chat was forked");
+    let side_chat = fork.outcome.result.session_id.clone();
+    // A turn in the side chat builds it, if the seat left it unbuilt.
+    mob.handle()
+        .member(&fork.outcome.result.agent_identity)
+        .await
+        .expect("the side chat")
+        .start_turn(
+            meerkat_core::ContentInput::Text("What is the code word?".to_string()),
+            meerkat_core::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await
+        .expect("a turn in the side chat")
+        .wait()
+        .await
+        .expect("the side chat's turn settled");
+
+    let builds = seen.builds.lock().expect("builds").clone();
+    let (private, shared): (Vec<_>, Vec<_>) = builds
+        .into_iter()
+        .partition(|(session, _, _)| session.as_ref() == Some(&side_chat));
+    assert!(
+        private
+            .iter()
+            .any(|(_, servers, owned)| *servers == ["notes"] && *owned),
+        "the side chat keeps the personal server with its owner's source: {private:?}"
+    );
+    assert!(
+        !shared.is_empty()
+            && shared
+                .iter()
+                .all(|(_, servers, owned)| servers.is_empty() && !*owned),
+        "the shared agent gets no personal server: {shared:?}"
+    );
+    let check = mob
+        .personal_account_owner_check()
+        .expect("the composition's owner check");
+    assert_eq!(
+        check.take_plan(&side_chat),
+        None,
+        "the member factory's owner check composed the side chat and took its plan"
+    );
+    let _ = runtime.shutdown().await;
 }

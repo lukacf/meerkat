@@ -36,16 +36,21 @@
 //! connector-bound server, a fixed account or a static `Authorization`
 //! header is [`PersonalAccountRefusal::Unsupported`]. So is a member placed
 //! on another host whose profile declares a personal server: that host would
-//! serve the server with its own credentials, so the spawn and every rebuild
-//! of such a member are refused.
+//! serve the server with its own credentials, so the spawn and the respawn of
+//! such a member are refused, and so is sending a member placed before the
+//! server was marked personal to its host again (`placement`).
 //!
 //! The owner check runs in an MCP adapter composition: a dispatcher over each
 //! member's MCP adapter, inside the agent's grant gate (which authorizes
 //! first) and before the router's per-call preparation. It refuses with a
-//! typed policy denial whose code is the refusal's kind.
+//! typed policy denial whose code is the refusal's kind. Each member factory
+//! has an owner check of its own ([`PersonalAccountOwnerCheck`]): a member
+//! keeps a personal server only in a build whose factory composes it, and
+//! the owner's credential serves only a build that check composed.
 
 pub(crate) mod build;
 pub(crate) mod gate;
+pub(crate) mod owner_check;
 pub(crate) mod placement;
 pub(crate) mod resolver;
 #[cfg(test)]
@@ -53,13 +58,14 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::SystemTime;
 
 use meerkat_core::McpServerConfig;
 use meerkat_core::mcp_config::{McpHttpTransport, McpOAuthAccountSelection, McpTransportConfig};
 use serde::{Deserialize, Serialize};
 
+pub use owner_check::PersonalAccountOwnerCheck;
 pub use resolver::PersonalAccountCredentials;
 
 /// The label of an approval branch (the grants design's one-time fork that
@@ -424,20 +430,14 @@ pub(crate) struct PrivateOwner {
     pub(crate) opened_at: SystemTime,
 }
 
-/// The most member plans kept between a member's build and its MCP adapter
-/// composition; a full map starts over.
-const MEMBER_PLAN_LIMIT: usize = 4096;
-
-/// A composition's personal accounts: its account modes, where its people's
-/// accounts are kept, the private owner each member build established
-/// (taken by that build's MCP adapter composition), and the console's
-/// session fence record once a console is composed.
+/// A composition's personal accounts: its account modes, and the console's
+/// session fence record once a console is composed. Each member factory of
+/// the composition has an owner check over them
+/// ([`Self::owner_check`]), which keeps where that factory keeps the
+/// people's accounts and the private owner each of its builds established.
 pub struct PersonalMcpAccounts {
     config: Arc<McpAccountsConfig>,
-    credentials: RwLock<Option<PersonalAccountCredentials>>,
-    plans: Mutex<BTreeMap<meerkat_core::types::SessionId, PrivateOwner>>,
     fences: RwLock<Option<crate::auth::session_fence::ConsoleSessionFences>>,
-    gate_installed: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for PersonalMcpAccounts {
@@ -452,61 +452,13 @@ impl PersonalMcpAccounts {
     pub fn new(config: McpAccountsConfig) -> Arc<Self> {
         Arc::new(Self {
             config: Arc::new(config),
-            credentials: RwLock::new(None),
-            plans: Mutex::new(BTreeMap::new()),
             fences: RwLock::new(None),
-            gate_installed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /// The account modes.
     pub fn config(&self) -> &McpAccountsConfig {
         &self.config
-    }
-
-    /// Keep the people's accounts in `factory`'s own provider-auth
-    /// persistence, each owner's in a realm of their own below
-    /// `installation_realm`, with `authority`, the composition runtime's
-    /// credential authority. `system` is the credential source the factory's
-    /// members use for every other server (`None` when they connect without
-    /// OAuth); a factory that has one uses
-    /// [`Self::member_credential_source`] over it. The factory also needs the
-    /// owner check ([`Self::composer`]).
-    ///
-    /// # Errors
-    ///
-    /// The factory has no provider-auth persistence, so no personal account
-    /// could be kept; no member build keeps a personal server then.
-    pub fn keep_accounts_in(
-        &self,
-        factory: &meerkat::AgentFactory,
-        authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
-        installation_realm: meerkat_core::RealmId,
-        system: Option<Arc<dyn meerkat_mcp::McpAuthResolver>>,
-    ) -> Result<(), meerkat::HostAuthError> {
-        let host_auth = meerkat::HostAuthService::from_factory(factory, authority)?;
-        self.bind_credentials(PersonalAccountCredentials::new(
-            host_auth,
-            installation_realm,
-            system,
-        ));
-        Ok(())
-    }
-
-    /// Bind where the composition keeps its people's accounts. Until it is
-    /// bound, no member build keeps a personal server.
-    pub fn bind_credentials(&self, credentials: PersonalAccountCredentials) {
-        *self
-            .credentials
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(credentials);
-    }
-
-    fn credentials(&self) -> Option<PersonalAccountCredentials> {
-        self.credentials
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
     }
 
     /// Bind the console's session fence record, which an access admin's
@@ -520,31 +472,6 @@ impl PersonalMcpAccounts {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-
-    fn keep_plan(&self, session: meerkat_core::types::SessionId, owner: PrivateOwner) {
-        let mut plans = self.plans.lock().unwrap_or_else(PoisonError::into_inner);
-        if plans.len() >= MEMBER_PLAN_LIMIT {
-            plans.clear();
-        }
-        plans.insert(session, owner);
-    }
-
-    fn take_plan(&self, session: &meerkat_core::types::SessionId) -> Option<PrivateOwner> {
-        self.plans
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(session)
-    }
-
-    fn mark_gate_installed(&self) {
-        self.gate_installed
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
-    fn gate_installed(&self) -> bool {
-        self.gate_installed
-            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The refusal of a use of the personal server `server` by a run whose

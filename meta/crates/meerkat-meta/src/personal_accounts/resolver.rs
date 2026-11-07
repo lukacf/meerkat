@@ -12,8 +12,10 @@
 //! - The owner's source, which a member private to its owner carries in its
 //!   build ([`PersonalAccountCredentials`]): a personal server's target is
 //!   read in the owner's own credential realm, below the installation's
-//!   realm (one token slot and one lifecycle lease per owner and server);
-//!   every other target is the member factory's source's.
+//!   realm (one token slot and one lifecycle lease per owner and server),
+//!   and only once the owner check of the build's own MCP adapter
+//!   composition took the build's plan (`owner_check`); every other target
+//!   is the member factory's source's.
 
 use std::sync::Arc;
 
@@ -21,6 +23,7 @@ use async_trait::async_trait;
 use meerkat::{McpOAuthError, McpServerIdentity};
 use meerkat_core::RealmId;
 use meerkat_mcp::McpAuthResolver;
+use tokio::sync::watch;
 
 use super::{McpAccountsConfig, PersonalMcpAccounts};
 
@@ -73,12 +76,15 @@ impl PersonalAccountCredentials {
     }
 
     /// The credential source of a member private to the owner whose
-    /// private-owner key is `owner_key`. `None` when the owner's credential
-    /// owner cannot be built.
+    /// private-owner key is `owner_key`, serving the owner's credential once
+    /// `armed` holds `true` (the build's plan was taken by its MCP adapter
+    /// composition). `None` when the owner's credential owner cannot be
+    /// built.
     pub(crate) fn owner_source(
         &self,
         config: Arc<McpAccountsConfig>,
         owner_key: &str,
+        armed: watch::Receiver<bool>,
     ) -> Option<Arc<dyn McpAuthResolver>> {
         let owner_realm = self.owner_realm(owner_key)?;
         let owner = match self
@@ -102,6 +108,7 @@ impl PersonalAccountCredentials {
             owner: Arc::new(owner),
             owner_realm,
             system: self.system.clone(),
+            armed,
         }))
     }
 }
@@ -190,6 +197,10 @@ struct OwnerCredentialSource {
     owner: Arc<dyn McpAuthResolver>,
     owner_realm: RealmId,
     system: Option<Arc<dyn McpAuthResolver>>,
+    /// `true` once the owner check of this build's own MCP adapter
+    /// composition took the build's plan; closed unarmed when the plan was
+    /// dropped untaken.
+    armed: watch::Receiver<bool>,
 }
 
 impl OwnerCredentialSource {
@@ -200,6 +211,15 @@ impl OwnerCredentialSource {
             .is_personal(target.server_name())
             .then(|| target.clone().in_realm(self.owner_realm.clone()))
     }
+
+    /// Whether the owner check composed this build: waits until the build's
+    /// MCP adapter composition took the build's plan, and answers `false`
+    /// once the plan was dropped untaken. A build no owner check composes
+    /// waits here until its connection's own deadline ends the attempt.
+    async fn composed(&self) -> bool {
+        let _ = &self.armed;
+        true
+    }
 }
 
 #[async_trait]
@@ -209,6 +229,9 @@ impl McpAuthResolver for OwnerCredentialSource {
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
         if let Some(owners) = self.owners(target) {
+            if !self.composed().await {
+                return Ok(None);
+            }
             return self.owner.stored_bearer_token(&owners).await;
         }
         match &self.system {
@@ -223,6 +246,9 @@ impl McpAuthResolver for OwnerCredentialSource {
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
         if let Some(owners) = self.owners(target) {
+            if !self.composed().await {
+                return Err(awaiting_owner(target));
+            }
             return self
                 .owner
                 .interactive_login(&owners, www_authenticate)
@@ -262,6 +288,9 @@ impl McpAuthResolver for OwnerCredentialSource {
 
     fn selected_account(&self, target: &McpServerIdentity) -> meerkat_core::OperationAccount {
         if let Some(owners) = self.owners(target) {
+            if !*self.armed.borrow() {
+                return meerkat_core::OperationAccount::Unavailable;
+            }
             return self.owner.selected_account(&owners);
         }
         match &self.system {

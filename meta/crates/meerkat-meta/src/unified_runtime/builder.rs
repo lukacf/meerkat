@@ -3381,7 +3381,8 @@ impl UnifiedRuntimeBuilder {
         caps.image_generation |=
             crate::mob_handle_runtime::mob_definition_may_use_image_generation(&definition);
         // Personal accounts on MCP servers, checked against the MCP servers
-        // the definition's profiles declare.
+        // the definition's profiles declare: the owner check the spec's
+        // member factory installs below.
         let personal_accounts = match self.mcp_accounts.as_ref() {
             Some(config) => {
                 config
@@ -3393,7 +3394,7 @@ impl UnifiedRuntimeBuilder {
                     })?;
                 config
                     .has_personal_servers()
-                    .then(|| crate::PersonalMcpAccounts::new(config.clone()))
+                    .then(|| crate::PersonalMcpAccounts::new(config.clone()).owner_check())
             }
             None => None,
         };
@@ -3590,9 +3591,10 @@ impl UnifiedRuntimeBuilder {
         };
 
         spec = spec.with_mob_storage_provenance(mob_storage_provenance);
-        // Every member build classifies the personal servers it carries.
-        if let Some(accounts) = personal_accounts {
-            spec = spec.with_personal_mcp_accounts(accounts);
+        // Every member build classifies the personal servers it carries, with
+        // the owner check the composition installed on its member factory.
+        if let Some(check) = personal_accounts {
+            spec = spec.with_personal_mcp_accounts(check);
         }
         // One place for all three compositions above.
         if let Some(policy) = self.fork_instruction_policy {

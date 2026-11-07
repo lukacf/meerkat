@@ -17642,7 +17642,7 @@ external_addressable = true
                 })?;
             config
                 .has_personal_servers()
-                .then(|| crate::PersonalMcpAccounts::new(config))
+                .then(|| crate::PersonalMcpAccounts::new(config).owner_check())
         }
         None => None,
     };
@@ -18282,8 +18282,8 @@ external_addressable = true
         // Personal accounts on MCP servers: the owner check over the host's
         // composer, and the people's accounts in this factory's store.
         let factory = match personal_accounts.as_ref() {
-            Some(accounts) => crate::gateway_mcp_composition::compose_personal_accounts(
-                accounts,
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
                 factory,
                 host_composer,
                 &adapter,
@@ -18748,8 +18748,8 @@ external_addressable = true
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
         // As in the persistent arm: personal accounts on MCP servers.
         let factory = match personal_accounts.as_ref() {
-            Some(accounts) => crate::gateway_mcp_composition::compose_personal_accounts(
-                accounts,
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
                 factory,
                 host_composer,
                 &adapter,
@@ -19007,9 +19007,10 @@ external_addressable = true
         has_roster_provider,
     );
     let mob_spec = member_build_wiring.install(mob_spec);
-    // Every member build classifies the personal servers it carries.
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
     let mob_spec = match personal_accounts.as_ref() {
-        Some(accounts) => mob_spec.with_personal_mcp_accounts(Arc::clone(accounts)),
+        Some(check) => mob_spec.with_personal_mcp_accounts(check.clone()),
         None => mob_spec,
     };
     // Core records a member's binding under the realm that owns it, so the

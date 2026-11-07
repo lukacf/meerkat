@@ -4,8 +4,9 @@
 //! (`MobBootstrapSpec::with_base_layer`): a member's create, the fork that
 //! seats a side chat, and every rebuild of a member (an explicit resume, a
 //! warm revival, the wake of a dormant member, a respawn). There a
-//! composition with personal servers classifies each of them
-//! ([`PersonalMcpAccounts::classify_build`]):
+//! composition with personal servers classifies each of them with the owner
+//! check of the member factory that builds the spec's members
+//! ([`PersonalAccountOwnerCheck::classify_build`]):
 //!
 //! - a server that cannot be personal is withheld;
 //! - a member private to no person gets none;
@@ -13,7 +14,10 @@
 //!   credential source in the build
 //!   (`SessionBuildOptions::mcp_auth_resolver_override`, process-local, so
 //!   every build supplies it again), and its owner is kept for the build's
-//!   MCP adapter composition (the owner check).
+//!   MCP adapter composition (the owner check), when that check is installed
+//!   on the member factory and keeps the people's accounts. Otherwise it
+//!   gets none either. The source serves the owner's credential only once
+//!   that composition took the build's plan (see `owner_check`).
 //!
 //! A member is private to its owner only as a verified console side chat
 //! (the rule of [`crate::side_chat::verified_side_chat_source`] over the
@@ -27,37 +31,42 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
-use super::{APPROVAL_BRANCH_LABEL, PersonalMcpAccounts, PrivateOwner, unsupported_refusal};
+use super::{
+    APPROVAL_BRANCH_LABEL, PersonalAccountOwnerCheck, PersonalMcpAccounts, PrivateOwner,
+    unsupported_refusal,
+};
 
-/// The late-bound personal accounts every member build of a spec reads;
-/// empty (no personal servers) until a composition fills it.
+/// The late-bound owner check every member build of a spec reads; empty (no
+/// personal servers) until a composition fills it.
 #[derive(Clone, Default)]
 pub(crate) struct PersonalAccountsSlot {
-    accounts: Arc<RwLock<Option<Arc<PersonalMcpAccounts>>>>,
+    check: Arc<RwLock<Option<PersonalAccountOwnerCheck>>>,
 }
 
 impl std::fmt::Debug for PersonalAccountsSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PersonalAccountsSlot")
-            .field("filled", &self.accounts().is_some())
+            .field("filled", &self.check().is_some())
             .finish()
     }
 }
 
 impl PersonalAccountsSlot {
-    /// Fill the slot with the composition's personal accounts.
-    pub(crate) fn fill(&self, accounts: Arc<PersonalMcpAccounts>) {
-        *self
-            .accounts
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(accounts);
+    /// Fill the slot with the owner check of the spec's member factory.
+    pub(crate) fn fill(&self, check: PersonalAccountOwnerCheck) {
+        *self.check.write().unwrap_or_else(PoisonError::into_inner) = Some(check);
     }
 
-    pub(crate) fn accounts(&self) -> Option<Arc<PersonalMcpAccounts>> {
-        self.accounts
+    pub(crate) fn check(&self) -> Option<PersonalAccountOwnerCheck> {
+        self.check
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The composition's personal accounts.
+    pub(crate) fn accounts(&self) -> Option<Arc<PersonalMcpAccounts>> {
+        self.check().map(|check| Arc::clone(check.accounts()))
     }
 
     /// `hook`, then the classification of the build's personal servers.
@@ -71,8 +80,8 @@ impl PersonalAccountsSlot {
             let slot = slot.clone();
             Box::pin(async move {
                 hook(&mut *req).await?;
-                if let Some(accounts) = slot.accounts() {
-                    accounts.classify_build(req);
+                if let Some(check) = slot.check() {
+                    check.classify_build(req);
                 }
                 Ok(())
             })
@@ -108,11 +117,11 @@ fn build_owner(
     ))
 }
 
-impl PersonalMcpAccounts {
+impl PersonalAccountOwnerCheck {
     /// Classify the personal servers of one member build (see the module
     /// docs). Nothing changes for a build without personal servers.
     pub(crate) fn classify_build(&self, req: &mut CreateSessionRequest) {
-        let config = Arc::clone(&self.config);
+        let config = Arc::clone(&self.accounts().config);
         let labels = req.labels.clone().unwrap_or_default();
         let Some(build) = req.build.as_mut() else {
             return;
@@ -125,15 +134,16 @@ impl PersonalMcpAccounts {
             return;
         }
         // The owner, with the source the build carries for them; only where
-        // the owner check is installed on the member factory.
-        let served = build_owner(&labels, build)
-            .filter(|_| self.gate_installed())
-            .and_then(|(session, owner)| {
-                let source = self
-                    .credentials()?
-                    .owner_source(Arc::clone(&config), &owner.key)?;
-                Some((session, owner, source))
-            });
+        // this owner check is installed on the member factory. The source
+        // serves the owner's credential once this check's composition of the
+        // build's MCP adapter takes the build's plan.
+        let (arm, armed) = tokio::sync::watch::channel(false);
+        let served = build_owner(&labels, build).and_then(|(session, owner)| {
+            let source =
+                self.credentials()?
+                    .owner_source(Arc::clone(&config), &owner.key, armed)?;
+            Some((session, owner, source))
+        });
         let mut kept = false;
         build.mcp_servers.retain(|server| {
             if !config.is_personal(&server.name) {
@@ -162,7 +172,7 @@ impl PersonalMcpAccounts {
             build.mcp_auth_resolver_override = Some(
                 meerkat::encode_mcp_auth_resolver_override_for_service(source),
             );
-            self.keep_plan(session, owner);
+            self.keep_plan(session, owner, arm);
         }
     }
 }

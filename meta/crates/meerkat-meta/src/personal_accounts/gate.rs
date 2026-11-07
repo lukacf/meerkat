@@ -1,10 +1,10 @@
 //! The owner check: a dispatcher over each member's MCP adapter.
 //!
-//! A composition with personal servers composes every MCP adapter its member
-//! factories build ([`PersonalMcpAccounts::composer`]), over any composer a
-//! host installed. The returned [`PersonalAccountGate`] forwards everything
-//! to the adapter (or the host's dispatcher) and checks each path that
-//! reaches a server: every tool call (resolved or not) and every tool
+//! A member factory's owner check ([`super::PersonalAccountOwnerCheck`])
+//! composes every MCP adapter the factory builds ([`composer`]), over any
+//! composer a host installed. The returned [`PersonalAccountGate`] forwards
+//! everything to the adapter (or the host's dispatcher) and checks each path
+//! that reaches a server: every tool call (resolved or not) and every tool
 //! application (an MCP app's resource read or tool call), before the router.
 //! The server is named by the resolved plan's operation target or the app
 //! invocation's registration when there is one, and by the tool's MCP
@@ -30,11 +30,11 @@ use meerkat_core::{
     AgentToolDispatcher, ToolCatalogCapabilities, ToolCatalogEntry, ToolDispatchContext, ToolError,
 };
 
-use super::{PersonalAccountRefusal, PersonalMcpAccounts, PrivateOwner};
+use super::{PersonalAccountOwnerCheck, PersonalAccountRefusal, PersonalMcpAccounts, PrivateOwner};
 
-/// The composer [`PersonalMcpAccounts::composer`] installs.
+/// The composer [`PersonalAccountOwnerCheck::install`] installs.
 struct PersonalAccountComposer {
-    accounts: Arc<PersonalMcpAccounts>,
+    check: PersonalAccountOwnerCheck,
     host: Option<Arc<dyn McpAdapterComposer>>,
 }
 
@@ -49,29 +49,23 @@ impl McpAdapterComposer for PersonalAccountComposer {
             Some(host) => host.compose(adapter, session_id, member)?,
             None => Arc::clone(adapter) as Arc<dyn AgentToolDispatcher>,
         };
-        let owner = self.accounts.take_plan(session_id);
+        let owner = self.check.take_plan(session_id);
         Ok(Arc::new(PersonalAccountGate {
             inner,
-            accounts: Arc::clone(&self.accounts),
+            accounts: Arc::clone(self.check.accounts()),
             owner,
         }))
     }
 }
 
-impl PersonalMcpAccounts {
-    /// The MCP adapter composer of a member factory: every construction's
-    /// adapter, composed by `host` first when a host installed a composer,
-    /// behind the owner check.
-    pub fn composer(
-        self: &Arc<Self>,
-        host: Option<Arc<dyn McpAdapterComposer>>,
-    ) -> Arc<dyn McpAdapterComposer> {
-        self.mark_gate_installed();
-        Arc::new(PersonalAccountComposer {
-            accounts: Arc::clone(self),
-            host,
-        })
-    }
+/// The MCP adapter composer of the member factory `check` is installed on:
+/// every construction's adapter, composed by `host` first when a host
+/// installed a composer, behind the owner check.
+pub(crate) fn composer(
+    check: PersonalAccountOwnerCheck,
+    host: Option<Arc<dyn McpAdapterComposer>>,
+) -> Arc<dyn McpAdapterComposer> {
+    Arc::new(PersonalAccountComposer { check, host })
 }
 
 /// The owner check over one member's MCP adapter (see the module docs).

@@ -395,12 +395,12 @@ fn realm_config_source(
 /// (see [`crate::personal_accounts`]): the members' credential source for
 /// every other server is the realm's default MCP credential owner, installed
 /// here so that it serves no personal server's target (the builder wraps it
-/// in the realm's service-secret custody, `gateway_member_builder`); the
-/// owner check runs over `host`, the host's own composer if any; and the
-/// people's accounts are kept in the factory's own provider-auth
-/// persistence.
+/// in the realm's service-secret custody, `gateway_member_builder`); `check`,
+/// the owner check the gateway gives its spec, is installed over `host`, the
+/// host's own composer if any; and the people's accounts are kept in the
+/// factory's own provider-auth persistence.
 pub(crate) fn compose_personal_accounts(
-    accounts: &Arc<crate::PersonalMcpAccounts>,
+    check: &crate::PersonalAccountOwnerCheck,
     factory: AgentFactory,
     host: Option<Arc<dyn McpAdapterComposer>>,
     runtime: &MeerkatMachine,
@@ -417,7 +417,7 @@ pub(crate) fn compose_personal_accounts(
     );
     let (factory, system) = match default_owner {
         Some(owner) => {
-            let no_fallback = accounts.member_credential_source(owner);
+            let no_fallback = check.accounts().member_credential_source(owner);
             let factory = factory.mcp_auth_resolver(Arc::clone(&no_fallback));
             // The members private to an owner read every other server's
             // credential, and its service secrets, as the others do.
@@ -436,13 +436,13 @@ pub(crate) fn compose_personal_accounts(
         }
         None => (factory, None),
     };
-    accounts.keep_accounts_in(
+    check.keep_accounts_in(
         &factory,
         runtime.provider_auth_runtime_authority(),
         realm,
         system,
     )?;
-    Ok(factory.with_mcp_adapter_composer(accounts.composer(host)))
+    Ok(check.install(factory, host))
 }
 
 /// The installation's meerkat-level realm as the meerkat realm storage its

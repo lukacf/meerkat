@@ -268,9 +268,9 @@ pub use mobpack::{
 pub use mocks::{MockModuleProcess, MockProcessError};
 pub use personal_accounts::{
     APPROVAL_BRANCH_LABEL, McpAccountMode, McpAccountsConfig, McpAccountsConfigError,
-    McpServerAccounts, PersonalAccountCredentials, PersonalAccountRefusal, PersonalMcpAccounts,
-    UnsupportedPersonalServer, personal_server_shape, private_owner_key,
-    private_owner_key_of_principal,
+    McpServerAccounts, PersonalAccountCredentials, PersonalAccountOwnerCheck,
+    PersonalAccountRefusal, PersonalMcpAccounts, UnsupportedPersonalServer, personal_server_shape,
+    private_owner_key, private_owner_key_of_principal,
 };
 pub use process::{ProcessBoundaryError, run_process_json_line};
 pub use protocol::{ProtocolParseError, parse_module_event_line, parse_unified_event_line};

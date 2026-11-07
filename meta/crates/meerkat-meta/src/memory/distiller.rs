@@ -1989,28 +1989,25 @@ impl DistillerEngine {
         });
     }
 
-    /// A compaction-cause harvest whose evidence is `discards`: the batch
-    /// Core's cold settle of a session's owed compaction projections
-    /// published and answered (`OwedCompactionSettlement::Settled`). The
-    /// discards of a compaction whose projection the session still owed
-    /// when it ended reach the distiller as the `CompactionCompleted`
-    /// harvest would have read them. Bounded like the pre-rotation
-    /// distillation: answers the bound it did not end within.
-    pub(crate) async fn harvest_settled_discards_within_bound(
+    /// A compaction-cause harvest of a session that ended owing a
+    /// compaction's projection. Its evidence is `discards`, the batch
+    /// Core's cold settle published and answered
+    /// (`OwedCompactionSettlement::Settled`), or, with none, the session's
+    /// compaction discards read from its memory, as the
+    /// `CompactionCompleted` harvest reads them. Bounded like the
+    /// pre-rotation distillation: answers the run's outcome, or the bound
+    /// it did not end within.
+    pub(crate) async fn harvest_compaction_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
-        discards: Vec<DiscardEntry>,
-    ) -> Result<(), Duration> {
+        discards: Option<Vec<DiscardEntry>>,
+    ) -> Result<DistillOutcome, Duration> {
         let timeout = self.pre_rotation_timeout;
-        let harvest = self.distill_now_with(
-            identity,
-            session_key,
-            DistillCause::Compaction,
-            Some(discards),
-        );
-        if tokio::time::timeout(timeout, harvest).await.is_ok() {
-            return Ok(());
+        let harvest =
+            self.distill_now_with(identity, session_key, DistillCause::Compaction, discards);
+        if let Ok(outcome) = tokio::time::timeout(timeout, harvest).await {
+            return Ok(outcome);
         }
         tracing::warn!(
             identity,
@@ -2036,9 +2033,9 @@ impl DistillerEngine {
         Err(timeout)
     }
 
-    /// [`Self::harvest_settled_discards_within_bound`], detached: for a
-    /// session that goes on (Core refused the step that would have ended
-    /// it), off every critical path.
+    /// [`Self::harvest_compaction_within_bound`] of an answered batch,
+    /// detached: for a session that goes on (Core refused the step that
+    /// would have ended it), off every critical path.
     pub(crate) fn spawn_settled_discards_harvest(
         self: &Arc<Self>,
         identity: &str,

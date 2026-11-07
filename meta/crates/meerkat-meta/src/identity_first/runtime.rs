@@ -15027,24 +15027,33 @@ impl IdentityRuntime {
             // A compaction projection the outgoing session still owes is
             // settled first, and its discards harvested before the
             // transcript is distilled: no wake will finalize it, and the
-            // delete drops the session's scope once Core ended it.
-            if previous.is_live()
-                && let Some(settled) = self.settle_owed_compaction(identity).await
-                && let Err(bound) = injector
-                    .harvest_settled_discards_within_bound(
-                        identity,
-                        &settled.session_key,
-                        settled.discards,
-                    )
-                    .await
-            {
-                tracing::warn!(
-                    %identity,
-                    session_key,
-                    bound_ms = bound.as_millis() as u64,
-                    "the settled compaction's harvest did not finish within its bound; the \
-                     delete proceeds"
-                );
+            // delete drops the session's scope once Core ended it. A
+            // harvest that fails here, and a batch Core finalizes only as
+            // it ends the session (the settle failed), are owed to the
+            // retirement's side effects, which harvest the session's
+            // memory before the scope drop.
+            if previous.is_live() {
+                use self::lifecycle_projection::OwedSettle;
+                let owed = match self.settle_owed_compaction(identity).await {
+                    OwedSettle::Nothing => None,
+                    OwedSettle::Batch {
+                        session_key,
+                        discards,
+                    } => injector
+                        .harvest_compaction_within_bound(identity, &session_key, Some(discards))
+                        .await
+                        .err()
+                        .map(Some),
+                    OwedSettle::Published { session_key } => injector
+                        .harvest_compaction_within_bound(identity, &session_key, None)
+                        .await
+                        .err()
+                        .map(Some),
+                    OwedSettle::Unsettled => Some(None),
+                };
+                if let Some(failed) = owed {
+                    self.owe_compaction_fallback(identity, previous.generation().get(), failed);
+                }
             }
             injector
                 .distill_before_rotation(

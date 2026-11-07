@@ -673,23 +673,34 @@ impl AgentMemoryRuntimeInjector {
         self.distiller.is_some()
     }
 
-    /// The Distiller's harvest of a batch Core's cold settle answered
-    /// (`DistillerEngine::harvest_settled_discards_within_bound`), bounded
-    /// like the pre-rotation distillation. Without a Distiller there is
-    /// nothing to wait for.
-    pub(crate) async fn harvest_settled_discards_within_bound(
+    /// The Distiller's harvest of a compaction `session_key` ended owing
+    /// (`DistillerEngine::harvest_compaction_within_bound`), bounded like
+    /// the pre-rotation distillation: of `discards`, the batch Core's cold
+    /// settle answered, or, with none, of the session's compaction
+    /// discards read from its memory. `Ok` once the discards reached the
+    /// distiller, or there was nothing to read; `Err` with why they did
+    /// not (a timeout, a denial of the realm's budget, a failed read or
+    /// extraction). Without a Distiller there is nothing to harvest.
+    pub(crate) async fn harvest_compaction_within_bound(
         &self,
         identity: &AgentIdentity,
         session_key: &str,
-        discards: Vec<crate::memory::distiller::DiscardEntry>,
-    ) -> Result<(), std::time::Duration> {
-        match self.distiller.as_ref() {
-            Some(distiller) => {
-                distiller
-                    .harvest_settled_discards_within_bound(identity.as_str(), session_key, discards)
-                    .await
-            }
-            None => Ok(()),
+        discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
+    ) -> Result<(), String> {
+        let Some(distiller) = self.distiller.as_ref() else {
+            return Ok(());
+        };
+        match distiller
+            .harvest_compaction_within_bound(identity.as_str(), session_key, discards)
+            .await
+        {
+            Ok(outcome) if outcome.compaction_harvest_satisfied() => Ok(()),
+            Ok(crate::memory::distiller::DistillOutcome::Skipped { reason }) => Err(reason),
+            Ok(outcome) => Err(format!("{outcome:?}")),
+            Err(bound) => Err(format!(
+                "timed out: no answer within {} ms",
+                bound.as_millis()
+            )),
         }
     }
 

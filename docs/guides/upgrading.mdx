@@ -118,6 +118,58 @@ While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
 - A host that took a second loop's start refusal as the sign of another
   executor reads `DecisionExecutorPass::unclaimed` instead.
 
+### The downgrade cycle of store-owned identities
+
+A release before 0.9.9 does not read a mob's rows of schema version 2 and
+later: the rows of store-owned identities (present, pending their host's
+preparation or archived) and the tombstones of removed names
+(`IdentityRecordCensus::created_rows`, and the `identity-store-rows`
+finding of `rkat storage doctor`). A downgrade of a mob that holds any to
+such a release is supported through this cycle only, and a host's downgrade
+tooling refuses while the census counts any row. A downgrade to 0.9.9 or
+0.9.10 needs no cycle: they read the rows.
+
+1. Hold the mob's identity changes (`MobHandle::set_identity_changes_held`).
+2. Settle every identity awaiting its host's preparation
+   (`preparations_open`) and every held construction (`constructions_held`),
+   or remove the identity.
+3. Bring each stale seat up to date (`seats_stale`), or remove its identity.
+4. Export the set: `MobHandle::export_created_identities` answers a
+   `CreatedIdentitySetExport` (schema `meerkat.identity.created_set.v1`)
+   that holds every row as sealed, with each identity's session reference
+   (its member's session, or its archived session), sealed with a digest.
+   Keep it: the import needs it. Session contents, memory and decisions are
+   not in it.
+5. Purge: `MobHandle::purge_created_identities` with the export's digest,
+   as the host operator. One store transaction removes every row of the
+   set, and nothing else (no session, journal row or host-adopted intent),
+   only while the rows are still the export's. The mob then refuses every
+   identity change (`purged`) until it restarts.
+6. Downgrade.
+7. After the roll-forward, import the export:
+   `MobHandle::import_created_identities`, as the host operator, under
+   imported consent. A retry of its operation replays it.
+
+Under the older release, after the purge, an adopted identity that its
+host's roster still lists is a roster identity again, on its session. The
+other store-owned members are plain members: its roster pass, a
+`retire_stale` reconcile or a former spawner's retirement may retire them,
+archiving their sessions. The names of removed identities are free there,
+and a roster may seat one.
+
+Rolled forward, a start reads each store-owned identity whose row was purged
+as unreadable: its name is reserved, nothing acts on it and nothing seats it
+until the import restores its row. The import re-creates each record and
+re-binds its session: a member seated under its name is bound in place, on
+its session; an identity with no member is seated again, Dormant, on its
+archived session, or on a fresh session with the history unavailable notice
+when the session store no longer holds it; pending, archived and removed
+names are restored as recorded; and an adopted identity whose roster
+declared it again returns to store custody by the adoption's step. A name
+another holder keeps (a roster or a member seated on it meanwhile, or
+another row) is left as that holder has it, and the import's receipt reports
+it (`name_taken_meanwhile`).
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in
@@ -1046,7 +1098,8 @@ store-owned identity's pending preparation, so the paragraph above applies to
 every mob that holds one. This release has no step that deletes these rows:
 a removal writes the name's tombstone and an archive keeps its row, so a mob
 that holds any (`IdentityRecordCensus::created_rows` above zero) has no
-supported downgrade before the export and purge steps.
+supported downgrade before the export and purge steps, which 0.9.11 adds
+([the downgrade cycle](#the-downgrade-cycle-of-store-owned-identities)).
 `MobHandle::identity_record_census()` counts the rows and what a downgrade
 must settle first: the mob's rows (`created_rows`, the archived ones, the
 tombstones and the unreadable ones), the identities awaiting their host's

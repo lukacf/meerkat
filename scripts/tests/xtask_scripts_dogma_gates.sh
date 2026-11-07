@@ -375,12 +375,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its sixteen runs (at or above the floor of each
+# count for each of its seventeen runs (at or above the floor of each
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its ninety-eight
+# line in turn), its one hundred and five
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -1034,6 +1034,13 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessAdoptHeld is violated."' \
   'echo "Error: Action property NotAuditWitnessAdoptCandidate is violated."' \
   'echo "Error: Action property NotAuditWitnessAdoptStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleDeclaredKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleInPlace is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleTombstone is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleNameTaken is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReleased is violated."' \
   'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
   'echo "Error: Action property AuditRemovalTombstones is violated."' \
   'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
@@ -1066,6 +1073,12 @@ printf '%s\n' \
   'echo "Error: Invariant AuditAdoptExactlyOne is violated."' \
   'echo "Error: Action property AuditAdoptionKeepsTheIncarnation is violated."' \
   'echo "Error: Action property AuditAdoptionTakesASettledMember is violated."' \
+  'echo "Error: Invariant AuditCycleExactlyOne is violated."' \
+  'echo "Error: Action property AuditPurgeTouchesNothingElse is violated."' \
+  'echo "Error: Invariant AuditImportRestoresOverNoRow is violated."' \
+  'echo "Error: Action property AuditImportKeepsTheIncarnation is violated."' \
+  'echo "Error: Invariant created_origin_without_row_is_unreadable is violated."' \
+  'for action in PurgeIdentityRowsPurged PurgeIdentityRowsNonAuthoritative PurgeIdentityRowsReplayed PurgeIdentityRowsOperationReused PurgeIdentityRowsRowsPurged PurgeIdentityRowsNotHostOperator PurgeIdentityRowsChangesNotHeld PurgeIdentityRowsMobNotRunningStopped RecoverRowlessCreatedEntryReservedRunning RecoverRowlessCreatedEntryReservedStopped RecoverRowlessCreatedEntryKeptRunning RecoverRowlessCreatedEntryKeptStopped ImportIdentityRecordRestoredInPlace ImportIdentityRecordRestoredOwedSeat ImportIdentityRecordRestoredPending ImportIdentityRecordRestoredArchived ImportIdentityRecordRestoredTombstone ImportIdentityRecordRestoredByAdoption ImportIdentityRecordUnchanged ImportIdentityRecordNameTakenMeanwhile ImportIdentityRecordUnsettled ImportIdentityRecordNonAuthoritative ImportIdentityRecordChangesHeld ImportIdentityRecordRowsPurged ImportIdentityRecordMobNotRunningStopped AdmitIdentityChangeRowsPurged; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'for action in AdoptIdentityIntoStoreAdopted AdoptIdentityIntoStoreNotAdoptable AdoptIdentityIntoStorePredecessorMismatch AdoptIdentityIntoStoreAdmissionUnsettled AdoptIdentityIntoStoreDeclaredApplyOpen AdoptIdentityIntoStoreNameUnreadable AdoptIdentityIntoStoreNameTombstoned AdoptIdentityIntoStoreNonAuthoritative AdoptIdentityIntoStoreChangesHeld AdoptIdentityIntoStoreMobNotRunningStopped UnlistIdentityEntryRetiring OpenDeclaredApplyOpened CloseDeclaredApplyRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
   'echo "Error: Invariant owned_edge_owner_is_a_store_owned_end is violated."' \
@@ -1076,6 +1089,7 @@ printf '%s\n' \
   'echo "<C1OneRowRemoving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowArchiving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowUnreadable line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'for wrapper in CycleRestoresInPlace CycleRestoresOwedSeat CycleRestoresPending CycleRestoresArchived CycleRestoresTombstone CycleRestoresByAdoption; do echo "<$wrapper line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"; done' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
@@ -1256,7 +1270,13 @@ for alias_case in "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly" \
   "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning" \
   "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning" \
-  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning"; do
+  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning" \
+  "cycle:CycleRestoresInPlace:ImportIdentityRecordRestoredInPlace" \
+  "cycle:CycleRestoresOwedSeat:ImportIdentityRecordRestoredOwedSeat" \
+  "cycle:CycleRestoresPending:ImportIdentityRecordRestoredPending" \
+  "cycle:CycleRestoresArchived:ImportIdentityRecordRestoredArchived" \
+  "cycle:CycleRestoresTombstone:ImportIdentityRecordRestoredTombstone" \
+  "cycle:CycleRestoresByAdoption:ImportIdentityRecordRestoredByAdoption"; do
   alias_run="${alias_case%%:*}"
   alias_wrapper="${alias_case#*:}"
   alias_wrapper="${alias_wrapper%%:*}"

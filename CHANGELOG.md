@@ -180,6 +180,22 @@ them.
   no existing variant's discriminant moves. Every enum named here is
   exhaustive, so a downstream exhaustive match needs the new arms, or a
   wildcard arm.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides the downgrade cycle's purge, a start's reservation of a
+  store-owned identity whose row was purged, and the import (see Added).
+  `MobMachineInput` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` inputs gain `PurgeIdentityRows { receipt, host_operator }`
+  and `ImportIdentityRecord { agent_identity, kind, adopted_from_roster, row,
+  last_session }`, `MobMachineSignal` gains
+  `RecoverRowlessCreatedEntry { agent_identity }`, `MobMachineEffect` gains
+  `IdentityRowsPurgeResolved` and `IdentityRecordImportResolved`,
+  `IdentityChangeAdmissionKind` gains `RowsPurged`, and the state gains the
+  public fields `identity_rows_purged` and `identity_entry_rowless`, so code
+  that builds the state literally must set them. The kernel
+  `generated::mob::TransitionId` gains the new arms, each appended last, so
+  no existing variant's discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
 
 ### Added
 
@@ -398,6 +414,35 @@ them.
   the retryable `AdmissionUnsettled` (`admission_unsettled`) and
   `DeclaredApplyOpen` (`declared_apply_open`). No start, reconcile or
   declared apply adopts.
+- `meerkat-mob`: the downgrade cycle of a mob's rows of schema version 2 and
+  later (store-owned identities, archived ones and the tombstones of removed
+  names), which a release before 0.9.9 does not read.
+  `MobHandle::export_created_identities` exports them
+  (`CreatedIdentitySetExport`, schema `meerkat.identity.created_set.v1`),
+  each with its session reference (its member's session, or its archived
+  session), sealed with a digest; session contents, memory and decisions are
+  not in it. `MobHandle::purge_created_identities` (`IdentityRowsPurge`, the
+  host operator only, under held identity changes, receipt kind
+  `IdentityChangeKind::Purge`) removes them in one store transaction only
+  when their digest is the export's, and never a session, a journal row or
+  a host-adopted intent; the mob then refuses every identity change
+  (`IdentityChangeRefusal::Purged`, `purged`) until it restarts. Refusals:
+  `IdentityChangeRefusal::PurgeRefused` (`purge_refused`, with a
+  `PurgeRefusedReason`: `not_host_operator`, `changes_not_held`,
+  `export_mismatch`, `unreadable_rows`, `nothing_to_purge`). A start that
+  reads no row of a store-owned identity's name reserves the name: it reads
+  unreadable, and nothing acts on it or seats it, until
+  `MobHandle::import_created_identities` (`IdentityImport`, mode
+  `IdentityImportMode::Restore`, the host operator only, under imported
+  consent, receipt kind `IdentityChangeKind::Import`) restores its row.
+  The import restores each record and re-binds its session: a member seated
+  under the name in place, an unseated identity Dormant on its archived
+  session (a fresh session, with the history unavailable notice, when that
+  session is gone), pending, archived and removed names as recorded, and an
+  adopted identity a roster declared again by the adoption's step. A name
+  another holder keeps is left as it is and reported (receipt outcome
+  `IdentityChangeEntryOutcome::NameTakenMeanwhile`); a record whose row the
+  store holds is `Unchanged`.
 
 ### Changed
 
@@ -537,6 +582,14 @@ them.
   receipt (kind `adopt`) as unreadable. Its roster keeps the member's former
   spawner: retiring that spawner there retires the adopted member too, and
   the identity is owed its seat again.
+- A downgrade of a mob that holds rows of schema version 2 or later (the
+  census's `created_rows` above zero, the `identity-store-rows` doctor
+  finding) to a release before 0.9.9 is supported through the downgrade
+  cycle only: hold the identity changes, settle the pending preparations,
+  bring the stale seats up to date, export, purge, downgrade, and import
+  after the roll-forward (`docs/guides/upgrading.mdx`). A 0.9.9 or 0.9.10
+  build reads the rows themselves, so a downgrade to it needs no cycle; it
+  reads a purge's or an import's receipt as unreadable.
 
 ### Known limitations
 

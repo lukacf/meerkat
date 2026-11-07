@@ -10,7 +10,7 @@
 # identity_entry_audit.sh does for the declared apply, with the VIEW of
 # member_residency_audit that leaves out the two counters no guard reads
 # (model_step_count and topology_epoch); the runner first checks that the
-# model reads neither anywhere else. It checks sixteen runs of
+# model reads neither anywhere else. It checks seventeen runs of
 # created_identity_audit.tla, each over its whole space with TLC coverage, in
 # two parts (every part by default; --part <run>,<run>... checks those runs,
 # as a CI shard does). Its recovery part (--part recovery):
@@ -170,6 +170,24 @@
 #   runtime, generation and session (AuditAdoptionKeepsTheIncarnation),
 #   and takes a settled member only, outside a declared apply
 #   (AuditAdoptionTakesASettledMember). Its domains add a third identity.
+# - cycle (0.9.11): a worker the replay recovered and bound, and a
+#   roster-owned identity declared owed its seat, its spawn ladder opened
+#   and its first incarnation seated, one step at a time; then the worker's
+#   adoption into store custody and a store-owned identity's record owed
+#   its seat, each or not, under the host's changes hold, in a running and
+#   a stopped mob (or a candidate composition before the seed); a start's
+#   pass of each name its scan read no row of; the purge with each receipt,
+#   by the host operator or not; a change's admission; and the import of
+#   each kind of record for each name, a roster's adoption or not, over
+#   each row of its name: exactly one arm answers each
+#   (AuditCycleExactlyOne), the purge changes nothing of the machine but
+#   its own fact (AuditPurgeTouchesNothingElse), an import restores a
+#   record only where the store holds no row of its name
+#   (AuditImportRestoresOverNoRow) and binds a member in place on its
+#   incarnation (AuditImportKeepsTheIncarnation), and a Created entry whose
+#   row was purged stays reserved (the generated
+#   created_origin_without_row_is_unreadable). Its domains add a third
+#   identity.
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -215,7 +233,7 @@ done
 part_of() {
   case "$1" in
     scan|reseat|names|placed) echo recovery ;;
-    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered|edges|adoption) echo changes ;;
+    admit|commit|update|removal|archive|preparation|prepverdicts|placement|unlist|recovered|edges|adoption|cycle) echo changes ;;
     *) return 1 ;;
   esac
 }
@@ -257,6 +275,7 @@ unlist_states=336
 recovered_states=180
 edges_states=3089
 adoption_states=1620
+cycle_states=1735
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies
@@ -678,6 +697,39 @@ adoption_covered_actions=(
   CloseDeclaredApplyRunning
 )
 
+# The cycle run fires every arm of the purge, of a start's pass of a name
+# without a row and of an import in a running mob and their stopped arms
+# (the completed and destroyed ones are arm_coverage_not_covered.txt's),
+# and the admission's arm after a purge.
+cycle_covered_actions=(
+  PurgeIdentityRowsPurged
+  PurgeIdentityRowsNonAuthoritative
+  PurgeIdentityRowsReplayed
+  PurgeIdentityRowsOperationReused
+  PurgeIdentityRowsRowsPurged
+  PurgeIdentityRowsNotHostOperator
+  PurgeIdentityRowsChangesNotHeld
+  PurgeIdentityRowsMobNotRunningStopped
+  RecoverRowlessCreatedEntryReservedRunning
+  RecoverRowlessCreatedEntryReservedStopped
+  RecoverRowlessCreatedEntryKeptRunning
+  RecoverRowlessCreatedEntryKeptStopped
+  ImportIdentityRecordRestoredInPlace
+  ImportIdentityRecordRestoredOwedSeat
+  ImportIdentityRecordRestoredPending
+  ImportIdentityRecordRestoredArchived
+  ImportIdentityRecordRestoredTombstone
+  ImportIdentityRecordRestoredByAdoption
+  ImportIdentityRecordUnchanged
+  ImportIdentityRecordNameTakenMeanwhile
+  ImportIdentityRecordUnsettled
+  ImportIdentityRecordNonAuthoritative
+  ImportIdentityRecordChangesHeld
+  ImportIdentityRecordRowsPurged
+  ImportIdentityRecordMobNotRunningStopped
+  AdmitIdentityChangeRowsPurged
+)
+
 # A covered arm a run fires only through a named wrapper whose conjunct
 # restricts its exploration: TLC's coverage names such an action after the
 # wrapper (an action whose body is a conjunction is named after its
@@ -692,6 +744,12 @@ covered_aliases=(
   "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning"
   "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning"
   "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning"
+  "cycle:CycleRestoresInPlace:ImportIdentityRecordRestoredInPlace"
+  "cycle:CycleRestoresOwedSeat:ImportIdentityRecordRestoredOwedSeat"
+  "cycle:CycleRestoresPending:ImportIdentityRecordRestoredPending"
+  "cycle:CycleRestoresArchived:ImportIdentityRecordRestoredArchived"
+  "cycle:CycleRestoresTombstone:ImportIdentityRecordRestoredTombstone"
+  "cycle:CycleRestoresByAdoption:ImportIdentityRecordRestoredByAdoption"
 )
 
 spec_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -918,6 +976,15 @@ write_cfg() {
       run_invariants="
   AuditAdoptExactlyOne"
       ;;
+    cycle)
+      spec="CycleSpec"
+      run_properties="
+  AuditPurgeTouchesNothingElse
+  AuditImportKeepsTheIncarnation"
+      run_invariants="
+  AuditCycleExactlyOne
+  AuditImportRestoresOverNoRow"
+      ;;
     *)
       echo "error: unknown audit run '${run}'" >&2
       exit 1
@@ -936,7 +1003,7 @@ write_cfg() {
   # run adds a third identity, its third end, and the adoption run one no
   # member holds.
   local identities='{"agentidentity_1", "agentidentity_2"}'
-  if [[ "${run}" == "edges" || "${run}" == "adoption" ]]; then
+  if [[ "${run}" == "edges" || "${run}" == "adoption" || "${run}" == "cycle" ]]; then
     identities='{"agentidentity_1", "agentidentity_2", "agentidentity_3"}'
   fi
   replace_exact_line "  AgentIdentityValues = {}" "  AgentIdentityValues = ${identities}" "${cfg}"
@@ -1072,7 +1139,7 @@ check_space() {
   done
 }
 
-for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered edges adoption; do
+for run in scan reseat names placed admit commit update removal archive preparation prepverdicts placement unlist recovered edges adoption cycle; do
   if in_part "${run}"; then
     floor_var="${run}_states"
     arms_var="${run}_covered_actions[@]"
@@ -1139,7 +1206,11 @@ for witness in \
   "adoption:Action property:AdoptApplyOpen" "adoption:Action property:AdoptStoreOwned" \
   "adoption:Action property:AdoptNotAMember" "adoption:Action property:AdoptTombstoned" \
   "adoption:Action property:AdoptUnreadable" "adoption:Action property:AdoptHeld" \
-  "adoption:Action property:AdoptCandidate" "adoption:Action property:AdoptStopped"; do
+  "adoption:Action property:AdoptCandidate" "adoption:Action property:AdoptStopped" \
+  "cycle:Action property:CycleReserved" "cycle:Action property:CycleDeclaredKept" \
+  "cycle:Action property:CycleInPlace" "cycle:Action property:CycleOwedSeat" \
+  "cycle:Action property:CycleTombstone" "cycle:Action property:CycleNameTaken" \
+  "cycle:Action property:CycleReleased"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1859,6 +1930,18 @@ PY
   mutate adoption adopt_takes_an_unlisting_entry "Invariant retiring_entry_is_a_declared_entry" <<'PY'
 replace_in_arm("AdoptIdentityIntoStoreAdopted", "((agent_identity \\in identity_entry_retiring) = TRUE)",
                "FALSE")
+PY
+
+  # The purge drops the archived session records: a session reference
+  # the import re-binds is lost.
+  mutate cycle purge_drops_a_session "Action property AuditPurgeTouchesNothingElse" <<'PY'
+update_var("PurgeIdentityRowsPurged", "identity_entry_archived_sessions", "[x \\in {} |-> x]")
+PY
+
+  # A start's pass of a Created entry whose row was purged leaves its name
+  # readable, so a created custody seat may take it with no row.
+  mutate cycle reseat_without_row "Invariant created_origin_without_row_is_unreadable" <<'PY'
+keep_var("RecoverRowlessCreatedEntryReservedRunning", "identity_entry_unreadable")
 PY
 fi
 echo "created identity audit passed"

@@ -1495,6 +1495,29 @@ impl MobIdentityMemberStore for SpiMobIdentityStore {
             .await
     }
 
+    /// I: the purge's rows and receipt, checked and applied in one locked
+    /// in-memory step and committed as one host batch (the intents scope's
+    /// rows the purge removed, and its receipt).
+    async fn purge_created_identity_rows(
+        &self,
+        write: &crate::store::CreatedRowsPurgeWrite,
+    ) -> Result<crate::store::CreatedRowsPurge, MobStoreError> {
+        let touch = Touch {
+            intents: true,
+            change_receipt: Some((
+                write.receipt.mob_id.clone(),
+                write.receipt.operation_id.clone(),
+            )),
+            ..Touch::default()
+        };
+        self.bundle
+            .write(
+                touch,
+                self.bundle.identity.purge_created_identity_rows(write),
+            )
+            .await
+    }
+
     /// M + I in one batch: the member event appended under identity
     /// authority validated in the same locked state. The in-memory
     /// transaction writes no identity entry; the identity scope is locked so

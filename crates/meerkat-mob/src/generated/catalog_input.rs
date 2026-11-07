@@ -254,6 +254,8 @@ pub enum MobMachineCatalogInput {
     EndOwnedIdentityEdge,
     AdmitMemberUnwire,
     AdoptIdentityIntoStore,
+    PurgeIdentityRows,
+    ImportIdentityRecord,
 }
 
 impl MobMachineCatalogInput {
@@ -508,6 +510,8 @@ impl MobMachineCatalogInput {
         Self::EndOwnedIdentityEdge,
         Self::AdmitMemberUnwire,
         Self::AdoptIdentityIntoStore,
+        Self::PurgeIdentityRows,
+        Self::ImportIdentityRecord,
     ];
 
     #[must_use]
@@ -765,6 +769,8 @@ impl MobMachineCatalogInput {
             Self::EndOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndOwnedIdentityEdge,
             Self::AdmitMemberUnwire => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitMemberUnwire,
             Self::AdoptIdentityIntoStore => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptIdentityIntoStore,
+            Self::PurgeIdentityRows => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::PurgeIdentityRows,
+            Self::ImportIdentityRecord => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ImportIdentityRecord,
         }
     }
 
@@ -1047,6 +1053,8 @@ impl MobMachineCatalogInput {
             Self::EndOwnedIdentityEdge => "EndOwnedIdentityEdge",
             Self::AdmitMemberUnwire => "AdmitMemberUnwire",
             Self::AdoptIdentityIntoStore => "AdoptIdentityIntoStore",
+            Self::PurgeIdentityRows => "PurgeIdentityRows",
+            Self::ImportIdentityRecord => "ImportIdentityRecord",
         }
     }
 }

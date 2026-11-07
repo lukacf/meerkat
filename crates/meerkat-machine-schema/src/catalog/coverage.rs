@@ -1034,6 +1034,36 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         .effects(&["IdentityAdoptionResolved"]),
                 ),
                 machine_anchor(
+                    "mob_identity_downgrade_cycle_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/created_set.rs",
+                    "MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdmitIdentityChangeRowsPurged",
+                            "PurgeIdentityRowsPurged",
+                            "PurgeIdentityRowsNonAuthoritative",
+                            "PurgeIdentityRowsReplayed",
+                            "PurgeIdentityRowsOperationReused",
+                            "PurgeIdentityRowsRowsPurged",
+                            "PurgeIdentityRowsNotHostOperator",
+                            "PurgeIdentityRowsChangesNotHeld",
+                            "RecoverRowlessCreatedEntryReservedRunning",
+                            "RecoverRowlessCreatedEntryKeptRunning",
+                            "ImportIdentityRecordRestoredInPlace",
+                            "ImportIdentityRecordRestoredOwedSeat",
+                            "ImportIdentityRecordRestoredPending",
+                            "ImportIdentityRecordRestoredArchived",
+                            "ImportIdentityRecordRestoredTombstone",
+                            "ImportIdentityRecordRestoredByAdoption",
+                            "ImportIdentityRecordUnchanged",
+                            "ImportIdentityRecordNameTakenMeanwhile",
+                            "ImportIdentityRecordUnsettled",
+                        ])
+                        .effects(&["IdentityRowsPurgeResolved", "IdentityRecordImportResolved"])
+                        .invariants(&["created_origin_without_row_is_unreadable"]),
+                ),
+                machine_anchor(
                     "mob_identity_preparation_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/identity_preparation.rs",

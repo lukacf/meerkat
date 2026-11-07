@@ -97,6 +97,14 @@ impl MobActor {
                 let result = Box::pin(self.commit_identity_adoption(*commit)).await;
                 let _ = reply_tx.send(result);
             }
+            IdentityChangeCommand::CommitPurge { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_rows_purge(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::CommitImport { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_import(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
                 let result = Box::pin(self.begin_identity_construction(*request)).await;
@@ -135,7 +143,7 @@ impl MobActor {
     /// The store's receipt of `operation`, as the machine reads it: none, the
     /// same request's (the receipt itself, which a replay answers), or
     /// another request's.
-    async fn observe_change_receipt(
+    pub(super) async fn observe_change_receipt(
         &self,
         operation: &IdentityOperation,
     ) -> Result<

@@ -327,6 +327,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_entry_constructions_held`: `Map<AgentIdentity, u64>`
 - `identity_entry_constructions_activating`: `Map<AgentIdentity, u64>`
 - `identity_edge_owners`: `Map<WiringEdge, AgentIdentity>`
+- `identity_rows_purged`: `Bool`
+- `identity_entry_rowless`: `Set<AgentIdentity>`
 - `operator_instruction_revision`: `Map<String, u64>`
 - `operator_instruction_effect`: `Map<String, InstructionEffect>`
 - `operator_instruction_digest`: `Map<String, String>`
@@ -604,6 +606,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EndOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity, cause: OwnedEdgeEndCause)
 - `AdmitMemberUnwire`(edge: WiringEdge)
 - `AdoptIdentityIntoStore`(agent_identity: AgentIdentity, source: IdentityAdoptionSource, generation: Option<Generation>)
+- `PurgeIdentityRows`(receipt: IdentityChangeReceiptKind, host_operator: Bool)
+- `ImportIdentityRecord`(agent_identity: AgentIdentity, kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, last_session: Option<SessionId>)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)
@@ -698,6 +702,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverIdentityEntryRetiring`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId)
 - `RecoverCreatedIdentityEntry`(agent_identity: AgentIdentity, presence: RecoveredPresence, last_session: Option<SessionId>)
 - `RecoverOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
+- `RecoverRowlessCreatedEntry`(agent_identity: AgentIdentity)
 - `SetOperatorInstruction`(slot: String, revision: u64, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>)
 - `RevokeOperatorInstruction`(slot: String, revision: u64)
 - `RecoverOperatorInstruction`(slot: String, revision: u64, effect: InstructionEffect, digest: String, body_bytes: u64, target_kind: InstructionTargetKind, target_profile: String, target_member: Option<AgentIdentity>, generation: u64)
@@ -906,15 +911,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OwnedIdentityEdgeEnded`(edge: WiringEdge, cause: OwnedEdgeEndCause, verdict: OwnedEdgeEndVerdict)
 - `MemberUnwireAdmissionResolved`(edge: WiringEdge, verdict: MemberUnwireAdmission)
 - `IdentityAdoptionResolved`(agent_identity: AgentIdentity, verdict: IdentityAdoptionVerdict, reason: Option<IdentityNotAdoptableReason>)
+- `IdentityRowsPurgeResolved`(verdict: IdentityRowsPurgeVerdict)
+- `IdentityRecordImportResolved`(agent_identity: AgentIdentity, verdict: IdentityImportVerdict)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
 - `identity_entry_verdict`(composition_authoritative: Bool, intent_managed: Bool, worker_holds_name: Bool, lifecycle_in_flight: Bool, seated: Bool, ever_created: Bool, placement: EntryPlacementKind, held_creation: Bool, profile_matches: Bool, migration_declared_from_current: Bool, session_memory_only: Bool, mode_matches: Bool, resume_role_moved: Bool, migration_declared_from_resume_role: Bool, preparation_required: Bool, record_only: Bool) -> `IdentityEntryVerdict`
-- `identity_change_admission`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, changes_held: Bool, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool) -> `IdentityChangeAdmissionKind`
+- `identity_change_admission`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, changes_held: Bool, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool) -> `IdentityChangeAdmissionKind`
 - `created_identity_record_verdict`(composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, held_by_identity: Bool, held_by_worker: Bool) -> `CreatedIdentityRecordVerdict`
 - `identity_entry_change_verdict`(kind: IdentityEntryChangeKind, composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, entry_recorded: Bool, entry_store_owned: Bool, in_flight: Bool, seated: Bool, archived: Bool, preparation_pending: Bool) -> `IdentityEntryChangeVerdict`
 - `identity_adoption_verdict`(source: IdentityAdoptionSource, composition_authoritative: Bool, changes_held: Bool, declared_apply_open: Bool, name_unreadable: Bool, name_tombstoned: Bool, origin_declared: Bool, origin_created: Bool, seated: Bool, generation_current: Bool, unsettled: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool) -> `IdentityAdoptionVerdict`
 - `identity_not_adoptable_reason`(source: IdentityAdoptionSource, origin_declared: Bool, origin_created: Bool, seated: Bool, placed: Bool, hosted_on_first_use: Bool, held_creation: Bool) -> `IdentityNotAdoptableReason`
+- `identity_rows_purge_verdict`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, host_operator: Bool, changes_held: Bool) -> `IdentityRowsPurgeVerdict`
+- `identity_import_verdict`(kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, composition_authoritative: Bool, changes_held: Bool, rows_purged: Bool, unsettled: Bool, rowless: Bool, origin_declared: Bool, origin_created: Bool, name_reserved: Bool, seated: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool) -> `IdentityImportVerdict`
 - `created_entry_cause`(preparation_required: Bool, placement: EntryPlacementKind, held_creation: Bool) -> `UnseatedEntryCause`
 - `unlist_entry_verdict`(composition_authoritative: Bool, declared_entry: Bool, in_flight: Bool, seated: Bool) -> `UnlistEntryVerdict`
 - `preparation_construction_verdict`(composition_authoritative: Bool, preparation_pending: Bool, constructed: Bool, construction_open: Bool) -> `PreparationConstructionVerdict`
@@ -1112,6 +1121,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `tombstone_is_never_an_entry`
 - `owned_edge_owner_is_a_store_owned_end`
 - `owned_edge_joins_no_tombstone`
+- `created_origin_without_row_is_unreadable`
 - `construction_is_held_or_activating`
 - `entry_custodies_are_disjoint`
 - `entry_custody_ladder_is_open`
@@ -20484,6 +20494,236 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IdentityAdoptionResolved`
 - To: `Destroyed`
 
+### `AdmitIdentityChangeRowsPurged`
+- From: `Running`
+- On: `AdmitIdentityChange`(receipt, consent, permit_binds, permit_admits, host_operator, grant_current, spec_current)
+- Guards:
+  - `admission_rows_purged`
+- Emits: `IdentityChangeAdmissionResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsPurged`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_purged`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsNonAuthoritative`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_non_authoritative`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsReplayed`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_replayed`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsOperationReused`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_operation_reused`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsRowsPurged`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_rows_purged`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsNotHostOperator`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_not_host_operator`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsChangesNotHeld`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Guards:
+  - `purge_changes_not_held`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
+### `PurgeIdentityRowsMobNotRunningStopped`
+- From: `Stopped`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Stopped`
+
+### `PurgeIdentityRowsMobNotRunningCompleted`
+- From: `Completed`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Completed`
+
+### `PurgeIdentityRowsMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `PurgeIdentityRows`(receipt, host_operator)
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Destroyed`
+
+### `RecoverRowlessCreatedEntryReservedRunning`
+- From: `Running`
+- On: `RecoverRowlessCreatedEntry`(agent_identity)
+- Guards:
+  - `replay_not_sealed`
+  - `created_entry`
+  - `name_readable`
+- To: `Running`
+
+### `RecoverRowlessCreatedEntryReservedStopped`
+- From: `Stopped`
+- On: `RecoverRowlessCreatedEntry`(agent_identity)
+- Guards:
+  - `replay_not_sealed`
+  - `created_entry`
+  - `name_readable`
+- To: `Stopped`
+
+### `RecoverRowlessCreatedEntryKeptRunning`
+- From: `Running`
+- On: `RecoverRowlessCreatedEntry`(agent_identity)
+- Guards:
+  - `replay_not_sealed`
+  - `not_a_readable_created_entry`
+- To: `Running`
+
+### `RecoverRowlessCreatedEntryKeptStopped`
+- From: `Stopped`
+- On: `RecoverRowlessCreatedEntry`(agent_identity)
+- Guards:
+  - `replay_not_sealed`
+  - `not_a_readable_created_entry`
+- To: `Stopped`
+
+### `ImportIdentityRecordRestoredInPlace`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_in_place`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRestoredOwedSeat`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_owed_seat`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRestoredPending`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_pending`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRestoredArchived`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_archived`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRestoredTombstone`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_tombstone`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRestoredByAdoption`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_restored_by_adoption`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordUnchanged`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_unchanged`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordNameTakenMeanwhile`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_name_taken_meanwhile`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordUnsettled`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_unsettled`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordNonAuthoritative`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_non_authoritative`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordChangesHeld`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_changes_held`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordRowsPurged`
+- From: `Running`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Guards:
+  - `import_rows_purged`
+- Emits: `IdentityRecordImportResolved`
+- To: `Running`
+
+### `ImportIdentityRecordMobNotRunningStopped`
+- From: `Stopped`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Emits: `IdentityRecordImportResolved`
+- To: `Stopped`
+
+### `ImportIdentityRecordMobNotRunningCompleted`
+- From: `Completed`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Emits: `IdentityRecordImportResolved`
+- To: `Completed`
+
+### `ImportIdentityRecordMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `ImportIdentityRecord`(agent_identity, kind, adopted_from_roster, row, last_session)
+- Emits: `IdentityRecordImportResolved`
+- To: `Destroyed`
+
 ## Coverage
 ### Code Anchors
 - `mob_handle_surface` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
@@ -20498,6 +20738,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
 - `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row
 - `mob_identity_adoption_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/adoption.rs` — MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason
+- `mob_identity_downgrade_cycle_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_set.rs` — MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps
 - `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding

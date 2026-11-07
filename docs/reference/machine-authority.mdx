@@ -410,6 +410,24 @@ generation `PredecessorMismatch`, and any other shape no adoption takes
 then declares the member's current edges to identities owned edges of the
 adopted identity in the same step.
 
+`MobMachine` decides the downgrade cycle too (since 0.9.11).
+`PurgeIdentityRows` admits the host operator's purge of the mob's rows of
+schema version 2 and later only under held identity changes; the step's
+store transaction removes the rows when their digest is the export's, and
+the machine records only `identity_rows_purged`, which refuses every later
+identity change (`IdentityChangeAdmissionKind::RowsPurged`) until the mob
+restarts. A start that reads no row of a Created entry's name
+(`RecoverRowlessCreatedEntry`) reserves it, unreadable and rowless
+(`identity_entry_rowless`), so nothing acts on it and no seat binds it; the
+invariant `created_origin_without_row_is_unreadable` holds this.
+`ImportIdentityRecord` decides each exported record, one arm per verdict
+(`IdentityImportVerdict`): the record comes back for a member seated under
+its name in place, for an unseated name owed its seat on its archived
+session, as recorded for a pending, an archived or a removed name, or by the
+adoption's step for a roster's adopted identity whose roster declared it
+again; a name another holder keeps is reported and left, and a rowless
+entry's name a member holds now is released to that member.
+
 The host's preparation before an identity's first seat is `MobMachine`'s for
 either custody. `BeginPreparationConstruction` holds an attempt of a
 `constructed` preparation (`identity_entry_constructions_held`);

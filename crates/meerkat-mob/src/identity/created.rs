@@ -1033,6 +1033,12 @@ pub enum IdentityChangeKind {
     /// An existing member's adoption into store custody: a roster-owned
     /// identity, or a worker member.
     Adopt,
+    /// The host operator's purge of the mob's rows of schema version 2 and
+    /// later, before a downgrade, under the digest of their export.
+    Purge,
+    /// The host operator's import of an export after a roll-forward: each
+    /// record re-created and its session re-bound.
+    Import,
 }
 
 /// What a change did to one identity at its commit
@@ -1064,6 +1070,14 @@ pub enum IdentityChangeEntryOutcome {
     /// The activation of the identity's held construction was accepted: its
     /// publication seats it, and one that ends otherwise leaves it pending.
     Activating,
+    /// A purge removed the identity's row.
+    Purged,
+    /// An import found the identity's row already restored: nothing
+    /// changed.
+    Unchanged,
+    /// An import left the name as its current holder has it (a roster, a
+    /// member, or another row of the name): its record was not restored.
+    NameTakenMeanwhile,
 }
 
 /// One identity of a change's receipt.

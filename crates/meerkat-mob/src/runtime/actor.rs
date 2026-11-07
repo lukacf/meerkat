@@ -13,6 +13,7 @@ use super::*;
 
 mod adoption;
 pub(super) mod boot_lift;
+mod created_set;
 mod declared_apply;
 mod dormant_kickoff;
 mod dormant_seat;

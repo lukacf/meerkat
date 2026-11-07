@@ -24,6 +24,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // Adoption into store custody and owned edges (0.9.11): the rows of an
 // adoption, and of an identity change's edges.
 mod adoption;
+// The downgrade cycle (0.9.11): export, purge, the reservation of a purged
+// row's name, and import.
+mod cycle;
 mod owned_edges;
 
 const STEP: Duration = Duration::from_mins(1);

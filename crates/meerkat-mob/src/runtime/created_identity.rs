@@ -11,9 +11,13 @@
 //! to in the replayed journal. A store read that fails fails the start: a
 //! name the store may reserve is never read as free. The replay of a member
 //! row whose origin token this build does not know reserves the name as
-//! unreadable through the same signal. Once every row is recovered, the
-//! start recovers each owned edge a row holds (`RecoverOwnedIdentityEdge`,
-//! 0.9.11), and after its seats realizes those whose ends are both seated.
+//! unreadable through the same signal. A Created entry whose name the scan
+//! reads no row of (its row was purged before a downgrade, 0.9.11) is
+//! reserved too (`RecoverRowlessCreatedEntry`): nothing acts on it and no
+//! seat binds it until the import restores its row. Once every row is
+//! recovered, the start recovers each owned edge a row holds
+//! (`RecoverOwnedIdentityEdge`, 0.9.11), and after its seats realizes those
+//! whose ends are both seated.
 //!
 //! A created entry owed its seat (a build that predates created entries
 //! retired its member, or a kickoff's spawn after its create failed) is
@@ -129,6 +133,9 @@ pub(super) async fn recover_created_identity_entries(
     // The owned edges of the rows read, recovered once every row is: an
     // edge's other end may be a row read later.
     let mut owned_edges = Vec::new();
+    // Every name the scan read a row of: an entry name it read none of is
+    // passed once every row is recovered.
+    let mut scanned = std::collections::BTreeSet::new();
     loop {
         let page = store
             .scan_created_identities_page(
@@ -138,6 +145,7 @@ pub(super) async fn recover_created_identity_entries(
             )
             .await?;
         for (identity, observation) in &page.observations {
+            scanned.insert(identity.clone());
             if let CreatedIdentityObservation::Created(record) = observation {
                 for edge in &record.owned_edges {
                     owned_edges.push((identity.clone(), edge.peer.clone()));
@@ -192,6 +200,8 @@ pub(super) async fn recover_created_identity_entries(
         }
         match page.next {
             None => {
+                // RED: no name without a row is passed.
+                let _ = (&scanned, reserve_rowless_created_entries);
                 recover_owned_edges(authority, &owned_edges)?;
                 return Ok(recovered);
             }
@@ -205,6 +215,32 @@ pub(super) async fn recover_created_identity_entries(
             }
         }
     }
+}
+
+/// Pass MobMachine each entry name the boot's scan read no row of
+/// (`RecoverRowlessCreatedEntry`, 0.9.11), once every row is recovered: a
+/// Created entry's row was purged before a downgrade, and MobMachine
+/// reserves its name until an import restores the row; a Declared entry
+/// keeps no row, and MobMachine leaves it.
+fn reserve_rowless_created_entries(
+    authority: &mut mob_dsl::MobMachineAuthority,
+    scanned: &std::collections::BTreeSet<AgentIdentity>,
+) -> Result<(), MobError> {
+    let names: Vec<mob_dsl::AgentIdentity> = authority
+        .state()
+        .identity_entry_origins
+        .keys()
+        .filter(|identity| !scanned.contains(&AgentIdentity::from(identity.0.as_str())))
+        .cloned()
+        .collect();
+    for agent_identity in names {
+        super::builder::apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverRowlessCreatedEntry { agent_identity },
+            "recover_rowless_created_entry",
+        )?;
+    }
+    Ok(())
 }
 
 /// Recover each owned edge of the rows a start read
@@ -275,12 +311,14 @@ fn reseat_spec(row: &MemberSpawnedEvent, session_id: SessionId) -> super::SpawnM
 
 /// The created entries owed their seat that a start seats again, in
 /// identity order, each with its archived session record if it has one.
-/// None when the mob is not running, its destroy is admitted, or the
-/// composition is a candidate.
+/// None when the mob is not running, its destroy is admitted, the
+/// composition is a candidate, or the mob's rows were purged and it has not
+/// restarted since (no row to seat an entry from).
 fn owed_created_seats(state: &mob_dsl::MobMachineState) -> Vec<(AgentIdentity, Option<SessionId>)> {
     if state.lifecycle_phase != mob_dsl::MobPhase::Running
         || state.destroy_admitted
         || state.composition_authority != mob_dsl::CompositionAuthorityKind::Authoritative
+        || state.identity_rows_purged
     {
         return Vec::new();
     }

@@ -87,6 +87,12 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     IdentityAdoptionSource, IdentityAdoptionVerdict, IdentityNotAdoptableReason,
 };
+// The downgrade cycle (0.9.11): the purge's verdict, an imported record's
+// kind and its name's row, and the record's verdict. The schema's own types,
+// one definition for both instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    IdentityImportVerdict, IdentityRowsPurgeVerdict, ImportedRecordKind, ImportedRowState,
+};
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
 // target predicate the machine's helper states. The schema's own types, one
@@ -18685,6 +18691,431 @@ mod tests {
             authority.state().identity_entry_unseated.get(&owed),
             Some(&UnseatedEntryCause::SeatOwed),
             "a store-owned identity owed its seat now"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The downgrade cycle (0.9.11)
+    // ---------------------------------------------------------------------
+
+    /// The host operator's purge with the store's `receipt`, and its verdict.
+    fn purge_rows(
+        authority: &mut MobMachineAuthority,
+        receipt: IdentityChangeReceiptKind,
+        host_operator: bool,
+    ) -> IdentityRowsPurgeVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::PurgeIdentityRows {
+                receipt,
+                host_operator,
+            },
+        )
+        .expect("the purge answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityRowsPurgeResolved { verdict } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the purge emits its verdict")
+    }
+
+    /// Hold, or release, the mob's identity changes.
+    fn hold_changes(authority: &mut MobMachineAuthority, held: bool) {
+        MobMachineMutator::apply(authority, MobMachineInput::SetIdentityChangesHeld { held })
+            .expect("the hold answers");
+    }
+
+    /// One exported record's import, and its verdict.
+    fn import_record(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        kind: ImportedRecordKind,
+        adopted_from_roster: bool,
+        row: ImportedRowState,
+        last_session: Option<&SessionId>,
+    ) -> IdentityImportVerdict {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ImportIdentityRecord {
+                agent_identity: identity.clone(),
+                kind,
+                adopted_from_roster,
+                row,
+                last_session: last_session.cloned(),
+            },
+        )
+        .expect("the import answers every record")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityRecordImportResolved { verdict, .. } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the import emits its verdict")
+    }
+
+    /// The boot's pass of an entry name its scan read no row of.
+    fn recover_rowless(authority: &mut MobMachineAuthority, identity: &AgentIdentity) {
+        authority
+            .apply_signal(MobMachineSignal::RecoverRowlessCreatedEntry {
+                agent_identity: identity.clone(),
+            })
+            .expect("the recovery answers every entry name");
+    }
+
+    /// The admission of a host's change under its allow rule, and its
+    /// verdict.
+    fn admit_change(authority: &mut MobMachineAuthority) -> IdentityChangeAdmissionKind {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AdmitIdentityChange {
+                receipt: IdentityChangeReceiptKind::Absent,
+                consent: IdentityChangeConsentKind::Policy,
+                permit_binds: false,
+                permit_admits: false,
+                host_operator: false,
+                grant_current: true,
+                spec_current: true,
+            },
+        )
+        .expect("the admission answers every change")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityChangeAdmissionResolved { verdict } => Some(*verdict),
+            _ => None,
+        })
+        .expect("the admission's verdict")
+    }
+
+    /// The purge is the host operator's, under held changes; once it went
+    /// on, every identity change and every later purge is refused until the
+    /// mob restarts, and nothing else of the machine moves: no member,
+    /// session or entry.
+    ///
+    /// RED: drop the purge's record (`PurgeIdentityRowsPurged`): the next
+    /// change is admitted.
+    #[test]
+    fn a_purge_is_the_host_operators_under_held_changes_and_refuses_changes_until_restart() {
+        let (mut authority, _) = created_entries(&["alpha"]);
+        let seated = seat_for_adoption(&mut authority, "seated", false);
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityRowsPurgeVerdict::ChangesNotHeld
+        );
+        hold_changes(&mut authority, true);
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Absent, false),
+            IdentityRowsPurgeVerdict::NotHostOperator
+        );
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Other, true),
+            IdentityRowsPurgeVerdict::OperationReused
+        );
+        let before = authority.state().clone();
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityRowsPurgeVerdict::Purged
+        );
+        let state = authority.state();
+        assert!(state.identity_rows_purged);
+        assert_eq!(state.identity_entry_origins, before.identity_entry_origins);
+        assert_eq!(
+            state.identity_entry_unseated,
+            before.identity_entry_unseated
+        );
+        assert_eq!(state.identity_to_runtime, before.identity_to_runtime);
+        assert_eq!(
+            state.member_session_bindings,
+            before.member_session_bindings
+        );
+        assert!(state.identity_to_runtime.contains_key(&seated));
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Same, true),
+            IdentityRowsPurgeVerdict::Replayed,
+            "a retry of the purge replays it"
+        );
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityRowsPurgeVerdict::RowsPurged
+        );
+        hold_changes(&mut authority, false);
+        assert_eq!(
+            admit_change(&mut authority),
+            IdentityChangeAdmissionKind::RowsPurged
+        );
+    }
+
+    /// A start whose scan reads no row of a Created entry's name reserves
+    /// it, unreadable and rowless: no spawn under created custody takes it.
+    /// A Declared entry, which keeps no row, is left as it is.
+    ///
+    /// RED: drop the reservation (`RecoverRowlessCreatedEntryReserved`): the
+    /// entry stays owed its seat, and its created custody spawn is admitted.
+    #[test]
+    fn a_created_entry_whose_row_the_start_reads_none_of_is_reserved() {
+        let (mut authority, identities) = created_entries(&["purged"]);
+        let purged = &identities[0];
+        let listed = seat_for_adoption(&mut authority, "listed", true);
+        recover_rowless(&mut authority, purged);
+        recover_rowless(&mut authority, &listed);
+        let state = authority.state();
+        assert!(state.identity_entry_unreadable.contains(purged));
+        assert!(state.identity_entry_rowless.contains(purged));
+        assert!(!state.identity_entry_unreadable.contains(&listed));
+        assert!(!state.identity_entry_rowless.contains(&listed));
+        assert_eq!(
+            probe(&mut authority, purged, false, true),
+            MemberAdmissionVerdictKind::IdentityNameReserved,
+            "no created custody spawn seats the reserved name"
+        );
+    }
+
+    /// The import restores each record by its name's facts: a rowless
+    /// entry's member in place, or its seat owed on its archived session; a
+    /// pending, an archived and a removed name's record as recorded; a
+    /// roster's adopted identity by the adoption's step; a plain member in
+    /// place.
+    ///
+    /// RED: drop the restore of an owed seat
+    /// (`ImportIdentityRecordRestoredOwedSeat`): the entry stays reserved.
+    #[test]
+    fn an_import_restores_each_record_by_its_names_facts() {
+        let (mut authority, identities) =
+            created_entries(&["owed", "pending", "archived", "removed"]);
+        let (owed, pending, archived, removed) = (
+            &identities[0],
+            &identities[1],
+            &identities[2],
+            &identities[3],
+        );
+        let in_place = seat_for_adoption(&mut authority, "in-place", false);
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &in_place,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+        for identity in [owed, pending, archived, removed, &in_place] {
+            recover_rowless(&mut authority, identity);
+        }
+        let plain = seat_for_adoption(&mut authority, "plain", false);
+        let listed = seat_for_adoption(&mut authority, "listed", true);
+        let session = SessionId::from("session-archived");
+        for (identity, kind, adopted_from_roster, verdict) in [
+            (
+                &in_place,
+                ImportedRecordKind::Present,
+                false,
+                IdentityImportVerdict::RestoredInPlace,
+            ),
+            (
+                owed,
+                ImportedRecordKind::Present,
+                false,
+                IdentityImportVerdict::RestoredOwedSeat,
+            ),
+            (
+                pending,
+                ImportedRecordKind::PendingPreparation,
+                false,
+                IdentityImportVerdict::RestoredPending,
+            ),
+            (
+                archived,
+                ImportedRecordKind::Archived,
+                false,
+                IdentityImportVerdict::RestoredArchived,
+            ),
+            (
+                removed,
+                ImportedRecordKind::Tombstone,
+                false,
+                IdentityImportVerdict::RestoredTombstone,
+            ),
+            (
+                &listed,
+                ImportedRecordKind::Present,
+                true,
+                IdentityImportVerdict::RestoredByAdoption,
+            ),
+            (
+                &plain,
+                ImportedRecordKind::Present,
+                false,
+                IdentityImportVerdict::RestoredInPlace,
+            ),
+        ] {
+            assert_eq!(
+                import_record(
+                    &mut authority,
+                    identity,
+                    kind,
+                    adopted_from_roster,
+                    ImportedRowState::Absent,
+                    Some(&session)
+                ),
+                verdict,
+                "{identity:?}"
+            );
+        }
+        let state = authority.state();
+        for identity in [&in_place, owed, pending, archived, &listed, &plain] {
+            assert_eq!(
+                state.identity_entry_origins.get(identity),
+                Some(&IdentityEntryOrigin::Created),
+                "{identity:?}"
+            );
+            assert!(!state.identity_entry_unreadable.contains(identity));
+            assert!(!state.identity_entry_rowless.contains(identity));
+        }
+        assert_eq!(
+            state.identity_entry_unseated.get(owed),
+            Some(&UnseatedEntryCause::SeatOwed)
+        );
+        assert_eq!(
+            state.identity_entry_archived_sessions.get(owed),
+            Some(&session),
+            "the exported session is its revival record"
+        );
+        assert_eq!(
+            state.identity_entry_unseated.get(pending),
+            Some(&UnseatedEntryCause::PreparationPending)
+        );
+        assert_eq!(
+            state.identity_entry_unseated.get(archived),
+            Some(&UnseatedEntryCause::Archived)
+        );
+        assert!(state.identity_entry_tombstones.contains(removed));
+        assert_eq!(state.identity_entry_origins.get(removed), None);
+        assert_eq!(state.identity_entry_unseated.get(&in_place), None);
+        assert!(state.identity_to_runtime.contains_key(&in_place));
+
+        // A rowless entry's name a member holds now, under a removed name's
+        // record: reported, and released to the member.
+        let taken = seat_for_adoption(&mut authority, "taken", false);
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &taken,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+        recover_rowless(&mut authority, &taken);
+        assert_eq!(
+            import_record(
+                &mut authority,
+                &taken,
+                ImportedRecordKind::Tombstone,
+                false,
+                ImportedRowState::Absent,
+                None
+            ),
+            IdentityImportVerdict::NameTakenMeanwhile
+        );
+        let state = authority.state();
+        assert_eq!(state.identity_entry_origins.get(&taken), None);
+        assert!(!state.identity_entry_unreadable.contains(&taken));
+        assert!(!state.identity_entry_rowless.contains(&taken));
+        assert!(!state.identity_entry_tombstones.contains(&taken));
+        assert!(state.identity_to_runtime.contains_key(&taken));
+    }
+
+    /// A name another holder keeps is reported and left as it is: another
+    /// row of the name, a roster entry for a record that is no roster's
+    /// adoption, a member under a removed name's record; the same row is
+    /// unchanged. A changes hold and a purge the mob has not restarted
+    /// since restore nothing.
+    #[test]
+    fn an_import_reports_a_name_another_holder_keeps_and_changes_nothing() {
+        let mut authority = MobMachineAuthority::new();
+        let listed = seat_for_adoption(&mut authority, "listed", true);
+        let plain = seat_for_adoption(&mut authority, "plain", false);
+        let before = authority.state().clone();
+        for (identity, kind, row, verdict) in [
+            (
+                &listed,
+                ImportedRecordKind::Present,
+                ImportedRowState::Absent,
+                IdentityImportVerdict::NameTakenMeanwhile,
+            ),
+            (
+                &listed,
+                ImportedRecordKind::Tombstone,
+                ImportedRowState::Absent,
+                IdentityImportVerdict::NameTakenMeanwhile,
+            ),
+            (
+                &plain,
+                ImportedRecordKind::Tombstone,
+                ImportedRowState::Absent,
+                IdentityImportVerdict::NameTakenMeanwhile,
+            ),
+            (
+                &plain,
+                ImportedRecordKind::Archived,
+                ImportedRowState::Absent,
+                IdentityImportVerdict::NameTakenMeanwhile,
+            ),
+            (
+                &plain,
+                ImportedRecordKind::Present,
+                ImportedRowState::Other,
+                IdentityImportVerdict::NameTakenMeanwhile,
+            ),
+            (
+                &plain,
+                ImportedRecordKind::Present,
+                ImportedRowState::Same,
+                IdentityImportVerdict::Unchanged,
+            ),
+        ] {
+            assert_eq!(
+                import_record(&mut authority, identity, kind, false, row, None),
+                verdict,
+                "{identity:?} {kind:?} {row:?}"
+            );
+        }
+        let state = authority.state();
+        assert_eq!(state.identity_entry_origins, before.identity_entry_origins);
+        assert_eq!(
+            state.identity_entry_tombstones,
+            before.identity_entry_tombstones
+        );
+        hold_changes(&mut authority, true);
+        assert_eq!(
+            import_record(
+                &mut authority,
+                &plain,
+                ImportedRecordKind::Present,
+                false,
+                ImportedRowState::Absent,
+                None
+            ),
+            IdentityImportVerdict::ChangesHeld
+        );
+        assert_eq!(
+            purge_rows(&mut authority, IdentityChangeReceiptKind::Absent, true),
+            IdentityRowsPurgeVerdict::Purged
+        );
+        hold_changes(&mut authority, false);
+        assert_eq!(
+            import_record(
+                &mut authority,
+                &plain,
+                ImportedRecordKind::Present,
+                false,
+                ImportedRowState::Absent,
+                None
+            ),
+            IdentityImportVerdict::RowsPurged
         );
     }
 }

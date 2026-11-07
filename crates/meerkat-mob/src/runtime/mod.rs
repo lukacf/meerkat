@@ -252,8 +252,8 @@ pub use identity_change::{
     IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
     IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
     IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason, StoreOwnedIdentityCreate,
-    StoreOwnedIdentityUpdate,
+    MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 mod identity_entry;
 mod identity_preparation;
@@ -263,6 +263,8 @@ pub use identity_preparation::{
 };
 mod adoption;
 pub use adoption::{AdoptionSource, IdentityAdoption};
+mod created_set;
+pub use created_set::{IdentityImport, IdentityImportMode, IdentityRowsPurge};
 mod owned_edges;
 pub use owned_edges::OwnedEdgeEndOutcome;
 mod identity_incarnation_custody;

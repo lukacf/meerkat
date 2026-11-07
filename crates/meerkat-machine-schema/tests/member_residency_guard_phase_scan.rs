@@ -96,8 +96,10 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// store-owned entry, the host's changes hold, a removal, an archive and an
 /// unarchive), a held construction's start, a settle and an attempt's end,
 /// the one-entry unlist, the owned edges (a declaration, an end, a plain
-/// unwire's admission and a recovery), and the adoption into store custody.
-/// They are written one arm per lifecycle phase as the residency arms are.
+/// unwire's admission and a recovery), the adoption into store custody, and
+/// the downgrade cycle (the purge, a start's reservation of a Created entry
+/// whose row was purged, and the import). They are written one arm per
+/// lifecycle phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -128,6 +130,9 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "AdmitMemberUnwire",
     "RecoverOwnedIdentityEdge",
     "AdoptIdentityIntoStore",
+    "PurgeIdentityRows",
+    "RecoverRowlessCreatedEntry",
+    "ImportIdentityRecord",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -169,6 +174,11 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "RecoverOwnedIdentityEdgeRecovered",
     "AdoptIdentityIntoStoreAdopted",
     "AdoptIdentityIntoStoreMobNotRunning",
+    "PurgeIdentityRowsPurged",
+    "PurgeIdentityRowsMobNotRunning",
+    "RecoverRowlessCreatedEntryReserved",
+    "ImportIdentityRecordRestoredInPlace",
+    "ImportIdentityRecordMobNotRunning",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

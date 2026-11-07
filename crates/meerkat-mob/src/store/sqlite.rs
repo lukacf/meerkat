@@ -4903,6 +4903,37 @@ fn read_identity_record_rows_at_sync(
 /// Count every row of `mob_id`'s created identity scan inside the caller's
 /// read transaction, page by page, as
 /// [`crate::runtime::IdentityRecordRows`] counts a store's scan.
+/// Every one of `mob_id`'s created identity rows, by identity, read page by
+/// page as the created identity scan reads them, over the caller's
+/// connection (inside its transaction): what a purge decides over.
+fn query_all_created_rows(
+    conn: &Connection,
+    mob_id: &MobId,
+) -> Result<BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>, MobStoreError> {
+    let mut rows = BTreeMap::new();
+    let mut after: Option<super::IdentityIntentScanCursor> = None;
+    loop {
+        let page = query_created_identities_page(
+            conn,
+            mob_id,
+            after.as_ref(),
+            super::IDENTITY_INTENT_SCAN_PAGE_MAX,
+        )?;
+        rows.extend(page.observations);
+        match page.next {
+            None => return Ok(rows),
+            Some(next) if after.as_ref().is_none_or(|current| &next > current) => {
+                after = Some(next);
+            }
+            Some(_) => {
+                return Err(MobStoreError::Internal(format!(
+                    "the created identity scan of mob '{mob_id}' returned a non-advancing cursor"
+                )));
+            }
+        }
+    }
+}
+
 fn count_identity_record_rows(
     conn: &Connection,
     mob_id: &MobId,
@@ -7111,6 +7142,72 @@ impl MobIdentityMemberStore for SqliteMobIdentityStore {
         run_sqlite_task(self.observer_owner(), move || {
             let conn = open_existing_identity_read_connection(&path, &store_instance_id)?;
             Ok(query_created_row_observation(&conn, &mob_id, &identity)?.1)
+        })
+        .await
+    }
+
+    async fn purge_created_identity_rows(
+        &self,
+        write: &super::CreatedRowsPurgeWrite,
+    ) -> Result<super::CreatedRowsPurge, MobStoreError> {
+        if self.event_bus.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        write
+            .receipt
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        let path = self.path.clone();
+        let store_instance_id = self.store_instance_id.clone();
+        let write = write.clone();
+        run_sqlite_task(self.observer_owner(), move || {
+            let mut conn = open_existing_identity_write_connection(&path, &store_instance_id)?;
+            let tx = begin_identity_immediate(&mut conn, &store_instance_id)?;
+            // Everything is read and checked inside the one IMMEDIATE
+            // transaction before anything is removed: a refusal changes
+            // nothing.
+            let receipt_key =
+                super::identity_change_receipt_request_key(&write.receipt.operation_id);
+            if let Some(existing) =
+                query_identity_change_receipt(&tx, &write.receipt.mob_id, &receipt_key)?
+            {
+                return Ok(if existing.request_digest == write.receipt.request_digest {
+                    super::CreatedRowsPurge::Replayed { receipt: existing }
+                } else {
+                    super::CreatedRowsPurge::OperationReused { receipt: existing }
+                });
+            }
+            let rows = query_all_created_rows(&tx, &write.receipt.mob_id)?;
+            if let Some(refusal) = super::created_rows_purge_refusal(&write, &rows)? {
+                return Ok(refusal);
+            }
+            // The rows the created identity scan reads, and only those: a
+            // host-adopted intent's row (schema version 1) stays.
+            // RED: the purge removes no row.
+            for identity in rows.keys().filter(|_| false) {
+                tx.execute(
+                    "DELETE FROM mob_identity_intents WHERE mob_id = ?1 AND agent_identity = ?2",
+                    params![write.receipt.mob_id.as_str(), identity.as_str()],
+                )
+                .map_err(se)?;
+            }
+            let receipt_json = serde_json::to_vec(&write.receipt)
+                .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+            tx.execute(
+                "INSERT INTO mob_identity_intent_mutation_receipts
+                     (mob_id, request_id, agent_identity, request_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    write.receipt.mob_id.as_str(),
+                    receipt_key,
+                    write.receipt.key_identity().as_str(),
+                    write.receipt.request_digest.as_str(),
+                    receipt_json
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(super::CreatedRowsPurge::Purged)
         })
         .await
     }

@@ -91363,7 +91363,9 @@ fn mob_runtime_parity_field_value(
         | "member_definition_wiring_exempt"
         // Identity entries: the parity probes declare none.
         | "spawn_exec_entry_custody"
-        | "identity_entry_retiring" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "identity_entry_retiring"
+        // The downgrade cycle: the parity probes purge no row.
+        | "identity_entry_rowless" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         // Created identity entries, from the runtime's formal state.
         "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
             snapshot.identity_entry_tombstones.clone(),
@@ -91407,7 +91409,9 @@ fn mob_runtime_parity_field_value(
         }
         "boot_plan_sealed"
         // The declared apply's open fact: the parity probes open no apply.
-        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
+        | "declared_apply_open"
+        // The downgrade cycle's purge: the parity probes purge nothing.
+        | "identity_rows_purged" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),

@@ -4489,6 +4489,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "GrantRevoked",
                     "MobNotRunning",
                     "StaleSpec",
+                    "RowsPurged",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4638,6 +4639,44 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "HostedOnFirstUse",
                     "AwaitingHeldCreation",
                     "AwaitingHostPreparation",
+                ],
+            ),
+            // The downgrade cycle (0.9.11): the purge's verdict, an imported
+            // record's kind and its name's row, and the record's verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityRowsPurgeVerdict",
+                &[
+                    "Purged",
+                    "NonAuthoritative",
+                    "Replayed",
+                    "OperationReused",
+                    "RowsPurged",
+                    "NotHostOperator",
+                    "ChangesNotHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ImportedRecordKind",
+                &["Present", "PendingPreparation", "Archived", "Tombstone"],
+            ),
+            NamedTypeBinding::string_enum("ImportedRowState", &["Absent", "Same", "Other"]),
+            NamedTypeBinding::string_enum(
+                "IdentityImportVerdict",
+                &[
+                    "RestoredInPlace",
+                    "RestoredOwedSeat",
+                    "RestoredPending",
+                    "RestoredArchived",
+                    "RestoredTombstone",
+                    "RestoredByAdoption",
+                    "Unchanged",
+                    "NameTakenMeanwhile",
+                    "Unsettled",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "RowsPurged",
+                    "MobNotRunning",
                 ],
             ),
             NamedTypeBinding::string("RuntimeEpochId"),
@@ -5323,6 +5362,11 @@ runtime_internal_inputs!(
         // Adoption into store custody (0.9.11), decided in the actor's change
         // step. Not a surface command.
         AdoptIdentityIntoStore,
+        // The downgrade cycle (0.9.11): the purge and each imported record,
+        // decided in the actor's purge and import steps. Not surface
+        // commands.
+        PurgeIdentityRows,
+        ImportIdentityRecord,
     ]
 );
 

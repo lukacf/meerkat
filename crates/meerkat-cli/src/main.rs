@@ -10272,8 +10272,9 @@ async fn with_identity_store_rows(
                      the rows of store-owned identities and the tombstones of removed names. A \
                      release before 0.9.9 does not read them (Core 0.9.8 reads each such \
                      identity as unreadable and refuses every new identity-first adoption in \
-                     the mob), and this release has no step that deletes them, so a downgrade \
-                     of this mob to such a release is not supported while any remain"
+                     the mob), so a downgrade of this mob to such a release is supported only \
+                     through the downgrade cycle (export, purge, and import after the \
+                     roll-forward), and not while any remain"
                 )
             }
             Err(error) => format!(

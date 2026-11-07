@@ -647,6 +647,66 @@ pub enum IdentityChangeRefusal {
     /// A declared apply of the mob is open: an adoption waits for it to
     /// close, retryable.
     DeclaredApplyOpen,
+    /// The mob's rows of schema version 2 and later were purged before a
+    /// downgrade: its identity changes are refused until it restarts.
+    Purged,
+    /// The purge of the mob's rows is refused: `reason` says why.
+    PurgeRefused { reason: PurgeRefusedReason },
+}
+
+/// Why a purge of the mob's rows is refused
+/// ([`IdentityChangeRefusal::PurgeRefused`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PurgeRefusedReason {
+    /// Only the host operator purges.
+    NotHostOperator,
+    /// The mob's identity changes are not held: the cycle holds them first.
+    ChangesNotHeld,
+    /// The rows the store holds are not the export's: export them again.
+    /// `current_digest` is theirs.
+    ExportMismatch { current_digest: String },
+    /// Rows this build cannot read remain, which no import would restore.
+    UnreadableRows { identities: Vec<AgentIdentity> },
+    /// The mob holds no row of schema version 2 or later: nothing stands in
+    /// the way of a downgrade.
+    NothingToPurge,
+}
+
+impl PurgeRefusedReason {
+    /// The reason's stable token.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotHostOperator => "not_host_operator",
+            Self::ChangesNotHeld => "changes_not_held",
+            Self::ExportMismatch { .. } => "export_mismatch",
+            Self::UnreadableRows { .. } => "unreadable_rows",
+            Self::NothingToPurge => "nothing_to_purge",
+        }
+    }
+}
+
+impl std::fmt::Display for PurgeRefusedReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExportMismatch { current_digest } => write!(
+                formatter,
+                "export_mismatch (the rows' digest is {current_digest})"
+            ),
+            Self::UnreadableRows { identities } => {
+                formatter.write_str("unreadable_rows (")?;
+                for (index, identity) in identities.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{identity}")?;
+                }
+                formatter.write_str(")")
+            }
+            other => formatter.write_str(other.as_str()),
+        }
+    }
 }
 
 /// Why an adoption into store custody takes no identity of a shape
@@ -760,6 +820,8 @@ impl IdentityChangeRefusal {
             Self::PredecessorMismatch { .. } => "predecessor_mismatch",
             Self::AdmissionUnsettled { .. } => "admission_unsettled",
             Self::DeclaredApplyOpen => "declared_apply_open",
+            Self::Purged => "purged",
+            Self::PurgeRefused { .. } => "purge_refused",
         }
     }
 
@@ -900,6 +962,11 @@ impl std::fmt::Display for IdentityChangeRefusal {
             Self::DeclaredApplyOpen => {
                 write!(formatter, "a declared apply is open: retry once it closed")
             }
+            Self::Purged => formatter.write_str(
+                "the mob's identity rows were purged: its identity changes are refused until \
+                 it restarts",
+            ),
+            Self::PurgeRefused { reason } => write!(formatter, "the purge is refused: {reason}"),
         }
     }
 }
@@ -1442,6 +1509,7 @@ pub(super) fn admission_refusal(
         Verdict::StaleSpec => Some(stale.unwrap_or(IdentityChangeRefusal::InvalidRequest {
             problem: "the change's spec is not its identity's current one".to_string(),
         })),
+        Verdict::RowsPurged => Some(IdentityChangeRefusal::Purged),
     }
 }
 
@@ -1907,6 +1975,16 @@ pub(super) enum IdentityChangeCommand {
         commit: Box<super::adoption::AdoptionCommit>,
         reply_tx: oneshot::Sender<Result<super::adoption::AdoptionCommitted, MobError>>,
     },
+    /// Commit the purge of the mob's rows of schema version 2 and later.
+    CommitPurge {
+        commit: Box<super::created_set::PurgeCommit>,
+        reply_tx: oneshot::Sender<Result<super::created_set::ChangeCommitted, MobError>>,
+    },
+    /// Commit the import of an export.
+    CommitImport {
+        commit: Box<super::created_set::ImportCommit>,
+        reply_tx: oneshot::Sender<Result<super::created_set::ChangeCommitted, MobError>>,
+    },
     /// Abort a held construction attempt before its activation.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     AbortConstruction {
@@ -2333,6 +2411,12 @@ impl IdentityChangeCommand {
                 let _ = reply_tx.send(());
             }
             Self::CommitAdoption { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitPurge { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitImport { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]

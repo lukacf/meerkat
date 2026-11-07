@@ -1028,7 +1028,7 @@ fi
 # either. A hand-written audit over the same generated model
 # (created_identity_audit.tla, shards audits-q, audits-r and audits-t
 # through audits-v) checks
-# sixteen runs over their whole reachable space, in two parts. Its
+# seventeen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
 # or after the scan of its rows: no replay turns a Created entry Declared;
@@ -1092,9 +1092,14 @@ fi
 # edge ending only by its owner's end or an end's removal, keeping its
 # owner while owned, and no end naming another identity ending it) and an
 # adoption into store custody (exactly one arm answering each, keeping
-# its member's incarnation, and taking a settled member only). They
-# require every listed arm
-# to fire, a floor of distinct states (the changes part's printed until its
+# its member's incarnation, and taking a settled member only) and the
+# downgrade cycle (exactly one arm answering each purge, each start's
+# pass of a name without a row, each import and the admission after a
+# purge; a purge changing nothing of the machine but its own fact; an
+# import restoring a record only over no row of its name and binding a
+# member in place on its incarnation; a Created entry whose row was
+# purged reserved). They require every listed arm to fire, a floor of
+# distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants
 # refuses the seeded defects named in the runner: the created entries'
 # invariants and properties and the new guards a reachable state needs (a
@@ -1110,7 +1115,9 @@ fi
 # third identity's removal or not by its end's removal, a second
 # declaration taking custody, a plain unwire of an owned edge admitted, an
 # adoption that rotates its member, runs beside an open declared apply or
-# takes an entry its unlisting retires).
+# takes an entry its unlisting retires, a purge that drops the archived
+# session records, a start's pass that leaves a purged row's name
+# readable).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1120,7 +1127,7 @@ fi
 # scan and placed runs in audits-q and its reseat and names runs in
 # audits-v; the changes part's admit, commit, update and adoption runs in
 # audits-r, its archive, unlist, placement, recovered and edges runs in
-# audits-t, and its removal, preparation and prepverdicts runs in
+# audits-t, and its removal, preparation, prepverdicts and cycle runs in
 # audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
@@ -1145,6 +1152,10 @@ fi
 if run_part audits-u; then
   echo "running bounded created identity preparations TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part preparation,prepverdicts
+fi
+if run_part audits-u; then
+  echo "running bounded created identity downgrade cycle TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part cycle
 fi
 
 # The SessionDocumentMachine activation-body retirement region: a hand-written
@@ -1421,7 +1432,9 @@ run_machine_verify() {
 # factor): about 530-650 s;
 # audits-u = its preparation and prepverdicts runs 161-237 and the tool
 # grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
-# removal run, from audits-s: about 454-497 s;
+# removal run, from audits-s: about 454-497 s, and its downgrade cycle run
+# (0.9.11; 97 s locally with 4 TLC workers, about 110-160 s at that
+# factor): about 565-660 s;
 # audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran

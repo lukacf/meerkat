@@ -699,6 +699,8 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::EndOwnedIdentityEdge { .. }
             | mob_dsl::MobMachineInput::AdmitMemberUnwire { .. }
             | mob_dsl::MobMachineInput::AdoptIdentityIntoStore { .. }
+            | mob_dsl::MobMachineInput::PurgeIdentityRows { .. }
+            | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -2009,6 +2011,8 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::EndOwnedIdentityEdge { .. }
             | mob_dsl::MobMachineInput::AdmitMemberUnwire { .. }
             | mob_dsl::MobMachineInput::AdoptIdentityIntoStore { .. }
+            | mob_dsl::MobMachineInput::PurgeIdentityRows { .. }
+            | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }

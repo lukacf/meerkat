@@ -1521,6 +1521,16 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::AdoptIdentityIntoStore,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // The downgrade cycle (0.9.11), decided in the actor's purge and import
+    // steps for the handle's purge and import. Not surface commands.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::PurgeIdentityRows,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ImportIdentityRecord,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

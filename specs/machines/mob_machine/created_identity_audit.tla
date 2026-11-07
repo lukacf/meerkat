@@ -22,11 +22,11 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks sixteen runs over fixed domains: the four of the recovery part
-\* below, and the twelve of the changes part (0.9.9: admit, commit, update,
-\* removal, archive, preparation, prepverdicts, placement, unlist and
-\* recovered; 0.9.11: edges and adoption), which its own section
-\* describes.
+\* checks seventeen runs over fixed domains: the four of the recovery part
+\* below, and the thirteen of the changes part (0.9.9: admit, commit,
+\* update, removal, archive, preparation, prepverdicts, placement, unlist
+\* and recovered; 0.9.11: edges, adoption and cycle), which its own
+\* section describes.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -581,8 +581,10 @@ NotAuditWitnessScanContradictedPlaced == [][~AuditWitnessScanContradictedPlaced]
 (* placed and peer-only spawns of a store-owned identity (placement), the  *)
 (* one-entry unlist of a roster-owned identity (unlist), the replay of a   *)
 (* removal or an archive in flight carried to its terminal (recovered),    *)
-(* and (0.9.11) the owned edges an identity change declares (edges) and    *)
-(* the adoption into store custody (adoption).                             *)
+(* and (0.9.11) the owned edges an identity change declares (edges), the   *)
+(* adoption into store custody (adoption), and the downgrade cycle's purge,*)
+(* its reservation of a Created entry whose row was purged and its import  *)
+(* (cycle).                                                                *)
 (***************************************************************************)
 
 Receipts == {"Absent", "Same", "Other"}
@@ -624,6 +626,7 @@ AdmitArm(r, c, pb, pa, ho, gc, sc) ==
     \/ AdmitIdentityChangeGrantRevoked(r, c, pb, pa, ho, gc, sc)
     \/ AdmitIdentityChangeStaleSpec(r, c, pb, pa, ho, gc, sc)
     \/ AdmitIdentityChangeMobNotRunningStopped(r, c, pb, pa, ho, gc, sc)
+    \/ AdmitIdentityChangeRowsPurged(r, c, pb, pa, ho, gc, sc)
 AdmitVerdicts(r, c, pb, pa, ho, gc, sc) ==
     << ENABLED AdmitIdentityChangeAdmitted(r, c, pb, pa, ho, gc, sc),
        ENABLED AdmitIdentityChangeReplayed(r, c, pb, pa, ho, gc, sc),
@@ -635,7 +638,8 @@ AdmitVerdicts(r, c, pb, pa, ho, gc, sc) ==
        ENABLED AdmitIdentityChangeImportedNotHostOperator(r, c, pb, pa, ho, gc, sc),
        ENABLED AdmitIdentityChangeGrantRevoked(r, c, pb, pa, ho, gc, sc),
        ENABLED AdmitIdentityChangeStaleSpec(r, c, pb, pa, ho, gc, sc),
-       ENABLED AdmitIdentityChangeMobNotRunningStopped(r, c, pb, pa, ho, gc, sc) >>
+       ENABLED AdmitIdentityChangeMobNotRunningStopped(r, c, pb, pa, ho, gc, sc),
+       ENABLED AdmitIdentityChangeRowsPurged(r, c, pb, pa, ho, gc, sc) >>
 AdmitAny ==
     \E r \in Receipts, c \in ConsentKinds, pb \in BOOLEAN, pa \in BOOLEAN, ho \in BOOLEAN,
        gc \in BOOLEAN, sc \in BOOLEAN : AdmitArm(r, c, pb, pa, ho, gc, sc)
@@ -872,7 +876,7 @@ AuditAdmitExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A r \in Receipts, c \in ConsentKinds, pb \in BOOLEAN, pa \in BOOLEAN, ho \in BOOLEAN,
            gc \in BOOLEAN, sc \in BOOLEAN :
-            Cardinality({i \in 1..11 : AdmitVerdicts(r, c, pb, pa, ho, gc, sc)[i]}) = 1
+            Cardinality({i \in 1..12 : AdmitVerdicts(r, c, pb, pa, ho, gc, sc)[i]}) = 1
 AuditRecordExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         \A id \in CreatedIds, f \in Facts :
@@ -2118,5 +2122,248 @@ NotAuditWitnessAdoptUnreadable == [][~AuditWitnessAdoptUnreadable]_vars
 NotAuditWitnessAdoptHeld == [][~AuditWitnessAdoptHeld]_vars
 NotAuditWitnessAdoptCandidate == [][~AuditWitnessAdoptCandidate]_vars
 NotAuditWitnessAdoptStopped == [][~AuditWitnessAdoptStopped]_vars
+
+
+(***************************************************************************)
+(* The cycle run (0.9.11).                                                 *)
+(***************************************************************************)
+
+CycleIds == {Id1, Id2, Id3}
+CycleRows == {"Absent", "Same", "Other"}
+\* The records the run imports, <<kind, from a roster's adoption, row of
+\* its name>>: a present record from a roster's adoption or not over each
+\* row of its name, and each other kind over no row.
+CycleImports ==
+    {<<"Present", a, row>> : a \in BOOLEAN, row \in CycleRows}
+    \cup {<<k, FALSE, "Absent">> : k \in {"PendingPreparation", "Archived", "Tombstone"}}
+\* The session reference an exported record names.
+CycleSession == Some(Sess3)
+
+\* Every arm of the purge, in a running and a stopped mob.
+PurgeArm(r, op) ==
+    \/ PurgeIdentityRowsPurged(r, op)
+    \/ PurgeIdentityRowsNonAuthoritative(r, op)
+    \/ PurgeIdentityRowsReplayed(r, op)
+    \/ PurgeIdentityRowsOperationReused(r, op)
+    \/ PurgeIdentityRowsRowsPurged(r, op)
+    \/ PurgeIdentityRowsNotHostOperator(r, op)
+    \/ PurgeIdentityRowsChangesNotHeld(r, op)
+    \/ PurgeIdentityRowsMobNotRunningStopped(r, op)
+PurgeVerdicts(r, op) ==
+    << ENABLED PurgeIdentityRowsPurged(r, op),
+       ENABLED PurgeIdentityRowsNonAuthoritative(r, op),
+       ENABLED PurgeIdentityRowsReplayed(r, op),
+       ENABLED PurgeIdentityRowsOperationReused(r, op),
+       ENABLED PurgeIdentityRowsRowsPurged(r, op),
+       ENABLED PurgeIdentityRowsNotHostOperator(r, op),
+       ENABLED PurgeIdentityRowsChangesNotHeld(r, op),
+       ENABLED PurgeIdentityRowsMobNotRunningStopped(r, op) >>
+\* Every arm of a start's pass of an entry name its scan read no row of,
+\* in a running and a stopped mob.
+RowlessArm(id) ==
+    \/ RecoverRowlessCreatedEntryReservedRunning(id)
+    \/ RecoverRowlessCreatedEntryReservedStopped(id)
+    \/ RecoverRowlessCreatedEntryKeptRunning(id)
+    \/ RecoverRowlessCreatedEntryKeptStopped(id)
+RowlessVerdicts(id) ==
+    << ENABLED RecoverRowlessCreatedEntryReservedRunning(id),
+       ENABLED RecoverRowlessCreatedEntryReservedStopped(id),
+       ENABLED RecoverRowlessCreatedEntryKeptRunning(id),
+       ENABLED RecoverRowlessCreatedEntryKeptStopped(id) >>
+\* Every arm of one record's import, in a running and a stopped mob.
+ImportVerdicts(id, k, a, row) ==
+    << ENABLED ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordUnchanged(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordUnsettled(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordNonAuthoritative(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordChangesHeld(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordRowsPurged(id, k, a, row, CycleSession),
+       ENABLED ImportIdentityRecordMobNotRunningStopped(id, k, a, row, CycleSession) >>
+\* An arm that restores a record.
+ImportRestores(id, k, a, row) ==
+    \/ ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession)
+\* The admission of a host's change under its allow rule.
+CycleAdmitFacts == <<"Absent", "Policy", FALSE, FALSE, FALSE, TRUE, TRUE>>
+CycleAdmit ==
+    AdmitArm(CycleAdmitFacts[1], CycleAdmitFacts[2], CycleAdmitFacts[3], CycleAdmitFacts[4],
+             CycleAdmitFacts[5], CycleAdmitFacts[6], CycleAdmitFacts[7])
+
+\* The run's seed, one step at a time: member 2 a worker the replay
+\* recovered and bound, then member 1 a roster-owned identity declared owed
+\* its seat, its spawn ladder opened and its first incarnation seated. Once
+\* it is done: member 2's adoption into store custody (a Created entry
+\* seated locally) and member 3's record owed its seat, each or not, the
+\* host's changes hold, and the mob's stop and resume. Or, before the seed,
+\* the build seed of a candidate composition. (The seed's order keeps the
+\* run's space to the cycle's own steps.)
+CycleBound == Id2 \in DOMAIN member_session_bindings
+CycleSeeded == CycleBound /\ Seated(Id1)
+CycleCandidate ==
+    /\ DOMAIN identity_to_runtime = {}
+    /\ SeedMemberResidencyRunning("OnDemand", "NonAuthoritative", {})
+CycleDeclare ==
+    DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
+                                 ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
+                                 ApplyShape[9], FALSE, FALSE)
+CycleSeed ==
+    /\ composition_authority = "Authoritative"
+    /\ \/ Id2 \notin DOMAIN identity_to_runtime /\ A2Recover
+       \/ ~CycleBound /\ A2Bind
+       \/ CycleBound /\ Origin(Id1) = None /\ CycleDeclare
+       \/ /\ CycleBound
+          /\ Origin(Id1) = Some("Declared")
+          /\ ~Seated(Id1)
+          /\ \/ AAuthorize
+             \/ AOpen(AFirst)
+             \/ ASeatAs(AFirst, FALSE, FALSE, FALSE)
+       \/ CycleSeeded /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0))
+       \/ CycleSeeded /\ RecordAs(Id3, "SeatOwed")
+\* An import's restoring arms once the seed is done (the export is taken
+\* then; before it, each import is refused or changes nothing). Named
+\* wrappers of one arm each: TLC's coverage names an action whose body is a
+\* conjunction after its operator, and the runner's closed alias table
+\* counts each wrapper's coverage for the arm it wraps.
+CycleRestoresInPlace(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession)
+CycleRestoresOwedSeat(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession)
+CycleRestoresPending(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession)
+CycleRestoresArchived(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession)
+CycleRestoresTombstone(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession)
+CycleRestoresByAdoption(id, k, a, row) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession)
+\* Every arm of one record's import as the run takes it.
+CycleImportArm(id, k, a, row) ==
+    \/ CycleRestoresInPlace(id, k, a, row)
+    \/ CycleRestoresOwedSeat(id, k, a, row)
+    \/ CycleRestoresPending(id, k, a, row)
+    \/ CycleRestoresArchived(id, k, a, row)
+    \/ CycleRestoresTombstone(id, k, a, row)
+    \/ CycleRestoresByAdoption(id, k, a, row)
+    \/ ImportIdentityRecordUnchanged(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordUnsettled(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordNonAuthoritative(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordChangesHeld(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordRowsPurged(id, k, a, row, CycleSession)
+    \/ ImportIdentityRecordMobNotRunningStopped(id, k, a, row, CycleSession)
+
+\* The seed; the start's pass of each name its scan read no row of; the
+\* purge with each receipt, by the host operator or not; the admission of a
+\* change; and the import of each kind of record for each name, recorded as
+\* a roster's adoption or not, over each row of its name; in a running and
+\* a stopped mob.
+CycleNext ==
+    \/ CycleCandidate
+    \/ CycleSeed
+    \/ CycleSeeded /\ (HoldArm \/ CStop)
+    \/ \E id \in CycleIds : RowlessArm(id)
+    \/ \E r \in Receipts, op \in BOOLEAN : PurgeArm(r, op)
+    \/ CycleAdmit
+    \/ \E id \in CycleIds, c \in CycleImports : CycleImportArm(id, c[1], c[2], c[3])
+
+CycleSpec == Init /\ [][CycleNext]_vars
+
+\* Exactly one arm answers every purge, every pass of a name its scan read
+\* no row of while the replay runs (none once the boot plan is sealed),
+\* every import and the admission, in a running and a stopped mob.
+AuditCycleExactlyOne ==
+    phase \in {"Running", "Stopped"} =>
+        /\ \A r \in Receipts, op \in BOOLEAN :
+               Cardinality({i \in 1..8 : PurgeVerdicts(r, op)[i]}) = 1
+        /\ \A id \in CycleIds :
+               Cardinality({i \in 1..4 : RowlessVerdicts(id)[i]})
+                   = IF boot_plan_sealed THEN 0 ELSE 1
+        /\ \A id \in CycleIds, c \in CycleImports :
+               Cardinality({i \in 1..13 : ImportVerdicts(id, c[1], c[2], c[3])[i]}) = 1
+        /\ Cardinality({i \in 1..12 : AdmitVerdicts(CycleAdmitFacts[1], CycleAdmitFacts[2],
+                                                    CycleAdmitFacts[3], CycleAdmitFacts[4],
+                                                    CycleAdmitFacts[5], CycleAdmitFacts[6],
+                                                    CycleAdmitFacts[7])[i]}) = 1
+
+\* The purge removes rows of the store only: in the machine it records its
+\* own fact and nothing else, no session, member, entry or reservation
+\* (purge_touches_v2_rows_only). Read step by step: a step that changes any
+\* of them is no purge.
+AuditPurgeTouchesNothingElse ==
+    [][\/ /\ member_session_bindings' = member_session_bindings
+          /\ identity_entry_archived_sessions' = identity_entry_archived_sessions
+          /\ identity_to_runtime' = identity_to_runtime
+          /\ identity_runtime_generations' = identity_runtime_generations
+          /\ identity_entry_origins' = identity_entry_origins
+          /\ identity_entry_unseated' = identity_entry_unseated
+          /\ identity_entry_tombstones' = identity_entry_tombstones
+          /\ identity_entry_unreadable' = identity_entry_unreadable
+       \/ ~\E r \in Receipts, op \in BOOLEAN : PurgeIdentityRowsPurged(r, op)
+      ]_vars
+
+\* An import restores a record only where the store holds no row of its
+\* name: in every state, no restoring arm answers a record over a row of
+\* its name.
+AuditImportRestoresOverNoRow ==
+    \A id \in CycleIds, c \in CycleImports :
+        c[3] # "Absent" => ~ENABLED ImportRestores(id, c[1], c[2], c[3])
+
+\* An import binds a member in place on its unchanged runtime, generation
+\* and session: a step that changes any of them restores no record in place
+\* or by the adoption's step.
+AuditImportKeepsTheIncarnation ==
+    [][\/ /\ identity_to_runtime' = identity_to_runtime
+          /\ identity_runtime_generations' = identity_runtime_generations
+          /\ member_session_bindings' = member_session_bindings
+       \/ ~\E id \in CycleIds, c \in CycleImports :
+              \/ ImportIdentityRecordRestoredInPlace(id, c[1], c[2], c[3], CycleSession)
+              \/ ImportIdentityRecordRestoredByAdoption(id, c[1], c[2], c[3], CycleSession)
+      ]_vars
+
+\* Witnesses of the cycle run: the steps whose state says more than the arm
+\* that takes them (an arm alone fired has the coverage check as its
+\* witness).
+AuditWitnessCycleReserved ==
+    /\ Created(Id2)
+    /\ Seated(Id2)
+    /\ RecoverRowlessCreatedEntryReservedRunning(Id2)
+AuditWitnessCycleDeclaredKept ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ RecoverRowlessCreatedEntryKeptRunning(Id1)
+AuditWitnessCycleInPlace ==
+    /\ Id2 \in identity_entry_rowless
+    /\ ImportIdentityRecordRestoredInPlace(Id2, "Present", FALSE, "Absent", CycleSession)
+AuditWitnessCycleOwedSeat ==
+    /\ Id3 \in identity_entry_rowless
+    /\ ImportIdentityRecordRestoredOwedSeat(Id3, "Present", FALSE, "Absent", CycleSession)
+    /\ Id3 \in DOMAIN identity_entry_archived_sessions'
+AuditWitnessCycleTombstone ==
+    /\ Id3 \in identity_entry_rowless
+    /\ ImportIdentityRecordRestoredTombstone(Id3, "Tombstone", FALSE, "Absent", CycleSession)
+AuditWitnessCycleNameTaken ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ ImportIdentityRecordNameTakenMeanwhile(Id1, "Tombstone", FALSE, "Absent", CycleSession)
+AuditWitnessCycleReleased ==
+    /\ Id2 \in identity_entry_rowless
+    /\ ImportIdentityRecordNameTakenMeanwhile(Id2, "Tombstone", FALSE, "Absent", CycleSession)
+    /\ OriginNext(Id2) = None
+
+NotAuditWitnessCycleReserved == [][~AuditWitnessCycleReserved]_vars
+NotAuditWitnessCycleDeclaredKept == [][~AuditWitnessCycleDeclaredKept]_vars
+NotAuditWitnessCycleInPlace == [][~AuditWitnessCycleInPlace]_vars
+NotAuditWitnessCycleOwedSeat == [][~AuditWitnessCycleOwedSeat]_vars
+NotAuditWitnessCycleTombstone == [][~AuditWitnessCycleTombstone]_vars
+NotAuditWitnessCycleNameTaken == [][~AuditWitnessCycleNameTaken]_vars
+NotAuditWitnessCycleReleased == [][~AuditWitnessCycleReleased]_vars
 
 ====

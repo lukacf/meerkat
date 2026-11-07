@@ -1646,6 +1646,12 @@ pub use created::{
     IdentityRemovalRecord, IdentitySourceEvidence, OwnedEdgeAdmission, OwnedIdentityEdge,
     PendingRoleMigration, classify_created_identity_row,
 };
+mod created_set;
+pub(crate) use created_set::created_set_digest_of_rows;
+pub use created_set::{
+    CREATED_IDENTITY_SET_SCHEMA, CreatedIdentitySetExport, ExportedIdentity,
+    ExportedSessionReference, ExportedSessionState, UnreadableIdentityRow,
+};
 
 /// Caller-chosen idempotency identity for one desired-member mutation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

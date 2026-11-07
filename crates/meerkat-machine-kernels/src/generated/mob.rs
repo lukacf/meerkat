@@ -2698,6 +2698,8 @@ pub enum IdentityChangeAdmissionKind {
     MobNotRunning,
     #[serde(rename = "StaleSpec")]
     StaleSpec,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
 }
 impl IdentityChangeAdmissionKind {
     pub fn as_str(&self) -> &'static str {
@@ -2713,6 +2715,7 @@ impl IdentityChangeAdmissionKind {
             Self::GrantRevoked => "GrantRevoked",
             Self::MobNotRunning => "MobNotRunning",
             Self::StaleSpec => "StaleSpec",
+            Self::RowsPurged => "RowsPurged",
         }
     }
 }
@@ -2731,6 +2734,7 @@ impl std::convert::TryFrom<&str> for IdentityChangeAdmissionKind {
             "GrantRevoked" => Ok(Self::GrantRevoked),
             "MobNotRunning" => Ok(Self::MobNotRunning),
             "StaleSpec" => Ok(Self::StaleSpec),
+            "RowsPurged" => Ok(Self::RowsPurged),
             other => Err(format!(
                 "invalid IdentityChangeAdmissionKind value `{other}`"
             )),
@@ -3332,6 +3336,100 @@ impl std::fmt::Display for IdentityExternalTrustCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityImportVerdict {
+    #[default]
+    #[serde(rename = "RestoredInPlace")]
+    RestoredInPlace,
+    #[serde(rename = "RestoredOwedSeat")]
+    RestoredOwedSeat,
+    #[serde(rename = "RestoredPending")]
+    RestoredPending,
+    #[serde(rename = "RestoredArchived")]
+    RestoredArchived,
+    #[serde(rename = "RestoredTombstone")]
+    RestoredTombstone,
+    #[serde(rename = "RestoredByAdoption")]
+    RestoredByAdoption,
+    #[serde(rename = "Unchanged")]
+    Unchanged,
+    #[serde(rename = "NameTakenMeanwhile")]
+    NameTakenMeanwhile,
+    #[serde(rename = "Unsettled")]
+    Unsettled,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityImportVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RestoredInPlace => "RestoredInPlace",
+            Self::RestoredOwedSeat => "RestoredOwedSeat",
+            Self::RestoredPending => "RestoredPending",
+            Self::RestoredArchived => "RestoredArchived",
+            Self::RestoredTombstone => "RestoredTombstone",
+            Self::RestoredByAdoption => "RestoredByAdoption",
+            Self::Unchanged => "Unchanged",
+            Self::NameTakenMeanwhile => "NameTakenMeanwhile",
+            Self::Unsettled => "Unsettled",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::RowsPurged => "RowsPurged",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityImportVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RestoredInPlace" => Ok(Self::RestoredInPlace),
+            "RestoredOwedSeat" => Ok(Self::RestoredOwedSeat),
+            "RestoredPending" => Ok(Self::RestoredPending),
+            "RestoredArchived" => Ok(Self::RestoredArchived),
+            "RestoredTombstone" => Ok(Self::RestoredTombstone),
+            "RestoredByAdoption" => Ok(Self::RestoredByAdoption),
+            "Unchanged" => Ok(Self::Unchanged),
+            "NameTakenMeanwhile" => Ok(Self::NameTakenMeanwhile),
+            "Unsettled" => Ok(Self::Unsettled),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "RowsPurged" => Ok(Self::RowsPurged),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityImportVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityImportVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityImportVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityInitialDeliveryCondition {
     #[default]
     #[serde(rename = "NotRequired")]
@@ -3908,6 +4006,80 @@ impl std::fmt::Display for IdentityResourceCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityRowsPurgeVerdict {
+    #[default]
+    #[serde(rename = "Purged")]
+    Purged,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "Replayed")]
+    Replayed,
+    #[serde(rename = "OperationReused")]
+    OperationReused,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
+    #[serde(rename = "NotHostOperator")]
+    NotHostOperator,
+    #[serde(rename = "ChangesNotHeld")]
+    ChangesNotHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityRowsPurgeVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Purged => "Purged",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::Replayed => "Replayed",
+            Self::OperationReused => "OperationReused",
+            Self::RowsPurged => "RowsPurged",
+            Self::NotHostOperator => "NotHostOperator",
+            Self::ChangesNotHeld => "ChangesNotHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityRowsPurgeVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Purged" => Ok(Self::Purged),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "Replayed" => Ok(Self::Replayed),
+            "OperationReused" => Ok(Self::OperationReused),
+            "RowsPurged" => Ok(Self::RowsPurged),
+            "NotHostOperator" => Ok(Self::NotHostOperator),
+            "ChangesNotHeld" => Ok(Self::ChangesNotHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityRowsPurgeVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityRowsPurgeVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityRowsPurgeVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentitySessionCondition {
     #[default]
     #[serde(rename = "Unavailable")]
@@ -3960,6 +4132,118 @@ impl std::convert::TryFrom<String> for IdentitySessionCondition {
     }
 }
 impl std::fmt::Display for IdentitySessionCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ImportedRecordKind {
+    #[default]
+    #[serde(rename = "Present")]
+    Present,
+    #[serde(rename = "PendingPreparation")]
+    PendingPreparation,
+    #[serde(rename = "Archived")]
+    Archived,
+    #[serde(rename = "Tombstone")]
+    Tombstone,
+}
+impl ImportedRecordKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Present => "Present",
+            Self::PendingPreparation => "PendingPreparation",
+            Self::Archived => "Archived",
+            Self::Tombstone => "Tombstone",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ImportedRecordKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Present" => Ok(Self::Present),
+            "PendingPreparation" => Ok(Self::PendingPreparation),
+            "Archived" => Ok(Self::Archived),
+            "Tombstone" => Ok(Self::Tombstone),
+            other => Err(format!("invalid ImportedRecordKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ImportedRecordKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ImportedRecordKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ImportedRowState {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Same")]
+    Same,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl ImportedRowState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Same => "Same",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ImportedRowState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Same" => Ok(Self::Same),
+            "Other" => Ok(Self::Other),
+            other => Err(format!("invalid ImportedRowState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ImportedRowState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ImportedRowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -10563,6 +10847,8 @@ pub struct State {
     pub identity_entry_constructions_held: std::collections::BTreeMap<AgentIdentity, u64>,
     pub identity_entry_constructions_activating: std::collections::BTreeMap<AgentIdentity, u64>,
     pub identity_edge_owners: std::collections::BTreeMap<WiringEdge, AgentIdentity>,
+    pub identity_rows_purged: bool,
+    pub identity_entry_rowless: std::collections::BTreeSet<AgentIdentity>,
     pub operator_instruction_revision: std::collections::BTreeMap<String, u64>,
     pub operator_instruction_effect: std::collections::BTreeMap<String, InstructionEffect>,
     pub operator_instruction_digest: std::collections::BTreeMap<String, String>,
@@ -12169,6 +12455,19 @@ pub mod inputs {
         pub source: IdentityAdoptionSource,
         pub generation: Option<Generation>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PurgeIdentityRows {
+        pub receipt: IdentityChangeReceiptKind,
+        pub host_operator: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ImportIdentityRecord {
+        pub agent_identity: AgentIdentity,
+        pub kind: ImportedRecordKind,
+        pub adopted_from_roster: bool,
+        pub row: ImportedRowState,
+        pub last_session: Option<SessionId>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12431,6 +12730,8 @@ pub enum Input {
     EndOwnedIdentityEdge(inputs::EndOwnedIdentityEdge),
     AdmitMemberUnwire(inputs::AdmitMemberUnwire),
     AdoptIdentityIntoStore(inputs::AdoptIdentityIntoStore),
+    PurgeIdentityRows(inputs::PurgeIdentityRows),
+    ImportIdentityRecord(inputs::ImportIdentityRecord),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12769,6 +13070,8 @@ impl Input {
             Self::EndOwnedIdentityEdge(_) => InputKind::EndOwnedIdentityEdge,
             Self::AdmitMemberUnwire(_) => InputKind::AdmitMemberUnwire,
             Self::AdoptIdentityIntoStore(_) => InputKind::AdoptIdentityIntoStore,
+            Self::PurgeIdentityRows(_) => InputKind::PurgeIdentityRows,
+            Self::ImportIdentityRecord(_) => InputKind::ImportIdentityRecord,
         }
     }
 }
@@ -13024,6 +13327,8 @@ pub enum InputKind {
     EndOwnedIdentityEdge,
     AdmitMemberUnwire,
     AdoptIdentityIntoStore,
+    PurgeIdentityRows,
+    ImportIdentityRecord,
 }
 
 pub mod signals {
@@ -13542,6 +13847,10 @@ pub mod signals {
         pub owner: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRowlessCreatedEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SetOperatorInstruction {
         pub slot: String,
         pub revision: u64,
@@ -13703,6 +14012,7 @@ pub enum Signal {
     RecoverIdentityEntryRetiring(signals::RecoverIdentityEntryRetiring),
     RecoverCreatedIdentityEntry(signals::RecoverCreatedIdentityEntry),
     RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
+    RecoverRowlessCreatedEntry(signals::RecoverRowlessCreatedEntry),
     SetOperatorInstruction(signals::SetOperatorInstruction),
     RevokeOperatorInstruction(signals::RevokeOperatorInstruction),
     RecoverOperatorInstruction(signals::RecoverOperatorInstruction),
@@ -13847,6 +14157,7 @@ impl Signal {
             Self::RecoverIdentityEntryRetiring(_) => SignalKind::RecoverIdentityEntryRetiring,
             Self::RecoverCreatedIdentityEntry(_) => SignalKind::RecoverCreatedIdentityEntry,
             Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
+            Self::RecoverRowlessCreatedEntry(_) => SignalKind::RecoverRowlessCreatedEntry,
             Self::SetOperatorInstruction(_) => SignalKind::SetOperatorInstruction,
             Self::RevokeOperatorInstruction(_) => SignalKind::RevokeOperatorInstruction,
             Self::RecoverOperatorInstruction(_) => SignalKind::RecoverOperatorInstruction,
@@ -13958,6 +14269,7 @@ pub enum SignalKind {
     RecoverIdentityEntryRetiring,
     RecoverCreatedIdentityEntry,
     RecoverOwnedIdentityEdge,
+    RecoverRowlessCreatedEntry,
     SetOperatorInstruction,
     RevokeOperatorInstruction,
     RecoverOperatorInstruction,
@@ -15073,6 +15385,15 @@ pub mod effects {
         pub verdict: IdentityAdoptionVerdict,
         pub reason: Option<IdentityNotAdoptableReason>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityRowsPurgeResolved {
+        pub verdict: IdentityRowsPurgeVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityRecordImportResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityImportVerdict,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15277,6 +15598,8 @@ pub enum Effect {
     OwnedIdentityEdgeEnded(effects::OwnedIdentityEdgeEnded),
     MemberUnwireAdmissionResolved(effects::MemberUnwireAdmissionResolved),
     IdentityAdoptionResolved(effects::IdentityAdoptionResolved),
+    IdentityRowsPurgeResolved(effects::IdentityRowsPurgeResolved),
+    IdentityRecordImportResolved(effects::IdentityRecordImportResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -15476,6 +15799,8 @@ pub enum EffectKind {
     OwnedIdentityEdgeEnded,
     MemberUnwireAdmissionResolved,
     IdentityAdoptionResolved,
+    IdentityRowsPurgeResolved,
+    IdentityRecordImportResolved,
 }
 
 pub mod command_capabilities {
@@ -17559,6 +17884,36 @@ pub enum TransitionId {
     AdoptIdentityIntoStoreMobNotRunningStopped,
     AdoptIdentityIntoStoreMobNotRunningCompleted,
     AdoptIdentityIntoStoreMobNotRunningDestroyed,
+    AdmitIdentityChangeRowsPurged,
+    PurgeIdentityRowsPurged,
+    PurgeIdentityRowsNonAuthoritative,
+    PurgeIdentityRowsReplayed,
+    PurgeIdentityRowsOperationReused,
+    PurgeIdentityRowsRowsPurged,
+    PurgeIdentityRowsNotHostOperator,
+    PurgeIdentityRowsChangesNotHeld,
+    PurgeIdentityRowsMobNotRunningStopped,
+    PurgeIdentityRowsMobNotRunningCompleted,
+    PurgeIdentityRowsMobNotRunningDestroyed,
+    RecoverRowlessCreatedEntryReservedRunning,
+    RecoverRowlessCreatedEntryReservedStopped,
+    RecoverRowlessCreatedEntryKeptRunning,
+    RecoverRowlessCreatedEntryKeptStopped,
+    ImportIdentityRecordRestoredInPlace,
+    ImportIdentityRecordRestoredOwedSeat,
+    ImportIdentityRecordRestoredPending,
+    ImportIdentityRecordRestoredArchived,
+    ImportIdentityRecordRestoredTombstone,
+    ImportIdentityRecordRestoredByAdoption,
+    ImportIdentityRecordUnchanged,
+    ImportIdentityRecordNameTakenMeanwhile,
+    ImportIdentityRecordUnsettled,
+    ImportIdentityRecordNonAuthoritative,
+    ImportIdentityRecordChangesHeld,
+    ImportIdentityRecordRowsPurged,
+    ImportIdentityRecordMobNotRunningStopped,
+    ImportIdentityRecordMobNotRunningCompleted,
+    ImportIdentityRecordMobNotRunningDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17952,6 +18307,8 @@ pub fn initial_state() -> State {
         identity_entry_constructions_held: Default::default(),
         identity_entry_constructions_activating: Default::default(),
         identity_edge_owners: Default::default(),
+        identity_rows_purged: false,
+        identity_entry_rowless: Default::default(),
         operator_instruction_revision: Default::default(),
         operator_instruction_effect: Default::default(),
         operator_instruction_digest: Default::default(),

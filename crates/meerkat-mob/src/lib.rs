@@ -196,6 +196,11 @@ pub use identity::{
     ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
     classify_identity_reconciliation,
 };
+// The downgrade cycle's export (0.9.11).
+pub use identity::{
+    CREATED_IDENTITY_SET_SCHEMA, CreatedIdentitySetExport, ExportedIdentity,
+    ExportedSessionReference, ExportedSessionState, UnreadableIdentityRow,
+};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
@@ -395,9 +400,10 @@ pub use runtime::{
     AdoptionSource, CreatedIdentityRequest, IdentityAdoption, IdentityArchiveChange,
     IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome, IdentityChangeRefusal,
     IdentityChangeRequesterInput, IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest,
-    IdentityNameHolder, IdentityOperation, IdentityRemoval, IdentityRosterChange,
-    IdentityUpdateOutcome, MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason,
-    OwnedEdgeEndOutcome, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+    IdentityImport, IdentityImportMode, IdentityNameHolder, IdentityOperation, IdentityRemoval,
+    IdentityRosterChange, IdentityRowsPurge, IdentityUpdateOutcome, MemberGrantMint,
+    MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{

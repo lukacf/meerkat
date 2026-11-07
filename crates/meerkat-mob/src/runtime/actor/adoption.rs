@@ -33,12 +33,6 @@ impl MobActor {
         &mut self,
         commit: AdoptionCommit,
     ) -> Result<AdoptionCommitted, MobError> {
-        // RED: no adoption step.
-        if !commit.identity.as_str().is_empty() {
-            return Err(refused(IdentityChangeRefusal::Unsupported {
-                feature: "adoption into store custody".to_string(),
-            }));
-        }
         let store = self
             .identity_member
             .clone()

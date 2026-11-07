@@ -3816,10 +3816,6 @@ macro_rules! mob_catalog_machine_dsl {
             session_bound: bool,
             seat_owed: bool
         ) -> Enum<IdentityAdoptionVerdict> {
-            // RED: every adoption is taken.
-            if source == source {
-                IdentityAdoptionVerdict::Adopted
-            } else {
             if composition_authoritative == false {
                 IdentityAdoptionVerdict::NonAuthoritative
             } else {
@@ -3874,7 +3870,7 @@ macro_rules! mob_catalog_machine_dsl {
                 IdentityAdoptionVerdict::NotAdoptable
             } else {
                 IdentityAdoptionVerdict::Adopted
-            }}}}}}}}}}}}}
+            }}}}}}}}}}}}
         }
 
         // Why an identity is not adoptable (identity_adoption_verdict's
@@ -35690,7 +35686,9 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::Adopted
             }
             update {
-                // RED: no origin recorded.
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
             }
             to Running
             emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::Adopted, reason: None }

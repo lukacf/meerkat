@@ -306,13 +306,18 @@ grant_gated = { families = ["shell"], tools = ["deploy"] }
 
 At every build, resume included, a member's gate is its own profile's gate
 joined with its role's current gate, so a member spawned with its own profile
-still gets its role's gate at its next build. A role entry never fails the
-build: a role tool name is gated from the moment it appears, a role family is
-gated where the member mounts it, and a role family the member does not mount
-is ignored. A grant to the member's identity (`tool_grants/grant` with
-`{"kind": "identity", "mob_id", "identity"}`) follows the member across
-respawns and restarts, and ends when the identity ends (a plain retire). A
-member whose gate names anything cannot be placed on another host.
+still gets its role's gate at its next build. A store-owned identity declared
+with its role's named profile is built from the role's definition, as a worker
+of the role is: its own gate is the role's current gate, less the families its
+declaration switches off; one declared with an exact profile of its own
+(`profile_override`) gets the role's gate as role entries. A role entry never
+fails the build: a role tool name is gated from the moment it appears, a role
+family is gated where the member mounts it, and a role family the member does
+not mount is ignored. A grant to the member's identity (`tool_grants/grant`
+with `{"kind": "identity", "mob_id", "identity"}`) follows the member across
+respawns and restarts, and ends when the identity ends (a plain retire, or a
+reset of the mob). A member whose gate names anything cannot be placed on
+another host.
 
 ### Opting into host tool bundles
 

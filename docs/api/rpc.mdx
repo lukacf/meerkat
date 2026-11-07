@@ -2113,7 +2113,9 @@ loads, registers or wakes the session or the member.
   whose recorded gate the target must be in, or a mob member identity
   (`{"kind": "identity", "mob_id": ..., "identity": ...}`), which must be in
   the mob's roster and whose gate is the one its next build resolves: its
-  profile's gate joined with its role's current gate. Exactly one of
+  profile's gate joined with its role's current gate (the role's current gate
+  is the own gate of a store-owned identity declared with its role's named
+  profile). Exactly one of
   `duration_ms` and `expires_at_ms` (UNIX ms) bounds the grant, at most the
   host's maximum lifetime (24 hours by default). `decision_ref`, when given,
   is the host's reference to the decision it made before issuing (non-empty,

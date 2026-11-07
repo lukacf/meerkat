@@ -248,7 +248,12 @@ confinement all still apply to every call it opens.
   `tools.grant_gated` (`grant_gated = { families = ["shell"], tools = ["deploy"] }`
   in TOML; on `mob/create`, a realm profile or a `mob/spawn` profile override).
   At every member build, resume included, the member's gate is its own
-  profile's gate joined with its role's current gate. A family of the
+  profile's gate joined with its role's current gate. A store-owned identity
+  declared with its role's named profile is built from the role's
+  definition, as a worker of the role is: its own gate is the role's current
+  gate, less the families its declaration switches off. One declared with an
+  exact profile of its own (`profile_override`) joins the role's gate as
+  role entries, as a member spawned with its own profile does. A family of the
   member's own gate is mounted, closed by the gate, whatever its switch: leave
   the switch off, so a binary that does not know the gate keeps the family
   off. A role entry never fails the member's build: a role tool name is gated

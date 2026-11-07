@@ -9536,6 +9536,7 @@ impl MobBuilder {
                 definition: definition.clone(),
                 events: storage.events.clone(),
                 identity_member: storage.identity_member.clone(),
+                identity: storage.identity.clone(),
                 member_binding_fold: Arc::default(),
                 run_store: storage.runs.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
@@ -11243,6 +11244,7 @@ impl MobBuilder {
                 definition: definition.clone(),
                 events: events.clone(),
                 identity_member: identity_member.clone(),
+                identity: Arc::clone(&identity),
                 member_binding_fold: Arc::default(),
                 run_store: run_store.clone(),
                 runtime_metadata: runtime_metadata.clone(),
@@ -13494,12 +13496,21 @@ pub(super) async fn provision_durable_member_restore(
         .default_external_tools_provider
         .as_ref()
         .and_then(|p| p());
+    let build_profile = super::member_grant_gate::member_build_profile(
+        ctx.tool_handle.identity.as_ref(),
+        definition,
+        ctx.realm_profile_store,
+        &entry.agent_identity,
+        &entry.role,
+        &profile,
+    )
+    .await?;
     let resumed_config = build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
         base: build::BuildAgentConfigParams {
             mob_id: &definition.id,
             profile_name: &entry.role,
             agent_identity: &entry.agent_identity,
-            profile: &profile,
+            profile: &build_profile,
             definition,
             realm_profile_store: ctx.realm_profile_store,
             external_tools: compose_external_tools_for_profile(
@@ -13922,11 +13933,20 @@ async fn provision_fresh_member_session(
         .default_external_tools_provider
         .as_ref()
         .and_then(|p| p());
+    let build_profile = super::member_grant_gate::member_build_profile(
+        ctx.tool_handle.identity.as_ref(),
+        definition,
+        ctx.realm_profile_store,
+        &entry.agent_identity,
+        &entry.role,
+        profile,
+    )
+    .await?;
     let mut config = build::build_agent_config(build::BuildAgentConfigParams {
         mob_id: &definition.id,
         profile_name: &entry.role,
         agent_identity: &entry.agent_identity,
-        profile,
+        profile: &build_profile,
         definition,
         realm_profile_store: ctx.realm_profile_store,
         external_tools: compose_external_tools_for_profile(

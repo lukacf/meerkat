@@ -162,6 +162,10 @@ them.
     `grant_gated: WireGrantGatedTools` (omitted when empty).
   - `meerkat_core::service::SessionBuildOptions` and
     `meerkat::AgentBuildConfig` gain `grant_gated_tools_where_mounted`.
+- `meerkat_mob::DesiredMemberMaterial` gains `profile_source`
+  (`DesiredProfileSource`): where a store-owned identity's desired material
+  took its profile from, which decides its member's tool grant gate (struct
+  literals need it).
 - Behaviour: `tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list`
   and `tool_grants/audit` answer every refusal of a request as invalid
   params carrying `data.kind = "tool_grant_request_refused"` and the typed
@@ -334,12 +338,17 @@ them.
   (`grant_gated = { families = [...], tools = [...] }` in TOML; on
   `mob/create`, realm profiles and a `mob/spawn` profile override). Every
   member build, resume included, gates the union of the member's own gate
-  and its role's current gate. A family of the member's own gate is mounted,
-  closed by the gate, whatever its switch. A role entry never fails the
-  build: a role tool name is gated from the moment it appears, a role family
-  is installed where the member mounts it, and a role family the member does
-  not mount, or a role name the build's tool policy refuses, is ignored. The
-  TOML parser warns on an unknown key inside the gate.
+  and its role's current gate. A store-owned identity declared with its
+  role's named profile is built from the role's definition, as a worker of
+  the role is: its own gate is the role's current gate at every build, less
+  the families its declaration switches off. One declared with an exact
+  profile of its own (`profile_override`) joins the role's gate as role
+  entries. A family of the member's own gate is mounted, closed by the gate,
+  whatever its switch. A role entry never fails the build: a role tool name
+  is gated from the moment it appears, a role family is installed where the
+  member mounts it, and a role family the member does not mount, or a role
+  name the build's tool policy refuses, is ignored. The TOML parser warns on
+  an unknown key inside the gate.
 - `tool_grants/grant`, `tool_grants/list` and `tool_grants/audit` accept a
   mob member identity subject, `{"kind": "identity", "mob_id", "identity"}`.
   A grant needs the identity in the mob's roster and a target the gate of
@@ -366,7 +375,8 @@ them.
   and `MemberGrantGate`; `MeerkatMachine::tool_grant` and
   `MeerkatMachine::end_tool_grants_of`; `ToolGrantService::load` and
   `ToolGrantService::revoke_subject`;
-  `RuntimeSessionToolGrants::for_member_subject`.
+  `RuntimeSessionToolGrants::for_member_subject`;
+  `meerkat_mob::DesiredProfileSource`.
 - Python and TypeScript SDKs: `grant_tool` / `grantTool`, `list_tool_grants`
   / `listToolGrants` and `tool_grant_audit` / `toolGrantAudit` take a mob
   member identity subject (`mob_id` and `identity`; `{ mobId, identity }`),
@@ -499,6 +509,12 @@ them.
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
 
+- An identity adopted before this release reads as declared with its role's
+  named profile: its desired material records no profile source. One that
+  was declared with an exact profile of its own (`profile_override`) then
+  takes its role's gate as its own once the role gates something, so a gated
+  family its profile leaves off is mounted closed, where it would be ignored.
+
 - Downgrade: an older binary drops `tools.grant_gated` (a profile's tool
   table refuses no unknown key). Leave a gated family's switch off, as the
   docs say, and an older binary keeps the family off. An older binary also
@@ -506,7 +522,16 @@ them.
   role gates runs that family with no grant there. A grant whose issuer
   carries a `decision_ref` is unreadable to an older binary: it opens
   nothing there and is listed as unreadable. Revoke such grants, or let them
-  expire, before a rollback.
+  expire, before a rollback. A member built by this release records its gate
+  in its session; a 0.9.10 member build names no gate, so its resume restores
+  the recorded one, and a recorded family whose switch the profile leaves
+  off fails that resume as disabled and grant-gated (`FamilyDisabled`). The
+  member is not resumed: it fails closed. Recover by upgrading again, or by
+  respawning the member on the older binary, which starts it on a fresh
+  session with no recorded gate. An identity adopted by this release with an
+  exact profile of its own records `profile_source` in its desired material,
+  which an older binary cannot read: it reads that identity's intent as
+  malformed and leaves the identity unreconciled.
 
 ### Known limitations
 

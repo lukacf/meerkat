@@ -1,14 +1,21 @@
 //! The member tool grant gate a member's next build resolves, as the grant
 //! surfaces read it: the member's own gate (from the profile its build runs
-//! on) joined with its role's current gate. Nothing here is stored and
-//! nothing is woken: the reads are the roster entry, the definition, the
-//! realm profile store and the published machine state.
+//! on, or its role's current gate for a store-owned identity declared with
+//! its role's named profile) joined with its role's current gate. Nothing
+//! here is stored and nothing is woken: the reads are the roster entry, the
+//! identity's sealed intent, the definition, the realm profile store and the
+//! published machine state.
+
+use std::borrow::Cow;
+use std::sync::Arc;
 
 use meerkat_core::tool_grant::GrantGatedTools;
 
+use crate::definition::MobDefinition;
 use crate::error::MobError;
-use crate::ids::AgentIdentity;
-use crate::profile::ToolConfig;
+use crate::identity::{DesiredProfileSource, IdentityIntent, IdentityStoredObservation};
+use crate::ids::{AgentIdentity, ProfileName};
+use crate::profile::{Profile, ToolConfig};
 
 /// The gate a member's next build resolves, split into what that build
 /// gates and the role entries it ignores as not mounted.
@@ -76,18 +83,99 @@ pub(crate) fn family_switch(tools: &ToolConfig, family: &str) -> Option<bool> {
     }
 }
 
+/// The own gate of `identity`'s member in the mob `definition` when the
+/// identity is a store-owned identity declared with its role's named profile
+/// ([`DesiredProfileSource::Definition`]): such a member is built from its
+/// role's definition, as a worker of the role is, so its own gate is its
+/// role's current gate, less the families its declaration's category
+/// overrides switch off. `None` for any other member (no identity intent, an
+/// absent or unreadable one, one declared with an exact profile of its own,
+/// or one of another role): its own gate is the gate of the profile its
+/// build runs on, and its role's gate joins as role entries.
+///
+/// # Errors
+/// The identity store's or the realm profile store's failure to read.
+pub(crate) async fn identity_role_gate(
+    identity_store: &dyn crate::store::MobIdentityStore,
+    definition: &MobDefinition,
+    realm_profile_store: Option<&Arc<dyn crate::store::RealmProfileStore>>,
+    identity: &AgentIdentity,
+    role: &ProfileName,
+) -> Result<Option<GrantGatedTools>, MobError> {
+    let IdentityStoredObservation::Valid(record) = identity_store
+        .observe_identity_intent(&definition.id, identity)
+        .await
+        .map_err(MobError::from)?
+    else {
+        return Ok(None);
+    };
+    let IdentityIntent::Present { member, .. } = &record.intent else {
+        return Ok(None);
+    };
+    let material = &member.material;
+    if material.profile_source != DesiredProfileSource::Definition || &material.profile_name != role
+    {
+        return Ok(None);
+    }
+    let Some(role_profile) =
+        crate::build::current_role_profile(definition, role, realm_profile_store).await?
+    else {
+        return Ok(None);
+    };
+    let mut gate = role_profile.tools.grant_gated;
+    super::spec_compiler::drop_disabled_families(
+        &mut gate,
+        material.overlay.tool_category_overrides,
+    );
+    Ok(Some(gate))
+}
+
+/// `profile` as `identity`'s build runs on it: with its role's current gate
+/// as its own gate when [`identity_role_gate`] answers one, else as it is.
+///
+/// # Errors
+/// As [`identity_role_gate`].
+pub(crate) async fn member_build_profile<'a>(
+    identity_store: &dyn crate::store::MobIdentityStore,
+    definition: &MobDefinition,
+    realm_profile_store: Option<&Arc<dyn crate::store::RealmProfileStore>>,
+    identity: &AgentIdentity,
+    role: &ProfileName,
+    profile: &'a Profile,
+) -> Result<Cow<'a, Profile>, MobError> {
+    Ok(
+        match identity_role_gate(
+            identity_store,
+            definition,
+            realm_profile_store,
+            identity,
+            role,
+        )
+        .await?
+        {
+            Some(gate) => {
+                let mut built = profile.clone();
+                built.tools.grant_gated = gate;
+                Cow::Owned(built)
+            }
+            None => Cow::Borrowed(profile),
+        },
+    )
+}
+
 impl super::MobHandle {
     /// The tool grant gate `identity`'s next build resolves: the union of
     /// its own gate (the profile its build runs on: its spawn-time profile,
-    /// else its role's current definition) and its role's current gate,
-    /// split into what the build gates and the role families it ignores as
-    /// not mounted. A member placed on another host carries no gate (its
-    /// placement refuses one), so it answers the empty gate. Nothing is
-    /// woken and nothing is stored.
+    /// else its role's current definition; for a store-owned identity
+    /// declared with its role's named profile, its role's current gate) and
+    /// its role's current gate, split into what the build gates and the role
+    /// families it ignores as not mounted. A member placed on another host
+    /// carries no gate (its placement refuses one), so it answers the empty
+    /// gate. Nothing is woken and nothing is stored.
     ///
     /// # Errors
     /// [`MobError::MemberNotFound`] for an identity outside the roster, and
-    /// the realm profile store's failure to read the role.
+    /// the identity store's or the realm profile store's failure to read.
     pub async fn member_grant_gate(
         &self,
         identity: &AgentIdentity,
@@ -116,11 +204,20 @@ impl super::MobHandle {
         )
         .await?;
         let own = match (&spawn_profile, &role_profile) {
-            (Some(profile), _) | (None, Some(profile)) => &profile.tools,
+            (Some(profile), _) | (None, Some(profile)) => profile,
             (None, None) => return Ok(MemberGrantGate::default()),
         };
-        Ok(MemberGrantGate::resolve(
+        let own = member_build_profile(
+            self.identity.as_ref(),
+            &self.definition,
+            self.realm_profile_store.as_ref(),
+            identity,
+            &role,
             own,
+        )
+        .await?;
+        Ok(MemberGrantGate::resolve(
+            &own.tools,
             role_profile.as_ref().map(|profile| &profile.tools),
         ))
     }

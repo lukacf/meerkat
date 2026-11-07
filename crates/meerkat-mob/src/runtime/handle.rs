@@ -6466,6 +6466,9 @@ pub struct MobHandle {
     /// composition has one: member binding history reads its journal and
     /// identity intent rows in one store transaction. Read-only here.
     pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    /// The mob's identity intents: a member's grant gate reads its
+    /// identity's sealed declaration. Read-only here.
+    pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
     /// The member binding fold this handle and its clones keep between
     /// member binding history reads, so a read folds only the journal tail.
     pub(super) member_binding_fold: Arc<super::delivery_scope::MemberBindingFoldCache>,

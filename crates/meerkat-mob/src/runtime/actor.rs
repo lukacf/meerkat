@@ -16696,6 +16696,7 @@ impl MobActor {
             definition: self.definition.clone(),
             events: self.events.clone(),
             identity_member: self.identity_member.clone(),
+            identity: Arc::clone(&self.identity),
             member_binding_fold: self.member_binding_fold.clone(),
             run_store: self.run_store.clone(),
             runtime_metadata: self.runtime_metadata.clone(),
@@ -36949,6 +36950,19 @@ impl MobActor {
             held,
         };
         let preparation = spawn_preparation::typed_preparation(async move {
+            // The profile the member's build runs on: a store-owned identity
+            // declared with its role's named profile takes its role's current
+            // tool grant gate as its own, as a worker of the role does.
+            let profile = super::member_grant_gate::member_build_profile(
+                preparation_context.identity.as_ref(),
+                &preparation_context.definition,
+                preparation_context.realm_profile_store.as_ref(),
+                &agent_identity,
+                &profile_name,
+                &profile,
+            )
+            .await?
+            .into_owned();
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
             // straight to finalization. The bridge session must already exist
@@ -40786,11 +40800,20 @@ impl MobActor {
         let external_tools =
             self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
         let labels = labels.unwrap_or_default();
+        let build_profile = super::member_grant_gate::member_build_profile(
+            self.identity.as_ref(),
+            &self.definition,
+            self.realm_profile_store.as_ref(),
+            agent_identity,
+            &profile_name,
+            &profile,
+        )
+        .await?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
             agent_identity,
-            profile: &profile,
+            profile: &build_profile,
             definition: &self.definition,
             realm_profile_store: self.realm_profile_store.as_ref(),
             external_tools,

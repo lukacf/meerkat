@@ -26,7 +26,8 @@ use meerkat_contracts::wire::{
 use crate::definition::{MobDefinition, SkillSource};
 use crate::error::MobError;
 use crate::identity::{
-    DesiredExecution, DesiredMemberMaterial, DesiredMemberOverlay, IdentityProfileMemberDeclaration,
+    DesiredExecution, DesiredMemberMaterial, DesiredMemberOverlay, DesiredProfileSource,
+    IdentityProfileMemberDeclaration,
 };
 use crate::ids::{AgentIdentity, MobId, ProfileName};
 use crate::portable_profile::{project_portable_profile, wire_runtime_mode};
@@ -49,10 +50,20 @@ pub(crate) fn apply_tool_category_overrides(
     // A spawn that disables a category also drops its families from the
     // member's own grant gate: an explicit disable still means no such
     // tools, where the gate would mount a gated family closed.
+    drop_disabled_families(&mut profile.tools.grant_gated, overrides);
+}
+
+/// Take out of `gate` the built-in tool families whose category `overrides`
+/// disables: an explicit disable means no such tools, where a gate would
+/// mount a gated family closed.
+pub(crate) fn drop_disabled_families(
+    gate: &mut meerkat_core::tool_grant::GrantGatedTools,
+    overrides: meerkat_core::ToolCategoryOverrides,
+) {
     let disabled = |category: meerkat_core::ToolCategoryOverride| {
         matches!(category, meerkat_core::ToolCategoryOverride::Disable)
     };
-    profile.tools.grant_gated.families.retain(|family| {
+    gate.families.retain(|family| {
         let category = match family.as_str() {
             "shell" => overrides.shell,
             "comms" => overrides.comms,
@@ -232,7 +243,10 @@ pub(crate) async fn compile_desired_member_material(
         } else {
             declaration.runtime_mode
         };
-    let mut portable_profile = match (&declaration.profile_override, resolved_profile) {
+    let (mut portable_profile, profile_source) = match (
+        &declaration.profile_override,
+        resolved_profile,
+    ) {
         (Some(portable), None) => {
             let mut portable = portable.clone();
             if let Some(model) = &declaration.model_override {
@@ -241,14 +255,16 @@ pub(crate) async fn compile_desired_member_material(
             if let Some(external_addressable) = declaration.external_addressable_override {
                 portable.external_addressable = external_addressable;
             }
-            portable
+            (portable, DesiredProfileSource::Override)
         }
         (None, Some(profile)) => {
             let mut profile = profile.clone();
-            // An identity's material carries no tool grant gate: a member
-            // built from it gets its role's current gate at every build, as
-            // role entries. A placement, which would drop the gate, refused a
-            // gated profile before this compile.
+            // An identity's material carries no tool grant gate (its
+            // portable form refuses one). A member built from it is built
+            // from its role's definition, so its build takes the role's
+            // current gate as its own at every build (`profile_source`). A
+            // placement, which would drop the gate, refused a gated profile
+            // before this compile.
             profile.tools.grant_gated = meerkat_core::tool_grant::GrantGatedTools::default();
             if let Some(model) = &declaration.model_override {
                 profile.model.clone_from(model);
@@ -259,7 +275,7 @@ pub(crate) async fn compile_desired_member_material(
             let runtime_mode = declared_runtime_mode
                 .map(domain_runtime_mode)
                 .unwrap_or(profile.runtime_mode);
-            project_portable_profile(
+            let portable = project_portable_profile(
                 &profile,
                 runtime_mode,
                 &definition.models,
@@ -267,7 +283,8 @@ pub(crate) async fn compile_desired_member_material(
                 declaration.profile_name.as_str(),
                 non_portable_disabled,
             )
-            .map_err(MobError::WiringError)?
+            .map_err(MobError::WiringError)?;
+            (portable, DesiredProfileSource::Definition)
         }
         (Some(_), Some(_)) => {
             return Err(MobError::Internal(format!(
@@ -319,6 +336,7 @@ pub(crate) async fn compile_desired_member_material(
     let material = DesiredMemberMaterial {
         profile_name: declaration.profile_name.clone(),
         profile: portable_profile,
+        profile_source,
         definition_extract: PortableDefinitionExtract {
             models: definition.models.clone(),
             image_generation_provider: definition.image_generation_provider,

@@ -19,6 +19,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod governed_peer_support;
 mod support;
 
 use std::time::Duration;
@@ -399,6 +400,121 @@ async fn older_member_host_blocks_member_host_unsupported() {
             .iter()
             .any(|entry| entry.agent_identity == member),
         "the blocked member stays seated"
+    );
+
+    scripted.shutdown();
+}
+
+/// A placed member on a governed member host (its runtime has a native work
+/// authorization host): an operator-instruction record needs prepared
+/// authorization there, which nothing mints for one yet. The host refuses
+/// the record typed (`prepared_authorization_required`) before anything is
+/// written, and the mob blocks the member `member_host_unsupported` until
+/// the next write instead of retrying; the session on the host holds none of
+/// the write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_governed_member_host_refuses_a_placed_record() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let governed = governed_peer_support::GovernedMember::new();
+    let mut options = HostFixtureOptions::named("oi-governed-host").with_member_build();
+    options.member_llm_client = Some(governed.client());
+    options.governed_member = Some(governed.clone());
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("spawn the governed member host");
+    let controlling = create_controlling_mob("oi-governed-host").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits on the governed host");
+    let member = AgentIdentity::from("b2");
+    let session_id = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .materialized
+        .get("b2")
+        .map(|row| SessionId::parse(&row.session_id).expect("a session id"))
+        .expect("b2 is materialized on its host");
+
+    let written = controlling
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL))
+        .await
+        .expect("the ungoverned controller commits the write");
+    let status = settle_member(
+        &controlling.handle,
+        &member,
+        "the governed host's refusal blocks the member member_host_unsupported",
+        blocked_member_host_unsupported,
+    )
+    .await;
+    assert_eq!(
+        status.delivery.recorded_generation, None,
+        "the mob recorded nothing for the member"
+    );
+    let held = fixture
+        .member_service
+        .as_ref()
+        .expect("the member-build fixture composes a member session service")
+        .read_member_instructions(std::slice::from_ref(&session_id))
+        .await
+        .into_iter()
+        .next()
+        .expect("one read per session")
+        .expect("the host session's operator-instruction state reads")
+        .target;
+    assert!(
+        held.as_ref()
+            .is_none_or(|target| target.target_generation() != written.generation),
+        "the governed host recorded nothing of the write: {held:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
+/// A snapshot whose record command would not fit the comms frame cannot
+/// reach a placed member: the mob measures the record before it sends it,
+/// sends nothing, and blocks the member `member_host_unsupported` until the
+/// next write instead of retrying a send that can never succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_placed_record_is_not_sent_and_blocks_the_member() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("oi-oversized-host").await;
+    let controlling = create_controlling_mob("oi-oversized-host").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+    let member = AgentIdentity::from("b2");
+
+    // Four bodies at the per-body limit fill the mob's active budget; their
+    // record, with its envelope, is larger than the comms frame.
+    let body = "x".repeat(256 * 1024);
+    for key in ["one", "two", "three", "four"] {
+        controlling
+            .handle
+            .set_operator_instruction(write(key, 1, &body))
+            .await
+            .expect("the write commits within the active budget");
+    }
+    let status = settle_member(
+        &controlling.handle,
+        &member,
+        "the oversized record blocks the member member_host_unsupported",
+        blocked_member_host_unsupported,
+    )
+    .await;
+    assert_eq!(
+        record_commands(&scripted),
+        0,
+        "no record command was sent: {:?}",
+        scripted.received_command_kinds()
+    );
+    assert_eq!(
+        status.delivery.recorded_generation, None,
+        "the mob recorded nothing for the member"
     );
 
     scripted.shutdown();

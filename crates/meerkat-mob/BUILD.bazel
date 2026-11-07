@@ -3857,6 +3857,7 @@ rust_test(
         "src/store/sqlite.rs",
     ],
     srcs = [
+        "tests/governed_peer_support/mod.rs",
         "tests/placed_member_operator_instructions.rs",
         "tests/support/mod.rs",
         "tests/support/probe_shared.rs",

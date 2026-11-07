@@ -90,7 +90,11 @@ pub enum DefinitionWiring {
     /// no member when it is seated, and no other member to it when that
     /// member is seated or rotated. Explicit wiring
     /// ([`crate::MobHandle::wire`], topology operations) is unaffected, and a
-    /// respawn restores the explicit edges it held.
+    /// respawn restores the explicit edges it held. The member is outside
+    /// role-wide flow steps too: a step that dispatches to every member of
+    /// its role, a flow's supervisor escalation and flow target provisioning
+    /// leave it out, and only a role-targeted run that names it in its
+    /// `role_targets` binds it.
     Exempt,
 }
 

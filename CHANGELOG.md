@@ -316,6 +316,13 @@ them.
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
 
+- `meerkat-mob`: a member seated exempt from the definition's wiring rules
+  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
+  also outside the definition's role-wide flow dispatch: a role-wide step
+  never dispatches to it, a flow's supervisor escalation never picks it,
+  and a role whose only Active members are exempt gets a provisioned flow
+  member. A run whose role targets name it still dispatches to it.
+
 ### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
@@ -422,6 +429,10 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- A Rust host that seats members `DefinitionWiring::Exempt` and wants them
+  to take part in a flow's role-wide steps names them in the run's role
+  targets (`MobHandle::run_flow_with_role_targets`).
 
 ### Known limitations
 

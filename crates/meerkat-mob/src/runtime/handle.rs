@@ -7226,7 +7226,9 @@ pub struct SpawnMemberSpec {
     /// and `role_wiring`) apply to this member.
     /// [`crate::DefinitionWiring::Exempt`] seats it with no edge those rules
     /// declare, and no later seat, spawn or rotation of another member is
-    /// wired to it by them. Explicit wiring is unaffected. The member's
+    /// wired to it by them. Explicit wiring is unaffected. No role-wide flow
+    /// step dispatches to an exempt member either: only a role-targeted run
+    /// that names it in its `role_targets` binds it. The member's
     /// `MemberSpawned` row and roster entry record it, and its restore and
     /// respawn keep it. A placed member cannot be exempt.
     pub definition_wiring: crate::DefinitionWiring,
@@ -14011,9 +14013,11 @@ impl MobHandle {
     }
 
     /// Provision a member for every role of `flow_id` that has no runnable
-    /// target. A member-initiated run passes its requester's recorded
-    /// operator authority as `provision_bound`, which each provisioned spawn
-    /// folds into its ceiling like a member's own spawn.
+    /// target of its role-wide steps (a member seated exempt from the
+    /// definition's wiring rules is none). A member-initiated run passes its
+    /// requester's recorded operator authority as `provision_bound`, which
+    /// each provisioned spawn folds into its ceiling like a member's own
+    /// spawn.
     async fn ensure_flow_targets_provisioned(
         &self,
         flow_id: &FlowId,
@@ -14032,7 +14036,7 @@ impl MobHandle {
                 .list_runnable_members()
                 .await
                 .into_iter()
-                .any(|entry| entry.role == role);
+                .any(|entry| entry.role == role && !entry.definition_wiring().is_exempt());
             if has_runnable_target {
                 continue;
             }

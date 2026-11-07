@@ -5965,6 +5965,45 @@ mod tests {
         );
     }
 
+    /// A model whose account states a context window and no output limit:
+    /// the limit stated for a session's output budget is the window less
+    /// that budget, the limit the gate enforces on the session's requests.
+    /// A 128_000 window with a 32_000 budget states 96_000, and the gate
+    /// refuses a measured 96_001-token prompt of a 32_000-token request at
+    /// 96_000. (Fails-old: without an output limit the stated limit took a
+    /// budget of 0, the whole window, so the session's default compaction
+    /// threshold sat above what the gate admits.)
+    #[test]
+    fn a_window_without_an_output_limit_states_the_limit_for_the_session_budget() {
+        let gated = |input_tokens| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        assert_eq!(
+            gated(0).prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        let refused = gated(96_001).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+            ),
+            "{refused:?}"
+        );
+    }
+
     /// A model the account lists with a policy state other than `enabled`
     /// is unavailable on the account's routes, and the refusal names the
     /// state the account states, with the models the account does offer.

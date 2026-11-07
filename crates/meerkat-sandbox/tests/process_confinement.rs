@@ -2206,3 +2206,122 @@ async fn linux_launch_network_namespace_follows_its_ip_access() {
         }
     }
 }
+
+/// A host that adopts orphans, as the pid 1 of a container or a child
+/// subreaper does, is left nothing of a confined launch that ends: the
+/// custody PID is the launch's init, which the launch's owner reaps, and
+/// every other process of the launch is reaped inside the launch's pid
+/// namespace when the init dies. That holds when the owner kills the
+/// launch, when the launch's process group gets SIGKILL after a SIGTERM it
+/// resists (the shell tool's and the MCP connection's teardown), and when
+/// the owner is dropped.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_a_reaping_host_is_left_nothing_of_an_ended_launch() {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "linux_reaping_host_probe",
+                "--nocapture",
+            ])
+            .env_clear()
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("isolated reaping host probe completes")
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reaping host probe passed"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "isolated host subprocess that adopts orphans"]
+fn linux_reaping_host_probe() {
+    use nix::libc;
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+    // This disposable host adopts the orphans of its descendants, as the
+    // pid 1 of a container does.
+    assert_eq!(
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+        0
+    );
+    let gone = |pid: &u32| !std::path::Path::new(&format!("/proc/{pid}")).exists();
+    let fixture = Fixture::new();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            for ending in ["kill", "group", "drop"] {
+                let ready = format!("ready-{ending}");
+                let mut child = fixture
+                    .prepared_shell(
+                        fixture.spec(),
+                        &format!("trap '' TERM; /bin/sleep 60 & printf ready > {ready}; wait"),
+                    )
+                    .spawn()
+                    .unwrap();
+                let group = child.id().unwrap();
+                fixture.ready(&ready).await;
+                // The shell and the sleep, and the launch's init.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while live_group_members(group).len() < 3 && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let members = live_group_members(group);
+                assert!(members.len() >= 2, "{ending}: {members:?}");
+                match ending {
+                    "kill" => {
+                        child.kill().await.unwrap();
+                        assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+                    }
+                    "group" => {
+                        let pgid = group as libc::pid_t;
+                        assert_eq!(unsafe { libc::killpg(pgid, libc::SIGTERM) }, 0);
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        assert_eq!(
+                            live_group_members(group),
+                            members,
+                            "the launch resists SIGTERM"
+                        );
+                        assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+                        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                            .await
+                            .expect("a group SIGKILL ends the launch")
+                            .unwrap();
+                        assert_eq!(status.signal(), Some(libc::SIGKILL));
+                    }
+                    _ => drop(child),
+                }
+                // No process of the launch is left, not even a zombie, and
+                // this host adopted none of them.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !members.iter().all(gone) && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                let left: Vec<u32> = members.iter().copied().filter(|pid| !gone(pid)).collect();
+                assert!(left.is_empty(), "{ending}: left {left:?} of {members:?}");
+                let mut status = 0;
+                assert_eq!(
+                    unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) },
+                    -1,
+                    "{ending}: this host adopted a process of the launch"
+                );
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ECHILD)
+                );
+            }
+        });
+    println!("reaping host probe passed");
+}

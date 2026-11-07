@@ -923,17 +923,24 @@ async fn an_aborted_held_member_is_seated_normally_after_an_ordinary_restart() {
 /// holds the identity again through its held bootstrap: the identity is
 /// still owed to its host's held protocol. The restart's pass holds it
 /// again, fresh (Core never created it), and Core binds nothing for it until
-/// that pass publishes it.
+/// that pass publishes it. The publication removes the member's mark from
+/// the rollback mirror, as 0.9.10 removes it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_aborted_held_member_stays_owed_to_a_restart_whose_bootstrap_holds_it_again() {
     let identity = AgentIdentity::parse("held-bootstrap-again").unwrap();
     let roster = vec![member(&identity)];
     let dir = tempfile::tempdir().unwrap();
     let mob = mob_id("held-bootstrap-again");
+    let marks = dir
+        .path()
+        .join("state")
+        .join(meerkat_meta::identity_first::HELD_COMPLETION_OWED_DIR);
+    let marked = || std::fs::read_dir(&marks).map(Iterator::count).unwrap_or(0);
 
     let mut runtime =
         installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
     abort_held_bootstrap(&mut runtime, &roster).await;
+    assert_eq!(marked(), 1, "the rollback mirror marks the aborted member");
     let _ = runtime.shutdown().await;
     drop(runtime);
 
@@ -978,6 +985,11 @@ async fn an_aborted_held_member_stays_owed_to_a_restart_whose_bootstrap_holds_it
     assert!(
         core_binds_live(&runtime, &identity).await,
         "the held pass published the member"
+    );
+    assert_eq!(
+        marked(),
+        0,
+        "publishing the member removed its mark from the rollback mirror"
     );
     let _ = runtime.shutdown().await;
 }

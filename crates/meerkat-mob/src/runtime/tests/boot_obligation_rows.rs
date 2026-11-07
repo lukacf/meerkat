@@ -618,3 +618,51 @@ async fn owed_work_whose_host_asks_to_retry_its_build_runs_after_the_retry() {
         "{other} ran no turn"
     );
 }
+
+/// A member that owes boot work and whose host asked to retry its build
+/// preparation is left to that preparation's own retry timer: its refused
+/// owed wake arms no owed-boot retry, whose wakes MobMachine would only
+/// refuse for the cause (`HostPreparationCause::BuildPreparationRetry`).
+///
+/// Pin: an owed-boot retry armed beside the cause (the early return in
+/// `schedule_owed_member_wake_retry` removed) is armed here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owed_work_whose_host_asks_to_retry_its_build_arms_no_owed_retry() {
+    let mob = CrashedStoreMob::new("boot-rows-build-preparation-no-owed-retry", 2).await;
+    let (owed_member, owed) = mob.sessions[1].clone();
+    mob.store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::for_session(&owed),
+            &undelivered_completion(&owed),
+        )
+        .await
+        .expect("the completion is durable");
+    let preparer = Arc::new(RetriesFirstPreparations {
+        refusals: 1,
+        asked: AtomicUsize::new(0),
+    });
+
+    let handle = mob
+        .resume_with_preparer(preparer.clone(), PREPARATION_RETRY)
+        .await;
+    assert_eq!(
+        preparation_of(&handle, &owed_member),
+        Some(dsl::HostPreparationCause::BuildPreparationRetry),
+        "MobMachine records the build preparation the host asked to retry"
+    );
+
+    let armed = handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::OwedMemberWakeRetryArmedForTest {
+            agent_identity: owed_member.clone(),
+            reply_tx,
+        })
+        .await
+        .expect("the probe is queued")
+        .await
+        .expect("the actor answers")
+        .expect("the probe reads");
+    assert!(
+        !armed,
+        "no owed-boot retry is armed while the cause stands: its own timer wakes the member"
+    );
+}

@@ -5691,6 +5691,30 @@ pub(super) fn startup_registration_takeovers_for_test(
         .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
         .unwrap_or_default()
 }
+
+/// How many times a start recorded each member's recovery failure (a member
+/// it left out, then could not recover), per mob.
+#[cfg(test)]
+static STARTUP_RECOVERY_FAILURES_FOR_TEST: std::sync::Mutex<BTreeMap<(MobId, AgentIdentity), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_startup_recovery_failure_for_test(mob_id: &MobId, member: &AgentIdentity) {
+    if let Ok(mut counts) = STARTUP_RECOVERY_FAILURES_FOR_TEST.lock() {
+        *counts.entry((mob_id.clone(), member.clone())).or_default() += 1;
+    }
+}
+
+/// Test read: how many times a start of `mob_id` recorded `member`'s
+/// recovery failure.
+#[cfg(test)]
+pub(super) fn startup_recovery_failures_for_test(mob_id: &MobId, member: &AgentIdentity) -> u64 {
+    STARTUP_RECOVERY_FAILURES_FOR_TEST
+        .lock()
+        .ok()
+        .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
+        .unwrap_or_default()
+}
 #[cfg(test)]
 static FAIL_AFTER_DESTROY_MEMBER_ARCHIVE_FOR_IDENTITY: std::sync::Mutex<Option<AgentIdentity>> =
     std::sync::Mutex::new(None);
@@ -31882,6 +31906,13 @@ impl MobActor {
                     let _ = reply_tx.send(Ok(()));
                 }
                 #[cfg(test)]
+                MobCommand::OwedMemberWakeRetryArmedForTest {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -36122,6 +36153,8 @@ impl MobActor {
             },
         )
         .await;
+        #[cfg(test)]
+        record_startup_recovery_failure_for_test(&self.definition.id, &entry.agent_identity);
     }
 
     /// Whether MobMachine records `agent_identity` Broken: its restore failed.

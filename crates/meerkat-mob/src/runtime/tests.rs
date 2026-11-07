@@ -2238,6 +2238,10 @@ struct MockSessionService {
     /// failure), built anew for each refused attempt: a typed refusal with
     /// its structured data, say.
     create_fail_errors: RwLock<HashMap<SessionId, fn() -> SessionError>>,
+    /// The session error every create that mints a new session fails with,
+    /// when set (presence implies failure), built anew for each refused
+    /// attempt: such a create's session id is assigned only as it runs.
+    create_mint_fail_error: RwLock<Option<fn() -> SessionError>>,
     /// Timestamps of every refused create_session attempt, per session, so
     /// retry-schedule tests can assert real attempt spacing.
     create_fail_attempts: RwLock<HashMap<SessionId, Vec<std::time::Instant>>>,
@@ -2649,6 +2653,7 @@ impl MockSessionService {
             create_fail_sessions: RwLock::new(HashSet::new()),
             create_fail_details: RwLock::new(HashMap::new()),
             create_fail_errors: RwLock::new(HashMap::new()),
+            create_mint_fail_error: RwLock::new(None),
             create_fail_attempts: RwLock::new(HashMap::new()),
             create_identity_already_active_no_live_sessions: RwLock::new(HashSet::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
@@ -3223,6 +3228,12 @@ impl MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), make);
+    }
+
+    /// Make every create that mints a new session (one that resumes no
+    /// session) fail with the session error `make` builds.
+    async fn fail_session_mints_with(&self, make: fn() -> SessionError) {
+        *self.create_mint_fail_error.write().await = Some(make);
     }
 
     /// Timestamps of every refused create_session attempt for `session_id`,
@@ -4353,6 +4364,14 @@ impl MockSessionService {
                 .cloned()
                 .unwrap_or_else(|| "mock create_session failure".to_string());
             return Err(SessionError::Store(Box::new(std::io::Error::other(detail))));
+        }
+        let mints = req.build.as_ref().is_none_or(|build| {
+            build.session_build_intent() == meerkat_core::service::SessionBuildIntent::Mint
+        });
+        if mints && let Some(make) = *self.create_mint_fail_error.read().await {
+            self.create_session_in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(make());
         }
         // Production-faithful "already active" failure: the inproc comms-claim
         // acquire fails INSIDE build_agent, before any live session handle is
@@ -41686,6 +41705,108 @@ async fn a_running_start_records_a_member_broken_when_its_reload_fails() {
         .internal_turn("served beside a broken member")
         .await
         .expect("the healthy member is served");
+}
+
+/// A member the start left out and recovers right after it (one whose
+/// registration needed a durability reload when `taken_over` is false, one
+/// whose stopped registration the start took over when it is true), whose
+/// rebuild the session builder refuses with structured data: once the start
+/// recorded the member's recovery failure, the refusal Core mints from the
+/// member's record.
+#[cfg(feature = "runtime-adapter")]
+async fn refusal_after_a_start_recovery_whose_rebuild_fails(taken_over: bool) -> MobError {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = if taken_over {
+        service.enable_runtime_adapter()
+    } else {
+        persistent_runtime_adapter(&service)
+    };
+    let identity = AgentIdentity::from(if taken_over {
+        "taken-over-refused-at-start"
+    } else {
+        "reload-refused-at-start"
+    });
+    let paused = paused_running_start(
+        &service,
+        &adapter,
+        &identity,
+        crate::MobRuntimeMode::TurnDriven,
+        &[],
+    )
+    .await;
+    if taken_over {
+        assert!(
+            adapter
+                .stop_runtime_executor_until_terminal_if_current(
+                    &paused.registration,
+                    "a host stops the member before the start restores it",
+                )
+                .await
+                .expect("stop the member's runtime to terminal"),
+            "the rebuilt registration is current when the host stops it"
+        );
+    } else {
+        mark_reload_required(&adapter, &paused.session_id).await;
+    }
+    service
+        .set_create_session_failure_error(&paused.session_id, host_build_refusal)
+        .await;
+    paused.release.send(()).expect("release the start");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while super::actor::startup_recovery_failures_for_test(&paused.mob_id, &identity) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the start records the member's recovery failure");
+    match paused.resumed.member(&identity).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    }
+}
+
+/// A member whose registration needs a durability reload when a Running
+/// mob starts, and whose rebuild the session builder then refuses with
+/// structured data: the start records the member Broken, and the refusal
+/// Core mints from its record keeps the builder's data, as the restore
+/// failure the member's own rebuild recorded did.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_the_start_reloads_whose_rebuild_fails_with_structured_data_keeps_it() {
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    let refused = refusal_after_a_start_recovery_whose_rebuild_fails(false).await;
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the member's record keeps its rebuild's structured data"
+    );
+}
+
+/// A member whose stopped registration a Running mob's start took over, and
+/// whose revival the session builder then refuses with structured data: the
+/// start records the member Broken, and the refusal Core mints from its
+/// record keeps the builder's data, as the restore failure the member's own
+/// rebuild recorded did.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_the_start_took_over_whose_revival_fails_with_structured_data_keeps_it() {
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+    let refused = refusal_after_a_start_recovery_whose_rebuild_fails(true).await;
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the member's record keeps its revival's structured data"
+    );
 }
 
 /// A delivery to a member whose registration the start reloads either
@@ -80940,6 +81061,232 @@ async fn a_revival_whose_build_fails_with_structured_data_keeps_it_on_the_restor
         restore_failure_cause_data(&refused),
         expected,
         "the refusal minted from the member's record keeps the same data"
+    );
+}
+
+/// A session builder that refuses member builds with [`host_build_refusal`]
+/// once `refuse` is set, over the production session service.
+struct RefusingPersistentBuilder {
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for RefusingPersistentBuilder {
+    type Agent = PersistentMockAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        meerkat_core::SessionCommsIdentityRoot::NotKept
+    }
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(host_build_refusal());
+        }
+        PersistentMockBuilder.build_agent(req, event_tx).await
+    }
+}
+
+/// A member's revival through the production session service
+/// (`PersistentSessionService`), whose builder refuses the rebuild with
+/// structured data: the service carries the builder's typed refusal, the
+/// restore failure the revival answers keeps its data, and so does every
+/// refusal Core mints from the member's record afterwards, a member
+/// handle's and a member operation's (`declare_member_outbound_taint`
+/// refuses a Broken member).
+#[tokio::test]
+async fn a_revival_through_the_persistent_session_service_keeps_the_builders_refusal_data() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .expect("inline worker profile")
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        RefusingPersistentBuilder {
+            refuse: refuse.clone(),
+        },
+        16,
+        store,
+        runtime_store,
+        blob_store,
+    ));
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob with persistent session service");
+    let member = AgentIdentity::from("w-1");
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), member.clone(), None)
+        .await
+        .expect("spawn worker");
+    let bridge_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed member")
+        .clone();
+    MobSessionService::discard_live_session(service.as_ref(), &bridge_session_id)
+        .await
+        .expect("discard live session");
+    refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    let expected = host_build_refusal().structured_data();
+    assert!(expected.is_some(), "the refusal carries structured data");
+
+    let error = handle
+        .member(&member)
+        .await
+        .expect("member handle")
+        .internal_turn(ContentInput::from("come back online".to_string()))
+        .await
+        .expect_err("the revival fails");
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "the revival answers the member's restore failure: {error:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&error),
+        expected,
+        "the revival's answer keeps the builder's data"
+    );
+    let refused = match handle.member(&member).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "a member handle's refusal, minted from the member's record"
+    );
+    let declared = handle
+        .declare_member_outbound_taint(member.clone(), None)
+        .await
+        .expect_err("a Broken member refuses the declaration");
+    assert!(
+        matches!(declared, MobError::MemberRestoreFailed { .. }),
+        "{declared:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&declared),
+        expected,
+        "a member operation's refusal, minted from the member's record"
+    );
+}
+
+/// A resume customizer that refuses every resume rebuild with a session
+/// builder's typed refusal (`MobError::SessionError` of
+/// [`host_build_refusal`]) once `refusing` is set.
+#[derive(Default)]
+struct RefusesResumeWithData {
+    refusing: std::sync::atomic::AtomicBool,
+}
+
+impl SpawnMemberCustomizer for RefusesResumeWithData {
+    fn customize_spawn(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
+    fn customize_resume(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _durable: &ResumedMemberView,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if self.refusing.load(std::sync::atomic::Ordering::Acquire) {
+            Err(MobError::SessionError(host_build_refusal()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A stopped mob's lift (`MobHandle::resume`) whose rebuild of a member the
+/// session builder refuses with structured data: the explicit resume's
+/// provision fails, the member is recorded Broken with the builder's data,
+/// and the refusal Core mints from its record keeps it.
+#[tokio::test]
+async fn a_lift_whose_member_rebuild_fails_with_structured_data_keeps_it() {
+    let (service, storage, member, session) =
+        seat_member_with_provider_params_then_crash(true).await;
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        // The lift rebuilds every member, as the start's policy says.
+        .with_member_restore_policy(MemberRestorePolicy::Eager)
+        .resume()
+        .await
+        .expect("the stopped mob is reconstructed");
+    service
+        .set_create_session_failure_error(&session, host_build_refusal)
+        .await;
+    let expected = host_build_refusal().structured_data();
+    let _ = tokio::time::timeout(Duration::from_secs(30), resumed.resume())
+        .await
+        .expect("the lift answers");
+    let refused = match resumed.member(&member).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "the member's rebuild failed: {refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the member's record keeps the builder's data"
+    );
+}
+
+/// A stopped mob's lift whose preparation of a member's rebuild fails with
+/// structured data (its customizer refuses the rebuild with a session
+/// builder's typed refusal) records the member Broken with that data, and
+/// the refusal Core mints from its record keeps it.
+#[tokio::test]
+async fn a_lift_whose_member_preparation_fails_with_structured_data_keeps_it() {
+    let (service, storage, member, _session) =
+        seat_member_with_provider_params_then_crash(true).await;
+    let customizer = Arc::new(RefusesResumeWithData::default());
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service.clone())
+        .with_spawn_member_customizer(customizer.clone())
+        // The lift rebuilds every member, as the start's policy says.
+        .with_member_restore_policy(MemberRestorePolicy::Eager)
+        .resume()
+        .await
+        .expect("the stopped mob is reconstructed");
+    customizer
+        .refusing
+        .store(true, std::sync::atomic::Ordering::Release);
+    let expected = host_build_refusal().structured_data();
+    let _ = tokio::time::timeout(Duration::from_secs(30), resumed.resume())
+        .await
+        .expect("the lift answers");
+    let refused = match resumed.member(&member).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "the member's preparation failed: {refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        expected,
+        "the member's record keeps the customizer's data"
     );
 }
 

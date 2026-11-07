@@ -1480,6 +1480,13 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: whether `agent_identity`'s owed-boot wake retry timer is
+    /// armed now.
+    #[cfg(test)]
+    OwedMemberWakeRetryArmedForTest {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -2417,6 +2424,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2657,6 +2666,8 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
             #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"

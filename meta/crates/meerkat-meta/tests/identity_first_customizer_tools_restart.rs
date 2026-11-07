@@ -3679,3 +3679,61 @@ async fn a_bootstrap_spec_declaring_its_customizer_continues_a_killed_run_only_w
     assert!(resolved_tools(&runtime).await.contains(&TOOL.to_string()));
     runtime.shutdown().await;
 }
+
+/// The door's own wake (`IdentityRuntime::materialize`) of a member whose
+/// build preparation the host refuses retryably, through the real session
+/// bridge and Core: Core records the build preparation retry and refuses
+/// the wake for it (`BuildPreparationRetry`), the door retries the
+/// preparation once, as it does for a delivery's wake, and the host is
+/// asked twice. The second refusal answers with the customizer's own
+/// failure, typed and retryable.
+///
+/// RED before the door's own wake read Core's refusal typed: the host was
+/// asked once, and the materialization answered Core's rendering as mob
+/// text.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_build_preparation_on_the_doors_own_wake_is_retried_once() {
+    const MOB_ID: &str = "customizer-tools-restart-door-wake";
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let state = temp.path().join("state");
+    first_boot(MOB_ID, &state).await;
+
+    let capture = CaptureClient::default();
+    let customizer = Arc::new(ToolCustomizer {
+        calls: AtomicUsize::new(0),
+        fail_calls: BTreeSet::from([1, 2]),
+    });
+    let runtime = boot(
+        MOB_ID,
+        &state,
+        capture.clone(),
+        customizer.clone(),
+        IdentityBootstrapMode::LazyMaterialize,
+    )
+    .await;
+    assert_eq!(
+        customizer.calls.load(Ordering::SeqCst),
+        0,
+        "the restart builds no member"
+    );
+
+    let refused = runtime
+        .identity_runtime()
+        .expect("identity runtime")
+        .materialize(&id(MEMBER))
+        .await;
+    let calls = customizer.calls.load(Ordering::SeqCst);
+    runtime.shutdown().await;
+    assert_eq!(
+        calls, 2,
+        "the wake's preparation and the door's one retry of it: {refused:?}"
+    );
+    match &refused {
+        Err(IdentityRuntimeError::IdentityWakeRetryable { detail, .. }) => {
+            assert!(detail.contains("host refused build 2"), "{detail}");
+        }
+        other => {
+            panic!("the materialization is refused retryable with the host's reason: {other:?}")
+        }
+    }
+}

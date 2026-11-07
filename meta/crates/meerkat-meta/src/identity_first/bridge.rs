@@ -13891,6 +13891,65 @@ mod tests {
         Ok(())
     }
 
+    /// Core's typed refusal of a member's wake (`MemberWakeRefused`) is
+    /// typed on the door's own wake (`ensure_member_live`, which maps
+    /// through `classify_reload_mob_error`) as it is on a delivery's wake
+    /// (`classify_submit_mob_error`): `BridgeError::MemberWakeRefused` with
+    /// the member, Core's refusal and Core's rendering, for a refusal the
+    /// door takes a step for and for a final one alike.
+    ///
+    /// RED before the reload mapping read it: the door's own wake answered
+    /// Core's refusal as mob text.
+    #[test]
+    fn cores_wake_refusal_is_typed_on_the_doors_own_wake_as_on_a_deliverys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:refused")?;
+        let member = member_id_for_identity(&identity);
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let refused = |refusal| meerkat_mob::MobError::MemberWakeRefused {
+            member_id: member.clone(),
+            refusal,
+        };
+        for refusal in [
+            meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
+            meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+            meerkat_mob::MemberWakeRefusal::Retiring,
+        ] {
+            let rendering = refused(refusal).to_string();
+            for (path, error) in [
+                (
+                    "the door's own wake",
+                    classify_reload_mob_error(
+                        "ensure_member_live",
+                        &member,
+                        refused(refusal),
+                        &deadline,
+                    ),
+                ),
+                (
+                    "a delivery's wake",
+                    classify_submit_mob_error(&member, refused(refusal), &deadline),
+                ),
+            ] {
+                match error {
+                    BridgeError::MemberWakeRefused {
+                        identity: answered,
+                        refusal: kept,
+                        detail,
+                    } => {
+                        assert_eq!(answered, member, "{path}, {refusal:?}");
+                        assert_eq!(kept, refusal, "{path}, {refusal:?}");
+                        assert_eq!(detail, rendering, "{path}, {refusal:?}: Core's rendering");
+                    }
+                    other => {
+                        panic!("{path}, {refusal:?}: Core's wake refusal is typed, got {other:?}")
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Bounded actor admission
     // -----------------------------------------------------------------------

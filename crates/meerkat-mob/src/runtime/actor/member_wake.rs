@@ -1766,6 +1766,19 @@ impl MobActor {
         )
     }
 
+    /// Whether `identity`'s owed-boot wake retry timer is armed now (rows
+    /// read it through `MobCommand::OwedMemberWakeRetryArmedForTest`).
+    #[cfg(test)]
+    pub(in crate::runtime) fn owed_member_wake_retry_armed(
+        &self,
+        identity: &AgentIdentity,
+    ) -> bool {
+        self.member_wakes
+            .owed_retries
+            .get(identity)
+            .is_some_and(|retry| retry.armed)
+    }
+
     /// An owed-boot retry is due: wake the member for its boot work again,
     /// unless its obligation is gone or a delivery already woke it.
     pub(in crate::runtime) async fn retry_owed_member_wake(&mut self, identity: AgentIdentity) {

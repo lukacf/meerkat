@@ -6266,9 +6266,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MemberWakeFeedbackResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
-- `MemberBuildPreparationRetryArmed`
-  - anchors: (unclaimed)
-  - scenarios: (unclaimed)
 - `MemberWakesAbandoned`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6385,6 +6382,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `IdentityEntryTakenOver`
   - anchors: `mob_declared_apply_authority`
+  - scenarios: (unclaimed)
+- `MemberBuildPreparationRetryArmed`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 
 ### Invariants

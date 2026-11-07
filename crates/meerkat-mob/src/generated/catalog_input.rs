@@ -229,7 +229,6 @@ pub enum MobMachineCatalogInput {
     ClassifyPeerNotice,
     CommitDormantSeat,
     ResolveMemberHostPreparation,
-    ResolveMemberBuildPreparation,
     BeginMemberRotation,
     CommitMemberRotation,
     ClassifyMemberRelease,
@@ -252,6 +251,7 @@ pub enum MobMachineCatalogInput {
     EndPreparationConstruction,
     UnlistIdentityEntry,
     TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
 }
 
 impl MobMachineCatalogInput {
@@ -481,7 +481,6 @@ impl MobMachineCatalogInput {
         Self::ClassifyPeerNotice,
         Self::CommitDormantSeat,
         Self::ResolveMemberHostPreparation,
-        Self::ResolveMemberBuildPreparation,
         Self::BeginMemberRotation,
         Self::CommitMemberRotation,
         Self::ClassifyMemberRelease,
@@ -504,6 +503,7 @@ impl MobMachineCatalogInput {
         Self::EndPreparationConstruction,
         Self::UnlistIdentityEntry,
         Self::TakeOverIdentityEntry,
+        Self::ResolveMemberBuildPreparation,
     ];
 
     #[must_use]
@@ -736,7 +736,6 @@ impl MobMachineCatalogInput {
             Self::ClassifyPeerNotice => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyPeerNotice,
             Self::CommitDormantSeat => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitDormantSeat,
             Self::ResolveMemberHostPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberHostPreparation,
-            Self::ResolveMemberBuildPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberBuildPreparation,
             Self::BeginMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::BeginMemberRotation,
             Self::CommitMemberRotation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::CommitMemberRotation,
             Self::ClassifyMemberRelease => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ClassifyMemberRelease,
@@ -759,6 +758,7 @@ impl MobMachineCatalogInput {
             Self::EndPreparationConstruction => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndPreparationConstruction,
             Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
             Self::TakeOverIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberBuildPreparation,
         }
     }
 
@@ -1016,7 +1016,6 @@ impl MobMachineCatalogInput {
             Self::ClassifyPeerNotice => "ClassifyPeerNotice",
             Self::CommitDormantSeat => "CommitDormantSeat",
             Self::ResolveMemberHostPreparation => "ResolveMemberHostPreparation",
-            Self::ResolveMemberBuildPreparation => "ResolveMemberBuildPreparation",
             Self::BeginMemberRotation => "BeginMemberRotation",
             Self::CommitMemberRotation => "CommitMemberRotation",
             Self::ClassifyMemberRelease => "ClassifyMemberRelease",
@@ -1039,6 +1038,7 @@ impl MobMachineCatalogInput {
             Self::EndPreparationConstruction => "EndPreparationConstruction",
             Self::UnlistIdentityEntry => "UnlistIdentityEntry",
             Self::TakeOverIdentityEntry => "TakeOverIdentityEntry",
+            Self::ResolveMemberBuildPreparation => "ResolveMemberBuildPreparation",
         }
     }
 }

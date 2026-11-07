@@ -862,7 +862,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BootMaterializationPlanned`(agent_identity: AgentIdentity, verdict: BootMaterializationKind, attempt: Option<u64>)
 - `MemberWakeClassified`(agent_identity: AgentIdentity, cause: MemberWakeCause, verdict: MemberWakeVerdictKind, refusal: Option<MemberWakeRefusalKind>, attempt: Option<u64>, session_id: Option<SessionId>)
 - `MemberWakeFeedbackResolved`(agent_identity: AgentIdentity, attempt: u64, verdict: MemberWakeFeedbackVerdict)
-- `MemberBuildPreparationRetryArmed`(agent_identity: AgentIdentity)
 - `MemberWakesAbandoned`(cause: MemberWakeAbandonCause)
 - `RotationSessionsAbandoned`(rotations: Map<AgentIdentity, SessionId>)
 - `CloseMemberPeerIngress`(reason: MemberWakeRefusalKind)
@@ -902,6 +901,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PreparationConstructionEnded`(agent_identity: AgentIdentity, attempt: u64, verdict: ConstructionEndVerdict)
 - `IdentityEntryUnlisted`(agent_identity: AgentIdentity, verdict: UnlistEntryVerdict)
 - `IdentityEntryTakenOver`(agent_identity: AgentIdentity, verdict: HostAdoptionEntryVerdict)
+- `MemberBuildPreparationRetryArmed`(agent_identity: AgentIdentity)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`

@@ -11638,10 +11638,6 @@ pub mod inputs {
         pub agent_identity: AgentIdentity,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveMemberBuildPreparation {
-        pub agent_identity: AgentIdentity,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginMemberRotation {
         pub agent_identity: AgentIdentity,
         pub agent_runtime_id: AgentRuntimeId,
@@ -11784,6 +11780,10 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct TakeOverIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberBuildPreparation {
         pub agent_identity: AgentIdentity,
     }
 }
@@ -12023,7 +12023,6 @@ pub enum Input {
     ClassifyPeerNotice(inputs::ClassifyPeerNotice),
     CommitDormantSeat(inputs::CommitDormantSeat),
     ResolveMemberHostPreparation(inputs::ResolveMemberHostPreparation),
-    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
     BeginMemberRotation(inputs::BeginMemberRotation),
     CommitMemberRotation(inputs::CommitMemberRotation),
     ClassifyMemberRelease(inputs::ClassifyMemberRelease),
@@ -12046,6 +12045,7 @@ pub enum Input {
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
     TakeOverIdentityEntry(inputs::TakeOverIdentityEntry),
+    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12359,7 +12359,6 @@ impl Input {
             Self::ClassifyPeerNotice(_) => InputKind::ClassifyPeerNotice,
             Self::CommitDormantSeat(_) => InputKind::CommitDormantSeat,
             Self::ResolveMemberHostPreparation(_) => InputKind::ResolveMemberHostPreparation,
-            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
             Self::BeginMemberRotation(_) => InputKind::BeginMemberRotation,
             Self::CommitMemberRotation(_) => InputKind::CommitMemberRotation,
             Self::ClassifyMemberRelease(_) => InputKind::ClassifyMemberRelease,
@@ -12382,6 +12381,7 @@ impl Input {
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
             Self::TakeOverIdentityEntry(_) => InputKind::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
         }
     }
 }
@@ -12612,7 +12612,6 @@ pub enum InputKind {
     ClassifyPeerNotice,
     CommitDormantSeat,
     ResolveMemberHostPreparation,
-    ResolveMemberBuildPreparation,
     BeginMemberRotation,
     CommitMemberRotation,
     ClassifyMemberRelease,
@@ -12635,6 +12634,7 @@ pub enum InputKind {
     EndPreparationConstruction,
     UnlistIdentityEntry,
     TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
 }
 
 pub mod signals {
@@ -14473,10 +14473,6 @@ pub mod effects {
         pub verdict: MemberWakeFeedbackVerdict,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct MemberBuildPreparationRetryArmed {
-        pub agent_identity: AgentIdentity,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MemberWakesAbandoned {
         pub cause: MemberWakeAbandonCause,
     }
@@ -14672,6 +14668,10 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: HostAdoptionEntryVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberBuildPreparationRetryArmed {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14834,7 +14834,6 @@ pub enum Effect {
     BootMaterializationPlanned(effects::BootMaterializationPlanned),
     MemberWakeClassified(effects::MemberWakeClassified),
     MemberWakeFeedbackResolved(effects::MemberWakeFeedbackResolved),
-    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
     MemberWakesAbandoned(effects::MemberWakesAbandoned),
     RotationSessionsAbandoned(effects::RotationSessionsAbandoned),
     CloseMemberPeerIngress(effects::CloseMemberPeerIngress),
@@ -14874,6 +14873,7 @@ pub enum Effect {
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
     IdentityEntryTakenOver(effects::IdentityEntryTakenOver),
+    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -15031,7 +15031,6 @@ pub enum EffectKind {
     BootMaterializationPlanned,
     MemberWakeClassified,
     MemberWakeFeedbackResolved,
-    MemberBuildPreparationRetryArmed,
     MemberWakesAbandoned,
     RotationSessionsAbandoned,
     CloseMemberPeerIngress,
@@ -15071,6 +15070,7 @@ pub enum EffectKind {
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
     IdentityEntryTakenOver,
+    MemberBuildPreparationRetryArmed,
 }
 
 pub mod command_capabilities {
@@ -16677,9 +16677,6 @@ pub enum TransitionId {
     ResolveMemberHostPreparationRunning,
     ResolveMemberHostPreparationStopped,
     ResolveMemberHostPreparationCompleted,
-    ResolveMemberBuildPreparationRunning,
-    ResolveMemberBuildPreparationStopped,
-    ResolveMemberBuildPreparationCompleted,
     BeginMemberRotationRunning,
     CommitMemberRotationLiveRunning,
     CommitMemberRotationLiveStopped,
@@ -16687,7 +16684,6 @@ pub enum TransitionId {
     CommitMemberRotationRetiredStopped,
     ResolveMemberRevivalBoundRunning,
     ResolveMemberRevivalRetryableRunning,
-    ResolveMemberRevivalRetryableBuildPreparationRunning,
     AbandonMemberWakeDormantRunning,
     AbandonMemberWakeBrokenRunning,
     ResolveMemberRevivalBoundStaleRunning,
@@ -17131,6 +17127,10 @@ pub enum TransitionId {
     TakeOverIdentityEntryMobNotRunningDestroyed,
     RecoverIdentityEntryAdoptingMarkedRunning,
     RecoverIdentityEntryAdoptingStaleRunning,
+    ResolveMemberRevivalRetryableBuildPreparationRunning,
+    ResolveMemberBuildPreparationRunning,
+    ResolveMemberBuildPreparationStopped,
+    ResolveMemberBuildPreparationCompleted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

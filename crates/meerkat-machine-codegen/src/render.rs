@@ -1034,6 +1034,12 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "TakeOverIdentityEntryMobNotRunningDestroyed",
             "RecoverIdentityEntryAdoptingMarkedRunning",
             "RecoverIdentityEntryAdoptingStaleRunning",
+            // A build preparation the host asked to retry (0.9.11): the wake
+            // feedback arm that records it, and its resolution.
+            "ResolveMemberRevivalRetryableBuildPreparationRunning",
+            "ResolveMemberBuildPreparationRunning",
+            "ResolveMemberBuildPreparationStopped",
+            "ResolveMemberBuildPreparationCompleted",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

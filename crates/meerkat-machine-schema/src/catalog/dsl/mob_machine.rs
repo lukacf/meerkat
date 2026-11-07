@@ -2142,10 +2142,6 @@ macro_rules! mob_catalog_machine_dsl {
             // The host carried out an identity's pending preparation on an
             // identity already seated on that session.
             ResolveMemberHostPreparation { agent_identity: AgentIdentity },
-            // The build preparation the host asked to retry for a member
-            // (BuildPreparationRetry) is retried: Core's retry timer at each
-            // backoff step, or the host's door after a wake refused for it.
-            ResolveMemberBuildPreparation { agent_identity: AgentIdentity },
             // A rotation. FreshSession (reset, delete): the exact Retiring
             // incarnation will be re-seated Dormant on a NEW session in its
             // terminal step. A network-comms member has no endpoint before
@@ -2299,6 +2295,10 @@ macro_rules! mob_catalog_machine_dsl {
             // reconciler takes its Declared entry over before it acts on the
             // member (HostAdoptionEntryVerdict).
             TakeOverIdentityEntry { agent_identity: AgentIdentity },
+            // The build preparation the host asked to retry for a member
+            // (BuildPreparationRetry) is retried: Core's retry timer at each
+            // backoff step, or the host's door after a wake refused for it.
+            ResolveMemberBuildPreparation { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -2865,12 +2865,6 @@ macro_rules! mob_catalog_machine_dsl {
             BootMaterializationPlanned { agent_identity: AgentIdentity, verdict: Enum<BootMaterializationKind>, attempt: Option<u64> },
             MemberWakeClassified { agent_identity: AgentIdentity, cause: Enum<MemberWakeCause>, verdict: Enum<MemberWakeVerdictKind>, refusal: Option<Enum<MemberWakeRefusalKind>>, attempt: Option<u64>, session_id: Option<SessionId> },
             MemberWakeFeedbackResolved { agent_identity: AgentIdentity, attempt: u64, verdict: Enum<MemberWakeFeedbackVerdict> },
-            // A wake's build preparation the host asked to retry was
-            // recorded (BuildPreparationRetry): the owner arms the member's
-            // retry timer, which sends ResolveMemberBuildPreparation at the
-            // next backoff step. Only the step that records the cause emits
-            // it.
-            MemberBuildPreparationRetryArmed { agent_identity: AgentIdentity },
             // Every Waking member was moved to Dormant by a mob-wide stop,
             // completion or destroy admission: every open attempt is closed.
             MemberWakesAbandoned { cause: Enum<MemberWakeAbandonCause> },
@@ -2979,6 +2973,12 @@ macro_rules! mob_catalog_machine_dsl {
             // The verdict of a host's adoption over the identity's entry
             // (TakeOverIdentityEntry).
             IdentityEntryTakenOver { agent_identity: AgentIdentity, verdict: Enum<HostAdoptionEntryVerdict> },
+            // A wake's build preparation the host asked to retry was
+            // recorded (BuildPreparationRetry): the owner arms the member's
+            // retry timer, which sends ResolveMemberBuildPreparation at the
+            // next backoff step. Only the step that records the cause emits
+            // it.
+            MemberBuildPreparationRetryArmed { agent_identity: AgentIdentity },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -4468,7 +4468,6 @@ macro_rules! mob_catalog_machine_dsl {
         disposition RuntimeBindingRefusalStale => local seam SurfaceResultAlignment,
         disposition OwedMemberWakesRecorded => local seam OwnerRealizationOnly,
         disposition OwedEdgeRepairsRecorded => local seam OwnerRealizationOnly,
-        disposition MemberBuildPreparationRetryArmed => local seam OwnerRealizationOnly,
         disposition PersistMemberSeatSessionBorn => local seam OwnerRealizationOnly,
         disposition LegacyIdentityEntryAdoptionResolved => local seam SurfaceResultAlignment,
         disposition AgentLaneMemberAdmissionResolved => local seam SurfaceResultAlignment,
@@ -4514,6 +4513,7 @@ macro_rules! mob_catalog_machine_dsl {
         // answers the identity reconciler's step, which retires a marked
         // entry's member or waits.
         disposition IdentityEntryTakenOver => local seam SurfaceResultAlignment,
+        disposition MemberBuildPreparationRetryArmed => local seam OwnerRealizationOnly,
 
         // =====================================================================
         // Invariants

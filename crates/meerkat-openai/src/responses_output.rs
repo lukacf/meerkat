@@ -478,6 +478,17 @@ impl CopilotSlots {
         Ok(())
     }
 
+    /// The first slot the stream announced whose item never completed (no
+    /// `response.output_item.done`), if any. A stream that ends without a
+    /// terminal response commits only what it completed, so such a slot (a
+    /// started tool call included) is a mismatch, never dropped.
+    pub(crate) fn first_uncompleted(&self) -> Option<u64> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.completed.is_none())
+            .map(|(index, _)| *index)
+    }
+
     /// Pair the terminal `response`'s output with the slots, give each item
     /// its slot's id and order the output by slot. Without slots the output
     /// stays as the provider sent it; an `output` that is not an array is

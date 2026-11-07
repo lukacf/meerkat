@@ -2850,6 +2850,10 @@ impl OpenAiClient {
             let mut streamed_web_search_ids: HashSet<String> = HashSet::new();
             let mut done_emitted = false;
             let mut saw_terminal_fallback_output = false;
+            // The output_index of every item the stream added: one ended by
+            // `[DONE]` without a terminal response must have completed.
+            let mut announced_items: std::collections::BTreeSet<u64> =
+                std::collections::BTreeSet::new();
             // A refusal the model streams (`response.refusal.delta`/`.done`):
             // never answer text, it ends the response as a refusal.
             let mut streamed_refusal = String::new();
@@ -2876,6 +2880,26 @@ impl OpenAiClient {
                     };
                     if data == "[DONE]" {
                         if !done_emitted && saw_terminal_fallback_output {
+                            // Without a terminal response only what completed
+                            // is committed: an item the stream announced and
+                            // never completed (a started tool call included)
+                            // ends the response as incomplete, never dropped.
+                            if copilot_item_identity {
+                                if let Some(index) = copilot_slots.first_uncompleted() {
+                                    Err::<(), _>(crate::responses_output::copilot_mismatch(format!(
+                                        "output_index {index} was announced but never completed"
+                                    )))?;
+                                }
+                            } else if let Some(index) = announced_items
+                                .iter()
+                                .find(|index| !completed_items.contains_key(&ResponsesOutputIndex(**index)))
+                            {
+                                Err::<(), _>(LlmError::IncompleteResponse {
+                                    message: format!(
+                                        "OpenAI Responses stream ended without a terminal response: output_index {index} was announced but never completed"
+                                    ),
+                                })?;
+                            }
                             if !completed_items.is_empty() {
                                 let blocks = crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?;
                                 crate::responses_output::validate_coverage(
@@ -3173,6 +3197,9 @@ impl OpenAiClient {
                         }
                         // Handle streaming delta events
                         else if event.event_type == "response.output_item.added" {
+                            if let Some(index) = event.output_index {
+                                announced_items.insert(index);
+                            }
                             if let Some(item) = &event.item {
                                 crate::responses_output::validate_item(item)?;
                                 if item.get("type").and_then(Value::as_str) == Some("message")

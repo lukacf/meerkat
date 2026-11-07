@@ -7678,10 +7678,12 @@ pub(crate) fn identity_error_code(err: &crate::identity_first::IdentityRuntimeEr
         | IdentityRuntimeError::IdentitySessionAbsent { .. } => IDENTITY_HISTORY_UNAVAILABLE_CODE,
         IdentityRuntimeError::IdentityHostAdopted { .. } => IDENTITY_HOST_ADOPTED_CODE,
         // The first-boot manifest: the migrated state directory and
-        // Core's stores disagree, the storage-resolution class.
+        // Core's stores disagree, the storage-resolution class. So does a
+        // name whose record Core cannot read.
         IdentityRuntimeError::FirstBootManifestUnreadable { .. }
         | IdentityRuntimeError::FirstBootRowRefused { .. }
-        | IdentityRuntimeError::FirstBootRowPending { .. } => STORAGE_RESOLUTION_CODE,
+        | IdentityRuntimeError::FirstBootRowPending { .. }
+        | IdentityRuntimeError::IdentityNameUnreadable { .. } => STORAGE_RESOLUTION_CODE,
         // Core's own class for its refusal: invalid params for an invalid key
         // or a conflict, a capability gap, an unreadable status.
         IdentityRuntimeError::KeyedSendRefused { error, .. } => {

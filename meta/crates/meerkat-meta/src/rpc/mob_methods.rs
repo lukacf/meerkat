@@ -263,9 +263,15 @@ pub(super) fn parse_handling_mode(
 /// 3. A failed read of a registered identity's Core facts while choosing its
 ///    door refuses the send typed (retryable, nothing submitted); it is never
 ///    taken as "not an identity".
-/// 4. Anything else (no identity runtime, unparseable identity, unknown
-///    identity) keeps raw member-id semantics so the original mob
-///    `member not found` error surfaces unchanged.
+/// 4. A name the `IdentityRuntime` has not registered that Core holds for an
+///    identity (an identity entry, a reserved or removed name, or a member
+///    seated before identity entries existed while the first roster pass
+///    has not run) is refused before any door, with the identity door's
+///    typed refusal: retryable while the next roster pass registers it,
+///    final otherwise. So is a name whose Core entry could not be read.
+/// 5. Anything else (no identity runtime, unparseable identity, a name Core
+///    holds for no identity) keeps raw member-id semantics so the original
+///    mob `member not found` error surfaces unchanged.
 enum SendMessageTarget {
     /// Deliver through the mob roster (`send_message_on_mob_with_interaction`).
     MobMember,
@@ -292,7 +298,8 @@ enum SendMessageTarget {
 }
 
 /// The door of a send to `member_id`; `Err` is the typed refusal of a
-/// registered identity whose Core facts could not be read (see
+/// registered identity whose Core facts could not be read, or of a name this
+/// runtime has not registered that Core holds for an identity (see
 /// [`SendMessageTarget`]): nothing reached any door.
 async fn resolve_send_message_target(
     runtime: &UnifiedRuntime,
@@ -314,17 +321,22 @@ async fn resolve_send_message_target(
         return Ok(SendMessageTarget::AuthorityUnavailable { alias: member_id });
     }
     // The identity's registration, or Core's entry of its name, never its
-    // status view, chooses its door: a name Core holds as an identity entry
-    // takes the identity's door even before this process's roster pass
-    // registered it, and that door refuses it typed and retryable until the
-    // pass does. A read of Core's entry Core could not serve refuses the
-    // send, typed: never the member door on a read that could not tell.
+    // status view, chooses its door. A name this runtime has not registered
+    // that Core holds for an identity (an entry, a reserved or removed name,
+    // a legacy member waiting for the first roster pass) is refused before
+    // any door, typed: retryable while the next roster pass registers it,
+    // final otherwise. A read of Core's entry Core could not serve refuses
+    // the send retryable: never the member door on a read that could not
+    // tell.
     if let Some(identity_rt) = configured_identity_runtime
         && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
-        && (identity_rt.contains(&identity).await
-            || identity_rt.core_holds_identity_entry(&identity).await?)
     {
-        return identity_send_target(identity_rt, identity, None).await;
+        if identity_rt.contains(&identity).await {
+            return identity_send_target(identity_rt, identity, None).await;
+        }
+        if let Some(refusal) = identity_rt.unregistered_name_refusal(&identity).await {
+            return Err(refusal);
+        }
     }
     Ok(SendMessageTarget::MobMember)
 }
@@ -358,6 +370,26 @@ async fn identity_send_target(
         runtime_member_id,
         session_id,
     })
+}
+
+/// The durable identity a member operation by `mid` acts on
+/// ([`crate::identity_first::IdentityRuntime::identity_for_member_mutation`]):
+/// `Ok(None)` for a member of the mob's raw plane, and without an identity
+/// runtime. `Err` is the response to answer: the typed refusal of a name the
+/// runtime has not registered that Core holds for an identity, or whose
+/// Core entry could not be read.
+async fn member_operation_identity(
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    response_id: &Value,
+    mid: &str,
+) -> Result<Option<crate::identity_first::AgentIdentity>, JsonRpcResponse> {
+    let Some(identity_runtime) = identity_runtime else {
+        return Ok(None);
+    };
+    identity_runtime
+        .identity_for_member_mutation(mid)
+        .await
+        .map_err(|error| super::identity_error_response(response_id.clone(), &error))
 }
 
 pub(super) async fn handle_send_message(
@@ -1173,8 +1205,13 @@ pub(super) async fn handle_retire_member(
             // not stale, but it still must not fall through to the raw Mob
             // handle. Retire through IdentityRuntime so fencing, continuity,
             // bridge state, and shutdown ownership advance together.
+            let durable =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(durable) => durable,
+                    Err(response) => return response,
+                };
             if let Some(identity_runtime) = identity_runtime
-                && let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await
+                && let Some(durable) = durable
             {
                 return match identity_runtime
                     .retire_member_alias_tracked(&durable, &mid)
@@ -1307,17 +1344,21 @@ pub(super) async fn handle_reload_member(
             }),
         };
     };
-    let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await else {
-        return JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: response_id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32001,
-                message: format!("unknown identity: {mid}"),
-                data: None,
-            }),
-        };
+    let durable = match identity_runtime.identity_for_member_mutation(&mid).await {
+        Ok(Some(durable)) => durable,
+        Ok(None) => {
+            return JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32001,
+                    message: format!("unknown identity: {mid}"),
+                    data: None,
+                }),
+            };
+        }
+        Err(error) => return super::identity_error_response(response_id, &error),
     };
     let expected_alias =
         crate::member_comms_id::is_reserved_generated_alias(&mid).then_some(mid.as_str());
@@ -1386,8 +1427,8 @@ pub(super) async fn handle_member_health(
         };
     };
     let identity = match identity_runtime.identity_for_member_mutation(&mid).await {
-        Some(identity) => identity,
-        None => match crate::identity_first::AgentIdentity::parse(&mid) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => match crate::identity_first::AgentIdentity::parse(&mid) {
             Ok(identity) => identity,
             Err(_) => {
                 return JsonRpcResponse {
@@ -1402,6 +1443,7 @@ pub(super) async fn handle_member_health(
                 };
             }
         },
+        Err(error) => return super::identity_error_response(response_id, &error),
     };
     match identity_runtime.member_health(&identity).await {
         Ok(report) => JsonRpcResponse {
@@ -1434,8 +1476,13 @@ pub(super) async fn handle_respawn_member(
             // Doctrine: identity-owned members respawn through the identity
             // authority — reset rebuilds a fresh session under the SAME
             // durable identity (new generation, continuity preserved).
+            let durable =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(durable) => durable,
+                    Err(response) => return response,
+                };
             if let Some(identity_runtime) = identity_runtime
-                && let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await
+                && let Some(durable) = durable
             {
                 return match identity_runtime
                     .reset_member_alias_tracked(&durable, &mid)
@@ -2553,9 +2600,14 @@ pub(super) async fn handle_force_cancel_member(
             // it: a member that needs a runtime reload, an unknown member and
             // every other mob refusal keep meerkat's typed code and
             // structured data.
+            let identity =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(identity) => identity,
+                    Err(response) => return response,
+                };
             let result: Result<Result<(), meerkat_mob::MobError>, String> = if let Some(identity_rt) =
                 identity_runtime
-                && let Some(identity) = identity_rt.identity_for_member_mutation(&mid).await
+                && let Some(identity) = identity
             {
                 let handle = runtime.mob_handle();
                 // Decode before keying: an `rt:` runtime alias names its durable
@@ -2670,6 +2722,10 @@ pub(super) async fn handle_stop_member_run(
         }
     };
     let reason = reason.to_string();
+    let identity = match member_operation_identity(identity_runtime, &response_id, &mid).await {
+        Ok(identity) => identity,
+        Err(response) => return response,
+    };
     // The meerkat verb's typed `MobError` is carried out of the identity
     // operation intact, so unknown members and host refusals keep meerkat's
     // typed code and structured data.
@@ -2677,7 +2733,7 @@ pub(super) async fn handle_stop_member_run(
         Result<meerkat_contracts::WireRunStopReceipt, meerkat_mob::MobError>,
         String,
     > = if let Some(identity_rt) = identity_runtime
-        && let Some(identity) = identity_rt.identity_for_member_mutation(&mid).await
+        && let Some(identity) = identity
     {
         let handle = runtime.mob_handle();
         // Decode before keying: an `rt:` runtime alias names its durable
@@ -5389,17 +5445,19 @@ comms = true
     }
 
     /// A send to a name Core holds as an identity entry, before this
-    /// process's first roster pass registered the identity, goes through the
-    /// identity door, never the raw member door that skips the identity's
-    /// guards. The identity door refuses it typed and retryable until the
-    /// pass registers the identity, and nothing is delivered.
+    /// process's first roster pass registered the identity, never takes the
+    /// raw member door that skips the identity's guards: `meta/send_message`
+    /// refuses it before any door, as the identity door refuses it, typed and
+    /// retryable (`-32052`) until the pass registers the identity, and
+    /// nothing is delivered.
     ///
     /// RED before the door was chosen from Core's entry: Meta chose it from
     /// its own registrations, which are empty until the first roster pass,
-    /// so the send took the raw member door.
+    /// so the send took the raw member door. The refusal now comes before
+    /// any door, where `meta/send_message` answers it typed (it answered the
+    /// identity door's refusal as an untyped `-32000`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn send_before_the_first_roster_pass_goes_through_the_identity_door() -> Result<(), String>
-    {
+    async fn send_before_the_first_roster_pass_waits_for_the_pass() -> Result<(), String> {
         let definition = meerkat_mob::MobDefinition::from_toml(
             r#"
 [mob]
@@ -5454,9 +5512,12 @@ external_addressable = true
         ));
 
         match resolve_send_message_target(&runtime, Some(&identity_rt), "door-alice").await {
-            Ok(SendMessageTarget::Identity { identity, .. }) if identity == alice => {}
-            Ok(SendMessageTarget::Identity { identity, .. }) => {
-                return Err(format!("the send must name {alice}, not {identity}"));
+            Err(error) if error.clears_on_its_own() => {}
+            Err(error) => {
+                return Err(format!(
+                    "the send is refused retryable until the pass registers the identity: \
+                     {error:?}"
+                ));
             }
             Ok(SendMessageTarget::MobMember) => {
                 return Err(
@@ -5464,18 +5525,41 @@ external_addressable = true
                         .to_string(),
                 );
             }
-            Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
+            Ok(SendMessageTarget::Identity { identity, .. }) => {
                 return Err(format!(
-                    "a plain identity takes the identity door, not the reserved-alias refusal \
-                     ({alias})"
+                    "an identity this runtime has not registered is refused before any door, \
+                     not sent through the door of {identity}"
                 ));
             }
-            Err(error) => {
+            Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
                 return Err(format!(
-                    "Core's entry reads, so the door is chosen: {error}"
+                    "a plain identity is refused as its door refuses it, not with the \
+                     reserved-alias refusal ({alias})"
                 ));
             }
         }
+        let response = handle_send_message(
+            &runtime,
+            Some(&identity_rt),
+            serde_json::json!(1),
+            &serde_json::json!({ "member_id": "door-alice", "message": "hello" }),
+        )
+        .await;
+        let error = response
+            .error
+            .ok_or_else(|| "meta/send_message is refused".to_string())?;
+        assert_eq!(
+            (error.code, error.data.clone()),
+            (
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                Some(serde_json::json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "door-alice",
+                    "retryable": true,
+                }))
+            ),
+            "meta/send_message's typed, retryable refusal: {error:?}"
+        );
         let refused = identity_rt
             .send(
                 &alice,

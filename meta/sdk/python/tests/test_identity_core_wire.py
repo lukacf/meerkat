@@ -763,6 +763,26 @@ def test_a_malformed_first_boot_row_is_refused(row: Any) -> None:
                 True,
             ),
         ),
+        (
+            {
+                "kind": "identity_name_unreadable",
+                "identity": "w",
+                "remedy": "repair_or_upgrade",
+                "retryable": False,
+            },
+            (
+                "identity_name_unreadable",
+                "w",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "repair_or_upgrade",
+                False,
+            ),
+        ),
     ],
 )
 def test_first_boot_refusals_are_typed_storage_resolution_errors(

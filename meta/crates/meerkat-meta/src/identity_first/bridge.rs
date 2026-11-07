@@ -4617,7 +4617,7 @@ pub struct CoreIdentityEntry {
     /// Where the entry comes from, when Core holds the name as an identity
     /// entry: a host's declaration (its roster), or a creation at runtime,
     /// whose record the mob's identity store owns. `None` for a name that is
-    /// no entry, or that Core reserves.
+    /// no entry, that Core reserves, or a removed identity's.
     pub origin: Option<meerkat_mob::IdentityEntryOrigin>,
     /// The member that holds the name, if one does: the entry's member, or
     /// the worker member that holds a name Core holds as no entry.
@@ -4644,9 +4644,15 @@ impl CoreIdentityEntry {
     }
 
     /// Core reserves the name: its entry is one this build of Core cannot
-    /// read, or the identity was removed.
+    /// read.
     pub fn reserved() -> Self {
         Self::of_kind(CoreNameKind::Reserved)
+    }
+
+    /// Core holds the name as a removed identity's: never an entry or a
+    /// member again.
+    pub fn removed() -> Self {
+        Self::of_kind(CoreNameKind::Removed)
     }
 
     fn of_kind(kind: CoreNameKind) -> Self {
@@ -4688,17 +4694,11 @@ impl CoreIdentityEntry {
         self
     }
 
-    /// Whether Core holds the name as an identity entry, or reserves it: a
-    /// name only the identity's host acts on, which Core refuses to every
-    /// door but the identity's own.
-    pub fn is_entry_or_reserved(&self) -> bool {
-        matches!(self.kind, CoreNameKind::Entry | CoreNameKind::Reserved)
-    }
-
     /// Whether Core holds the name as an identity entry a host declared:
     /// the one kind of name a roster pass registers with this runtime. A
-    /// created entry (the mob's identity store owns its record) and a name
-    /// Core reserves are never registered by a roster pass.
+    /// created entry (the mob's identity store owns its record), a name Core
+    /// reserves and a removed identity's name are never registered by a
+    /// roster pass.
     pub fn is_declared_entry(&self) -> bool {
         self.kind == CoreNameKind::Entry
             && self.origin == Some(meerkat_mob::IdentityEntryOrigin::Declared)
@@ -4719,9 +4719,14 @@ pub enum CoreNameKind {
     Entry,
     /// No identity entry: a worker member holds it, or nothing does.
     NotAnEntry,
-    /// Reserved: the name's entry is one this build of Core cannot read, or
-    /// the identity was removed.
+    /// Reserved: the name's entry is one this build of Core cannot read (its
+    /// created entry row is in a format this build does not know, or the
+    /// journal contradicts it). A repair of the mob's store, or a release
+    /// that reads it, is needed before anything acts on the name.
     Reserved,
+    /// Removed: the identity was removed, and its name is never an entry or
+    /// a member again.
+    Removed,
 }
 
 /// The member that holds a name in Core's mob ([`CoreIdentityEntry::member`]),
@@ -5093,7 +5098,7 @@ fn core_identity_entry_of(
             }
             entry
         }
-        meerkat_mob::IdentityEntryRead::Removed => CoreIdentityEntry::reserved(),
+        meerkat_mob::IdentityEntryRead::Removed => CoreIdentityEntry::removed(),
         other => {
             return Err(BridgeError::Mob(format!(
                 "Core answered an identity read this build cannot read: {other:?}"
@@ -5545,14 +5550,19 @@ pub trait SessionBridge: Send + Sync {
     }
 
     /// Core's read of `identity`'s name (`MobHandle::identity_entry`): how
-    /// Core holds it (an identity entry, no entry, or a reserved name), the
-    /// member that holds it with Core's Broken fact and that fact's resume
-    /// hold, the host preparation its entry owes, and the session its last
-    /// member's retirement archived. Read from the machine state the mob's
-    /// actor last published: no store read and no actor command, and it never
-    /// wakes a member. The identity runtime builds every view of an
-    /// identity's lifecycle from it (`status`, `statuses`, `member_health`,
-    /// the bootstrap status) and chooses an identity's door by it.
+    /// Core holds it (an identity entry, no entry, a reserved name or a
+    /// removed identity's), the member that holds it with Core's Broken fact
+    /// and that fact's resume hold, the host preparation its entry owes, and
+    /// the session its last member's retirement archived. Read from the
+    /// machine state the mob's actor last published: no store read and no
+    /// actor command, and it never wakes a member. The resume hold of a
+    /// member Core holds Broken comes from Core's restore diagnostic, which
+    /// [`MobSessionBridge`] reads through `MobHandle::member`: in the one
+    /// actor step before Core records it, that read takes an actor command
+    /// and the answer carries no hold. The identity runtime builds every
+    /// view of an identity's lifecycle from it (`status`, `statuses`,
+    /// `member_health`, the bootstrap status) and chooses an identity's door
+    /// by it.
     ///
     /// The default fails closed: a bridge that cannot read Core's entry
     /// answers [`BridgeError::Unsupported`], and every view of an identity
@@ -9914,7 +9924,12 @@ impl SessionBridge for MobSessionBridge {
         let mut entry = core_identity_entry_of(&read)?;
         // A member Core holds Broken: Core's answer for the member names the
         // failed restore's session and its durable resume hold, which the
-        // machine's read does not carry. Read without the mob actor.
+        // machine's read does not carry. `MobHandle::member` answers it from
+        // Core's restore diagnostic without the mob actor; in the one actor
+        // step between the machine's Broken fact and that diagnostic it
+        // falls through to `get_member`, an actor command, and the read goes
+        // on without the hold (a Core read of the hold with no actor command
+        // is a tracked follow-up).
         if let Some(broken) = entry
             .member
             .as_mut()
@@ -10569,15 +10584,31 @@ impl MobSessionBridge {
                 detail: "the native admission custody was already handed off".to_string(),
             }));
         };
+        // Submitted at the incarnation read above, its runtime id, fence and
+        // session: a member rotated since the reads (by a caller outside
+        // this runtime's verbs) is refused stale, never admitted to its
+        // successor, whose addressability nothing here read.
         let turn = match door {
             GovernedDoor::External => {
                 self.handle
-                    .start_governed_input_with_custody(&mid, input, custody)
+                    .start_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
             GovernedDoor::TrustedHostInternal => {
                 self.handle
-                    .start_internal_governed_input_with_custody(&mid, input, custody)
+                    .start_internal_governed_input_with_custody_at(
+                        &entry.agent_runtime_id,
+                        entry.fence_token,
+                        session_id,
+                        input,
+                        custody,
+                    )
                     .await
             }
         }

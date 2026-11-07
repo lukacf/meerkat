@@ -1394,10 +1394,43 @@ impl InternalDeliveryScheduleMobHost {
         // door). Decode-then-encode canonicalizes both spaces to the roster
         // key; it is the identity on plain member names.
         let member_alias = crate::member_comms_id::runtime_alias_str(member_id).into_owned();
-        if let Some(identity_runtime) = self.identity_runtime.as_ref()
-            && let Some(identity) = identity_runtime
+        // A name the identity runtime refuses (Core holds it for an identity
+        // the runtime has not registered, or its entry could not be read)
+        // ends the fire typed, or leaves it reclaimable when the refusal
+        // clears on its own: never the raw member door.
+        let identity = match self.identity_runtime.as_ref() {
+            Some(identity_runtime) => match identity_runtime
                 .identity_for_member_mutation(&member_alias)
                 .await
+            {
+                Ok(identity) => identity,
+                Err(error) => {
+                    let detail =
+                        format!("identity schedule delivery refused (member {member_id}): {error}");
+                    if error.clears_on_its_own() {
+                        return Some(Err(meerkat::ScheduleDomainError::DeliveryRepairDeferred {
+                            detail,
+                        }));
+                    }
+                    let reason = match error {
+                        crate::identity_first::IdentityRuntimeError::UnknownIdentity(_) => {
+                            meerkat::DeliveryFailureReason::TargetMissing
+                        }
+                        _ => meerkat::DeliveryFailureReason::RuntimeRejected,
+                    };
+                    return Some(Ok(immediate_delivery_failure(
+                        occurrence,
+                        detail,
+                        reason,
+                        Some(delivery_identity.correlation_id.clone()),
+                        None,
+                    )));
+                }
+            },
+            None => None,
+        };
+        if let Some(identity_runtime) = self.identity_runtime.as_ref()
+            && let Some(identity) = identity
         {
             // meerkat 0.8.15: the driver replays this exact identity on every
             // lease-expiry reclaim, and the identity dispatch path now

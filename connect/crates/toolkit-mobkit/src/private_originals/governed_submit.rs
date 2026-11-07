@@ -139,6 +139,7 @@ impl PrivateOriginals {
             }
             IdentityRuntimeError::FirstBootRowRefused { .. } => "FirstBootRowRefused",
             IdentityRuntimeError::FirstBootRowPending { .. } => "FirstBootRowPending",
+            IdentityRuntimeError::IdentityNameUnreadable { .. } => "IdentityNameUnreadable",
             IdentityRuntimeError::IdentityWakeRetryable { .. } => "IdentityWakeRetryable",
             IdentityRuntimeError::IdentitySessionAbsent { .. } => "IdentitySessionAbsent",
             IdentityRuntimeError::IdentityHostAdopted { .. } => "IdentityHostAdopted",

@@ -1133,6 +1133,15 @@ pub enum IdentityRuntimeError {
         waiting_for: FirstBootWait,
         operation: &'static str,
     },
+    /// A name this runtime has not registered, whose record Core cannot read:
+    /// Core reserves it (its created entry row is in a format this build
+    /// does not know, or the journal contradicts it), so nothing acts on it
+    /// and no roster pass registers it. Final: a repair of the mob's store,
+    /// or a release that reads the record, is needed first. Nothing was
+    /// delivered or changed. JSON-RPC `STORAGE_RESOLUTION_CODE`.
+    IdentityNameUnreadable {
+        identity: AgentIdentity,
+    },
     /// The wake's resume failed on a transient fault (busy, I/O, a lock, an
     /// unavailable store). Nothing was spawned, the durable session
     /// is kept, and the next wake retries. Never a reason to delete the
@@ -1478,6 +1487,13 @@ impl std::fmt::Display for IdentityRuntimeError {
                          retry"
                     }
                 }
+            ),
+            Self::IdentityNameUnreadable { identity } => write!(
+                f,
+                "identity {identity} cannot be served: Core cannot read its record (written by \
+                 a newer release, or contradicted by the mob's journal), so it reserves the \
+                 name and nothing acts on it; nothing was delivered or changed. Repair the \
+                 mob's store, or run a release that reads the record"
             ),
             Self::IdentityWakeRetryable {
                 identity,
@@ -1916,6 +1932,22 @@ fn provider_auth_refusal_reason(
 
 impl std::error::Error for IdentityRuntimeError {}
 
+/// Whether Core's `binding` of a member carries a legacy identity mark, as
+/// Core's legacy observation reads the member's spawn row: the
+/// durable-identity continuity marker, or the legacy identity label naming
+/// the member itself (spelling its member id, or the name that id encodes).
+/// A roster pass that lists the member's name adopts such a member as the
+/// identity's entry.
+fn carries_legacy_identity_mark(binding: &meerkat_mob::MemberBinding) -> bool {
+    matches!(
+        binding.continuity_intent(),
+        meerkat_mob::SpawnContinuityIntent::DurableIdentity { .. }
+    ) || crate::member_comms_id::durable_identity_label(binding.labels()).is_some_and(|label| {
+        let member_id = binding.identity().as_str();
+        label == member_id || crate::member_comms_id::mob_member_id_str(label) == member_id
+    })
+}
+
 impl IdentityRuntimeError {
     /// Whether the refusal clears on its own: Core's history or wake could
     /// not answer now, a first-boot row or a held completion is still
@@ -2031,6 +2063,10 @@ impl IdentityRuntimeError {
                     FirstBootWait::CarryOut => "wake_identity",
                 },
                 "retryable": true,
+            })),
+            Self::IdentityNameUnreadable { identity } => Some(serde_json::json!({
+                "kind": "identity_name_unreadable", "identity": identity,
+                "remedy": "repair_or_upgrade", "retryable": false,
             })),
             Self::IdentityWakeRetryable {
                 identity,
@@ -7365,7 +7401,7 @@ impl IdentityRuntime {
         alias: &str,
     ) -> Result<Option<MemberAliasLifecycleTarget>, IdentityRuntimeError> {
         let alias = crate::member_comms_id::runtime_alias_str(alias).into_owned();
-        match self.identity_for_member_mutation(&alias).await {
+        match self.identity_for_member_mutation(&alias).await? {
             Some(identity) => {
                 // Fail stale/deleted generated aliases before unrelated
                 // operation prerequisites (for example cross-mob directory
@@ -14855,20 +14891,6 @@ impl IdentityRuntime {
         }
     }
 
-    /// Whether Core holds `name` as an identity entry, or reserves it: a
-    /// name only its identity's host acts on, which Core refuses to every
-    /// door but the identity's own. `false` without a bridge. A read Core
-    /// could not serve is typed history unavailable, never a guess.
-    pub(crate) async fn core_holds_identity_entry(
-        &self,
-        name: &AgentIdentity,
-    ) -> Result<bool, IdentityRuntimeError> {
-        Ok(self
-            .core_entry_of_name(name)
-            .await?
-            .is_some_and(|entry| entry.is_entry_or_reserved()))
-    }
-
     /// Core's entry of `name`; `None` without a bridge. A read Core could
     /// not serve is typed history unavailable, never a guess.
     async fn core_entry_of_name(
@@ -14888,32 +14910,122 @@ impl IdentityRuntime {
             })
     }
 
+    /// The refusal of a door to `name`, which this runtime has not
+    /// registered, when Core holds the name for an identity; `None` when it
+    /// holds the name for none (no entry, and no legacy member waiting for
+    /// this runtime's first roster pass), or without a bridge: the name is
+    /// then a member of the mob's raw plane, if anything.
+    ///
+    /// Retryable only when this runtime's next roster pass registers the
+    /// name: an entry a host declared (an earlier process declared it, and
+    /// this one's roster pass has not run yet), and a member seated before
+    /// identity entries existed, while the first roster pass, which adopts
+    /// and registers it, has not completed. A read Core could not serve
+    /// refuses retryable too, never taken as "no identity's". Every other
+    /// name Core holds is refused for good: an identity created at runtime
+    /// (a created entry, whose record the mob's identity store owns; this
+    /// runtime registers no created identity) and a removed identity are
+    /// unknown to this runtime, and a name whose record Core cannot read is
+    /// refused as unreadable.
+    pub(crate) async fn unregistered_name_refusal(
+        &self,
+        name: &AgentIdentity,
+    ) -> Option<IdentityRuntimeError> {
+        let entry = match self.core_entry_of_name(name).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return None,
+            Err(error) => return Some(error),
+        };
+        match entry.kind {
+            super::bridge::CoreNameKind::Entry if entry.is_declared_entry() => {
+                Some(IdentityRuntimeError::IdentityHistoryUnavailable {
+                    identity: name.clone(),
+                    detail: "Core holds the identity's entry, and this runtime has not \
+                             registered the identity yet: its roster pass has not run. Nothing \
+                             was delivered or changed; ask again once the pass registers it"
+                        .to_string(),
+                })
+            }
+            super::bridge::CoreNameKind::Entry | super::bridge::CoreNameKind::Removed => {
+                Some(IdentityRuntimeError::UnknownIdentity(name.clone()))
+            }
+            super::bridge::CoreNameKind::Reserved => {
+                Some(IdentityRuntimeError::IdentityNameUnreadable {
+                    identity: name.clone(),
+                })
+            }
+            super::bridge::CoreNameKind::NotAnEntry => {
+                entry.member.as_ref()?;
+                match self.legacy_member_awaits_first_roster_pass(name).await {
+                    Ok(false) => None,
+                    Ok(true) => Some(IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: name.clone(),
+                        detail: "Core holds a member seated under the name before identity \
+                                 entries existed, and this runtime's first roster pass, which \
+                                 adopts and registers it, has not run yet. Nothing was \
+                                 delivered or changed; ask again once the pass registers it"
+                            .to_string(),
+                    }),
+                    Err(error) => Some(error),
+                }
+            }
+        }
+    }
+
     /// The refusal of a door to `identity`, which this runtime has not
-    /// registered. It clears on its own only for an entry a host declared
-    /// (an earlier process declared it, and this one's roster pass has not
-    /// run yet): the pass registers it. A read Core could not serve refuses
-    /// the same way, retryable. Any other name is unknown to this runtime,
-    /// for good: no roster pass registers a name Core holds as no entry, an
-    /// identity created at runtime (a created entry, whose record the mob's
-    /// identity store owns; this runtime registers no created identity), or
-    /// a name Core reserves (its entry unreadable, or the identity removed).
+    /// registered ([`Self::unregistered_name_refusal`]); a name Core holds
+    /// for no identity is unknown to this runtime.
     async fn unregistered_identity_refusal(
         &self,
         identity: &AgentIdentity,
     ) -> IdentityRuntimeError {
-        match self.core_entry_of_name(identity).await {
-            Ok(Some(entry)) if entry.is_declared_entry() => {
-                IdentityRuntimeError::IdentityHistoryUnavailable {
-                    identity: identity.clone(),
-                    detail: "Core holds the identity's entry, and this runtime has not \
-                             registered the identity yet: its roster pass has not run. Nothing \
-                             was delivered; send again once the pass registers it"
-                        .to_string(),
-                }
-            }
-            Ok(_) => IdentityRuntimeError::UnknownIdentity(identity.clone()),
-            Err(error) => error,
+        self.unregistered_name_refusal(identity)
+            .await
+            .unwrap_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))
+    }
+
+    /// Whether this runtime's first roster pass has not completed yet: a
+    /// roster provider is attached, and no pass has started or the first is
+    /// in flight. A runtime without a roster provider runs no roster pass,
+    /// and has none pending.
+    fn first_roster_pass_pending(&self) -> bool {
+        let roster_attached = self
+            .reset_roster_source
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if !roster_attached {
+            return false;
         }
+        let (generation, status) = self.identity_bootstrap_status_with_generation();
+        generation == 0 || (generation == 1 && !status.complete)
+    }
+
+    /// Whether `name`, which this runtime has not registered and Core holds
+    /// as no entry with a member under it, names a member seated before
+    /// identity entries existed that this runtime's first roster pass has not
+    /// adopted yet: the pass is pending, and Core's binding of the member
+    /// carries a legacy identity mark ([`carries_legacy_identity_mark`]),
+    /// which a roster pass that lists the name adopts. A read Core could not
+    /// serve is typed history unavailable.
+    async fn legacy_member_awaits_first_roster_pass(
+        &self,
+        name: &AgentIdentity,
+    ) -> Result<bool, IdentityRuntimeError> {
+        if !self.first_roster_pass_pending() {
+            return Ok(false);
+        }
+        let Some(bridge) = self.bridge.as_ref() else {
+            return Ok(false);
+        };
+        let binding = bridge.last_member_binding(name).await.map_err(|error| {
+            IdentityRuntimeError::IdentityHistoryUnavailable {
+                identity: name.clone(),
+                detail: format!("reading Core's binding of the name's member: {error}"),
+            }
+        })?;
+        Ok(binding
+            .is_some_and(|binding| binding.is_live() && carries_legacy_identity_mark(&binding)))
     }
 
     fn identity_from_member_alias(alias: &str) -> Option<(AgentIdentity, bool)> {
@@ -14946,29 +15058,32 @@ impl IdentityRuntime {
         })
     }
 
-    /// Resolve a mutating member request without allowing a generated alias
-    /// to fall back to the raw mob plane after concurrent deletion. A plain
-    /// durable identity takes its identity's door when this runtime
-    /// registered it or Core holds the name as an identity entry.
-    pub(crate) async fn identity_for_member_mutation(&self, alias: &str) -> Option<AgentIdentity> {
+    /// The durable identity a member operation by `alias` acts on, through
+    /// the identity's door; `Ok(None)` for a member of the mob's raw plane.
+    /// A generated alias is its identity's whether or not that identity is
+    /// still registered (the door refuses a deleted one), so it never falls
+    /// back to the raw plane after a concurrent delete. A plain name is its
+    /// identity's when this runtime registered it. A name this runtime has
+    /// not registered that Core holds for an identity is refused with the
+    /// door's refusal ([`Self::unregistered_name_refusal`]): retryable when
+    /// the next roster pass registers it or Core's entry could not be read,
+    /// final otherwise. Never the raw plane on a read that could not tell.
+    pub(crate) async fn identity_for_member_mutation(
+        &self,
+        alias: &str,
+    ) -> Result<Option<AgentIdentity>, IdentityRuntimeError> {
         match Self::identity_from_member_alias(alias) {
-            Some((identity, true)) => Some(identity),
+            Some((identity, true)) => Ok(Some(identity)),
             Some((identity, false)) => {
                 if self.contains(&identity).await {
-                    return Some(identity);
+                    return Ok(Some(identity));
                 }
-                // A name Core holds as an identity entry (an earlier process
-                // declared it, and this one's roster pass has not run yet)
-                // takes the identity's door too, which refuses it typed until
-                // the pass registers it. So does a name whose read Core could
-                // not serve: never the member door on a read that could not
-                // tell.
-                match self.core_holds_identity_entry(&identity).await {
-                    Ok(false) => None,
-                    Ok(true) | Err(_) => Some(identity),
+                match self.unregistered_name_refusal(&identity).await {
+                    Some(refusal) => Err(refusal),
+                    None => Ok(None),
                 }
             }
-            None => None,
+            None => Ok(None),
         }
     }
 

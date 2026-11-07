@@ -943,9 +943,10 @@ impl SessionBridge for CoreReadsBridge {
                 .unwrap_or_else(PoisonError::into_inner)
                 .contains(identity)
         };
-        // This build of Meta reads a removed identity as a name Core
-        // reserves, as it reads an unreadable one.
-        if held(&self.removed) || held(&self.unreadable) {
+        if held(&self.removed) {
+            return Ok(CoreIdentityEntry::removed());
+        }
+        if held(&self.unreadable) {
             return Ok(CoreIdentityEntry::reserved());
         }
         let created = self

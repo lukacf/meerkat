@@ -10021,6 +10021,32 @@ async fn retire_console_member_ids(
     Ok(())
 }
 
+/// The durable identity a console member operation by `member_id` acts on
+/// ([`crate::identity_first::IdentityRuntime::identity_for_member_mutation`]):
+/// `Ok(None)` for a member of the mob's raw plane, and without an identity
+/// runtime. `Err` is the response to answer: the identity runtime's typed
+/// refusal of a name it has not registered that Core holds for an identity,
+/// or whose Core entry could not be read.
+async fn console_member_operation_identity(
+    identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
+    response_id: &Value,
+    member_id: &str,
+) -> Result<Option<crate::identity_first::AgentIdentity>, Value> {
+    let Some(identity_runtime) = identity_runtime else {
+        return Ok(None);
+    };
+    identity_runtime
+        .identity_for_member_mutation(member_id)
+        .await
+        .map_err(|error| {
+            response_value(
+                response_id.clone(),
+                None,
+                Some(crate::rpc::identity_json_rpc_error(&error)),
+            )
+        })
+}
+
 fn console_identity_error_response(
     response_id: Value,
     operation: &str,
@@ -13285,11 +13311,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             if let (Some(identity_runtime_ref), Some(roster)) =
                 (identity_runtime.as_ref(), identity_roster.as_ref())
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity.clone()
             {
                 return match identity_runtime_ref
                     .retire_member_alias_tracked(&identity, &member_id)
@@ -13328,9 +13362,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             // authority even when this console has no roster slot (builder-
             // constructed identity runtimes serve these arms too).
             if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(durable) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(durable) = mutation_identity
             {
                 return match identity_runtime_ref
                     .retire_member_alias_tracked(&durable, &member_id)
@@ -13407,11 +13439,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             if identity_roster.is_some()
                 && let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity.clone()
             {
                 // Identity-first respawn = reset: retire the live session and
                 // rebuild from the current roster spec under the same durable
@@ -13447,9 +13487,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 };
             }
             if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(durable) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(durable) = mutation_identity
             {
                 return match identity_runtime_ref
                     .reset_member_alias_tracked(&durable, &member_id)
@@ -13537,19 +13575,29 @@ async fn handle_console_runtime_rpc_with_visibility(
                      has no non-destructive reload (respawn_member is a destructive reset)",
                 );
             };
-            let Some(identity) = identity_runtime_ref
+            let identity = match identity_runtime_ref
                 .identity_for_member_mutation(&member_id)
                 .await
-            else {
-                return response_value(
-                    response_id,
-                    None,
-                    Some(JsonRpcError {
-                        code: -32001,
-                        message: format!("unknown identity: {member_id}"),
-                        data: None,
-                    }),
-                );
+            {
+                Ok(Some(identity)) => identity,
+                Ok(None) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(JsonRpcError {
+                            code: -32001,
+                            message: format!("unknown identity: {member_id}"),
+                            data: None,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(crate::rpc::identity_json_rpc_error(&error)),
+                    );
+                }
             };
             let expected_alias = crate::member_comms_id::is_reserved_generated_alias(&member_id)
                 .then_some(member_id.as_str());
@@ -13607,8 +13655,8 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .identity_for_member_mutation(&member_id)
                 .await
             {
-                Some(identity) => identity,
-                None => match crate::identity_first::AgentIdentity::parse(&member_id) {
+                Ok(Some(identity)) => identity,
+                Ok(None) => match crate::identity_first::AgentIdentity::parse(&member_id) {
                     Ok(identity) => identity,
                     Err(_) => {
                         return response_value(
@@ -13622,6 +13670,13 @@ async fn handle_console_runtime_rpc_with_visibility(
                         );
                     }
                 },
+                Err(error) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(crate::rpc::identity_json_rpc_error(&error)),
+                    );
+                }
             };
             match identity_runtime_ref.member_health(&identity).await {
                 Ok(report) => response_value(
@@ -14043,11 +14098,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             // identity operation intact, as `meta/stop_member_run` carries it:
             // a member that needs a runtime reload, an unknown member and
             // every other mob refusal keep meerkat's typed code and data.
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             let result: Result<Result<(), meerkat_mob::MobError>, String> =
                 if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                    && let Some(identity) = identity_runtime_ref
-                        .identity_for_member_mutation(&member_id)
-                        .await
+                    && let Some(identity) = mutation_identity
                 {
                     let handle = runtime.handle();
                     // Decode before encoding. This branch has ALREADY resolved an
@@ -14131,13 +14194,21 @@ async fn handle_console_runtime_rpc_with_visibility(
                 Err(_) => return invalid_params(response_id, "run_id must be a UUID"),
             };
             let reason = reason.to_string();
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             let result: Result<
                 Result<meerkat_contracts::WireRunStopReceipt, meerkat_mob::MobError>,
                 String,
             > = if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity
             {
                 let handle = runtime.handle();
                 let member_id_value =

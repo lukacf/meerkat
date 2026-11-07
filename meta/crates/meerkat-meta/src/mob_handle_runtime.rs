@@ -2353,17 +2353,28 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             if let Some(identity_runtime) = identity_runtime {
                 for (field, alias) in raw_member_tool_arguments(call.name, &args) {
                     let alias = crate::member_comms_id::runtime_alias_str(&alias).into_owned();
-                    if identity_runtime
-                        .identity_for_member_mutation(&alias)
-                        .await
-                        .is_some()
-                    {
-                        return Err(meerkat_core::ToolError::invalid_arguments(
-                            call.name,
-                            format!(
-                                "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
-                            ),
-                        ));
+                    match identity_runtime.identity_for_member_mutation(&alias).await {
+                        Ok(Some(_)) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
+                                ),
+                            ));
+                        }
+                        Ok(None) => {}
+                        // Core holds the name for an identity the runtime has
+                        // not registered, or its entry could not be read:
+                        // never the raw member tool on a read that could not
+                        // tell.
+                        Err(error) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is held for a durable identity of the attached IdentityRuntime: {error}"
+                                ),
+                            ));
+                        }
                     }
                 }
                 if call.name == "mob_destroy"

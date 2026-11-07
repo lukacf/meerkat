@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `SessionBridge` has a new method, `identity_entry`: Core's entry of an
   identity's name (`MobHandle::identity_entry`, read from the machine state
-  the mob's actor published: no store read, no actor command, no wake), as a
+  the mob's actor published: no store read, no actor command, no wake; for
+  a member Core holds Broken, `MobSessionBridge` also reads the member's
+  durable resume hold, see Known limitations), as a
   `CoreIdentityEntry`: how Core holds the name (`CoreNameKind`), the member
   that holds it (`CoreMember`: generation, session, role, runtime mode,
   retiring, and Core's Broken fact, `CoreBrokenMember`, with its durable
@@ -31,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core could not serve is typed (`IdentityHistoryUnavailable`,
   `MemberHistoryUnavailable`), where it answered `false` and an empty list.
   A caller handles the result.
+- `IdentityRuntimeError` gains `IdentityNameUnreadable { identity }`: a name
+  this runtime has not registered whose record Core cannot read (see
+  Changed), answered `-32014` with the new kind `identity_name_unreadable`.
+  The enum is exhaustive, so a downstream exhaustive match needs the new
+  arm, or a wildcard arm.
 
 - Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
   are shared-account tokens unless the configuration declares
@@ -150,6 +157,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `MemberLifecycleFactRecord::new` alone leaves it `None`. The struct is
   `#[non_exhaustive]`, so the field is additive.
 
+- Core's entry of a name, as `SessionBridge::identity_entry` answers it:
+  `CoreIdentityEntry` (built with `entry`, `not_an_entry`, `reserved` and
+  `removed` and the `with_*` setters; `is_declared_entry` and
+  `holds_role_migration` read it), `CoreNameKind` (`Entry`, `NotAnEntry`,
+  `Reserved` for a name whose record Core cannot read, `Removed` for a
+  removed identity's name), `CoreMember` and `CoreBrokenMember`. Each is
+  `#[non_exhaustive]`.
+
+- `-32014` gains the kind `identity_name_unreadable` (`{kind, identity,
+  remedy: "repair_or_upgrade", retryable: false}`): a send, a dispatch or a
+  member mutation by a name whose record Core cannot read
+  (`IdentityRuntimeError::IdentityNameUnreadable`). Both SDKs raise it as
+  `StorageResolutionError`, with `kind`, `identity` and `remedy` set.
+
 ### Changed
 
 - An identity's views read Core's entry of its name: it is `active` while
@@ -161,23 +182,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member it holds Broken, its role hold (`resolve_role_migration`), or its
   last answer to a wake of the session it binds the identity to now. A
   refusal of another session's wake (an incarnation a host replaced) is not
-  shown, and a member Core holds Broken without a hold shows none.
+  shown, and a member Core holds Broken without a hold shows none. Core
+  keeps no Broken verdict across a restart: under `member_restore =
+  "on_demand"` a member the previous process held Broken reads `active`,
+  with no `wake_refusal`, until its next wake fails again, while
+  `on_demand_verified` and `eager` derive the verdict again before ready.
 - The status `runtime_mode` is the mode Core runs the identity's member in,
   `null` while Core holds no member of it, where it was the roster's
   `runtime_mode_override`. Ambient memory follows the same mode, where it
   followed the roster's override or profile table.
-- A name Core holds as an identity entry, or reserves, takes its identity's
-  door even before this process's roster pass registered the identity: a
-  send, a member mutation and a schedule fire never reach the member door.
-  A send or a fire to an entry a host declared is refused `-32052`
-  (`identity_history_unavailable`, retryable) until the pass registers it,
-  and so is a send whose read of Core's entry Core could not serve; a member
-  mutation of an identity this runtime has not registered is refused
-  `-32001` (unknown identity), as before. An identity created at runtime (a
-  created entry, whose record the mob's identity store owns) and a name Core
-  reserves (its entry unreadable, or the identity removed) are never
-  registered by a roster pass: a send or a fire to one is refused `-32001`
-  (unknown identity), not retryable (see Known limitations).
+- A name this runtime has not registered never reaches the member door when
+  Core holds it for an identity: a send, a dispatch, a member mutation, a
+  console send, a cross-mob send and a schedule fire by the name are refused
+  typed before anything is delivered or changed. The refusal is retryable
+  only when this runtime's next roster pass registers the name: an entry a
+  host declared answers `-32052` (`identity_history_unavailable`,
+  retryable) until this process's roster pass registers it, and so does a
+  name whose read of Core's entry Core could not serve. A name no roster
+  pass of this runtime registers is refused for good: an identity removed
+  and an identity created at runtime (a created entry, whose record the
+  mob's identity store owns; see Known limitations) answer `-32001`
+  (unknown identity), and a name whose record Core cannot read (written by
+  a newer release, or contradicted by the mob's journal) answers `-32014`
+  (`identity_name_unreadable`, `remedy: "repair_or_upgrade"`, not
+  retryable). `meta/send_message` answers each of them typed, where it
+  answered the identity door's refusal as an untyped `-32000`, and so do
+  the console's member verbs, where `meta/retire_member` answered some of
+  them as an internal error.
+- A send, a dispatch, a member mutation or a schedule fire by the name of a
+  member seated before identity entries existed (a worker whose spawn row
+  carries the legacy identity label naming it, or the durable-identity
+  continuity marker) that this runtime has not registered is refused
+  `-32052` (`identity_history_unavailable`, retryable) until this runtime's
+  first roster pass has run, where a send took the raw member door as
+  external work, skipping the identity's guards, and a mutation acted on
+  the raw member: the pass adopts and registers the identity when its
+  roster lists the name, and the same request then goes through the
+  identity's door. After the first pass, a member it did not adopt is a
+  worker as before.
 - A schedule fire's refusal class reads Core's entry of the identity: a
   member Core holds Broken ends the fire typed, and a read Core could not
   serve leaves it reclaimable.
@@ -188,7 +230,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   member whose runtime admits no external work is refused
   (`NotExternallyAddressable`) before anything is submitted, as Core refused
   it, and an `InternalOnly` identity is refused as before. A name that is no
-  entry takes the external door as external work, as before.
+  entry takes the external door as external work, as before. The input is
+  submitted at the incarnation of the member the send read (its runtime id,
+  fence and session): a member rotated between that read and the submission
+  (by a host caller outside the identity runtime's verbs) is refused stale
+  (`MobError::StaleFenceToken`), nothing is admitted and the custody is
+  withdrawn, where the input went to the new incarnation.
 - The direct member doors (`send_message_on_mob`,
   `send_message_on_mob_with_mode` and `UnifiedRuntime::start_member_turn`)
   addressed to a name Core holds as an identity entry are refused
@@ -303,9 +350,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Meta does not register identities created at runtime yet (Core's created
   entries, whose records the mob's identity store owns): no roster pass
   lists them, so the identity runtime does not serve them. A send by name,
-  a member mutation or a schedule fire to one is refused `-32001` (unknown
-  identity), not retryable, and nothing reaches its member, until Meta's
-  verbs serve created identities.
+  a dispatch, a member mutation or a schedule fire to one is refused
+  `-32001` (unknown identity), not retryable, and nothing reaches its
+  member, until Meta's verbs serve created identities. That depends on the
+  created-identity adopt work, which lands separately: once Meta registers
+  a created entry, a send to it goes through the identity's door, as for
+  any registered identity.
+- `MobSessionBridge::identity_entry` reads the durable resume hold of a
+  member Core holds Broken through `MobHandle::member`. In the one actor
+  step between Core holding the member Broken and recording that hold, the
+  read falls through to an actor command (`MobHandle::get_member`) and
+  answers without the hold; `meta/member_health` then waits for the actor
+  there. A Core read of the hold that issues no actor command is a tracked
+  follow-up.
 
 ## [0.9.10] - 2026-11-04
 

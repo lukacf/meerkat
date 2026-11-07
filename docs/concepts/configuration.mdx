@@ -252,7 +252,9 @@ context window and separate input ceiling, when one is declared. For
 trigger; its shared input-plus-output context window remains 1,050,000 tokens.
 When the selected account states a smaller prompt limit for the model (a
 GitHub Copilot account model's `max_prompt_tokens`), the trigger is 80 percent
-of that limit instead.
+of that limit instead. An explicit `auto_compact_threshold`, or a per-build
+override, above the account's prompt limit is lowered to the limit, with a
+warning: the account refuses a longer prompt whatever the threshold.
 Built-in provider clients also attach the current provider's approximate
 request-byte cap to each lowered request; the byte trigger fires at 80 percent
 of that cap. `max_request_bytes` is an optional operator override, especially

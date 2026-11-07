@@ -2763,15 +2763,21 @@ fn model_aware_compaction_config(
     // provider's cap to their exact lowered-request witness on every boundary,
     // so model fallback cannot keep applying the initial provider's limit.
     // The per-build override (e.g. a mob profile's `auto_compact_threshold`)
-    // wins over the global config knob and model-aware scaling.
+    // wins over the global config knob and model-aware scaling. Either
+    // explicit value stays within the selected account's prompt limit.
     if let Some(threshold) = build_threshold_override {
-        compaction.auto_compact_threshold = threshold.get();
+        compaction.auto_compact_threshold =
+            explicit_threshold_within_account_limit(threshold.get(), account_prompt_token_limit);
         return compaction;
     }
     let default_threshold = meerkat_core::CompactionConfig::default().auto_compact_threshold;
     if config.compaction.auto_compact_threshold_explicit
         || compaction.auto_compact_threshold != default_threshold
     {
+        compaction.auto_compact_threshold = explicit_threshold_within_account_limit(
+            compaction.auto_compact_threshold,
+            account_prompt_token_limit,
+        );
         return compaction;
     }
 
@@ -2802,6 +2808,31 @@ fn model_aware_compaction_config(
     }
 
     compaction
+}
+
+/// An explicit compaction threshold, bounded by the selected account's own
+/// prompt limit (the rule of the request-byte cap,
+/// `ProviderRequestPressure::effective_cap`): the account refuses a longer
+/// prompt whatever the threshold, so a higher value could only fail the
+/// session later with a non-retryable error. A lowered value is logged once,
+/// when the session's compactor is built. The model's own window does not
+/// bound an explicit threshold.
+#[cfg(any(feature = "session-compaction", test))]
+fn explicit_threshold_within_account_limit(
+    threshold: u64,
+    account_prompt_token_limit: Option<u32>,
+) -> u64 {
+    match account_prompt_token_limit.map(u64::from) {
+        Some(limit) if threshold > limit => {
+            tracing::warn!(
+                threshold,
+                account_prompt_token_limit = limit,
+                "the explicit compaction threshold is above the selected account's prompt limit; the session compacts by that limit"
+            );
+            limit
+        }
+        _ => threshold,
+    }
 }
 
 fn model_aware_default_max_tokens(
@@ -13277,8 +13308,8 @@ mod tests {
 
     /// The selected account's prompt limit (a Copilot account model's
     /// `max_prompt_tokens`) bounds the model-aware default threshold the way
-    /// the registry's input ceiling does: the tighter one wins, and an
-    /// explicit threshold or a per-build override keeps its value.
+    /// the registry's input ceiling does: the tighter one wins. An explicit
+    /// threshold or a per-build override under the limit keeps its value.
     #[test]
     fn account_prompt_limit_bounds_the_model_aware_compaction_threshold() {
         let mut config = Config::default();

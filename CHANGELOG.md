@@ -204,7 +204,9 @@ them.
   model's context window or input ceiling) now also takes the selected
   account's prompt limit when the account states a smaller one, so a long
   session compacts before the account refuses its prompt. An explicit
-  threshold or a per-build override keeps its value. A prompt the provider
+  threshold or a per-build override above the account's prompt limit is
+  lowered to the limit, with a warning, as the request-byte cap bounds a
+  configured cap; one under it keeps its value. A prompt the provider
   measured over that limit is refused as a context-length error, the class
   the agent compacts on, instead of an invalid request; Copilot's own answer
   to an over-limit prompt is not known, so no error body is assumed.

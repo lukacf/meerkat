@@ -3817,6 +3817,19 @@ pub(crate) fn identity_adoption_fixture(
     request_id: &str,
     session_id: SessionId,
 ) -> (AdoptMemberIdentityDeclaration, IdentityIntentRecord) {
+    identity_adoption_fixture_with(mob_id, agent_identity, request_id, session_id, |_| {})
+}
+
+/// [`identity_adoption_fixture`], with its desired material changed by
+/// `edit` before the record is prepared.
+#[cfg(test)]
+pub(crate) fn identity_adoption_fixture_with(
+    mob_id: MobId,
+    agent_identity: AgentIdentity,
+    request_id: &str,
+    session_id: SessionId,
+    edit: impl FnOnce(&mut DesiredMemberMaterial),
+) -> (AdoptMemberIdentityDeclaration, IdentityIntentRecord) {
     use meerkat_contracts::wire::PortableToolConfig;
 
     let profile_name = ProfileName::from("worker");
@@ -3875,7 +3888,7 @@ pub(crate) fn identity_adoption_fixture(
         owned_wiring: BTreeSet::new(),
         convergence: IdentityConvergenceMode::Drain { max_wait_ms: 1_000 },
     };
-    let material = DesiredMemberMaterial {
+    let mut material = DesiredMemberMaterial {
         profile_name,
         profile,
         profile_source: DesiredProfileSource::Definition,
@@ -3899,6 +3912,7 @@ pub(crate) fn identity_adoption_fixture(
         required_local_callback_tools: Vec::new(),
         execution,
     };
+    edit(&mut material);
     let record =
         prepare_identity_adoption_record(&request, material, 10).expect("valid adoption record");
     (request, record)

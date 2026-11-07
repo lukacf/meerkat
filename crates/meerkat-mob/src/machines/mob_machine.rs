@@ -14540,12 +14540,14 @@ mod tests {
             .expect("the declaration emits its verdict")
     }
 
-    /// A role hold belongs to its entry: the seal that removes an unseated
-    /// entry ends its role hold with it, and so does the mob's reset, so a
-    /// member seated later under the name inherits no hold
-    /// (`role_hold_belongs_to_an_entry`).
+    /// A role hold belongs to its entry: the one-entry unlist that ends an
+    /// unseated entry ends its role hold with it, and so does the mob's
+    /// reset, so a member seated later under the name inherits no hold
+    /// (`role_hold_belongs_to_an_entry`). The seal ends no entry itself: it
+    /// is refused while the unseated entry remains, and seals once the
+    /// unlist ended it.
     #[test]
-    fn a_role_hold_ends_with_its_entry_at_the_seal_and_the_reset() {
+    fn a_role_hold_ends_with_its_entry_at_the_unlist_and_the_reset() {
         let held = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
             assert_eq!(
                 declare(
@@ -14571,9 +14573,21 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let unlisted = AgentIdentity::from("unlisted-held-entry");
         held(&mut authority, &unlisted);
-        assert_eq!(
+        assert_ne!(
             seal(&mut authority, std::collections::BTreeSet::new()),
-            DeclaredRosterSealVerdict::Sealed
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal ends no unseated entry itself"
+        );
+        assert!(
+            authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&unlisted),
+            "the refused seal keeps the entry and its role hold"
+        );
+        assert_eq!(
+            unlist(&mut authority, &unlisted),
+            UnlistEntryVerdict::Removed
         );
         assert!(
             !authority
@@ -14586,7 +14600,12 @@ mod tests {
                 .state()
                 .member_host_preparation_causes
                 .contains_key(&unlisted),
-            "the seal ends the role hold with the entry"
+            "the unlist ends the role hold with the entry"
+        );
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal seals once the unlist ended the entry"
         );
 
         let reset = AgentIdentity::from("reset-held-entry");
@@ -14604,6 +14623,45 @@ mod tests {
                 .member_host_preparation_causes
                 .contains_key(&reset),
             "the reset ends the role hold with every entry"
+        );
+    }
+
+    /// A seal ends no entry itself: while the roster leaves out an unseated
+    /// Declared entry the one-entry unlist would end, the seal is refused
+    /// and changes nothing, so every identity end of the declared apply is
+    /// an unlist's, which names it.
+    #[test]
+    fn a_seal_is_refused_while_an_unseated_unlisted_entry_remains() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = AgentIdentity::from("unseated-unlisted-entry");
+        assert_eq!(
+            declare(&mut authority, &entry, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let before = authority.state().clone();
+        assert_ne!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal is refused while the unseated entry remains"
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "the refused seal changes nothing"
+        );
+        assert_eq!(
+            seal(
+                &mut authority,
+                std::collections::BTreeSet::from([entry.clone()])
+            ),
+            DeclaredRosterSealVerdict::Sealed,
+            "a roster that lists the entry seals"
+        );
+        assert_eq!(unlist(&mut authority, &entry), UnlistEntryVerdict::Removed);
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal seals once the unlist ended the entry"
         );
     }
 

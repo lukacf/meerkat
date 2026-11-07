@@ -58,6 +58,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   admin, releases it from the console (`meta/workgraph/release`; anyone
   else gets `-32030` `access_denied`). The stdio RPC gateway is unchanged.
 
+- Changing who a console schedule sends as is an explicit takeover:
+  `meta/schedule/update` or `meta/schedule/resume` by a caller who is not
+  the schedule's sender needs `take_over_sender: true`, and without it is
+  refused with `-32009` `sender_takeover_required` (a new refusal kind, with
+  `sender`, who the schedule sends as) and changes nothing. The stock
+  Console asks before it takes a schedule over.
+- Console schedule writes need the new access action `schedule.manage`
+  beside `agent.send`. An access configuration that names no schedule action
+  grants it wherever a rule grants or denies `agent.send`, so its rules keep
+  their meaning.
+- Every console access write needs `checked_v1`: a `meta/access/*` write
+  without it (its payload at the top level) is refused with `-32602`
+  `revision_required` (a new refusal kind) and changes nothing.
+- On a console without an access controller, `meta/console/revoke_sessions`
+  revokes only the caller's own sessions: naming another principal is
+  refused with `-32030` `access_denied`, and a caller no token identified
+  revokes none. On the console route `principal` may be left out, an
+  access admin's request included: it then names the caller, whose own
+  sessions are revoked (such a request was refused with `-32602` before).
+- `meta/schedule/create`, `meta/schedule/pause` and `meta/schedule/delete`
+  refuse a non-null `expected_revision` or `take_over_sender` with `-32602`
+  and the new refusal kind `unsupported_param` (with `param`); 0.9.10
+  accepted and ignored them.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -86,6 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console quarantine review, goal confirmation and WorkGraph release read
   the caller's grants again right before they are applied, as a gating
   decision does: a grant withdrawn while they waited is refused (`-32030`).
+
+- An access edit on the console always names the revision it was made
+  against, so no edit lands over one its client never saw.
+- On a console without an access controller, a caller can no longer end
+  another person's sessions.
 
 ### Upgrade
 
@@ -128,6 +157,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when the host releases it on its stdio RPC gateway (`rpc_gateway`;
   `meta_gateway` serves none), or when its item is closed.
 
+- An access configuration saved by this release names `schedule.manage`
+  wherever it grants `agent.send`, and an earlier Meta refuses to load a
+  configuration that names it. To roll back, remove `schedule.manage` from
+  the rules, or restore the configuration saved before the upgrade.
+- A client that writes the access policy over `/console/rpc` without
+  `checked_v1` reads `owner_instance` and `revision` from `meta/access/get`
+  and sends the edit inside `checked_v1`; the stock Console already does.
+- To end another person's sessions on a console without an access
+  controller, call `meta/console/revoke_sessions` on the runtime's RPC
+  surface, or install an access controller and revoke as an access admin.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -169,6 +209,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A gating decision made on the host's stdio RPC gateway, or by an
   embedding host through the library, records `deciding_assurance`
   `device_trusted` in its audit entry.
+
+- A console schedule keeps its sender history: `sender_history` names who
+  it sent as before each takeover and when it was taken over (the newest
+  16), shown to callers who may send to its agent.
+- Access action `schedule.manage` restricts who changes an agent's console
+  schedules. Under enforced access each agent's experience affordances
+  carry `can_manage_schedules`, and the stock Console offers schedule
+  changes only where it is true.
 
 ### Fixed
 
@@ -221,6 +269,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   until the member woke, or closed when the mob ended, and the pass tracked
   it as attached. The pass now skips such a subscription, as it skips a
   member it finds dormant, and the member's wake runs the pass again.
+
+- Concurrent console schedule edits no longer overwrite each other:
+  `meta/schedule/update` and `meta/schedule/resume` take
+  `expected_revision`, the stock Console sends the revision it showed, and
+  a change made from an older read is refused with
+  `schedule_revision_conflict`. A pause, a delete and a create take no
+  revision and make no takeover: one that names `expected_revision` or
+  `take_over_sender` is refused with `-32602` `unsupported_param` (with
+  `param`). Each write answers the schedule as it left it.
+- A Console WorkGraph action acts on the revision its card or row showed,
+  never on one read at the click; an action whose card showed none changes
+  nothing, says so, and reads the item again.
 
 ## [0.9.10] - 2026-11-04
 

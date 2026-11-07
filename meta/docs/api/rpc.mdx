@@ -2823,20 +2823,23 @@ sends the gateway's schedules. Every method names the agent as `identity`,
 as `meta/console/send` does. Additive methods, no `contract_version` bump.
 
 The list needs `agent.view` on the agent and every write needs `agent.send`
-(`-32030`): a schedule is a deferred send. A write takes exactly the gate
-`meta/console/send` takes on this route, for the caller as the console
-resolves it, signed in or not: a writable console (`-32010`), a valid public
-alias, and `agent.send` under the live access policy. A candidate launch
-refuses the writes (`-32047`).
+and `schedule.manage` (`-32030`): a schedule is a deferred send, and
+`schedule.manage` lets a deployment restrict who changes schedules (a
+configuration that names no schedule action grants it wherever it grants
+`agent.send`; see [access control](/concepts/access-control)). A write takes
+exactly the gate `meta/console/send` takes on this route, for the caller as
+the console resolves it, signed in or not: a writable console (`-32010`), a
+valid public alias, and `agent.send` under the live access policy. A
+candidate launch refuses the writes (`-32047`).
 
 <Accordion title="Parameters">
 | Method | Params |
 |--------|--------|
 | `meta/schedule/list` | `{identity}` |
 | `meta/schedule/create` | `{identity, content, trigger, name?}` |
-| `meta/schedule/update` | `{identity, schedule_id, content?, trigger?, name?}` |
+| `meta/schedule/update` | `{identity, schedule_id, content?, trigger?, name?, expected_revision?, take_over_sender?}` |
 | `meta/schedule/pause` | `{identity, schedule_id}` |
-| `meta/schedule/resume` | `{identity, schedule_id}` |
+| `meta/schedule/resume` | `{identity, schedule_id, expected_revision?, take_over_sender?}` |
 | `meta/schedule/delete` | `{identity, schedule_id}` |
 </Accordion>
 
@@ -2847,7 +2850,10 @@ trigger, as the schedule tools take it, tagged by `type`: `once`
 `day_of_month`, `month` and `day_of_week` fields, each `{"kind": "any"}` or
 `{"kind": "values", "values": [...]}`). An interval repeats at most once a
 minute (`every_seconds` of at least 60). An update keeps each of `content`,
-`trigger` and `name` it does not name.
+`trigger` and `name` it does not name. `expected_revision` is the schedule's
+`revision` as the caller last read it, and `take_over_sender: true` confirms
+that the change makes the caller the schedule's sender in someone else's
+place (below).
 
 <Accordion title="Result">
 | Field | Type | Description |
@@ -2861,6 +2867,7 @@ minute (`every_seconds` of at least 60). An update keeps each of `content`,
 | `revision` | `integer` | Its revision; every write moves it on |
 | `sender` | `string \| null` | The principal it sends as; `null` for an anonymous caller, and when withheld |
 | `sender_hidden` | `boolean` | `true` when `sender` is withheld: the caller may view the agent but not send to it |
+| `sender_history` | `array` | The senders it sent as before each takeover, oldest first, at most 16: `{sender, defined_at_utc, replaced_at_utc}` each (`sender` as above); empty when withheld |
 | `defined_at_utc` | `string` | When its sender defined it |
 | `created_at_utc`, `updated_at_utc` | `string` | When it was created and last changed |
 | `next_due_at_utc` | `string \| null` | Its next planned send while it is active |
@@ -2868,17 +2875,28 @@ minute (`every_seconds` of at least 60). An update keeps each of `content`,
 
 `meta/schedule/list` answers `{identity, schedules}`, the agent's console
 schedules, oldest first. Create, update, pause and resume answer the
-schedule; delete answers `{identity, schedule_id, deleted: true}`.
+schedule as the change left it (a resume, as Core resumed it: a change
+another caller made between the resume's write and the resume shows in
+the answer); delete answers `{identity, schedule_id, deleted: true}`.
 
-**The sender.** A create, an update and a resume record the caller as the
-schedule's sender: the principal the console's send would use for that
-caller (a verified signed-in human, another authenticated principal, or the
-open Console's shared account), with the provider and issuer its token
-verified under, and the subject only for a verified human. A pause or a
-delete leaves the sender as it is. A resume records its caller while the
-schedule is still paused, so no send goes out as the earlier sender. Only
-a caller who may send to the agent sees who its schedules send as: a caller
-who may only view it gets `sender: null` and `sender_hidden: true`.
+**The sender.** A create records the caller as the schedule's sender: the
+principal the console's send would use for that caller (a verified
+signed-in human, another authenticated principal, or the open Console's
+shared account), with the provider and issuer its token verified under, and
+the subject only for a verified human. An update and a resume define the
+schedule again as their caller. When that caller is its sender (the same
+person by issuer and subject, the same other principal, or the open
+Console's shared account again), the sender stays and its definition time
+moves to the change. When it is anyone else, the change takes the schedule
+over: it needs `take_over_sender: true`, and without it the change is
+refused (`-32009`, `sender_takeover_required`, with `sender`, who it sends as
+now) and changes nothing. A takeover makes the caller the sender and adds
+the sender it replaced to `sender_history`. A pause or a delete leaves the
+sender as it is. A resume records its caller while the schedule is still
+paused, so no send goes out as the earlier sender. Only a caller who may
+send to the agent sees who its schedules send as: a caller who may only
+view it gets `sender: null`, `sender_hidden: true` and an empty
+`sender_history`.
 
 **Each fire is a console send by its sender.** At each due time the Console
 first admits the recorded sender as it admits a live request by it, under
@@ -2896,10 +2914,19 @@ as a live send by the sender is, so a redelivered occurrence sends once. It
 reaches the agent with origin `console:schedule` and the scheduler turn
 origin.
 
-**Changes made meanwhile.** An update and a resume write at the revision
-they read: one that raced another change answers `-32009`
-(`schedule_revision_conflict`) and changes nothing, so it never puts back
-what the other change replaced. Read the schedule again and repeat it.
+**Changes made meanwhile.** `expected_revision` is optional, on an update
+and a resume only. One that names it is refused when the schedule moved
+past it (`-32009`, `schedule_revision_conflict`), so a change made from an
+older read never overwrites a change made meanwhile; the stock Console
+always sends the revision it showed. One that leaves it out acts on the
+schedule's current revision: the last writer wins. Either way they write at
+the revision they read: one that raced another change answers the same
+refusal and changes nothing, so it never puts back what the other change
+replaced. Read the schedule again and repeat it. A pause and a delete take
+no revision: they act on the schedule as it is. A pause, a delete or a
+create that names `expected_revision` or `take_over_sender` is refused
+(`-32602`, `unsupported_param`) rather than read as a condition it would
+not keep.
 
 A refused or failed send fails that occurrence (`delivery_failed` in the
 schedule store), and the schedule keeps its later times. That covers a
@@ -2916,8 +2943,10 @@ console send.
 | `-32002` | `not_addressable` | A create, update or resume names an agent that takes no console sends |
 | `-32004` | `governed_target` | The agent's input is governed: a governed send needs its Console human present, and a fire has none. A capability refusal, unlike the `-32003` a live send to a governed agent answers, since no human can be present at a fire |
 | `-32004` | `schedule_host_unavailable` | No schedule firing host sends the gateway's schedules, or the schedule store is unavailable |
-| `-32009` | `schedule_revision_conflict` | An update or resume raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
-| `-32602` | none | A blank `content`, an interval under 60 seconds, an invalid `trigger` (an unknown time zone among them), or a resume of a schedule that is not paused. Pausing a paused schedule answers it as it is |
+| `-32009` | `schedule_revision_conflict` | An update or resume named an `expected_revision` the schedule moved past, or raced another change of the schedule (with `expected_revision` and `actual_revision`); nothing changed |
+| `-32009` | `sender_takeover_required` | An update or resume by another caller than the schedule's sender without `take_over_sender: true` (with `sender`, who it sends as now); nothing changed |
+| `-32602` | `unsupported_param` | A pause, a delete or a create that names `expected_revision` or `take_over_sender` (with `param`, the one it named); nothing changed |
+| `-32602` | none | A blank `content`, an interval under 60 seconds, an invalid `trigger` (an unknown time zone among them), an `expected_revision` that is not a non-negative integer, a `take_over_sender` that is not a boolean, or a resume of a schedule that is not paused. Pausing a paused schedule answers it as it is |
 
 Known limits:
 
@@ -3092,7 +3121,7 @@ one never moves it back.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `principal` | `string` | The principal: the email, or the `sub` when the token carries no email |
+| `principal` | `string` | The principal: the email, or the `sub` when the token carries no email. On the console's `/console/rpc` it may be left out: it is then the caller's own |
 
 | Result field | Type | Description |
 |--------------|------|-------------|
@@ -3108,10 +3137,11 @@ synced after the record's file was replaced: the revocation then took effect
 but may not survive a power loss, and revoking again confirms it.
 
 The console's `/console/rpc` serves the same method. With an access
-controller, enforced or not, only an access admin may call it, as for the
-`meta/access/*` edits; on a console without one, any caller a token
-identified may, as with other console actions. A read-only console refuses
-it.
+controller, enforced or not, only an access admin may call it, for any
+principal, as for the `meta/access/*` edits. On a console without one, a
+caller a token identified revokes only their own sessions: naming another
+principal is refused with `-32030` (`access_denied`) and fences no one, and
+a caller no token identified revokes none. A read-only console refuses it.
 
 ---
 

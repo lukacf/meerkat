@@ -525,16 +525,27 @@ which asks you to confirm. An edit keeps the timing unless you change it.
   policy at that time, a writable console, and an agent that takes console
   messages. A refused send fails that time only; the schedule keeps its
   later times.
-- Creating, editing or resuming a schedule makes you its sender. On a
-  console without sign-in the sender is the console's shared account, as it
-  is for a message you send there; once the console requires sign-in, such
-  schedules stop sending until someone signed in edits them.
-- A change that races another change of the same schedule is refused and
-  the list is read again: check the schedule and repeat the change.
+- Creating a schedule makes you its sender, and so does editing or resuming
+  one you send. Editing or resuming a schedule someone else sends takes it
+  over: the Console first says who it sends as and asks you to confirm, and
+  only then makes you its sender; keeping its sender changes nothing. The
+  schedule keeps the senders it was taken over from, and its details name
+  them. On a console without sign-in the sender is the console's shared
+  account, as it is for a message you send there; once the console requires
+  sign-in, such schedules stop sending until someone signed in edits them.
+- An edit or a resume names the version of the schedule the pane showed: one
+  made after someone else changed the same schedule is refused and the list
+  is read again: check the schedule and repeat the change. A pause and a
+  delete name no version: they act on the schedule as it is.
+- A deployment can let people message an agent without changing its
+  schedules: schedule changes also need `schedule.manage`, which an access
+  configuration that names no schedule action grants wherever it grants
+  `agent.send`.
 - A schedule repeats at most once a minute.
-- Viewers who may see the agent but not message it see its schedules
-  read-only, and so does everyone on a read-only console or on a gateway
-  that does not offer schedule changes; the pane says why.
+- Viewers who may see the agent but not message it, or message it but not
+  manage its schedules, see its schedules read-only, and so does everyone on
+  a read-only console or on a gateway that does not offer schedule changes;
+  the pane says why.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
@@ -959,6 +970,7 @@ interface ConsoleAgent {
   addressable?: boolean;
   affordances?: {
     can_send_message?: boolean;
+    can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
     runtime_mode?: string;
@@ -1119,8 +1131,8 @@ Primary RPC methods on `/console/rpc`:
 - `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
   `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
   an agent's console schedules (see [Schedules](#schedules)); the list is
-  gated by `agent.view` and the writes by `agent.send` for the agent, and
-  each send is a Console send by the schedule's sender
+  gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
+  for the agent, and each send is a Console send by the schedule's sender
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

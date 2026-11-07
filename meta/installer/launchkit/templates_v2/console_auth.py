@@ -178,6 +178,17 @@ def _console_public_headers():
             "Content-Security-Policy": "frame-ancestors 'none'", "Referrer-Policy": "no-referrer"}
 
 
+def _method_not_found(value):
+    """Whether a console's JSON-RPC answer is "method not found": the console predates the method."""
+    error = value.get("error") if isinstance(value, dict) else None
+    return isinstance(error, dict) and error.get("code") == -32601
+
+
+# The console's answer about an administrator when it predates
+# `meta/console/whoami`: it names none.
+_CONSOLE_PREDATES_WHOAMI = object()
+
+
 def _console_origin(value, local_origin):
     """Select the browser origin from trusted host construction, never headers.
 
@@ -1006,7 +1017,8 @@ class ConsoleFront:
         # One application-owned review in this host lifetime, started at the
         # first ready login of a person and kept by the front, not by that
         # login: any administrator's login answers it, also after that login
-        # ends. A new login never retries an unknown or retired invocation.
+        # ends (with a console that predates whoami, only that login does).
+        # A new login never retries an unknown or retired invocation.
         self._controller_review_created = False
         self._controller_review_owner = None
         self._controller_review_failure = None
@@ -1154,8 +1166,7 @@ class ConsoleFront:
         if not isinstance(value, dict):
             return False
         if "error" in value:
-            error = value["error"]
-            return isinstance(error, dict) and error.get("code") == -32601
+            return _method_not_found(value)
         result = value.get("result")
         return isinstance(result, dict) and result.get("login") == "session"
 
@@ -1355,6 +1366,8 @@ class ConsoleFront:
         answers the review, so the review starts at the first ready login of a
         person the console names an administrator. While one login is checked,
         no other starts one; if it is not an administrator's, the next may.
+        A console that predates whoami names no administrator: the review then
+        starts at the first ready login of a person, and is that login's.
         """
         if (self.controller_review_factory is None or not login.person
                 or self._controller_review_created or self._controller_review_pending is not None):
@@ -1364,7 +1377,8 @@ class ConsoleFront:
             try:
                 if login.console_login_required and not await self._ready_console_login(login):
                     return
-                if await self._console_administrator(login) is True and self._login_current(login):
+                held = await self._console_administrator(login)
+                if (held is True or held is _CONSOLE_PREDATES_WHOAMI) and self._login_current(login):
                     self._reserve_controller_review(login)
             finally:
                 if self._controller_review_pending is login:
@@ -2499,6 +2513,8 @@ class ConsoleFront:
 
         Read from the console's `meta/console/whoami` with a token of the
         login, so an access edit applies at once. None when it cannot tell.
+        `_CONSOLE_PREDATES_WHOAMI` when the console answers "method not
+        found", as for its sign-out: such a console names no administrator.
         """
         import httpx
         token = self._native_token(login)
@@ -2511,6 +2527,8 @@ class ConsoleFront:
             value = response.json() if response.status_code == 200 else None
         except Exception:
             return None
+        if _method_not_found(value):
+            return _CONSOLE_PREDATES_WHOAMI
         result = value.get("result") if isinstance(value, dict) else None
         if not isinstance(result, dict) or not isinstance(result.get("actor"), dict):
             return None
@@ -2574,6 +2592,10 @@ class ConsoleFront:
                 return refusal("unavailable", 503)
             if not self._disclosure_current(request, login):
                 return refusal("invalid_binding", 401)
+            if held is _CONSOLE_PREDATES_WHOAMI:
+                # Such a console names no administrator: only the login the
+                # review started at sees and answers it.
+                return None if owner.login_scope_id == login.login_scope_id else refusal("unavailable", 409)
             return None if held else refusal("not_administrator", 403)
         try:
             if suffix == "/answer":

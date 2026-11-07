@@ -510,6 +510,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   copied again with a warning, so access control stays on. A temporary file
   that a start or setup stopped while writing leaves in `.mobkit` is removed
   by a later one.
+- Forge: with a console that predates `meta/console/whoami` (Meta 0.9.10
+  and earlier), the controller review opens again at the first sign-in of a
+  person, and only that sign-in sees and answers it, as before. Such a
+  console answers whoami with "method not found" and names no
+  administrator. With a console that serves whoami the review stays an
+  administrator's, and a whoami answer the front cannot use (none, a
+  timeout, a malformed answer or another error) still opens nothing.
 
 ### Known limitations
 

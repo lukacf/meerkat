@@ -1337,7 +1337,8 @@ def test_native_callbacks_are_never_mounted_on_the_consoles_own_routes(tmp_path,
         assert path not in console._mcp_routes
 
 
-@pytest.mark.parametrize("answer", ["transport", "not-served", "malformed"])
+@pytest.mark.parametrize("answer", ["unavailable", "timeout", "malformed", "another-error",
+                                    "not-found-in-an-error-status"])
 async def test_the_review_is_unavailable_when_the_console_cannot_tell(tmp_path, reviews, answer):
     native = ConsoleNative(admins=(ALICE,))
     console = front(tmp_path, native, controller_review_factory=Review)
@@ -1346,15 +1347,7 @@ async def test_the_review_is_unavailable_when_the_console_cannot_tell(tmp_path, 
         async with browser(app, console) as alice:
             await sign_in(alice, console, ALICE, ALICE_PASSWORD)
             assert (await review_state(alice)).json()["status"] == "prompt"
-
-            def unknown(identity):
-                if answer == "transport":
-                    raise httpx.ConnectError("the console is unavailable")
-                if answer == "not-served":
-                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
-                        "error": {"code": -32601, "message": "Method not found"}})
-                return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity, "result": {"actor": "person"}})
-            native.whoami_answer = unknown
+            native.whoami_answer = whoami_answer(answer)
             state = await alice.get("/console/forge/controller-review/state")
             assert state.status_code == 503 and state.json() == {"error": {"code": "unavailable"}}
             answered = await answer_review(alice, console)

@@ -477,12 +477,25 @@ pub async fn handle_request(
         Err(ToolGrantRequestError::Decision(error_value)) => {
             decision_error_to_response(id, error_value)
         }
+        // The grant's window and target, refused as a grant's own are.
+        Err(error_value @ ToolGrantRequestError::InvalidDuration { .. }) => refused(
+            id,
+            &ToolGrantRequestRefusal::InvalidWindow,
+            error_value.to_string(),
+        ),
+        Err(error_value @ ToolGrantRequestError::EmptyTarget) => refused(
+            id,
+            &ToolGrantRequestRefusal::EmptyTarget,
+            error_value.to_string(),
+        ),
         // The clock, or a held body this binary cannot read back: the
         // server's fault.
         Err(
             error_value @ (ToolGrantRequestError::Clock(_)
             | ToolGrantRequestError::UnreadableRequest(_)),
         ) => RpcResponse::error(id, error::INTERNAL_ERROR, error_value.to_string()),
+        // A request no decision can hold (a reason past a decision's size
+        // bounds): plain invalid params, the decision contract's refusal.
         Err(error_value) => RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string()),
     }
 }

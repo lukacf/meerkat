@@ -972,3 +972,104 @@ async fn the_presenter_loop_serves_two_logins_at_once_and_one_login_in_arrival_o
     finishing.await.unwrap().unwrap();
     drop(pipe);
 }
+
+/// A presentation can end on the host's closure before the loop sees the
+/// closure itself. The loop then starts no request that waited for that
+/// login's turn: the waiting request retires with its enrollment, unstarted.
+/// Here login A's first presentation asks for the closure and ends in the
+/// same poll in which it sees it, after the loop's own closure branch was
+/// polled, so the loop sees the presentation end first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_presentation_ending_as_the_host_closes_starts_no_waiting_request() {
+    use super::super::setup_presenter::{Enrollment, SetupEvent, channel};
+    let (connection, pipe, [a, _]) = two_logins().await;
+    let closed = connection.closed_observer();
+    let directory = tempfile::tempdir().unwrap();
+    let (factory, reviews) = channel(directory.path().to_owned());
+    let label = |event: &SetupEvent| match event {
+        SetupEvent::Approval(prompt) => prompt.record().proposed_action.summary.clone(),
+        _ => unreachable!("only reviews are requested here"),
+    };
+    let (seen, mut observed) = tokio::sync::mpsc::unbounded_channel::<(&'static str, String)>();
+    let (release, released) = oneshot::channel::<()>();
+    let (ask_close, close_asked) = oneshot::channel::<()>();
+    // The first presentation takes both: once released, it asks for the
+    // closure and waits for it without yielding.
+    let first = Arc::new(Mutex::new(Some((released, ask_close))));
+    let login_of = {
+        let seen = seen.clone();
+        let a = a.clone();
+        move |event: &SetupEvent| {
+            seen.send(("arrived", label(event))).unwrap();
+            Some(a.clone())
+        }
+    };
+    let present = move |login: Option<ConsoleLoginHandle>,
+                        enrollment: Enrollment,
+                        event: SetupEvent,
+                        closed: PrivateHostClosed|
+          -> Presentation {
+        seen.send(("started", label(&event))).unwrap();
+        let first = first.lock().unwrap().take();
+        Box::pin(async move {
+            match first {
+                Some((released, ask_close)) => {
+                    let _ = released.await;
+                    tokio::task::block_in_place(|| {
+                        ask_close.send(()).unwrap();
+                        while !closed.is_closed_for_presenter() {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    });
+                }
+                None => closed.wait_closed().await,
+            }
+            // The prompt ends without a decision.
+            drop(event);
+            (
+                login,
+                enrollment,
+                Presented::Software(Ok(ApprovalPromptOutcome::Continue)),
+            )
+        })
+    };
+    let serve = tokio::spawn(serve_setup_presentations(
+        reviews, closed, login_of, present,
+    ));
+    let event = |kind: &'static str, label: &str| Some((kind, label.to_owned()));
+
+    let a1 = enroll_review(&factory, "A1").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A1"));
+    assert_eq!(loop_saw(&mut observed).await, event("started", "A1"));
+    let a2 = enroll_review(&factory, "A2").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A2"));
+    assert!(
+        loop_quiet(&mut observed).await,
+        "A2 started while A1 was presented"
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(LOOP_BOUND, close_asked)
+        .await
+        .expect("A1's presentation asked for the closure")
+        .unwrap();
+    let finishing = tokio::spawn(connection.finish());
+    let served = tokio::time::timeout(LOOP_BOUND, serve)
+        .await
+        .expect("the loop ended at closure")
+        .unwrap();
+    assert!(served.is_ok(), "the loop ended with {served:?}");
+    let late = observed.try_recv();
+    assert!(
+        late.is_err(),
+        "the request waiting for login A's turn started after the closure: {late:?}"
+    );
+    for review in [a1, a2] {
+        let ended = tokio::time::timeout(LOOP_BOUND, review)
+            .await
+            .expect("every review ended")
+            .unwrap();
+        assert!(ended.is_err(), "a review was decided: {ended:?}");
+    }
+    finishing.await.unwrap().unwrap();
+    drop(pipe);
+}

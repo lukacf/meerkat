@@ -36,41 +36,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Core; not evidence of admission.
 - Structured error data kinds: `governed_input_refused`, `governed_input_held`
   (JSON-RPC -32052, retryable, with `condition`, `waited_ms`, `binds`,
-  `input_id`, `submitted: false`) and `governed_admission_unresolved` (with
-  the receipt). The Python and TypeScript SDKs raise
+  `input_id`, `submitted: false`) and `governed_admission_unresolved`
+  (`kind` only). The Python and TypeScript SDKs raise
   `IdentityHistoryUnavailableError` for the held kind, with `kind` exposed.
 - `ConsoleLogStore::transition_send_frame` (a send state transition applied
   to the frame's own state, atomically) and
   `ConsoleLogStore::take_send_frame_hold` (a compare-and-set on a send's
   hold); by default unsupported, the in-memory and SQLite stores implement
-  both. `MetaConsoleAggregator::mark_interaction_delivery_held`.
-- `GovernedInputBinder::submitting` (provided, `Ok` by default): called once
-  after a bind answered bound and before the input is submitted, outside
-  the protected section; an `Err` refuses the send and nothing is
+  both, and answer `true` from `ConsoleLogStore::supports_send_transitions`
+  (provided, `false` by default; a wrapper forwards all three).
+  `MetaConsoleAggregator::mark_interaction_delivery_held`.
+- `GovernedInputBinder::submitting(session_id)` (provided, `Ok` by default):
+  called once after a bind answered bound and before the input is submitted,
+  with the session the bind bound, outside the protected section and under
+  the identity's lifecycle lock; an `Err` refuses the send and nothing is
   submitted.
+- `IdentityRuntime::with_operation_refusal_observer`: a governed send's
+  waits for its binder's "not now" answers are reported to the host's
+  operation refusal observer (`OperationRefusalSurface::GovernedInput`).
+  The unified runtime builder's `operation_refusal_observer` installs it.
 
 ### Changed
 
 - A governed Console send whose every bind answered "not now" until its
   door's budget ended is held, not failed: its `user_input` frame stays
   `accepted` and records `delivery_hold` (`condition`, `waited_ms`, `binds`,
-  `retryable`), emitted as a frame update. A replay of the same send
-  dispatches the same input again (the governed input's id now derives from
-  the send's frame) and takes the hold first, a compare-and-set, unless the
-  runtime's evidence shows the input admitted, which settles it delivered;
-  evidence the replay cannot read does not stop it. A held steer answers
-  HTTP 503 `governed_input_held` (Console JSON-RPC -32052); a refused one
-  answers 409 `governed_input_refused` with the refusal's kind (it was 500
-  `internal_error`).
+  `retryable`), emitted as a frame update. A replay of a governed send that
+  submitted nothing (held, or stopped before its submission with no
+  dispatch owner left) dispatches the same input again (the governed
+  input's id now derives from the send's frame): it begins the dispatch,
+  then takes the hold, each a compare-and-set, unless the runtime's
+  evidence shows the input admitted, which settles it delivered; evidence
+  the replay cannot read does not stop it. A governed send's frame records
+  `governed: true` from its acceptance; one an earlier version left
+  unsettled carries neither that nor a hold and is settled from evidence
+  only. A held steer answers HTTP 503 `governed_input_held` (Console
+  JSON-RPC -32052); a refused one answers 409 `governed_input_refused` with
+  the refusal's kind; an unresolved one (its native admission's answer was
+  lost: the input may have run) answers 504 `governed_admission_unresolved`
+  (Console JSON-RPC -32000), to be retried only under the same key or read
+  with `meta/console/recover_send`. Both were 500 `internal_error`.
 - A governed Console send's frame records `dispatching` while it is
-  dispatched and `submitted` once its host's binder bound it, before the
-  input is submitted. A replay, a recovery or the gateway's start fails a
-  submitted send whose input the runtime does not hold (the process stopped
-  before submitting it), its outcome unknown (`delivery_failure`:
+  dispatched and `submitted` once its host's binder bound it, with the
+  session the bind bound (`bound_session_id`), before the input is
+  submitted. Its dispatch is owned by its request or task together with the
+  runtime-owned operation that submits it. A replay, a recovery or the
+  gateway's start fails a submitted send whose input the runtime does not
+  hold in the session its bind bound, once nothing owns its dispatch, its
+  outcome unknown (`delivery_failure`:
   `{reason: "outcome_unknown", retryable: true}`); it is never dispatched
   again. Downgrade: an older binary reads a frame's `submitted` status as
   `completed`, so a send in flight at a rollback shows completed even if it
   then fails; nothing is sent twice.
+- A Console whose log store does not record a send's states refuses every
+  governed send before anything is reserved (403 `governed_send_refused`),
+  instead of leaving it accepted with no owner.
 - A replay or recovery of a governed Console send reads the runtime's
   evidence by the send's own input id: Core indexes a governed input under
   its key as qualified by its association, so the read by the raw key never

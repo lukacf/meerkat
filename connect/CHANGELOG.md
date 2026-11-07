@@ -14,9 +14,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   attempt's first durable write; past it they keep their shipped outcome. The
   helper preparation's own wait-and-bind-again loop is removed: Meta's send
   loop waits outside the identity's lock.
-- The peer ingress binder answers its pending deliveries without waiting
-  inside its bind, and records the peer source record as its attempt's first
-  durable effect.
+- The peer ingress binder answers a delivery whose binding is pending as
+  pending instead of waiting for it inside its bind, and records the peer
+  source record as its attempt's first durable effect. Where the shared
+  original binder still waits in place inside a bind in this release (its
+  checks after a first durable write, its custody recovery enrollment), a
+  peer bind waits there too.
+- A binder's input check answers "not now" only inside a governed bind,
+  before its attempt's first durable write; called outside one it keeps its
+  shipped outcome.
+- A workflow launch waits out its binder's "not now" answers only within its
+  dispatch's deadline (its request deadline or its remaining tool time,
+  whichever ends first, within Core's owner-change bound), as every other
+  wait of the launch.
 
 ## [0.9.10] - 2026-11-05
 

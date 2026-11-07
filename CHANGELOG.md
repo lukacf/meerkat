@@ -64,6 +64,9 @@ them.
 - `PeerIngressBindRequest::not_now_waiter` (`PeerIngressWaiter`): a peer
   binder waits out a "not now" inside its bind, outside every protected
   section, within the request's deadline.
+- `OwnerChangeChurn::reporting_to` and `OperationRefusalSurface::GovernedInput`:
+  a host reports its own operation's waits (a governed input's "not now"
+  waits) to the operation refusal observer it installed.
 
 ### Changed
 
@@ -73,6 +76,11 @@ them.
   path.
 - A durable grant change (`LocalGrantAuthority`) calls the write witness
   (debug builds only).
+- Debug builds only: reserving `LocalAuthorizationPublication`'s writer for
+  an owner change inside a protected section (Core's native admission reads,
+  its historical admission callback) panics, naming `publication.writer`, so
+  a host whose admission callback takes it there fails in a debug build.
+  Release builds check nothing.
 
 ## [0.9.10] - 2026-11-04
 

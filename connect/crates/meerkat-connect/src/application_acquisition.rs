@@ -245,8 +245,27 @@ pub struct PreparedGatewayAcquisition {
     // Ordinary completed-bundle startup creates this from authenticated output.
     // A held driver already retains the original resource participant/provider.
     resource: Option<Arc<crate::application_setup::resource::SetupResourceSelection>>,
+    // The host's record of the administrative writes its Console admits.
+    administration_recorder: Option<Arc<dyn meerkat_core::AdministrationRecorder>>,
 }
 impl PreparedGatewayAcquisition {
+    /// The host's record of the administrative changes the Console setup
+    /// admits: each credential change a person makes by answering a setup
+    /// prompt in the Console (the service's installation into the realm's
+    /// configuration, and each service credential stored) reaches `recorder`
+    /// as one [`meerkat_core::AdministrationRecord`] once the change settles.
+    /// The record names the person (their qualified principal) and the
+    /// digest of the login they answered in, never the token or the login
+    /// itself. Connect keeps no record of its own: without a recorder,
+    /// nothing is recorded. It authorizes nothing.
+    #[must_use]
+    pub fn with_administration_recorder(
+        mut self,
+        recorder: Arc<dyn meerkat_core::AdministrationRecorder>,
+    ) -> Self {
+        self.administration_recorder = Some(recorder);
+        self
+    }
     /// Final adoption for a factory already composed by the held driver. Its
     /// existing channel and weak task source are retained, not recreated.
     pub(crate) fn compose_prepared_factory(
@@ -271,6 +290,7 @@ impl PreparedGatewayAcquisition {
             let panel = crate::application_gateway::console_setup::ConsoleSetup::new(
                 selection.clone(),
                 host.console_setup_binding()?,
+                self.administration_recorder.clone(),
             )
             .map_err(|_| HostLifetimeError::InvalidSelection)?;
             presenters
@@ -323,6 +343,7 @@ impl PreparedGatewayAcquisition {
         let panel = crate::application_gateway::console_setup::ConsoleSetup::new(
             selection,
             host.console_setup_binding()?,
+            self.administration_recorder.clone(),
         )
         .map_err(|_| HostLifetimeError::InvalidSelection)?;
         let (approvals, reviews) = match local {
@@ -409,6 +430,7 @@ impl PreparedGatewayAcquisition {
             let panel = crate::application_gateway::console_setup::ConsoleSetup::new(
                 console,
                 host.console_setup_binding()?,
+                self.administration_recorder.clone(),
             )
             .map_err(|_| HostLifetimeError::InvalidSelection)?;
             let (presenters, reviews) = match local {
@@ -479,6 +501,7 @@ impl PreparedGatewayAcquisition {
                 crate::application_gateway::console_setup::ConsoleSetup::new(
                     selection.clone(),
                     host.console_setup_binding()?,
+                    self.administration_recorder.clone(),
                 )
                 .map_err(|_| HostLifetimeError::InvalidSelection)?,
             )
@@ -841,6 +864,7 @@ fn prepare_gateway_acquisition_selected(
             console_setup: config.console_setup,
             local_operator_recovery: config.local_operator_recovery,
             resource,
+            administration_recorder: None,
         }),
     ))
 }

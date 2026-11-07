@@ -6,6 +6,7 @@ use crate::{
     installed_service_review::account_request::{
         InstalledAccountRequest, InstalledAccountRequests,
         console::{CallbackDelivery, CallbackResult, DecisionCheck, answer_retained_authorized},
+        credentials::administration::{AdministrationCheck, StatedAdministrator},
         credentials::transport::{CredentialDelivery, answer_retained_credentials},
     },
     stdio::{Exchange, PromptAnswer, PromptBridge},
@@ -98,6 +99,8 @@ struct Panel {
     active: Presentations<Active>,
     next: AtomicU64,
     pages: Mutex<Vec<StatusOffer<Arc<ConsoleStatusPage>>>>,
+    // The host's record of the administrative writes this panel admits.
+    recorder: Option<Arc<dyn meerkat_core::AdministrationRecorder>>,
 }
 // Presentation custody only. Exact login owners, not browser keys or person
 // labels, select replacement. At capacity another current owner is never evicted.
@@ -205,7 +208,13 @@ impl Action {
         self.current().ok_or_else(unavailable)?;
         Ok(())
     }
-    fn administration_check(&self) -> Result<crate::installed_service_review::account_request::credentials::administration::AdministrationCheck, ConnectError>{
+    /// The admission check for a credential write this accepted answer
+    /// enters, stating the person who answered (in the login they answered
+    /// in) for the host's `recorder` when the host passed one.
+    fn administration_check(
+        &self,
+        recorder: Option<Arc<dyn meerkat_core::AdministrationRecorder>>,
+    ) -> Result<AdministrationCheck, ConnectError> {
         // Capture only the already accepted action, before any native wait.
         // The entry below never calls current_login or resolves an enrollment.
         let viewer = self.current().ok_or_else(unavailable)?;
@@ -213,53 +222,59 @@ impl Action {
         let principal = human.principal().map_err(|_| unavailable())?;
         let scope = human.login_scope().ok_or_else(unavailable)?.to_owned();
         let identity = self.identity.get().cloned().ok_or_else(unavailable)?;
+        let administrator = recorder
+            .map(|recorder| StatedAdministrator::new(principal.clone(), &scope, recorder))
+            .transpose()?;
         let action = self.clone();
-        Ok(Arc::new(move || {
-            use meerkat_core::AdministrationEntryRefusal;
-            let unavailable = || {
-                AdministrationEntryRefusal::Unavailable(
-                    "The retained Console credential entry is unavailable".into(),
-                )
-            };
-            action
-                .binding
-                .with_credential_entry(|| {
-                    // This resolver directly rechecks the accepted native carrier and
-                    // obtains a fresh view from its same native AccessController. It
-                    // does not call Toolkit's blocking login lookup or Action.current.
-                    let subject = human
-                        .current()
-                        .map_err(|_| AdministrationEntryRefusal::NotAuthenticated)?;
-                    let viewer = action
-                        .viewer
-                        .resolve(&action.headers, &action.uri)
-                        .ok_or(AdministrationEntryRefusal::NotAuthenticated)?;
-                    if viewer.service_identity
-                        || viewer.human.as_ref() != Some(&human)
-                        || human.principal().ok().as_ref() != Some(&principal)
-                        || human.login_scope() != Some(scope.as_str())
-                        || viewer.principal.as_ref() != Some(&subject)
-                    {
-                        return Err(AdministrationEntryRefusal::NotAuthenticated);
-                    }
-                    let access = viewer
-                        .access_view
-                        .as_ref()
-                        .ok_or(AdministrationEntryRefusal::NotAdministrator)?;
-                    if !access.can_administer()
-                        || access.enforced()
-                            && (!access.can_view_agent(identity.as_str())
-                                || !access.allows_agent(
-                                    meerkat_mobkit::access::ACTION_AGENT_SEND,
-                                    identity.as_str(),
-                                ))
-                    {
-                        return Err(AdministrationEntryRefusal::NotAdministrator);
-                    }
-                    action.login.try_reserve().map_err(|_| unavailable())
-                })
-                .map_err(|_| unavailable())?
-        }))
+        Ok(AdministrationCheck::new(
+            move || {
+                use meerkat_core::AdministrationEntryRefusal;
+                let unavailable = || {
+                    AdministrationEntryRefusal::Unavailable(
+                        "The retained Console credential entry is unavailable".into(),
+                    )
+                };
+                action
+                    .binding
+                    .with_credential_entry(|| {
+                        // This resolver directly rechecks the accepted native carrier and
+                        // obtains a fresh view from its same native AccessController. It
+                        // does not call Toolkit's blocking login lookup or Action.current.
+                        let subject = human
+                            .current()
+                            .map_err(|_| AdministrationEntryRefusal::NotAuthenticated)?;
+                        let viewer = action
+                            .viewer
+                            .resolve(&action.headers, &action.uri)
+                            .ok_or(AdministrationEntryRefusal::NotAuthenticated)?;
+                        if viewer.service_identity
+                            || viewer.human.as_ref() != Some(&human)
+                            || human.principal().ok().as_ref() != Some(&principal)
+                            || human.login_scope() != Some(scope.as_str())
+                            || viewer.principal.as_ref() != Some(&subject)
+                        {
+                            return Err(AdministrationEntryRefusal::NotAuthenticated);
+                        }
+                        let access = viewer
+                            .access_view
+                            .as_ref()
+                            .ok_or(AdministrationEntryRefusal::NotAdministrator)?;
+                        if !access.can_administer()
+                            || access.enforced()
+                                && (!access.can_view_agent(identity.as_str())
+                                    || !access.allows_agent(
+                                        meerkat_mobkit::access::ACTION_AGENT_SEND,
+                                        identity.as_str(),
+                                    ))
+                        {
+                            return Err(AdministrationEntryRefusal::NotAdministrator);
+                        }
+                        action.login.try_reserve().map_err(|_| unavailable())
+                    })
+                    .map_err(|_| unavailable())?
+            },
+            administrator,
+        ))
     }
     /// The person this accepted answer was made by: the verified human its
     /// retained carrier names now (its current login and access included),
@@ -337,13 +352,16 @@ impl Active {
             .ok_or_else(unavailable)?
             .answerer()
     }
-    fn administration_check(&self) -> Result<crate::installed_service_review::account_request::credentials::administration::AdministrationCheck, ConnectError>{
+    fn administration_check(
+        &self,
+        recorder: Option<Arc<dyn meerkat_core::AdministrationRecorder>>,
+    ) -> Result<AdministrationCheck, ConnectError> {
         self.action
             .lock()
             .map_err(|_| unavailable())?
             .as_ref()
             .ok_or_else(unavailable)?
-            .administration_check()
+            .administration_check(recorder)
     }
     fn accept_action(&self, action: Action) -> Result<(), ConnectError> {
         action.current().ok_or_else(unavailable)?;
@@ -361,9 +379,12 @@ impl Active {
     }
 }
 impl ConsoleSetup {
+    /// `recorder` is the host's record of the administrative writes the
+    /// panel's answers admit; without one nothing is recorded.
     pub(crate) fn new(
         selection: ConsoleSetupSelection,
         binding: ConsoleSetupBinding,
+        recorder: Option<Arc<dyn meerkat_core::AdministrationRecorder>>,
     ) -> Result<Self, ConnectError> {
         selection.validate()?;
         let binding = binding
@@ -376,6 +397,7 @@ impl ConsoleSetup {
             active: Presentations::default(),
             next: AtomicU64::new(1),
             pages: Mutex::new(Vec::new()),
+            recorder,
         })))
     }
     pub(crate) fn routes(&self, viewer: ConsoleViewerResolver) -> Result<Router, ConnectError> {
@@ -659,7 +681,7 @@ impl ConsoleSetup {
                 let active = active.clone(); Box::pin(async move { active.refresh().await })
             };
             let decision = || active.decision_check();
-            let administration = || active.administration_check();
+            let administration = || active.administration_check(self.0.recorder.clone());
             let answerer = || active.answerer();
             let driver: BoxFuture<'_, Result<bool, ConnectError>> = match request {
                 crate::installed_service_review::account_request::InstalledRequest::Account(request) =>

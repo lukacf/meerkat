@@ -667,4 +667,155 @@ mod tests {
         let (servers, _) = crate::realm::read_own_mcp_config(&storage).await.unwrap();
         assert_eq!(names(&servers), [winner, loser]);
     }
+
+    /// A host's record of the administrative writes it admitted.
+    #[derive(Default)]
+    struct Recorded(std::sync::Mutex<Vec<meerkat_core::AdministrationRecord>>);
+    impl Recorded {
+        fn take(&self) -> Vec<meerkat_core::AdministrationRecord> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+    impl meerkat_core::AdministrationRecorder for Recorded {
+        fn record(&self, record: meerkat_core::AdministrationRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    /// The fixture person's Console login, enrolled on a real private pipe.
+    async fn person_login() -> (
+        toolkit_mobkit::private_host::PrivateHostConnection,
+        (tokio::fs::File, tokio::io::BufReader<tokio::fs::File>),
+        toolkit_mobkit::private_host::ConsoleLoginHandle,
+    ) {
+        use crate::installed_service_review::account_request::console::FIXTURE_LOGIN;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        const ISSUER: &str = "https://console-fixture.localhost";
+        const SUBJECT: &str = "fixture-subject";
+        let (connection, mut commands, mut responses) =
+            crate::application_gateway::setup_presenter::tests::presentation_pipe().await;
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000;
+        let mut command = serde_json::to_vec(&json!({"version":1,"id":2,
+            "command":{"kind":"enroll_console_login","login":{"issuer":ISSUER,
+                "subject":SUBJECT,"login_scope_id":FIXTURE_LOGIN,"expires_at_ms":expires}}}))
+        .unwrap();
+        command.push(b'\n');
+        commands.write_all(&command).await.unwrap();
+        commands.flush().await.unwrap();
+        let mut line = String::new();
+        assert!(responses.read_line(&mut line).await.unwrap() > 0);
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["result"]["kind"],
+            "console_login_enrolled"
+        );
+        let login = connection
+            .console_logins()
+            .resolve(ISSUER, SUBJECT, FIXTURE_LOGIN)
+            .unwrap();
+        (connection, (commands, responses), login)
+    }
+
+    /// Setup admissions carry the audit recorder. A credential write the
+    /// Console admits states the person who answered and the host's
+    /// recorder, so the write, made by Core's owner of the realm's
+    /// configuration, settles as one record naming that person's qualified
+    /// principal and the digest of the login they answered in, never the
+    /// login itself. Without a recorder from the host the same write is
+    /// admitted and nothing is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_admissions_carry_the_audit_recorder() {
+        use super::super::administration::{AdministrationCheck, StatedAdministrator};
+        use crate::installed_service_review::account_request::console::{
+            FIXTURE_LOGIN, fixture_person,
+        };
+        use meerkat_core::approval::consent::HostAuthenticationScope;
+        use meerkat_core::{AdministeredChange, AdministrationOutcome, McpRealmPersistTarget};
+        let (connection, pipe, login) = person_login().await;
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::realm::RealmOptions {
+            context_root: directory.path().to_owned(),
+            state_root: Some(directory.path().join("state")),
+            user_config_root: Some(directory.path().join("home")),
+        }
+        .resolve("console-admissions")
+        .unwrap();
+        let server =
+            |name: &str| McpServerConfig::stdio(name, "/bin/true", Vec::new(), Default::default());
+        let check = |administrator: Option<StatedAdministrator>| {
+            let login = login.clone();
+            AdministrationCheck::new(
+                move || {
+                    login
+                        .try_reserve()
+                        .map_err(|_| AdministrationEntryRefusal::NotAuthenticated)
+                },
+                administrator,
+            )
+        };
+        let recorder = std::sync::Arc::new(Recorded::default());
+        let (_, reviewed) = crate::realm::read_own_mcp_config(&storage).await.unwrap();
+        let person = StatedAdministrator::new(fixture_person(), FIXTURE_LOGIN, recorder.clone())
+            .expect("a qualified person");
+        let (_recorded_control, cancellation) = ReviewCancellation::channel();
+        let attempt = AdministrationAttempt::new(check(Some(person)), cancellation);
+        let generation =
+            McpRealmPersistTarget::new(&crate::realm::own_config_runtime(&storage).unwrap())
+                .add_entered(server("service-a"), Some(reviewed), attempt.as_ref())
+                .await
+                .unwrap()
+                .generation;
+        attempt.settled(false);
+        let records = recorder.take();
+        assert_eq!(
+            records.len(),
+            1,
+            "the admitted write did not settle as one record: {records:?}"
+        );
+        let record = &records[0];
+        assert_eq!(
+            record.administrator,
+            fixture_person(),
+            "the record does not name the person who answered"
+        );
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(HostAuthenticationScope::new(FIXTURE_LOGIN).digest()),
+            "the record does not name the login the person answered in"
+        );
+        assert!(
+            matches!(
+                record.change,
+                Some(AdministeredChange::ConfigPatch { generation: written, .. })
+                    if written == generation
+            ),
+            "the record does not name the configuration write: {:?}",
+            record.change
+        );
+        assert_eq!(record.outcome, AdministrationOutcome::Committed);
+        assert!(
+            !serde_json::to_string(record)
+                .unwrap()
+                .contains(FIXTURE_LOGIN),
+            "the record carries the login itself"
+        );
+
+        // No recorder from the host: admitted as before, nothing recorded.
+        let (_unrecorded_control, cancellation) = ReviewCancellation::channel();
+        let attempt = AdministrationAttempt::new(check(None), cancellation);
+        McpRealmPersistTarget::new(&crate::realm::own_config_runtime(&storage).unwrap())
+            .add_entered(server("service-b"), Some(generation), attempt.as_ref())
+            .await
+            .expect("a write without a recorder is admitted as before");
+        attempt.settled(false);
+        assert!(
+            recorder.take().is_empty(),
+            "a write without the host's recorder was recorded"
+        );
+        connection.finish().await.unwrap();
+        drop(pipe);
+    }
 }

@@ -61,6 +61,7 @@ struct SenderOriginal {
 
 /// The one staged original of a governed work, as it was admitted: what a
 /// Core tool of that work reads of the work it runs in. Never a grant.
+#[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
 pub(crate) struct StagedOriginal<'a> {
     pub(crate) namespace: &'a QualifiedIngressNamespace,
     pub(crate) original_work: &'a OriginalWorkRef,
@@ -197,6 +198,7 @@ impl GovernedPeerOrigin {
 
     /// The staged work's one original, as it was admitted, when the work
     /// staged exactly one. `None` for a work that staged several.
+    #[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
     pub(crate) fn single_original(&self) -> Option<StagedOriginal<'_>> {
         let [original] = self.0.originals.as_slice() else {
             return None;

@@ -608,10 +608,10 @@ them.
   Before a rollback, revoke the approval-carried grants or let them
   expire.
 
-- A runtime store that retains a work whose basis names a hold of a
-  decision (an access offer's calling work) or an approved work cannot be
-  read by 0.9.10 (it does not know their grant targets). Before a rollback,
-  let such works end.
+- 0.9.10 cannot decode a retained work whose basis selects a lineage for a
+  hold of a decision (`GrantTarget::DecisionHold`: the calling work of an
+  access offer), since it does not know that grant target. Before a
+  rollback, let such works end.
 
 ### Known limitations
 

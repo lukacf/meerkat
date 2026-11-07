@@ -685,8 +685,9 @@ impl LocalGrantAuthority {
     /// in `processors`. The issuance itself decides again.
     ///
     /// # Errors
-    /// [`ChildGrantRefusal::Denied`] when it would be refused;
-    /// [`ChildGrantRefusal::Unavailable`] when the owner cannot say now.
+    /// [`crate::grants::ChildGrantRefusal::Denied`] when it would be
+    /// refused; [`crate::grants::ChildGrantRefusal::Unavailable`] when the
+    /// owner cannot say now.
     pub fn child_admissible(
         &self,
         intent: &crate::grants::ChildGrantIntent,

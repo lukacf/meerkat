@@ -453,7 +453,7 @@ impl DecisionExecutor for GrantDecisionExecutor {
             })
             .await
         {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(ApprovalBranchError::Unavailable(_)) => return DecisionExecution::Released,
             Err(_) => {
                 self.grants.retire_branch(decision_id, grantee).await;

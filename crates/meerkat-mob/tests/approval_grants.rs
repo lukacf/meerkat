@@ -256,24 +256,6 @@ fn values(verb: &str, executor: &PrincipalRef) -> LocalOperationValues {
     }
 }
 
-/// A grant custody that vetoes nothing, for the fixture's administration.
-struct AnyCustody;
-
-impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody
-    for AnyCustody
-{
-    fn with_unreferenced_controller_grant<T, E>(
-        &mut self,
-        _reference: &GrantLineageRef,
-        mutate: impl FnOnce() -> Result<T, E>,
-    ) -> Result<
-        Result<T, E>,
-        meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal,
-    > {
-        Ok(mutate())
-    }
-}
-
 struct Eligible;
 
 impl ConsentEligibility for Eligible {
@@ -1581,7 +1563,7 @@ async fn the_approved_work_has_one_target_lineage_and_no_base() {
                 target: GrantTarget::McpServer {
                     server: SERVER.into()
                 },
-                lineage: vec![flow.grants.offering.clone(), approval],
+                lineage: vec![flow.grants.offering, approval],
             }],
         }
     );

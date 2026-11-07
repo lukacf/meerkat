@@ -483,6 +483,27 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
 
+// The known reds of the connect[console] suite below, under the same rules:
+// each names its class on meerkat-connect's console test-debt page, which the
+// plan checks against this list both ways. They fail in some runs only, so
+// the row excludes them without requiring them to fail.
+export const CONNECT_CONSOLE_TEST_DEBT = "connect/crates/meerkat-connect/CONSOLE-TEST-DEBT.md";
+const SETUP_CONTENTION = "setup-contention";
+export const CONNECT_CONSOLE_KNOWN_REDS = [
+  ["resources::shared_setup::native_case::two_sdk_children_share_one_preparation_and_cancel_independently", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::observe_controls::owner_change_at_a_finds_helper_observation_is_waited_out_and_observed_again", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::two_sdk_originals_admit_one_fresh_dedicated_planning_input", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::entered_operation::registered_r2_find_enters_once_per_call_and_commits_real_context_graphs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::closed_workflow_refuses_context_replay_after_automatic_admission", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::committed_waiter_context_is_delivered_automatically_once_and_survives_departure", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_survives_a_departure_and_refuses_closed_recipient", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_validates_mutable_payload_without_replaying_find", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_install_reservation_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
+].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
+
 export const FEATURE_UNIT_SUITES = [
   // The shipping public GPT Live path (experimental_gpt_live::tests,
   // session_runtime::live_summary, service_factory) plus the realtime
@@ -521,8 +542,14 @@ export const FEATURE_UNIT_SUITES = [
   // meerkat-mob through toolkit-mobkit's native host, so like its default
   // unit lane this suite runs on the push only. Its process controls
   // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
-  // the unit jobs export.
-  { package: "meerkat-connect", id: "console", features: ["console"] },
+  // the unit jobs export. It runs without its intermittent known reds
+  // (CONNECT_CONSOLE_KNOWN_REDS).
+  {
+    package: "meerkat-connect",
+    id: "console",
+    features: ["console"],
+    knownReds: { doc: CONNECT_CONSOLE_TEST_DEBT, tests: CONNECT_CONSOLE_KNOWN_REDS },
+  },
   // toolkit-mobkit's native host (its installed host, private originals,
   // private host and original ingress) compiles only under `native-host`,
   // which meerkat-connect turns on, so the package's own unit lane runs a

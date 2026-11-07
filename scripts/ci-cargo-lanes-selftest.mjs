@@ -24,6 +24,8 @@ import {
   workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import {
+  CONNECT_CONSOLE_KNOWN_REDS,
+  CONNECT_CONSOLE_TEST_DEBT,
   FEATURE_UNIT_SUITES,
   TOOLKIT_MOBKIT_KNOWN_REDS,
   TOOLKIT_MOBKIT_TEST_DEBT,
@@ -720,9 +722,25 @@ function assertArchivedLanes(plan, label) {
   assert.ok(filters.known_reds.startsWith("package(toolkit-mobkit) and (test(="), "the ratchet runs the package's steady known reds");
   assert.equal(filters.known_red_count, steady.length, "the ratchet counts the steady known reds");
   // A suite without companions or known reds keeps its plain flags and no filter.
-  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
-  assert.equal(featureSuiteFlags(plain), "-p meerkat-connect --features console");
+  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-live" && candidate.id === "webrtc");
+  assert.equal(featureSuiteFlags(plain), "-p meerkat-live --features webrtc");
   assert.deepEqual(featureSuiteFilters(plain), {});
+  // A suite whose known reds are all intermittent excludes them and runs no
+  // ratchet: meerkat-connect's console suite.
+  const intermittentOnly = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
+  assert.equal(featureSuiteFlags(intermittentOnly), "-p meerkat-connect --features console");
+  assert.ok(
+    CONNECT_CONSOLE_KNOWN_REDS.length > 0 && CONNECT_CONSOLE_KNOWN_REDS.every((entry) => entry.intermittent),
+    "the console suite's known reds are intermittent",
+  );
+  const consoleFilters = featureSuiteFilters(intermittentOnly);
+  assert.ok(consoleFilters.filter.startsWith("not (test(="), "the console suite runs without its intermittent known reds");
+  for (const entry of CONNECT_CONSOLE_KNOWN_REDS) {
+    assert.ok(consoleFilters.filter.includes(`test(=${entry.test})`), `the console suite excludes ${entry.test}`);
+  }
+  assert.equal(consoleFilters.known_reds, undefined, "intermittent known reds get no ratchet");
+  assert.equal(consoleFilters.known_red_count, undefined, "intermittent known reds get no ratchet count");
+  checkKnownRedsDoc(readFileSync(resolve(root, CONNECT_CONSOLE_TEST_DEBT), "utf8"), CONNECT_CONSOLE_KNOWN_REDS, CONNECT_CONSOLE_TEST_DEBT);
 
   // The page and the list agree, and every drift between them is refused.
   const page = readFileSync(resolve(root, TOOLKIT_MOBKIT_TEST_DEBT), "utf8");

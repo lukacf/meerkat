@@ -255,12 +255,16 @@ async fn pause(
     refuse_unkept_preconditions(call.params, "meta/schedule/pause")?;
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    #[cfg(test)]
+    schedules.wait_at_write_hold().await;
     caller_current(call)?;
     let schedule = schedules
         .service
         .pause(&schedule_id)
         .await
         .map_err(schedule_error)?;
+    // Core pauses the schedule as it is then: a change made since the read
+    // above is the schedule's, so the answer names it.
     Ok(schedule_item(
         &schedules.service,
         &schedule,

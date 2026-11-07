@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   revokes none. On the console route `principal` may be left out, an
   access admin's request included: it then names the caller, whose own
   sessions are revoked (such a request was refused with `-32602` before).
+- `meta/schedule/create`, `meta/schedule/pause` and `meta/schedule/delete`
+  refuse a non-null `expected_revision` or `take_over_sender` with `-32602`
+  and the new refusal kind `unsupported_param` (with `param`); 0.9.10
+  accepted and ignored them.
 
 ### Security
 

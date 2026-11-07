@@ -2654,6 +2654,74 @@ async fn resume_answers_the_schedule_as_it_resumed() -> TestResult {
     Ok(())
 }
 
+/// A pause answers the schedule as Core paused it: when another caller took
+/// the schedule over between the pause's read and the pause, the answer
+/// names that sender and message and the revision the schedule is at, never
+/// the pause's earlier view of it.
+#[tokio::test]
+async fn pause_answers_the_schedule_as_it_paused() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-pause-answer",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let hold = crate::console_schedules::ScheduleWriteHold::default();
+    fixture
+        .runtime
+        .console_schedules()
+        .attached()
+        .ok_or("the schedules are attached")?
+        .hold_writes(hold.clone());
+    let pause = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    );
+    let meanwhile = async {
+        tokio::time::timeout(Duration::from_secs(30), hold.reached())
+            .await
+            .map_err(|_| "the pause reached its hold")?;
+        let taken = call(
+            &fixture,
+            Caller::human(FRANK),
+            "meta/schedule/update",
+            json!({
+                "identity": "alpha",
+                "schedule_id": schedule_id,
+                "content": "Changed meanwhile.",
+                "take_over_sender": true,
+            }),
+        )
+        .await;
+        hold.release();
+        Ok::<Value, Box<dyn std::error::Error + Send + Sync>>(taken)
+    };
+    let (paused, taken) = tokio::join!(pause, meanwhile);
+    let taken = taken?;
+    assert!(taken["error"].is_null(), "{taken:#?}");
+    assert!(paused["error"].is_null(), "{paused:#?}");
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    assert_eq!(
+        paused["result"]["sender"],
+        json!(FRANK),
+        "the answer names who the schedule sends as: {paused:#?}"
+    );
+    assert_eq!(
+        paused["result"]["content"],
+        json!("Changed meanwhile."),
+        "{paused:#?}"
+    );
+    assert_eq!(
+        paused["result"]["revision"],
+        json!(revision_of(&fixture, &schedule_id).await?),
+        "{paused:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// A pause, a delete and a create take no `expected_revision` and no
 /// `take_over_sender`: Core pauses and deletes a schedule as it is, and none
 /// of them makes anyone the sender in another's place. Naming either is

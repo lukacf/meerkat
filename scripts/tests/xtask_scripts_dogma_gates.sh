@@ -351,13 +351,14 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # action property violated.
 # identity_entry_audit.sh (mob_machine) requires a final distinct-state count
 # at or above each of its nine runs' floors, a coverage block in which each
-# covered action of every run generated a state, its seventy-seven step
+# covered action of every run generated a state, its eighty-seven step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
 # adoption mutant's invariant or property, its unlisted adoption and
 # unadopted retirement mutants' target action properties, its replay,
 # archive and destroy mutants' generated invariants, its rotation, seat,
-# respawn and preserving-archive mutants' action properties, its declared apply
+# respawn, preserving-archive, takeover and host-adopted archive mutants'
+# action properties, its declared apply
 # mutants' generated invariants (the in-flight seal mutant's run with its
 # target invariant alone), totality invariants and action properties
 # (one per declared apply invariant, property and guard; the reset
@@ -760,6 +761,10 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessWorkerRespawnAdmitted is violated."' \
   'echo "Error: Action property NotAuditWitnessEntryRespawnRefusedStopped is violated."' \
   'echo "Error: Action property NotAuditWitnessWorkerPreservingArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEntryHostAdopted is violated."' \
+  'echo "Error: Action property NotAuditWitnessHostMemberStands is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverEndsUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverDeferred is violated."' \
   'echo "Error: Action property NotAuditWitnessEntryReseatedOnRecord is violated."' \
   'echo "Error: Action property NotAuditWitnessAdoptedThenUnlisted is violated."' \
   'echo "Error: Action property NotAuditWitnessRelistedAfterUnlist is violated."' \
@@ -768,6 +773,12 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessFreshAfterForget is violated."' \
   'echo "Error: Action property NotAuditWitnessSealRemovesUnseated is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayMarked is violated."' \
+  'echo "Error: Action property NotAuditWitnessDeclareOverAdopting is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesAdopting is violated."' \
+  'echo "Error: Action property NotAuditWitnessTakeOverDeferredBySeal is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptedEntryEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptionMarkReplayed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesIntentNamed is violated."' \
   'echo "Error: Action property NotAuditWitnessCandidateRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessNameHeldByWorker is violated."' \
   'echo "Error: Action property NotAuditWitnessHostAdopted is violated."' \
@@ -882,6 +893,10 @@ printf '%s\n' \
   'echo "Error: Invariant archived_session_record_is_unseated is violated."' \
   'echo "Error: Action property AuditEntryLeavesBySealDestroyOrReset is violated."' \
   'echo "Error: Action property AuditCandidateChangesNothing is violated."' \
+  'echo "Error: Action property AuditHostAdoptedArchiveTakesOnlyAnAdoptingEntry is violated."' \
+  'echo "Error: Action property AuditTakeOverEndsOnlyUnseated is violated."' \
+  'echo "Error: Action property AuditApplyLeavesAdoptingEntryAlone is violated."' \
+  'echo "Error: Action property AuditSealSparesIntentNamed is violated."' \
   'echo "Error: Action property AuditSeatTakesArchivedSession is violated."' \
   'echo "Error: Action property AuditHostPreparationNeverWoken is violated."' \
   'echo "Error: Action property AuditHostStepKeepsRoleHold is violated."' \

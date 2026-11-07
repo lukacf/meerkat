@@ -194,6 +194,10 @@ them.
   mints a new token, whose own listing decides; a token route builds its
   account again); any other failure keeps the last list and is tried
   again later, as before.
+- GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
+  network failure or timeout, is tried once more at once, both attempts
+  within the listing's existing 30-second bound; any other answer is final,
+  as before.
 - GitHub Copilot: when a temporary token exchange failure leaves no valid
   token and the exchange sent `Retry-After`, every turn until then fails
   with the outage's retryable error without calling the exchange (for at

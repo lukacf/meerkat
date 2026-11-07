@@ -183,6 +183,21 @@ impl CopilotModelDiscoveryError {
         }
     }
 
+    /// Whether the next try may answer otherwise: a 408, 502, 503 or 504,
+    /// or a network failure or timeout. The listing tries once more at once
+    /// for these ([`fetch_copilot_models`]).
+    fn worth_an_immediate_retry(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                status: 408 | 502 | 503 | 504,
+                ..
+            } | Self::Transport(
+                CopilotHttpTransportError::Request(_) | CopilotHttpTransportError::Timeout
+            )
+        )
+    }
+
     fn retry_delay(&self) -> StdDuration {
         match self {
             Self::Http {
@@ -2426,6 +2441,10 @@ impl CopilotAuthorizer {
 
 /// The account's model list: `GET {api_base}/models` with `token` as the
 /// Copilot API bearer.
+/// The account's model list. An answer the next try may change (a 408,
+/// 502, 503 or 504, or a network failure or timeout) gets one immediate
+/// second attempt, inside the listing's one HTTP bound: both attempts
+/// together take at most [`COPILOT_HTTP_TIMEOUT`].
 async fn fetch_copilot_models(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
@@ -2433,10 +2452,34 @@ async fn fetch_copilot_models(
     token: &str,
 ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
+    let attempts = async {
+        match list_copilot_models_once(transport, config, &url, token).await {
+            Err(error) if error.worth_an_immediate_retry() => {
+                list_copilot_models_once(transport, config, &url, token).await
+            }
+            answer => answer,
+        }
+    };
+    tokio::time::timeout(COPILOT_HTTP_TIMEOUT, attempts)
+        .await
+        .unwrap_or_else(|_| {
+            Err(CopilotModelDiscoveryError::Transport(
+                CopilotHttpTransportError::Timeout,
+            ))
+        })
+}
+
+/// One `GET {api_base}/models` with `token`.
+async fn list_copilot_models_once(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    url: &str,
+    token: &str,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let headers = copilot_inference_headers(config, token, CopilotRequestIntent::ModelAccess)
         .map_err(CopilotModelDiscoveryError::Header)?;
     let response = transport
-        .get(&url, headers)
+        .get(url, headers)
         .await
         .map_err(CopilotModelDiscoveryError::Transport)?;
     if !(200..=299).contains(&response.status) {
@@ -6332,8 +6375,10 @@ mod tests {
     async fn failed_model_discovery_retries_without_reminting_derived_token() {
         let (auth_binding, binding) = validated_binding();
         let (env, _) = resolver_environment(&auth_binding).await;
+        // The listing's 503 is tried once more at once, and fails again.
         let transport = Arc::new(ScriptedTransport::new([
             token_response("derived"),
+            json_response(503, serde_json::json!({"message": "temporary"})),
             json_response(503, serde_json::json!({"message": "temporary"})),
             models_response(),
         ]));
@@ -6351,7 +6396,7 @@ mod tests {
             .prime()
             .await
             .expect("token mint survives discovery failure");
-        assert_eq!(transport.request_count(), 2);
+        assert_eq!(transport.request_count(), 3);
         state
             .cache
             .write()
@@ -6378,7 +6423,7 @@ mod tests {
         .await;
         assert_eq!(
             transport.request_count(),
-            3,
+            4,
             "discovery retry must reuse the derived token"
         );
     }
@@ -9721,26 +9766,36 @@ mod tests {
         /// stated time.
         #[tokio::test]
         async fn an_unanswered_lookup_never_serves_without_a_model_list() {
-            let listings: Vec<(&str, Outcome)> = vec![
+            // A transient failure (a 502, a timeout) is tried once more at
+            // once and fails again; a rate limit is final at once.
+            let bad_gateway = || -> Outcome {
+                Ok(json_response(
+                    502,
+                    serde_json::json!({"message": "Bad gateway"}),
+                ))
+            };
+            let listings: Vec<(&str, Vec<Outcome>)> = vec![
+                ("server error", vec![bad_gateway(), bad_gateway()]),
                 (
-                    "server error",
-                    Ok(json_response(
-                        502,
-                        serde_json::json!({"message": "Bad gateway"}),
-                    )),
+                    "timeout",
+                    vec![
+                        Err(CopilotHttpTransportError::Timeout),
+                        Err(CopilotHttpTransportError::Timeout),
+                    ],
                 ),
-                ("timeout", Err(CopilotHttpTransportError::Timeout)),
-                ("rate limit", Ok(rate_limited(429, 120))),
+                ("rate limit", vec![Ok(rate_limited(429, 120))]),
             ];
             for (label, listing) in listings {
-                let harness = Harness::new([Ok(unanswered_lookup(404)), listing]);
+                let attempts = listing.len();
+                let harness =
+                    Harness::new(std::iter::once(Ok(unanswered_lookup(404))).chain(listing));
                 harness
                     .operator
                     .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-down"));
                 let failed = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
                 assert_eq!(
                     harness.transport.request_count(),
-                    2,
+                    1 + attempts,
                     "{label}: the model list was asked"
                 );
                 let detail = refresh_failure(

@@ -36,8 +36,7 @@ def oidc_url_issue(value, *, loopback_http=True, query=False):
     https, or plain http to this computer's loopback for a provider that runs
     here; never credentials or a fragment, and a query only where allowed.
     The address is a host name or an IP address, with a port only as its
-    number, written as the URL reaches it: so the URL is usable as written,
-    and its origin can be named in the sign-in page's policy.
+    number, written as the URL reaches it, so the URL is usable as written.
     """
     exact = "Use the identity provider's exact https URL."
     if (not isinstance(value, str) or not value.isascii() or not 8 <= len(value) <= 512

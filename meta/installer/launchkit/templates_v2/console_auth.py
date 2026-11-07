@@ -767,14 +767,6 @@ class _OidcTimeout(Exception):
     """The identity provider did not answer within the sign-in step's deadline."""
 
 
-def _oidc_origin(url):
-    """The origin of a provider URL oidc_url_issue admitted, as a CSP source."""
-    parsed = urlsplit(url)
-    host = parsed.hostname
-    return (parsed.scheme + "://" + ("[" + host + "]" if ":" in host else host)
-            + ("" if parsed.port is None else f":{parsed.port}"))
-
-
 @dataclass(frozen=True)
 class _OidcPending:
     """One started sign-in, kept until its callback or its expiry."""
@@ -1479,19 +1471,8 @@ class ConsoleFront:
                 raise ValueError("Request too large.")
         return bytes(body)
 
-    async def _login_response(self, now, client, *, error=None, status_code=200):
+    def _login_response(self, now, client, *, error=None, status_code=200):
         from starlette.responses import HTMLResponse
-        form_action = "'self'"
-        if self.oidc is not None:
-            # The form's start answers with a redirect to the provider, which
-            # Chromium checks against this page's form-action too: the policy
-            # names the front and exactly the authorization endpoint's origin.
-            try:
-                discovery = await self._oidc_bounded(self._oidc_discovery_document())
-            except (_OidcUnavailable, _OidcMalformed, _OidcTimeout) as trouble:
-                return self._oidc_trouble(trouble, "This Console could not use its identity provider just now. "
-                                          "Try again shortly; if it keeps failing, tell the Console's operator.")
-            form_action += " " + _oidc_origin(discovery["authorization_endpoint"])
         # A full table refuses no one: the address's oldest form goes first,
         # then the oldest of all, so one caller behind a shared address
         # cannot hold everyone else's sign-in off.
@@ -1509,8 +1490,11 @@ class ConsoleFront:
                                 status_code=status_code)
         response.set_cookie(self.cookie + "_login", nonce, httponly=True, samesite="strict", max_age=300,
                             secure=self._secure_cookie, path="/")
+        # The form posts only to the front. An OIDC start moves on to the
+        # provider from a page of its own (_oidc_start), never by a redirect
+        # of this form's submission, which form-action would also govern.
         response.headers.update({"Cache-Control": "no-store", "Content-Security-Policy":
-            f"default-src 'none'; style-src 'unsafe-inline'; form-action {form_action}; frame-ancestors 'none'"})
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"})
         return response
 
     def _drop_login_form(self, nonce):
@@ -1705,7 +1689,7 @@ class ConsoleFront:
 
     async def _oidc_start(self, request, now, client):
         """Send the browser to the identity provider: the code flow, with PKCE, state and nonce."""
-        from starlette.responses import RedirectResponse, Response
+        from starlette.responses import HTMLResponse, Response
         if self._sign_in_held(None, client, now):
             return Response("Too many sign-in attempts from this address. Try again in one minute.",
                             status_code=429)
@@ -1739,7 +1723,12 @@ class ConsoleFront:
             "redirect_uri": self.origin + OIDC_CALLBACK_PATH, "scope": OIDC_SCOPES, "state": state,
             "nonce": nonce, "code_challenge": _base64(hashlib.sha256(verifier.encode("ascii")).digest()),
             "code_challenge_method": "S256"})
-        response = RedirectResponse(endpoint + ("&" if urlsplit(endpoint).query else "?") + query, status_code=303)
+        # The form's answer is a same-origin page that moves on to the
+        # provider, not a redirect: Chromium checks form-action on every
+        # redirect of a form submission, the provider's own included, and no
+        # CSP source can name an IPv6 address. A meta refresh is no form
+        # submission, so the sign-in page keeps form-action 'self' alone.
+        response = HTMLResponse(_oidc_onward_page(endpoint + ("&" if urlsplit(endpoint).query else "?") + query))
         # The provider sends the browser back on a top-level navigation from
         # its own site, which carries Lax cookies only: this one binds the
         # callback to the browser that started the sign-in.
@@ -1747,7 +1736,7 @@ class ConsoleFront:
                             max_age=OIDC_PENDING_SECONDS, secure=self._secure_cookie, path="/")
         response.delete_cookie(self.cookie + "_login", secure=self._secure_cookie, httponly=True,
                                samesite="strict", path="/")
-        response.headers.update({"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+        response.headers.update(_oidc_page_headers())
         return response
 
     async def _oidc_callback(self, request, now):
@@ -1964,7 +1953,7 @@ class ConsoleFront:
                                          if key in self.login_tokens}
             client = request.client.host if request.client is not None else ""
             if request.method == "GET":
-                return await self._login_response(now, client)
+                return self._login_response(now, client)
             if request.method != "POST" or request.headers.get("origin") != self.origin:
                 return Response("Login requires a same-origin form.", status_code=403)
             try:
@@ -1977,7 +1966,7 @@ class ConsoleFront:
             nonce = form.get("nonce", "")
             if (not nonce or nonce != request.cookies.get(self.cookie + "_login")
                     or not self.login_tokens.pop(nonce, None)):
-                return await self._login_response(now, client, error=("This sign-in form expired. Sign in again."
+                return self._login_response(now, client, error=("This sign-in form expired. Sign in again."
                     if self.oidc is not None else "This sign-in form expired. Enter your Console password again."),
                     status_code=403)
             self._login_token_clients.pop(nonce, None)
@@ -2002,7 +1991,7 @@ class ConsoleFront:
             finally:
                 self._password_checks -= 1
             if not opened:
-                return await self._login_response(now, client, error=self._login_refusal(), status_code=401)
+                return self._login_response(now, client, error=self._login_refusal(), status_code=401)
             self._forget_failure(key, client, now)
             if self._closing:
                 return Response("The Console is stopping.", status_code=503)
@@ -3114,6 +3103,16 @@ def _oidc_landing_page():
     """Signed in: a same-site step on to the Console, which sends the Strict session cookie."""
     return _oidc_page("Signed in", ('<meta http-equiv="refresh" content="0;url=/console">',
                                     '<p><a href="/console">Open the Console</a></p>'))
+
+
+def _oidc_onward_page(url):
+    """The start's answer: a same-origin step on to the provider's authorization URL.
+
+    The URL is one escaped attribute value, in the meta refresh and the link.
+    """
+    target = html.escape(url, quote=True)
+    return _oidc_page("Continue to sign in", (f'<meta http-equiv="refresh" content="0;url={target}">',
+                                              f'<p><a href="{target}">Continue to the identity provider</a></p>'))
 
 
 def _oidc_refusal_page(message):

@@ -157,10 +157,13 @@ them.
   `terms_digest: Sha256Digest` and `ResolveUse` gains
   `requester: Option<GrantPrincipal>`, `work: Option<OriginalWorkRef>` and
   `operation: Option<GrantOperationBinding>`, so code that builds them
-  literally must set them (`None` for the three is a plain resolution). The
-  machine's state gains `spent`, `consumed` and `carried_decisions`.
-  `GrantAuthorityInput` gains `ConsumeUse` and `GrantAuthorityEffect` gains
-  `UseConsumed`; the kernel's `Input` and `InputKind` gain `ConsumeUse`,
+  literally must set them (`None` for the three is a plain resolution).
+  `GrantAuthorityMachineState` (meerkat-machine-schema
+  `catalog::dsl::grant_authority`) gains the public fields `spent`,
+  `consumed` and `carried_decisions`, so code that builds it literally must
+  set them. `GrantAuthorityInput` and `GrantAuthorityInputVariant` gain
+  `ConsumeUse`, and `GrantAuthorityEffect` and `GrantAuthorityEffectVariant`
+  gain `UseConsumed`; the kernel's `Input` and `InputKind` gain `ConsumeUse`,
   its `Effect` and `EffectKind` gain `UseConsumed`, and its `TransitionId`
   gains `ConsumeUse` and `ConsumeUseRefusedApproverRevoked`, each appended
   last, so an exhaustive match needs their arms. The machine is at version
@@ -198,12 +201,53 @@ them.
   `generated::durable_decision::State` gain the public fields
   `cleanup: DurableDecisionCleanup` and `reply_digest: Option<DecisionDigest>`,
   so code that builds them literally must set them (`NotOwed` and `None` are
-  the state as before). `DurableDecisionInput` gains `OweCleanup`,
-  `SettleCleanup` and `SettleReply { digest }`, and `DurableDecisionEffect`
-  gains `CleanupOwed`, `CleanupSettled` and `ReplySettled`; the kernel's
-  `Input`, `InputKind`, `Effect`, `EffectKind` and `TransitionId` gain the
-  matching variants, each appended last, so an exhaustive match needs their
-  arms.
+  the state as before). `DurableDecisionInput` and
+  `DurableDecisionInputVariant` (meerkat-machine-schema and meerkat-runtime)
+  gain `OweCleanup`, `SettleCleanup` and `SettleReply` (the input with its
+  `digest`), and `DurableDecisionEffect` and `DurableDecisionEffectVariant`
+  gain `CleanupOwed`, `CleanupSettled` and `ReplySettled`; the kernel's
+  `Input`, `InputKind`, `Effect` and `EffectKind` gain the matching
+  variants. The kernel `generated::durable_decision::TransitionId` gains
+  `OweCleanup`, `OweCleanupReplayed`, `OweCleanupRefusedNotAuthorized`,
+  `OweCleanupRefusedNotApprovedOpen`, `OweCleanupRefusedNotApprovedRejected`,
+  `OweCleanupRefusedNotApprovedExpired`,
+  `OweCleanupRefusedNotApprovedWithdrawn`,
+  `OweCleanupRefusedNotApprovedExecuted`,
+  `OweCleanupRefusedNotApprovedExecutionRefused`, `SettleCleanupExecuted`,
+  `SettleCleanupExecutionRefused`, `SettleCleanupExpired`,
+  `SettleCleanupRefusedNotOwedRejected`,
+  `SettleCleanupRefusedNotOwedExpired`,
+  `SettleCleanupRefusedNotOwedWithdrawn`,
+  `SettleCleanupRefusedNotOwedExecuted`,
+  `SettleCleanupRefusedNotOwedExecutionRefused`,
+  `SettleCleanupRefusedNotEndedOpen`,
+  `SettleCleanupRefusedNotEndedApproved`, `SettleReply`,
+  `SettleReplyReplayed`, `SettleReplyRefusedOther`,
+  `SettleReplyRefusedNotExecutedOpen`,
+  `SettleReplyRefusedNotExecutedApproved`,
+  `SettleReplyRefusedNotExecutedRejected`,
+  `SettleReplyRefusedNotExecutedExpired`,
+  `SettleReplyRefusedNotExecutedWithdrawn` and
+  `SettleReplyRefusedNotExecutedExecutionRefused`. Every new variant is
+  appended last, so no existing variant's implicit discriminant moves, and
+  an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a hold of a
+  decision whose kind is decided by people only (`grant.child`,
+  `tool_grant.issue`, `route.release` and `gating.release`:
+  `DECIDED_BY_PEOPLE_ONLY`) that names a reviewer is refused
+  `review_stage_not_allowed` (`DecisionContractError::ReviewStageNotAllowed`)
+  and holds nothing. 0.9.10 held a decision of any kind in the review stage.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: the member
+  identity prefix `approval-branch-` and the label `decision.approval_branch`
+  are reserved for approval branches (see Added). A spawn, ensure,
+  reconcile, fork, dormant seat or resume that takes either, other than a
+  branch's own opening and the restore of a member that records it, is
+  refused `MobError::ApprovalBranchReserved`, and so is a wire, unwire or
+  respawn of an open approval branch. 0.9.10 treated them as an ordinary
+  identity and label: retire a member that uses them, and seat it under
+  another identity, before upgrading.
 
 ### Added
 

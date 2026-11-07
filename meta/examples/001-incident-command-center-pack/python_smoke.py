@@ -5,7 +5,7 @@ import time
 import urllib.request
 
 
-def rpc(base_url: str, method: str, params: dict):
+def call(base_url: str, method: str, params: dict) -> dict:
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": f"python-smoke:{method}",
@@ -19,7 +19,11 @@ def rpc(base_url: str, method: str, params: dict):
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8"))
+        return json.loads(response.read().decode("utf-8"))
+
+
+def rpc(base_url: str, method: str, params: dict):
+    body = call(base_url, method, params)
     if "error" in body:
         raise RuntimeError(body["error"])
     return body["result"]
@@ -63,25 +67,18 @@ def main() -> int:
     assert pending, "expected seeded pending gating entry"
     first_pending = pending[0]
 
-    escalated = rpc(base_url, "meta/gating/decide", {
+    # The console decides an approval only as the signed-in person on the
+    # connection. This pack's console has no sign-in, so a decision is
+    # refused and the request stays pending.
+    refused = call(base_url, "meta/gating/decide", {
         "pending_id": first_pending["pending_id"],
-        "approver_id": "console-ops-lead",
         "decision": "escalate",
         "reason": "python_smoke_escalate",
     })
-    next_pending_id = escalated["next_pending_id"]
-    assert next_pending_id, "expected successor pending id"
-
+    assert refused.get("error", {}).get("code") == -32057, refused
+    assert refused["error"].get("data", {}).get("kind") == "approver_unauthenticated", refused
     pending_after = rpc(base_url, "meta/gating/pending", {})["pending"]
-    successor = next(item for item in pending_after if item["pending_id"] == next_pending_id)
-
-    approved = rpc(base_url, "meta/gating/decide", {
-        "pending_id": successor["pending_id"],
-        "approver_id": "console-ops-lead",
-        "decision": "approve",
-        "reason": "python_smoke_approve",
-    })
-    assert approved["decision"] == "approve"
+    assert any(item["pending_id"] == first_pending["pending_id"] for item in pending_after)
 
     routes = rpc(base_url, "meta/routing/routes/list", {})["routes"]
     assert any(route["recipient"] == "statuspage@example.test" for route in routes)

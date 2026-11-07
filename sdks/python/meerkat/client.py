@@ -254,6 +254,7 @@ from .mob import (
     MobLifecycleAction,
     MobMember,
     MobMemberCustodyDeferral,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberRef,
     MobMemberSnapshot,
     MobPeerConnectivity,
@@ -8772,25 +8773,31 @@ class MeerkatClient:
     @staticmethod
     def _parse_member_preview_unavailable(
         raw: dict[str, Any], context: str
-    ) -> WireMemberPreviewUnavailable | None:
+    ) -> WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | None:
         """Return the typed reason a status read carries no observed preview.
 
         Absent or ``null`` means ``output_preview``/``tokens_used`` are
-        observations; a value outside the closed vocabulary fails closed.
+        observations. The field is advisory and its vocabulary may grow: a
+        reason this SDK does not know is read as ``{"unknown": <the value>}``,
+        so a newer server never fails the read. A value that is not a string
+        is malformed and fails closed.
         """
         value = raw.get("preview_unavailable")
         if value is None:
             return None
-        if not isinstance(value, str) or value not in {
+        if not isinstance(value, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
+            )
+        if value in {
             "observation_deadline",
             "read_failed",
             "session_absent",
             "not_observed_while_retiring",
+            "store_refused",
         }:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
-            )
-        return cast(WireMemberPreviewUnavailable, value)
+            return cast(WireMemberPreviewUnavailable, value)
+        return {"unknown": value}
 
     @staticmethod
     def _parse_member_registration_refusal(

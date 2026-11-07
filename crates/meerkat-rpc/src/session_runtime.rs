@@ -26772,10 +26772,10 @@ mod tests {
         use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 
         const RESPONSES_SSE: &str = concat!(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
-            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n",
-            "data: [DONE]\n",
+            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n",
         );
         async fn capture(
             State(bodies): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,

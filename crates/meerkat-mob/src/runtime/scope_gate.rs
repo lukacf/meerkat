@@ -117,6 +117,8 @@ impl MobCommand {
             | Self::ForceCancel { .. }
             | Self::HardCancelMember { .. }
             | Self::StopMemberRun { .. }
+            // Settling a member's retained run ends that run's work.
+            | Self::SettleMemberRetainedRun { .. }
             // Revoking a capability terminalizes outstanding delegated work
             // authority without retiring any member.
             | Self::RevokeForkedParticipant { .. }
@@ -450,7 +452,8 @@ impl MobCommand {
             | Self::ReleaseMemberRunStarts { agent_identity, .. }
             | Self::ForceCancel { agent_identity, .. }
             | Self::HardCancelMember { agent_identity, .. }
-            | Self::StopMemberRun { agent_identity, .. } => {
+            | Self::StopMemberRun { agent_identity, .. }
+            | Self::SettleMemberRetainedRun { agent_identity, .. } => {
                 AgentLaneAdmission::Members(vec![agent_identity])
             }
             Self::CancelAllWork { runtime_id, .. } => {
@@ -848,6 +851,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::StopMemberRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SettleMemberRetainedRun { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {

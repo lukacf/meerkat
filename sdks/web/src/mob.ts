@@ -776,6 +776,7 @@ const WIRE_MEMBER_PREVIEW_UNAVAILABLE_VALUES: readonly WireMemberPreviewUnavaila
   'read_failed',
   'session_absent',
   'not_observed_while_retiring',
+  'store_refused',
 ];
 
 /**

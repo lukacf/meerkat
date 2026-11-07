@@ -13,8 +13,8 @@
 //! - `META_MEMORY_E2E_ADDR`   listen address (default `127.0.0.1:3230`)
 //! - `META_MEMORY_E2E_STATE`  persistent-state dir for the sqlite store
 //!   (default: fresh dir under the system temp dir)
-//! - `META_MEMORY_E2E_ACCESS` `open` (default, no access controller —
-//!   the lane browser-e2e's reference proof runs in), `reader` (memory
+//! - `META_MEMORY_E2E_ACCESS` `open` (default, a controller that enforces
+//!   nothing, so the console verifies a volunteered token), `reader` (memory
 //!   read grants but no quarantine review), `partial` (agent+mob reads,
 //!   no operator.memory.read — operator scope must render "no grant"),
 //!   `scoped` (agent.memory.read limited to one agent — panel/dreams
@@ -176,7 +176,12 @@ args = []
 restart_policy = "always"
 "#
         .to_string(),
-        auth: AuthPolicy::default(),
+        // The e2e walks its open-access flows as this person: a quarantine
+        // decision is a signed-in person's.
+        auth: AuthPolicy {
+            email_allowlist: vec!["reviewer@memory-e2e.test".to_string()],
+            ..AuthPolicy::default()
+        },
         trusted_oidc: trusted_oidc(),
         console: ConsolePolicy {
             require_app_auth: false,
@@ -687,8 +692,8 @@ fn emit_timeline_events(runtime: &UnifiedRuntime, ids: &SeededIds) {
     }
 }
 
-/// `open`: no controller (everything allowed — matches how browser-e2e's
-/// reference proof runs). `reader`: console + memory reads for everyone,
+/// `open`: a controller that enforces nothing, so the open console verifies
+/// a volunteered token. `reader`: console + memory reads for everyone,
 /// but no `memory.quarantine.review`. `none`: console for everyone, zero
 /// memory grants — the memory nav entry must not render.
 fn access_controller(mode: &str) -> Option<AccessController> {
@@ -705,7 +710,11 @@ fn access_controller(mode: &str) -> Option<AccessController> {
         everyone("everyone-observes-mob", &["mob.observe"]),
     ];
     match mode {
-        "open" => return None,
+        "open" => {
+            return Some(
+                AccessController::new(AccessControlConfig::default()).expect("access controller"),
+            );
+        }
         "reader" => rules.push(everyone(
             "everyone-reads-memory",
             &[
@@ -763,7 +772,7 @@ fn access_controller(mode: &str) -> Option<AccessController> {
 fn trusted_oidc() -> TrustedOidcRuntimeConfig {
     TrustedOidcRuntimeConfig {
         discovery_json:
-            r#"{"issuer":"https://trusted.meta.local","jwks_uri":"https://trusted.meta.local/.well-known/jwks.json"}"#
+            r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
                 .to_string(),
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
             .to_string(),

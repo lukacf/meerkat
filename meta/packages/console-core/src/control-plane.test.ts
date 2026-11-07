@@ -360,26 +360,28 @@ test("gating audit distinguishes actor from approver and reads the recorded deta
 });
 
 test("normalize gating and routing payloads for the shared control-plane contract", () => {
+  // A console decision names no approver: one a caller supplies is dropped,
+  // since the gateway decides as the signed-in person.
   assert.deepEqual(
     normalizeGatingActionRequest({
       pending_id: " pending-1 ",
-      approver_id: " luka ",
+      approver_id: " approver-1 ",
       decision: "escalate",
       reason: " needs higher approval ",
     }),
     {
       pending_id: "pending-1",
-      approver_id: "luka",
       decision: "escalate",
       reason: "needs higher approval",
     },
   );
+  assert.equal(normalizeGatingActionRequest({ pending_id: "pending-1", decision: "approve" })?.pending_id, "pending-1");
 
   assert.deepEqual(
     normalizeGatingActionResult({
       pending_id: "pending-1",
       action_id: "action-1",
-      approver_id: "luka",
+      approver_id: "approver-1",
       decision: "escalate",
       outcome: "pending_approval",
       decided_at_ms: 1717171717,
@@ -388,7 +390,7 @@ test("normalize gating and routing payloads for the shared control-plane contrac
     {
       pending_id: "pending-1",
       action_id: "action-1",
-      approver_id: "luka",
+      approver_id: "approver-1",
       decision: "escalate",
       outcome: "pending_approval",
       decided_at_ms: 1717171717,

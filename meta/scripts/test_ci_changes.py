@@ -752,7 +752,7 @@ class CiChangesTests(unittest.TestCase):
             ("crates/meerkat-meta/src/bin/meta_flow_editor.rs", {"flow_editor"}),
             ("crates/meerkat-meta/src/http_flow_editor.rs", {"flow_editor"}),
             ("crates/meerkat-meta/src/mobpack.rs", {"flow_editor"}),
-            ("crates/meerkat-meta/src/rpc.rs", {"python", "flow_editor"}),
+            ("crates/meerkat-meta/src/rpc.rs", {"python", "flow_editor", "console"}),
             ("crates/meerkat-meta/src/rpc/mob_methods.rs", {"python"}),
             # Sources the console and flow editor contract tests read.
             ("crates/meerkat-meta/src/rpc/topology_methods.rs", {"python", "console"}),

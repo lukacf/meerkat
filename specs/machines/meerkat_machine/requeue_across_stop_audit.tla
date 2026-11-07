@@ -9,9 +9,9 @@
 \* RuntimeTerminated carrier, the executor exits (RuntimeExecutorExited*),
 \* and the stop cleanup ends exactly the inputs answered Abandon with
 \* AbandonInput(Stopped). An input answered Retain stays Queued with a
-\* durable requeue mark and runs on the next start, unless it is older than
-\* its max age: then the start's pre-serve settlement ends it with the
-\* generated AbandonInput(RequeueExpired) before the runtime can serve.
+\* durable requeue mark and runs on the next start, unless its max age has
+\* passed since the stop: then the start's pre-serve settlement ends it with
+\* the generated AbandonInput(RequeueExpired) before the runtime can serve.
 \*
 \* This audit keeps the generated MeerkatMachine model unchanged and explores
 \* two processes. Process 1 registers one session, admits an input A and runs

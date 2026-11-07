@@ -5073,6 +5073,7 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
       "read_failed",
       "session_absent",
       "not_observed_while_retiring",
+      "store_refused",
     ]) {
       it(`surfaces the typed preview_unavailable marker '${marker}'`, async () => {
         const client = memberStatusClient(validResponse({ preview_unavailable: marker }));
@@ -5089,15 +5090,26 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
       }
     });
 
-    it("rejects a preview_unavailable outside the closed vocabulary", async () => {
+    // The marker is advisory and its vocabulary may grow: a reason this SDK
+    // does not know is surfaced, not refused.
+    it("reads a preview_unavailable this SDK does not know as { unknown }", async () => {
       const client = memberStatusClient(validResponse({ preview_unavailable: "stale" }));
-      await assert.rejects(
-        () => client.mobMemberStatus("mob-1", "worker-1"),
-        (error) =>
-          error instanceof MeerkatError &&
-          error.code === "INVALID_RESPONSE" &&
-          /preview_unavailable/.test(String(error.message)),
-      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.previewUnavailable, { unknown: "stale" });
+      assert.equal(result.outputPreview, undefined);
+    });
+
+    it("rejects a preview_unavailable that is not a string", async () => {
+      for (const malformed of [{ kind: "observation_deadline" }, 42, true]) {
+        const client = memberStatusClient(validResponse({ preview_unavailable: malformed }));
+        await assert.rejects(
+          () => client.mobMemberStatus("mob-1", "worker-1"),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE" &&
+            /preview_unavailable/.test(String(error.message)),
+        );
+      }
     });
 
     it("carries preview_unavailable on wait_kickoff and wait_ready members", async () => {
@@ -5112,6 +5124,13 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
             preview_unavailable: "observation_deadline",
           },
           { agent_identity: "writer", status: "active", tokens_used: 7, is_final: false },
+          {
+            agent_identity: "reviewer",
+            status: "active",
+            tokens_used: 0,
+            is_final: false,
+            preview_unavailable: "a_newer_reason",
+          },
         ],
       });
       for (const members of [
@@ -5120,6 +5139,7 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
       ]) {
         assert.equal(members[0].previewUnavailable, "observation_deadline");
         assert.equal(Object.prototype.hasOwnProperty.call(members[1], "previewUnavailable"), false);
+        assert.deepEqual(members[2].previewUnavailable, { unknown: "a_newer_reason" });
       }
     });
 

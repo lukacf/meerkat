@@ -510,6 +510,12 @@ pub enum BetaFeature {
     StructuredOutput,
     /// Interleaved thinking between tool calls.
     InterleavedThinking,
+    /// Anthropic thinking-block binding controls
+    /// (`thinking.block_binding.prefix_mismatch_behavior`). A catalog row
+    /// lists it only for a model that checks every replayed thinking block
+    /// against the request prefix it was produced under and thinks by default
+    /// when `thinking` is omitted, so the control can name that default.
+    ThinkingBindingControls,
 }
 
 impl BetaFeature {
@@ -519,6 +525,7 @@ impl BetaFeature {
             BetaFeature::Compaction => "compaction",
             BetaFeature::StructuredOutput => "structured_output",
             BetaFeature::InterleavedThinking => "interleaved_thinking",
+            BetaFeature::ThinkingBindingControls => "thinking_binding_controls",
         }
     }
 }
@@ -702,6 +709,10 @@ mod tests {
         assert_eq!(
             BetaFeature::InterleavedThinking.as_wire_str(),
             "interleaved_thinking"
+        );
+        assert_eq!(
+            BetaFeature::ThinkingBindingControls.as_wire_str(),
+            "thinking_binding_controls"
         );
     }
 

@@ -34,8 +34,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::console_aggregator::{
-    ConsoleFrame, ConsoleThreadAudience, ConsoleThreadReference, MetaConsoleAggregator,
-    PrivateReplyAppend,
+    ConsoleFrame, ConsoleFrameStatus, ConsoleThreadAudience, ConsoleThreadReference,
+    MetaConsoleAggregator, PrivateReplyAppend,
 };
 use crate::runtime::{MetadataStoreError, PersistentMetadataStore, RecordRetention};
 
@@ -392,12 +392,21 @@ fn attention_receipt(item: &ConsoleAttentionItem) -> ConsoleReplyReceipt {
     }
 }
 
-/// The text a reply's frame carries.
-fn frame_text(frame: &ConsoleFrame) -> Option<&str> {
-    frame
-        .payload
-        .get("text")
-        .and_then(serde_json::Value::as_str)
+/// The text a reply's frame was delivered with; `None` when a host's
+/// payload policy redacted the frame before it was stored, so the text can
+/// no longer be compared.
+fn delivered_text(frame: &ConsoleFrame) -> Option<String> {
+    if frame.status == ConsoleFrameStatus::Redacted {
+        return None;
+    }
+    Some(
+        frame
+            .payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 impl ConsoleReplies {
@@ -457,21 +466,21 @@ impl ConsoleReplies {
     }
 
     /// The receipt of the reply `reply_id` to the request `reference`, and
-    /// the text it was delivered with, if it was delivered.
+    /// the text it was delivered with (`None` for a frame a host's payload
+    /// policy redacted), if it was delivered.
     async fn find(
         &self,
         reference: &ConsoleThreadReference,
         addressee: &str,
         reply_id: &str,
-    ) -> Result<Option<(ConsoleReplyReceipt, String)>, ConsoleReplyError> {
+    ) -> Result<Option<(ConsoleReplyReceipt, Option<String>)>, ConsoleReplyError> {
         if let Some(frame) = self
             .aggregator
             .private_reply_frame(&reference.interaction_id, reply_id)
             .await
             .map_err(store_error)?
         {
-            let text = frame_text(&frame).unwrap_or_default().to_string();
-            return Ok(Some((thread_receipt(&frame), text)));
+            return Ok(Some((thread_receipt(&frame), delivered_text(&frame))));
         }
         let Some(attention) = &self.attention else {
             return Ok(None);
@@ -483,7 +492,7 @@ impl ConsoleReplies {
             .map_err(store_error)?
             .map(|item| {
                 let ConsoleAttentionContent::PrivateReply { text, .. } = &item.content;
-                let text = text.clone();
+                let text = Some(text.clone());
                 (attention_receipt(&item), text)
             }))
     }
@@ -493,7 +502,8 @@ impl ConsoleReplies {
     /// private thread when the request was made there and the thread is
     /// still theirs, else as an item of their attention list. The same reply
     /// again answers the first delivery's receipt; other text under the same
-    /// reply id is refused.
+    /// reply id is refused, unless a host's payload policy redacted the
+    /// reply's frame, whose text can no longer be compared.
     pub(crate) async fn deliver(
         &self,
         interaction_id: &str,
@@ -502,7 +512,7 @@ impl ConsoleReplies {
     ) -> Result<ConsoleReplyReceipt, ConsoleReplyError> {
         let (reference, addressee) = self.addressed_thread(interaction_id).await?;
         if let Some((receipt, delivered)) = self.find(&reference, &addressee, reply_id).await? {
-            return if delivered == text {
+            return if delivered.is_none_or(|delivered| delivered == text) {
                 Ok(receipt)
             } else {
                 Err(ConsoleReplyError::Conflict)
@@ -516,7 +526,7 @@ impl ConsoleReplies {
                 .map_err(store_error)?
             {
                 PrivateReplyAppend::Appended(frame) | PrivateReplyAppend::Existing(frame) => {
-                    return if frame_text(&frame) == Some(text) {
+                    return if delivered_text(&frame).is_none_or(|delivered| delivered == text) {
                         Ok(thread_receipt(&frame))
                     } else {
                         Err(ConsoleReplyError::Conflict)

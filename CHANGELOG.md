@@ -539,7 +539,7 @@ them.
   effect: `not_governed_work` (outside governed work of one original),
   `not_an_approved_work`, `reply_already_delivered`, or an offer's refusal
   kind and reason; a grant owner that cannot answer now answers the
-  retryable `unavailable` (`temporarily_unavailable`). Hosts compose it
+  retryable `tool_unavailable` (`temporarily_unavailable`). Hosts compose it
   (`ApprovalGrants`, `ApprovalGrantsConfiguration`) from their decision
   owner, their grant owner, their approval branches (`ApprovalBranchHost`),
   their requester reply route (`RequesterReplyRoute`, with `can_deliver`)

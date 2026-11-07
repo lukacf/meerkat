@@ -33,6 +33,17 @@ struct ReplyArguments {
 /// governed work. Every plan this owner resolves carries its witness with
 /// the call's typed operation target: a hold for the offering grant's
 /// approver id, or the requester reply.
+///
+/// A call refused for good fails as `execution_failed` with typed data, the
+/// same payload whether it is refused when its plan resolves, when its plan
+/// dispatches or at its effect: `{"refusal": "not_governed_work"}` outside
+/// governed work of one original, `{"refusal": "not_an_approved_work"}` for
+/// a reply outside an approved work, `{"refusal": "reply_already_delivered"}`
+/// for a reply with another text than the settled one, and an access
+/// offer's refusal kind with its reason ([`AccessOfferRefusal`], for example
+/// `{"refusal": "no_child_approval_rule", "reason": "no_parent_grant"}`). A
+/// grant owner that cannot answer now fails the call as the retryable
+/// `tool_unavailable` ([`meerkat_core::ToolUnavailableReason::TemporarilyUnavailable`]).
 pub struct DecisionsToolDispatcher {
     grants: ApprovalGrants,
     tool_defs: Arc<[Arc<ToolDef>]>,

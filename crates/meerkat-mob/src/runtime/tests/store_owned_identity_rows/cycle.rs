@@ -744,6 +744,179 @@ async fn import_reports_a_tombstoned_name_a_roster_seated_meanwhile() {
     assert!(!rolled_back.rows().await.contains_key(&id("gone")));
 }
 
+/// MobMachine's custody map of the owned edges `mob` published, by pair.
+fn edge_custody(mob: &StoreOwnedMob) -> BTreeMap<(AgentIdentity, AgentIdentity), AgentIdentity> {
+    mob.handle
+        .machine_state_watch_rx
+        .borrow()
+        .identity_edge_owners
+        .iter()
+        .map(|(edge, owner)| {
+            (
+                (
+                    AgentIdentity::from(edge.a.0.as_str()),
+                    AgentIdentity::from(edge.b.0.as_str()),
+                ),
+                AgentIdentity::from(owner.0.as_str()),
+            )
+        })
+        .collect()
+}
+
+/// Row (RED): the import restores its rows' owned edges as a restart
+/// recovers them from the rows: an edge to a roster-owned identity the
+/// roster no longer lists is held, out of force, so the custody map the
+/// import leaves is the one the next restart reads, and the identity's
+/// re-listing realizes the edge.
+///
+/// RED with the restoration needing the edge's other end to be an identity,
+/// as a declaration does: the import's map lacks the edge the restart's
+/// holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_imports_owned_edges_are_the_ones_a_restart_recovers() {
+    let mut mob = StoreOwnedMob::new("cycle-import-edges").await;
+    mob.declare(&["listed"]).await;
+    committed(
+        mob.create(
+            StoreOwnedIdentityCreate::new(
+                operation("create-alpha"),
+                IdentityChangeRequesterInput::host("console"),
+                vec![
+                    CreatedIdentityRequest::new(spec("alpha", "worker")).with_peers(vec![
+                        crate::identity::OwnedIdentityEdge::new(
+                            "listed",
+                            crate::identity::OwnedEdgeAdmission::rule("team-peers")
+                                .expect("a peer rule id"),
+                        ),
+                    ]),
+                ],
+            ),
+            ALLOW,
+        )
+        .await,
+    );
+    let export = mob.export_and_purge("purge-import-edges").await;
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    tokio::time::timeout(STEP, mob.handle.unlist_declared_identity(&id("listed")))
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist runs");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("listed").await {
+        assert!(tokio::time::Instant::now() < deadline, "listed never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    committed(mob.import("import-edges", export).await);
+    let imported = edge_custody(&mob);
+    mob.restart_as(MobCompositionAuthority::Authoritative).await;
+    let restarted = edge_custody(&mob);
+    assert_eq!(
+        imported, restarted,
+        "the import's custody of the owned edges is the one a restart recovers"
+    );
+    assert_eq!(
+        restarted.get(&(id("alpha"), id("listed"))),
+        Some(&id("alpha")),
+        "alpha's restored row owns the edge to the unlisted identity"
+    );
+
+    mob.declare(&["listed"]).await;
+    let deadline = tokio::time::Instant::now() + STEP;
+    while !mob.wired_to("alpha").await.contains(&id("listed")) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the re-listed identity's owned edge was never realized"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Row (RED): the import binds a plain member in place only on the session
+/// its record names: a worker an older build seated under an exported
+/// identity's name, on another session, is reported
+/// (`name_taken_meanwhile`) and left as it is, with nothing written for the
+/// name.
+///
+/// RED with the verdict reading no session: the worker is bound in place
+/// as the store-owned identity.
+#[tokio::test]
+async fn import_reports_a_worker_on_another_session_and_binds_nothing() {
+    let definition = store_owned_definition("cycle-other-session");
+    let exported = StoreOwnedMob::build(definition.clone(), MobStorage::in_memory(), |builder| {
+        builder
+    })
+    .await;
+    committed(
+        exported
+            .create(host_create("create-alpha", &["alpha"]), ALLOW)
+            .await,
+    );
+    let export = exported.export_set().await;
+
+    // The same mob over a store an older build left, which seated a worker
+    // of the name on a session of its own.
+    crash_stop_and_release_routes(exported.handle.clone()).await;
+    let older = StoreOwnedMob::build(definition, MobStorage::in_memory(), |builder| builder).await;
+    tokio::time::timeout(
+        STEP,
+        older
+            .handle
+            .spawn_spec(SpawnMemberSpec::new("worker", id("alpha"))),
+    )
+    .await
+    .expect("the spawn answers")
+    .expect("spawn the worker");
+    let session = older.session("alpha").await;
+    let receipt = committed(older.import("import-other-session", export).await);
+    assert_eq!(
+        outcome_of(&receipt, "alpha"),
+        IdentityChangeEntryOutcome::NameTakenMeanwhile
+    );
+    assert!(
+        matches!(
+            older.read("alpha"),
+            IdentityEntryRead::NotAnEntry { worker: Some(_) }
+        ),
+        "{:?}",
+        older.read("alpha")
+    );
+    assert_eq!(older.session("alpha").await, session);
+    assert!(!older.rows().await.contains_key(&id("alpha")));
+}
+
+/// Row (RED): a purge of a mob whose scan reads no row of schema version 2
+/// is refused `purge_refused` (`nothing_to_purge`), decided by MobMachine,
+/// and writes nothing: no receipt, and identity changes go on.
+///
+/// RED with the verdict reading no row count: the empty purge goes on.
+#[tokio::test]
+async fn a_purge_with_no_row_to_purge_is_refused_nothing_to_purge() {
+    let mob = StoreOwnedMob::new("cycle-purge-nothing").await;
+    mob.hold_changes(true).await;
+    let export = mob.export_set().await;
+    assert!(export.identities.is_empty());
+    assert_eq!(
+        refusal(mob.purge("purge-nothing", &export.export_digest).await),
+        IdentityChangeRefusal::PurgeRefused {
+            reason: PurgeRefusedReason::NothingToPurge
+        }
+    );
+    assert!(
+        mob.handle
+            .identity_operation("purge-nothing")
+            .await
+            .expect("the receipt read answers")
+            .is_none(),
+        "no receipt is written"
+    );
+    mob.hold_changes(false).await;
+    committed(
+        mob.create(host_create("create-alpha", &["alpha"]), ALLOW)
+            .await,
+    );
+}
+
 /// Rollback row RB-CL4-3, in-process leg: a store-owned member that the
 /// older build retired (here, retired after the purge, which no re-seat
 /// follows) is seated again on its archived session by the import after

@@ -2441,16 +2441,25 @@ impl MobActor {
         {
             state.planned_wiring_targets.push(parent_target);
         }
-        // The member's owned edges whose other end is seated (0.9.11): the
-        // spawn realizes them as a seat does, whatever the definition
-        // declares and whether or not the member is exempt from its rules.
-        for (_, peer) in super::owned_edges::owned_pairs_to_realize(
-            self.dsl_authority.state(),
-            std::slice::from_ref(&agent_identity),
-        ) {
-            if !state.planned_wiring_targets.contains(&peer) {
-                state.planned_wiring_targets.push(peer);
+        // The member's owned edges in force whose other end is seated
+        // (0.9.11, MobMachine's verdict on each): the spawn realizes them as
+        // a seat does, whatever the definition declares and whether or not
+        // the member is exempt from its rules. A worker that takes the name
+        // of an owned edge's unlisted end is no identity entry: MobMachine
+        // holds that edge out of force, and the spawn wires nothing for it.
+        match self.owned_pairs_to_realize(std::slice::from_ref(&agent_identity)) {
+            Ok(pairs) => {
+                for (_, peer) in pairs {
+                    if !state.planned_wiring_targets.contains(&peer) {
+                        state.planned_wiring_targets.push(peer);
+                    }
+                }
             }
+            Err(error) => tracing::warn!(
+                agent_identity = %agent_identity,
+                %error,
+                "the spawn's owned edges were not planned: MobMachine decided no realization"
+            ),
         }
         if let Some(plan) = state.restore_wiring.as_ref() {
             state

@@ -23,11 +23,12 @@ use crate::store::{
 impl MobActor {
     /// Commit the host operator's purge of the mob's rows of schema version
     /// 2 and later in one actor step: MobMachine decides it
-    /// (`PurgeIdentityRows`) on a prepared transition, the store's one
-    /// transaction removes the rows and writes the receipt only when their
-    /// digest is the export's, and only then does the machine commit, which
-    /// refuses every later identity change until the mob restarts. A
-    /// refusal anywhere removes nothing.
+    /// (`PurgeIdentityRows`, with whether the scan read any row) on a
+    /// prepared transition, the store's one transaction removes the rows
+    /// and writes the receipt only when their digest is the export's, and
+    /// only then does the machine commit, which refuses every later
+    /// identity change until the mob restarts. A refusal anywhere removes
+    /// nothing.
     pub(super) async fn commit_identity_rows_purge(
         &mut self,
         commit: PurgeCommit,
@@ -41,6 +42,7 @@ impl MobActor {
             mob_dsl::MobMachineInput::PurgeIdentityRows {
                 receipt: receipt_kind,
                 host_operator: commit.host_operator,
+                rows_present: !commit.identities.is_empty(),
             },
             "purge_identity_rows",
         )?;
@@ -62,11 +64,6 @@ impl MobActor {
             return replayed.map(ChangeCommitted::Replayed).ok_or_else(|| {
                 MobError::Internal("MobMachine replayed a purge with no receipt".into())
             });
-        }
-        if commit.identities.is_empty() {
-            return Err(refused(IdentityChangeRefusal::PurgeRefused {
-                reason: PurgeRefusedReason::NothingToPurge,
-            }));
         }
         let receipt = IdentityChangeReceipt::sealed(
             self.definition.id.clone(),
@@ -128,8 +125,9 @@ impl MobActor {
 
     /// Commit the host operator's import of an export in one actor step:
     /// MobMachine decides the change's admission and each record's verdict
-    /// (`ImportIdentityRecord`) on one prepared authority, then declares the
-    /// restored records' owned edges (`DeclareOwnedIdentityEdge`); the
+    /// (`ImportIdentityRecord`) on one prepared authority, then restores the
+    /// restored records' owned edges as the next start recovers them
+    /// (`RestoreOwnedIdentityEdge`); the
     /// change's store transaction writes the restored rows as exported, the
     /// binding rows (origin Created) of the members bound in place and the
     /// receipt, and only then does the machine commit; the roster folds the
@@ -282,12 +280,15 @@ impl MobActor {
         }
         // The restored records' owned edges, once every record is: an edge's
         // other end may be a record restored after its owner's. The rows
-        // keep every edge as exported; MobMachine holds those whose other
-        // end is an identity, as a start's recovery of the rows would.
+        // keep every edge as exported, and MobMachine restores each as the
+        // next start's recovery of the rows recovers it
+        // (`RestoreOwnedIdentityEdge`): an edge whose other end is no
+        // identity now (an unlisted roster-owned identity's) is held, out of
+        // force, as the start holds it.
         for (owner, peer) in edges {
             let dsl_owner = mob_dsl::AgentIdentity::from_domain(&owner);
-            let declared = authority
-                .apply(mob_dsl::MobMachineInput::DeclareOwnedIdentityEdge {
+            let restored = authority
+                .apply(mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge {
                     edge: mob_dsl::WiringEdge::new(
                         dsl_owner.clone(),
                         mob_dsl::AgentIdentity::from_domain(&peer),
@@ -295,10 +296,25 @@ impl MobActor {
                     owner: dsl_owner,
                 })
                 .map_err(|error| MobError::MobMachineRejected {
-                    context: "declare_owned_identity_edge",
+                    context: "restore_owned_identity_edge",
                     reason: error.to_string(),
                 })?;
-            effects.extend(declared.into_effects());
+            let verdict = restored
+                .effects()
+                .iter()
+                .find_map(|effect| match effect {
+                    mob_dsl::MobMachineEffect::OwnedIdentityEdgeRestored { verdict, .. } => {
+                        Some(*verdict)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    MobError::Internal("MobMachine restored an owned edge with no verdict".into())
+                })?;
+            if verdict == mob_dsl::OwnedEdgeRestoreVerdict::MobNotRunning {
+                return Err(refused(IdentityChangeRefusal::MobNotRunning));
+            }
+            effects.extend(restored.into_effects());
         }
         let events = bound_in_place
             .iter()

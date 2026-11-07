@@ -987,7 +987,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_owned_identity_edge_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/owned_edges.rs",
-                    "MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row",
+                    "MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an owned edge is in force while both its ends are identity entries, and only an edge in force is realized by a seat, a spawn or a realization pass and refused a plain unwire, so a worker that takes an unlisted end's free name is no end of it; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat or a re-listing realizes it again; and the boot recovers each owned edge from its owner's row, as an import restores the edges of the rows it restores",
                     CoverageClaims::none()
                         .transitions(&[
                             "DeclareOwnedIdentityEdgeDeclared",
@@ -1003,11 +1003,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "AdmitMemberUnwireOwnedEdgeRunning",
                             "RecoverOwnedIdentityEdgeRecoveredRunning",
                             "RecoverOwnedIdentityEdgeSkippedRunning",
+                            "AdmitOwnedEdgeRealizationRealizeRunning",
+                            "AdmitOwnedEdgeRealizationNotOwnedRunning",
+                            "AdmitOwnedEdgeRealizationEndNotAnIdentityRunning",
+                            "RestoreOwnedIdentityEdgeRestored",
+                            "RestoreOwnedIdentityEdgeSkipped",
                         ])
                         .effects(&[
                             "OwnedIdentityEdgeDeclared",
                             "OwnedIdentityEdgeEnded",
                             "MemberUnwireAdmissionResolved",
+                            "OwnedEdgeRealizationResolved",
+                            "OwnedIdentityEdgeRestored",
                         ])
                         .invariants(&[
                             "owned_edge_owner_is_a_store_owned_end",
@@ -1018,7 +1025,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_identity_adoption_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/adoption.rs",
-                    "MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason",
+                    "MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, spawned with no profile or model override, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason",
                     CoverageClaims::none()
                         .transitions(&[
                             "AdoptIdentityIntoStoreAdopted",
@@ -1037,7 +1044,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_identity_downgrade_cycle_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/created_set.rs",
-                    "MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps",
+                    "MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, of a mob whose scan reads rows, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, a plain one only on the session the record names, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps",
                     CoverageClaims::none()
                         .transitions(&[
                             "AdmitIdentityChangeRowsPurged",
@@ -1048,6 +1055,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "PurgeIdentityRowsRowsPurged",
                             "PurgeIdentityRowsNotHostOperator",
                             "PurgeIdentityRowsChangesNotHeld",
+                            "PurgeIdentityRowsNothingToPurge",
                             "RecoverRowlessCreatedEntryReservedRunning",
                             "RecoverRowlessCreatedEntryKeptRunning",
                             "ImportIdentityRecordRestoredInPlace",

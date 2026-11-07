@@ -2,12 +2,13 @@
 //! declaration and the end of the edges an identity change lists, decided on
 //! the change step's prepared authority; the end of an edge the host's
 //! policy reload denies; a plain unwire's admission; and the realization of
-//! owned edges whose ends are both seated.
+//! the owned edges in force whose ends are both seated, each read from
+//! MobMachine's verdict before its wire.
 
 use super::*;
 use crate::identity::{CreatedIdentityObservation, OwnedIdentityEdge};
 use crate::runtime::identity_change::{IdentityChangeRefusal, refused};
-use crate::runtime::owned_edges::OwnedEdgeEndOutcome;
+use crate::runtime::owned_edges::{OwnedEdgeEndOutcome, owned_edge_candidates};
 use crate::store::{CreatedIdentityRowExpectation, CreatedIdentityRowWrite};
 
 /// The machine edge between `a` and `b`.
@@ -18,9 +19,80 @@ fn machine_edge(a: &AgentIdentity, b: &AgentIdentity) -> mob_dsl::WiringEdge {
     )
 }
 
-pub(super) use crate::runtime::owned_edges::owned_pairs_to_realize;
+/// The realization verdict MobMachine emitted in `effects`.
+fn realization_verdict(
+    effects: &[mob_dsl::MobMachineEffect],
+) -> Result<mob_dsl::OwnedEdgeRealization, MobError> {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            mob_dsl::MobMachineEffect::OwnedEdgeRealizationResolved { verdict, .. } => {
+                Some(*verdict)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| {
+            MobError::Internal(
+                "MobMachine decided an owned edge's realization with no verdict".into(),
+            )
+        })
+}
+
+/// The candidates of a realization staged on a step's prepared `authority`
+/// (`owned_edge_candidates` over its state) that MobMachine holds in force
+/// (`AdmitOwnedEdgeRealization` answers `Realize`): the owned edges the step
+/// wires. Each verdict's effect goes to `effects`.
+pub(super) fn owned_pairs_in_force<M: mob_dsl::MobMachineMutator>(
+    authority: &mut M,
+    candidates: Vec<(AgentIdentity, AgentIdentity)>,
+    effects: &mut Vec<mob_dsl::MobMachineEffect>,
+) -> Result<Vec<(AgentIdentity, AgentIdentity)>, MobError> {
+    let mut pairs = Vec::with_capacity(candidates.len());
+    for (local, peer) in candidates {
+        let transition = authority
+            .apply(mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization {
+                edge: machine_edge(&local, &peer),
+            })
+            .map_err(|error| MobError::MobMachineRejected {
+                context: "admit_owned_edge_realization",
+                reason: error.to_string(),
+            })?;
+        let verdict = realization_verdict(transition.effects())?;
+        effects.extend(transition.into_effects());
+        if verdict == mob_dsl::OwnedEdgeRealization::Realize {
+            pairs.push((local, peer));
+        }
+    }
+    Ok(pairs)
+}
 
 impl MobActor {
+    /// The owned edges of `members` a realization wires now: each joins a
+    /// member of `members` to another member, both seated and active, the
+    /// mob has not wired it (`owned_edge_candidates`), and MobMachine holds
+    /// it in force (`AdmitOwnedEdgeRealization`). An edge one of whose ends
+    /// is no identity entry (an unlisted roster-owned identity's name, which
+    /// a worker may hold) is left declared and unrealized.
+    pub(super) fn owned_pairs_to_realize(
+        &mut self,
+        members: &[AgentIdentity],
+    ) -> Result<Vec<(AgentIdentity, AgentIdentity)>, MobError> {
+        let candidates = owned_edge_candidates(self.dsl_authority.state(), members);
+        let mut pairs = Vec::with_capacity(candidates.len());
+        for (local, peer) in candidates {
+            let effects = self.apply_dsl_input_collect_effects(
+                mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization {
+                    edge: machine_edge(&local, &peer),
+                },
+                "admit_owned_edge_realization",
+            )?;
+            if realization_verdict(&effects)? == mob_dsl::OwnedEdgeRealization::Realize {
+                pairs.push((local, peer));
+            }
+        }
+        Ok(pairs)
+    }
+
     /// Declare on `authority` each edge `owner`'s change lists
     /// (`DeclareOwnedIdentityEdge`), in order, and answer the edges `owner`
     /// owns now: those MobMachine declared. An edge an identity owns already
@@ -250,8 +322,10 @@ impl MobActor {
         Ok(rows)
     }
 
-    /// A plain unwire's admission (`AdmitMemberUnwire`): an edge an identity
-    /// owns takes no plain unwire, refused [`MobError::OwnedIdentityEdge`].
+    /// A plain unwire's admission (`AdmitMemberUnwire`): an owned edge in
+    /// force takes no plain unwire, refused [`MobError::OwnedIdentityEdge`].
+    /// An owned edge one of whose ends is no identity entry is plain wiring
+    /// for a member under that end's name.
     pub(super) fn admit_member_unwire(
         &mut self,
         local: &AgentIdentity,
@@ -301,17 +375,24 @@ impl MobActor {
         }
     }
 
-    /// Realize each owned edge of `members` whose ends are both seated and
-    /// which MobMachine has not wired yet, by the wire's own path. A
-    /// realization that fails leaves the edge owed a repair.
+    /// Realize each owned edge in force of `members` whose ends are both
+    /// seated and which MobMachine has not wired yet, by the wire's own path.
+    /// A realization that fails leaves the edge owed a repair.
     pub(super) async fn realize_owned_edges_of(&mut self, members: &[AgentIdentity]) {
-        let pairs = owned_pairs_to_realize(self.dsl_authority.state(), members);
-        Box::pin(self.realize_owned_pairs(pairs)).await;
+        match self.owned_pairs_to_realize(members) {
+            Ok(pairs) => Box::pin(self.realize_owned_pairs(pairs)).await,
+            Err(error) => tracing::warn!(
+                mob_id = %self.definition.id,
+                %error,
+                "owned edges were not realized: MobMachine decided no realization"
+            ),
+        }
     }
 
-    /// Realize every owned edge whose ends are both seated and which
-    /// MobMachine has not wired yet: a start's pass, after its seats, for an
-    /// edge a crash left unrealized. A mob that is not running wires
+    /// Realize every owned edge in force whose ends are both seated and
+    /// which MobMachine has not wired yet: a start's pass, after its seats,
+    /// for an edge a crash left unrealized, and an import's or an
+    /// adoption's after its commit. A mob that is not running wires
     /// nothing: its resume runs the pass again.
     pub(super) async fn realize_every_owned_edge(&mut self) {
         let state = self.dsl_authority.state();

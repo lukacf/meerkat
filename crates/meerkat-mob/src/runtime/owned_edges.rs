@@ -13,25 +13,32 @@
 //! an owned edge gives no custody.
 //!
 //! The map is the edge's desired record; its realization is the mob's
-//! ordinary wiring. The edge is wired once both its ends are seated: by the
-//! change's own step when they are seated already, and otherwise by the seat
-//! of the end that was not (a create's seat, an unarchive, the re-listing of
-//! a roster-owned identity, a start). An archive or an unlisting of an end
-//! leaves the edge declared and unrealized, and the end's seat realizes it
-//! again; no durable record of the unlisting is needed, since the owner's
-//! row holds the edge. An edge enables nothing: a member reaches its peers
-//! only with the tools its profile grants.
+//! ordinary wiring. The edge is in force while both its ends are identity
+//! entries, and MobMachine decides it (`AdmitOwnedEdgeRealization`, read
+//! before each realization's wire): an edge in force is wired once both its
+//! ends are seated, by the change's own step when they are seated already,
+//! and otherwise by the seat of the end that was not (a create's seat, an
+//! unarchive, the re-listing of a roster-owned identity, a start). An
+//! archive of an end leaves the edge declared and unrealized, and the end's
+//! seat realizes it again. An unlisting of an end leaves it declared and out
+//! of force: the end's name is free, and a worker that takes it is no end of
+//! the edge, neither wired by it nor refused a plain unwire of its own
+//! wiring; the end's re-listing brings the edge back in force. No durable
+//! record of the unlisting is needed, since the owner's row holds the edge.
+//! An edge enables nothing: a member reaches its peers only with the tools
+//! its profile grants.
 //!
 //! An owned edge ends only by its owner's change
 //! ([`super::StoreOwnedIdentityUpdate::peers_remove`]), by the host's policy
 //! reload that denies it ([`super::MobHandle::end_denied_identity_edge`]), by
 //! the removal of either end, which ends it in the removal's own step and
 //! store transaction with the tombstone, and by the mob's reset or destroy.
-//! A plain unwire of an owned edge is refused
+//! A plain unwire of an owned edge in force is refused
 //! ([`crate::MobError::OwnedIdentityEdge`]): no other identity's change, the
 //! requester's included, ends it. The start recovers each edge from its
-//! owner's row (`RecoverOwnedIdentityEdge`) and realizes the edges a crash
-//! left unrealized.
+//! owner's row (`RecoverOwnedIdentityEdge`), an import restores the edges of
+//! the rows it restores the same way (`RestoreOwnedIdentityEdge`), and both
+//! realize the edges in force that are left unrealized.
 
 use std::collections::BTreeSet;
 
@@ -42,11 +49,13 @@ use crate::machines::mob_machine as mob_dsl;
 use super::identity_change::IdentityChangeCommand;
 use super::mob_member_lifecycle_projection::MobMemberLifecycleProjection;
 
-/// The owned edges of `members` that wait for their realization in `state`:
-/// each joins a member of `members` to another member, both seated and
-/// active, and MobMachine has not wired it. Each unordered pair once, as
-/// (member of `members`, other end), in edge order.
-pub(super) fn owned_pairs_to_realize(
+/// The owned edges of `members` a realization may wire in `state`: each
+/// joins a member of `members` to another member, both seated and active,
+/// and MobMachine has not wired it. Each unordered pair once, as (member of
+/// `members`, other end), in edge order. These are the wire's own facts:
+/// whether the edge is in force, and so realized at all, is MobMachine's
+/// verdict on each (`AdmitOwnedEdgeRealization`).
+pub(super) fn owned_edge_candidates(
     state: &mob_dsl::MobMachineState,
     members: &[AgentIdentity],
 ) -> Vec<(AgentIdentity, AgentIdentity)> {
@@ -137,17 +146,18 @@ impl super::MobHandle {
         .await?
     }
 
-    /// Realize every owned edge whose ends are both seated and which the mob
-    /// has not wired yet: a start's and a resume's pass after their seats,
-    /// off the caller's path (a start returns without waiting for the
-    /// actor's turn). Read first from the machine state the actor published:
-    /// a mob with no owned edge awaiting its realization sends nothing.
-    /// Never fails its caller: an edge it cannot realize stays owed its
-    /// repair, and the failure is logged.
+    /// Realize every owned edge in force whose ends are both seated and
+    /// which the mob has not wired yet: a start's and a resume's pass after
+    /// their seats, off the caller's path (a start returns without waiting
+    /// for the actor's turn). Read first from the machine state the actor
+    /// published: a mob with no owned edge whose ends are seated and
+    /// unwired sends nothing, and the actor's pass asks MobMachine which of
+    /// them are in force. Never fails its caller: an edge it cannot realize
+    /// stays owed its repair, and the failure is logged.
     pub(super) async fn realize_owned_identity_edges(&self) {
         let pending = {
             let state = self.machine_state_watch_rx.borrow();
-            !owned_pairs_to_realize(&state, &edge_owners(&state)).is_empty()
+            !owned_edge_candidates(&state, &edge_owners(&state)).is_empty()
         };
         if !pending {
             return;

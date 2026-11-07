@@ -3,8 +3,8 @@
 
 use super::super::adoption::{AdoptionCommit, AdoptionCommitted, AdoptionSource, adoption_refusal};
 use super::super::identity_change::{
-    IdentityChangeRefusal, IdentityGrantRequest, NotAdoptableReason, committed_change_events,
-    grant_covers_the_commit, now_ms, refused,
+    IdentityChangeRefusal, IdentityGrantRequest, committed_change_events, grant_covers_the_commit,
+    now_ms, refused,
 };
 use super::identity_change::ChangeAdmission;
 use super::*;
@@ -53,6 +53,13 @@ impl MobActor {
             ChangeAdmission::Admitted => {}
         }
         let agent_identity = mob_dsl::AgentIdentity::from_domain(&commit.identity);
+        // The member's facts, which the adoption keeps: its roster entry (a
+        // seated member's), with whether it was spawned with a profile or
+        // model override, which MobMachine's verdict reads.
+        let entry = self.roster.read().await.get(&commit.identity).cloned();
+        let spawn_overridden = entry.as_ref().is_some_and(|entry| {
+            entry.effective_profile_override.is_some() || entry.effective_model_override.is_some()
+        });
         let transition = authority
             .apply(mob_dsl::MobMachineInput::AdoptIdentityIntoStore {
                 agent_identity: agent_identity.clone(),
@@ -61,6 +68,7 @@ impl MobActor {
                     .source
                     .observed_generation()
                     .map(mob_dsl::Generation::from_domain),
+                spawn_overridden,
             })
             .map_err(|error| MobError::MobMachineRejected {
                 context: "adopt_identity_into_store",
@@ -82,9 +90,7 @@ impl MobActor {
             return Err(refused(refusal));
         }
         let mut effects = transition.into_effects();
-        // The member's facts, which the adoption keeps: its roster entry (a
-        // seated member's), its role and its session.
-        let entry = self.roster.read().await.get(&commit.identity).cloned();
+        // Its role and its session, which the adoption keeps.
         let seated_role = authority
             .state()
             .member_profile_names
@@ -122,14 +128,6 @@ impl MobActor {
                         commit.identity
                     )));
                 };
-                if entry.effective_profile_override.is_some()
-                    || entry.effective_model_override.is_some()
-                {
-                    return Err(refused(IdentityChangeRefusal::NotAdoptable {
-                        identity: commit.identity.clone(),
-                        reason: NotAdoptableReason::ProfileOverride,
-                    }));
-                }
                 let mut spec = crate::identity::CreatedIdentitySpec::new(
                     commit.identity.clone(),
                     entry.role.clone(),

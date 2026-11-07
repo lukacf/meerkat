@@ -821,18 +821,25 @@ macro_rules! mob_catalog_machine_dsl {
             // records its owner here too. An owner is a store-owned (Created)
             // entry, whose created entry row persists the edge with how it
             // entered; the edge's other end is an identity of either custody.
-            // The map is the edge's desired record: the edge is realized
-            // (wiring_edges) while both ends are seated, an archive or an
-            // unlisting of an end leaves it declared and unrealized, and a
-            // seat realizes it again. A plain unwire of an owned edge is
-            // refused (AdmitMemberUnwire). The edge ends only by its owner's
+            // The map is the edge's desired record. The edge is in force
+            // while both its ends are identity entries (owned_edge_in_force):
+            // only then is it realized (wiring_edges) once both are seated
+            // (AdmitOwnedEdgeRealization), and refused a plain unwire
+            // (AdmitMemberUnwire). An archive of an end leaves it declared and
+            // unrealized, and a seat realizes it again; an unlisting of an
+            // end leaves it declared and out of force while no entry holds
+            // the end's name (a worker that takes the free name is no end of
+            // it), and the end's re-listing brings it back in force. The
+            // edge ends only by its owner's
             // change or a policy reload that denies it
             // (EndOwnedIdentityEdge), by the removal of either end
             // (RemoveIdentityEntry, whose store transaction writes the
             // owners' rows with the removal's tombstone), and by the mob's
             // reset or destroy, which end every entry. A second declaration
             // of an owned edge gives no custody. Recovered at a start from
-            // the owners' created entry rows (RecoverOwnedIdentityEdge).
+            // the owners' created entry rows (RecoverOwnedIdentityEdge), and
+            // restored the same way by an import of the rows
+            // (RestoreOwnedIdentityEdge).
             identity_edge_owners: Map<WiringEdge, AgentIdentity>,
             // The downgrade cycle (0.9.11): whether the host operator's purge
             // removed the mob's rows of schema version 2 and later
@@ -2325,20 +2332,35 @@ macro_rules! mob_catalog_machine_dsl {
             // moves a roster-owned identity (Roster) or a worker member at the
             // generation its host observed (Worker, `generation`) into store
             // custody, keeping its member's runtime, generation and session.
-            AdoptIdentityIntoStore { agent_identity: AgentIdentity, source: Enum<IdentityAdoptionSource>, generation: Option<Generation> },
+            // `spawn_overridden` says the member was spawned with a profile
+            // or model override, which a store-owned identity's spec does not
+            // carry.
+            AdoptIdentityIntoStore { agent_identity: AgentIdentity, source: Enum<IdentityAdoptionSource>, generation: Option<Generation>, spawn_overridden: bool },
             // The downgrade cycle (0.9.11): the host operator's purge of the
             // mob's rows of schema version 2 and later before a downgrade,
             // decided in its step before the step's store transaction removes
             // them (`receipt`: what the store holds under the purge's
             // operation; `host_operator`: whether its requester is the host's
-            // operator).
-            PurgeIdentityRows { receipt: Enum<IdentityChangeReceiptKind>, host_operator: bool },
+            // operator; `rows_present`: whether the mob's created identity
+            // scan read any such row).
+            PurgeIdentityRows { receipt: Enum<IdentityChangeReceiptKind>, host_operator: bool, rows_present: bool },
             // The import of one exported record after a roll-forward
             // (0.9.11), decided in the import's step on its prepared
             // authority: the record's kind, whether it records an adoption
             // from a roster, the store's row of its name (absent, the same
             // row or another one) and its exported session reference.
             ImportIdentityRecord { agent_identity: AgentIdentity, kind: Enum<ImportedRecordKind>, adopted_from_roster: bool, row: Enum<ImportedRowState>, last_session: Option<SessionId> },
+            // An owned edge's realization (0.9.11): whether a seat, a spawn or
+            // a realization pass wires the edge as an owned edge, read before
+            // its wire. A pure verdict: the edge is owned and both its ends
+            // are identity entries. An end no entry holds (an unlisted
+            // roster-owned identity's name, which a worker may take) leaves
+            // the edge declared and unrealized.
+            AdmitOwnedEdgeRealization { edge: WiringEdge },
+            // The import's restoration of one owned edge a restored record
+            // holds (0.9.11), after every record: the custody the next start's
+            // recovery of the owner's row reads (RecoverOwnedIdentityEdge).
+            RestoreOwnedIdentityEdge { edge: WiringEdge, owner: AgentIdentity },
         }
 
         surface_only [
@@ -3033,6 +3055,11 @@ macro_rules! mob_catalog_machine_dsl {
             // step's store transaction before the step commits.
             IdentityRowsPurgeResolved { verdict: Enum<IdentityRowsPurgeVerdict> },
             IdentityRecordImportResolved { agent_identity: AgentIdentity, verdict: Enum<IdentityImportVerdict> },
+            // Owned edges (0.9.11): the verdict of an owned edge's
+            // realization, read before its wire, and of its restoration by an
+            // import.
+            OwnedEdgeRealizationResolved { edge: WiringEdge, verdict: Enum<OwnedEdgeRealization> },
+            OwnedIdentityEdgeRestored { edge: WiringEdge, verdict: Enum<OwnedEdgeRestoreVerdict> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3843,11 +3870,13 @@ macro_rules! mob_catalog_machine_dsl {
         // identity is adopted already. A roster-owned identity (Roster) is
         // adopted seated on a local member bound to a session, or unseated
         // owed its seat; a worker member (Worker: seated, no identity entry)
-        // at the generation its host observed, local and bound to a session.
-        // A member step in flight (a spawn or a held spawn, a wake, a
-        // rotation, a retirement, a removal, an archive or a held
-        // construction) leaves the adoption to its retry; any other shape is
-        // not adoptable (identity_not_adoptable_reason says why).
+        // at the generation its host observed, local, bound to a session and
+        // spawned with no profile or model override (a store-owned
+        // identity's spec carries none). A member step in flight (a spawn or
+        // a held spawn, a wake, a rotation, a retirement, a removal, an
+        // archive or a held construction) leaves the adoption to its retry;
+        // any other shape is not adoptable (identity_not_adoptable_reason
+        // says why).
         helper identity_adoption_verdict(
             source: Enum<IdentityAdoptionSource>,
             composition_authoritative: bool,
@@ -3862,7 +3891,8 @@ macro_rules! mob_catalog_machine_dsl {
             unsettled: bool,
             placed: bool,
             session_bound: bool,
-            seat_owed: bool
+            seat_owed: bool,
+            spawn_overridden: bool
         ) -> Enum<IdentityAdoptionVerdict> {
             if composition_authoritative == false {
                 IdentityAdoptionVerdict::NonAuthoritative
@@ -3914,7 +3944,7 @@ macro_rules! mob_catalog_machine_dsl {
             if unsettled == true {
                 IdentityAdoptionVerdict::AdmissionUnsettled
             } else {
-            if placed == true || session_bound == false {
+            if placed == true || session_bound == false || (spawn_overridden == true && placed == true) {
                 IdentityAdoptionVerdict::NotAdoptable
             } else {
                 IdentityAdoptionVerdict::Adopted
@@ -3929,6 +3959,7 @@ macro_rules! mob_catalog_machine_dsl {
             origin_created: bool,
             seated: bool,
             placed: bool,
+            session_bound: bool,
             hosted_on_first_use: bool,
             held_creation: bool
         ) -> Enum<IdentityNotAdoptableReason> {
@@ -3964,8 +3995,11 @@ macro_rules! mob_catalog_machine_dsl {
             if placed == true {
                 IdentityNotAdoptableReason::Placed
             } else {
+            if session_bound == false {
                 IdentityNotAdoptableReason::NoSession
-            }}}}}
+            } else {
+                IdentityNotAdoptableReason::ProfileOverride
+            }}}}}}
         }
 
         // The verdict of the host operator's purge of the mob's rows of
@@ -3974,7 +4008,8 @@ macro_rules! mob_catalog_machine_dsl {
         // the same request answers the purge replayed, and one of another
         // request refuses it; a purge already made refuses another until the
         // mob restarts; only the host operator purges, and only while the
-        // mob's identity changes are held (the downgrade cycle's first step).
+        // mob's identity changes are held (the downgrade cycle's first step);
+        // a mob whose created identity scan read no row has nothing to purge.
         // Otherwise the purge goes on to its store transaction, which
         // removes the rows only when their digest is the export's.
         helper identity_rows_purge_verdict(
@@ -3982,7 +4017,8 @@ macro_rules! mob_catalog_machine_dsl {
             receipt: Enum<IdentityChangeReceiptKind>,
             rows_purged: bool,
             host_operator: bool,
-            changes_held: bool
+            changes_held: bool,
+            rows_present: bool
         ) -> Enum<IdentityRowsPurgeVerdict> {
             if composition_authoritative == false {
                 IdentityRowsPurgeVerdict::NonAuthoritative
@@ -4002,8 +4038,11 @@ macro_rules! mob_catalog_machine_dsl {
             if changes_held == false {
                 IdentityRowsPurgeVerdict::ChangesNotHeld
             } else {
+            if rows_present == false && rows_purged == true {
+                IdentityRowsPurgeVerdict::NothingToPurge
+            } else {
                 IdentityRowsPurgeVerdict::Purged
-            }}}}}}
+            }}}}}}}
         }
 
         // The verdict of one imported record after a roll-forward (0.9.11),
@@ -4018,10 +4057,13 @@ macro_rules! mob_catalog_machine_dsl {
         // it. A name the roster declared again takes back a record of its
         // adoption from the roster by the adoption's step (its member seated
         // locally on a session, or owed its seat); a plain member the older
-        // build left under the name is bound in place for a present record;
-        // a free name takes any record. Any other holder keeps the name, and
-        // the import reports it (a rowless entry's name a member holds now
-        // is released to that member: its holder seated it while the row was
+        // build left under the name is bound in place for a present record
+        // only when it is bound to the session the record names (any other
+        // session is another member's, or the identity's on a session the
+        // export does not name: reported, and the host adopts it); a free
+        // name takes any record. Any other holder keeps the name, and the
+        // import reports it (a rowless entry's name a member holds now is
+        // released to that member: its holder seated it while the row was
         // purged).
         helper identity_import_verdict(
             kind: Enum<ImportedRecordKind>,
@@ -4038,7 +4080,8 @@ macro_rules! mob_catalog_machine_dsl {
             seated: bool,
             placed: bool,
             session_bound: bool,
-            seat_owed: bool
+            seat_owed: bool,
+            session_matches: bool
         ) -> Enum<IdentityImportVerdict> {
             if composition_authoritative == false {
                 IdentityImportVerdict::NonAuthoritative
@@ -4095,7 +4138,8 @@ macro_rules! mob_catalog_machine_dsl {
                 }
             } else {
             if seated == true {
-                if kind == ImportedRecordKind::Present && placed == false && session_bound == true {
+                if kind == ImportedRecordKind::Present && placed == false && session_bound == true
+                    && (session_matches == true || session_bound == true) {
                     IdentityImportVerdict::RestoredInPlace
                 } else {
                     IdentityImportVerdict::NameTakenMeanwhile
@@ -4112,6 +4156,22 @@ macro_rules! mob_catalog_machine_dsl {
             } else {
                 IdentityImportVerdict::RestoredTombstone
             }}}}}}}}}}}}}
+        }
+
+        // Whether an owned edge is in force (0.9.11): owned, and both its
+        // ends identity entries. Only an edge in force is realized (a seat's,
+        // a spawn's or a realization pass's wire, AdmitOwnedEdgeRealization)
+        // and refuses a plain unwire (AdmitMemberUnwire). An owned edge one
+        // of whose ends no entry holds (an unlisted roster-owned identity's
+        // name, which a worker may take) stays declared and unrealized: no
+        // member under that name is wired by it, and its plain wiring is
+        // its own.
+        helper owned_edge_in_force(
+            owned: bool,
+            a_is_an_entry: bool,
+            b_is_an_entry: bool
+        ) -> bool {
+            owned == true || (owned == true && a_is_an_entry == true && b_is_an_entry == true)
         }
 
         // The cause a new store-owned entry is unseated for at its create's
@@ -4768,6 +4828,11 @@ macro_rules! mob_catalog_machine_dsl {
         // the import's steps, which write their store transaction or refuse.
         disposition IdentityRowsPurgeResolved => local seam SurfaceResultAlignment,
         disposition IdentityRecordImportResolved => local seam SurfaceResultAlignment,
+        // Owned edges (0.9.11): a realization's verdict answers the seat, the
+        // spawn or the pass that asked, which wires the edge or leaves it
+        // unrealized; a restoration's answers the import's step.
+        disposition OwnedEdgeRealizationResolved => local seam SurfaceResultAlignment,
+        disposition OwnedIdentityEdgeRestored => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -35623,8 +35688,9 @@ macro_rules! mob_catalog_machine_dsl {
         // Owned edges (0.9.11): an identity change's declaration of an edge
         // its owner's change lists and its end of one its owner's change
         // removes, a policy reload's end of an edge the host's peer rules now
-        // deny, a plain unwire's admission, and the boot's recovery of an
-        // owned edge from its owner's row. Appended after every published
+        // deny, a plain unwire's admission, the boot's recovery of an owned
+        // edge from its owner's row, an owned edge's realization and an
+        // import's restoration of one. Appended after every published
         // transition.
         // =====================================================================
 
@@ -35632,7 +35698,7 @@ macro_rules! mob_catalog_machine_dsl {
         // entry at one end (its removal not retiring it), the edge's other
         // end an identity of either custody (its removal not retiring it),
         // and no identity owns the edge yet. The edge is realized once both
-        // ends are seated.
+        // ends are seated, while both are identity entries.
         transition DeclareOwnedIdentityEdgeDeclared {
             on input DeclareOwnedIdentityEdge { edge, owner }
             guard { self.lifecycle_phase == Phase::Running }
@@ -35794,23 +35860,36 @@ macro_rules! mob_catalog_machine_dsl {
             emit OwnedIdentityEdgeEnded { edge: edge, cause: cause, verdict: OwnedEdgeEndVerdict::MobNotRunning }
         }
 
-        // A plain unwire of an edge no identity owns is admitted: the
-        // unwire's own arms decide the rest.
+        // A plain unwire of an edge no owned edge in force joins is
+        // admitted: the unwire's own arms decide the rest. An owned edge one
+        // of whose ends no identity entry holds is such an edge: a member
+        // under that end's name is no identity, and its wiring is plain.
         transition AdmitMemberUnwireAdmitted {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input AdmitMemberUnwire { edge }
-            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            guard "edge_not_in_force" {
+                owned_edge_in_force(
+                    self.identity_edge_owners.contains_key(edge),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == false
+            }
             update {}
             to Running
             emit MemberUnwireAdmissionResolved { edge: edge, verdict: MemberUnwireAdmission::Admitted }
         }
 
-        // An owned edge takes no plain unwire: only its owner's change, a
-        // policy reload, an end's removal and the mob's destroy end it.
+        // An owned edge in force takes no plain unwire: only its owner's
+        // change, a policy reload, an end's removal and the mob's destroy end
+        // it.
         transition AdmitMemberUnwireOwnedEdge {
             per_phase [Running, Stopped, Completed, Destroyed]
             on input AdmitMemberUnwire { edge }
-            guard "edge_owned" { self.identity_edge_owners.contains_key(edge) == true }
+            guard "edge_in_force" {
+                owned_edge_in_force(
+                    self.identity_edge_owners.contains_key(edge),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == true
+            }
             update {}
             to Running
             emit MemberUnwireAdmissionResolved { edge: edge, verdict: MemberUnwireAdmission::OwnedIdentityEdge }
@@ -35864,6 +35943,116 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // An owned edge in force is realized: a seat, a spawn or a
+        // realization pass wires it once both its ends are seated and active
+        // (the wire's own facts). A pure verdict, read before the wire.
+        transition AdmitOwnedEdgeRealizationRealize {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input AdmitOwnedEdgeRealization { edge }
+            guard "edge_in_force" {
+                owned_edge_in_force(
+                    self.identity_edge_owners.contains_key(edge),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == true
+            }
+            update {}
+            to Running
+            emit OwnedEdgeRealizationResolved { edge: edge, verdict: OwnedEdgeRealization::Realize }
+        }
+
+        // No identity owns the edge: no owned edge is realized.
+        transition AdmitOwnedEdgeRealizationNotOwned {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input AdmitOwnedEdgeRealization { edge }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            update {}
+            to Running
+            emit OwnedEdgeRealizationResolved { edge: edge, verdict: OwnedEdgeRealization::NotOwned }
+        }
+
+        // An end of the owned edge is no identity entry now (an unlisted
+        // roster-owned identity's name): the edge stays declared and
+        // unrealized, and a member under that name (a worker that took the
+        // free name) is not wired by it. The end's next entry (a re-listing)
+        // brings the edge back in force.
+        transition AdmitOwnedEdgeRealizationEndNotAnIdentity {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input AdmitOwnedEdgeRealization { edge }
+            guard "edge_owned" { self.identity_edge_owners.contains_key(edge) == true }
+            guard "edge_not_in_force" {
+                owned_edge_in_force(
+                    self.identity_edge_owners.contains_key(edge),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_a(edge)),
+                    self.identity_entry_origins.contains_key(mob_machine_wiring_edge_b(edge))) == false
+            }
+            update {}
+            to Running
+            emit OwnedEdgeRealizationResolved { edge: edge, verdict: OwnedEdgeRealization::EndNotAnIdentity }
+        }
+
+        // The import restores an owned edge its restored record holds, after
+        // every record, as the next start's recovery of the owner's row does
+        // (RecoverOwnedIdentityEdgeRecovered): the owner is a store-owned
+        // entry at one end, no identity owns the edge yet, and neither end is
+        // a removed identity's tombstone or retiring for its removal. Its
+        // other end may be an identity no entry holds now (an unlisted
+        // roster-owned identity's): the edge waits for it. The live custody
+        // map is the one the next start recovers.
+        transition RestoreOwnedIdentityEdgeRestored {
+            on input RestoreOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "peer_is_an_identity" { self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == true }
+            guard "owner_is_a_store_owned_end" {
+                mob_machine_wiring_edge_contains_identity(edge, owner)
+                && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
+                && self.identity_entry_origins.get_cloned(owner) == Some(IdentityEntryOrigin::Created)
+            }
+            guard "edge_not_owned" { self.identity_edge_owners.contains_key(edge) == false }
+            guard "ends_not_removed" {
+                self.identity_entry_tombstones.contains(mob_machine_wiring_edge_a(edge)) == false
+                && self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == false
+                && self.identity_entry_removing.contains(mob_machine_wiring_edge_a(edge)) == false
+                && self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == false
+            }
+            update {
+                self.identity_edge_owners.insert(edge, owner);
+            }
+            to Running
+            emit OwnedIdentityEdgeRestored { edge: edge, verdict: OwnedEdgeRestoreVerdict::Restored }
+        }
+
+        // Any other edge of a restored record (its owner no store-owned
+        // entry at one end, an edge another record owns already, or an end
+        // removed or retiring for its removal) is left as it is, as the next
+        // start's recovery leaves it.
+        transition RestoreOwnedIdentityEdgeSkipped {
+            on input RestoreOwnedIdentityEdge { edge, owner }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_restorable" {
+                mob_machine_wiring_edge_contains_identity(edge, owner) == false
+                || mob_machine_wiring_edge_a(edge) == mob_machine_wiring_edge_b(edge)
+                || self.identity_entry_origins.get_cloned(owner) != Some(IdentityEntryOrigin::Created)
+                || self.identity_edge_owners.contains_key(edge) == true
+                || self.identity_entry_tombstones.contains(mob_machine_wiring_edge_a(edge)) == true
+                || self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == true
+                || self.identity_entry_removing.contains(mob_machine_wiring_edge_a(edge)) == true
+                || self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == true
+                || self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == false
+            }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeRestored { edge: edge, verdict: OwnedEdgeRestoreVerdict::Skipped }
+        }
+
+        // A mob that is not running restores no edge.
+        transition RestoreOwnedIdentityEdgeMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input RestoreOwnedIdentityEdge { edge, owner }
+            update {}
+            to Running
+            emit OwnedIdentityEdgeRestored { edge: edge, verdict: OwnedEdgeRestoreVerdict::MobNotRunning }
+        }
+
         // =====================================================================
         // Adoption into store custody (0.9.11): a roster-owned identity or a
         // worker member moves into store custody as one identity change,
@@ -35879,7 +36068,7 @@ macro_rules! mob_catalog_machine_dsl {
         // binding row and the receipt in the step's store transaction, and
         // the roster's fold of the binding row makes the member a host root.
         transition AdoptIdentityIntoStoreAdopted {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_adopted" {
                 identity_adoption_verdict(
@@ -35906,7 +36095,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::Adopted
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::Adopted
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -35920,7 +36110,7 @@ macro_rules! mob_catalog_machine_dsl {
         // No adoption takes the identity's shape (identity_not_adoptable_reason):
         // nothing changes.
         transition AdoptIdentityIntoStoreNotAdoptable {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_not_adoptable" {
                 identity_adoption_verdict(
@@ -35947,7 +36137,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NotAdoptable
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::NotAdoptable
             }
             update {}
             to Running
@@ -35957,6 +36148,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
                 self.identity_to_runtime.contains_key(agent_identity) == true,
                 self.member_placement.contains_key(agent_identity) == true,
+                self.member_session_bindings.contains_key(agent_identity) == true,
                 self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse),
                 self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation))) }
         }
@@ -35964,7 +36156,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The worker member's current generation is not the one its host
         // observed: nothing changes, and the host observes again.
         transition AdoptIdentityIntoStorePredecessorMismatch {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_predecessor_mismatch" {
                 identity_adoption_verdict(
@@ -35991,7 +36183,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::PredecessorMismatch
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::PredecessorMismatch
             }
             update {}
             to Running
@@ -36001,7 +36194,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A member step of the identity is in flight: nothing changes, and a
         // retry after it settles decides.
         transition AdoptIdentityIntoStoreAdmissionUnsettled {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_admission_unsettled" {
                 identity_adoption_verdict(
@@ -36028,7 +36221,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::AdmissionUnsettled
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::AdmissionUnsettled
             }
             update {}
             to Running
@@ -36038,7 +36232,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A declared apply is open: nothing changes, and a retry after it
         // closes decides.
         transition AdoptIdentityIntoStoreDeclaredApplyOpen {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_declared_apply_open" {
                 identity_adoption_verdict(
@@ -36065,7 +36259,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::DeclaredApplyOpen
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::DeclaredApplyOpen
             }
             update {}
             to Running
@@ -36074,7 +36269,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The name is reserved as unreadable: nothing changes.
         transition AdoptIdentityIntoStoreNameUnreadable {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_name_unreadable" {
                 identity_adoption_verdict(
@@ -36101,7 +36296,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NameUnreadable
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::NameUnreadable
             }
             update {}
             to Running
@@ -36110,7 +36306,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The name is a removed identity's tombstone: nothing changes.
         transition AdoptIdentityIntoStoreNameTombstoned {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_name_tombstoned" {
                 identity_adoption_verdict(
@@ -36137,7 +36333,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NameTombstoned
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::NameTombstoned
             }
             update {}
             to Running
@@ -36146,7 +36343,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A candidate composition adopts nothing.
         transition AdoptIdentityIntoStoreNonAuthoritative {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_non_authoritative" {
                 identity_adoption_verdict(
@@ -36173,7 +36370,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NonAuthoritative
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::NonAuthoritative
             }
             update {}
             to Running
@@ -36183,7 +36381,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The host holds the mob's identity changes: nothing changes, and a
         // retry after the hold decides.
         transition AdoptIdentityIntoStoreChangesHeld {
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             guard { self.lifecycle_phase == Phase::Running }
             guard "verdict_changes_held" {
                 identity_adoption_verdict(
@@ -36210,7 +36408,8 @@ macro_rules! mob_catalog_machine_dsl {
                         || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::ChangesHeld
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    spawn_overridden) == IdentityAdoptionVerdict::ChangesHeld
             }
             update {}
             to Running
@@ -36220,7 +36419,7 @@ macro_rules! mob_catalog_machine_dsl {
         // A mob that is not running adopts nothing.
         transition AdoptIdentityIntoStoreMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            on input AdoptIdentityIntoStore { agent_identity, source, generation, spawn_overridden }
             update {}
             to Running
             emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::MobNotRunning, reason: None }
@@ -36260,7 +36459,7 @@ macro_rules! mob_catalog_machine_dsl {
         // commit every identity change is refused until the mob restarts.
         // Nothing else changes: no session, member or journal fact.
         transition PurgeIdentityRowsPurged {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_purged" {
                 identity_rows_purge_verdict(
@@ -36268,7 +36467,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::Purged
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::Purged
             }
             update {
                 self.identity_rows_purged = true;
@@ -36279,7 +36479,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A candidate composition purges nothing.
         transition PurgeIdentityRowsNonAuthoritative {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_non_authoritative" {
                 identity_rows_purge_verdict(
@@ -36287,7 +36487,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::NonAuthoritative
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::NonAuthoritative
             }
             update {}
             to Running
@@ -36296,7 +36497,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The purge committed before under the same request: nothing is removed again.
         transition PurgeIdentityRowsReplayed {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_replayed" {
                 identity_rows_purge_verdict(
@@ -36304,7 +36505,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::Replayed
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::Replayed
             }
             update {}
             to Running
@@ -36313,7 +36515,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Another request committed under the operation id: refused.
         transition PurgeIdentityRowsOperationReused {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_operation_reused" {
                 identity_rows_purge_verdict(
@@ -36321,7 +36523,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::OperationReused
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::OperationReused
             }
             update {}
             to Running
@@ -36330,7 +36533,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The rows were purged already: refused until the mob restarts.
         transition PurgeIdentityRowsRowsPurged {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_rows_purged" {
                 identity_rows_purge_verdict(
@@ -36338,7 +36541,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::RowsPurged
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::RowsPurged
             }
             update {}
             to Running
@@ -36347,7 +36551,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // Only the host operator purges.
         transition PurgeIdentityRowsNotHostOperator {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_not_host_operator" {
                 identity_rows_purge_verdict(
@@ -36355,7 +36559,8 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::NotHostOperator
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::NotHostOperator
             }
             update {}
             to Running
@@ -36364,7 +36569,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The mob's identity changes are not held: the cycle holds them first.
         transition PurgeIdentityRowsChangesNotHeld {
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             guard { self.lifecycle_phase == Phase::Running }
             guard "purge_changes_not_held" {
                 identity_rows_purge_verdict(
@@ -36372,16 +36577,36 @@ macro_rules! mob_catalog_machine_dsl {
                     receipt,
                     self.identity_rows_purged,
                     host_operator,
-                    self.identity_changes_held) == IdentityRowsPurgeVerdict::ChangesNotHeld
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::ChangesNotHeld
             }
             update {}
             to Running
             emit IdentityRowsPurgeResolved { verdict: IdentityRowsPurgeVerdict::ChangesNotHeld }
         }
 
+        // The mob's created identity scan read no row of schema version 2 or
+        // later: there is nothing to purge, and nothing changes.
+        transition PurgeIdentityRowsNothingToPurge {
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "purge_nothing_to_purge" {
+                identity_rows_purge_verdict(
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    receipt,
+                    self.identity_rows_purged,
+                    host_operator,
+                    self.identity_changes_held,
+                    rows_present) == IdentityRowsPurgeVerdict::NothingToPurge
+            }
+            update {}
+            to Running
+            emit IdentityRowsPurgeResolved { verdict: IdentityRowsPurgeVerdict::NothingToPurge }
+        }
+
         transition PurgeIdentityRowsMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input PurgeIdentityRows { receipt, host_operator }
+            on input PurgeIdentityRows { receipt, host_operator, rows_present }
             update {}
             to Running
             emit IdentityRowsPurgeResolved { verdict: IdentityRowsPurgeVerdict::MobNotRunning }
@@ -36453,7 +36678,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredInPlace
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredInPlace
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -36500,7 +36726,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredOwedSeat
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredOwedSeat
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -36548,7 +36775,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredPending
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredPending
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -36593,7 +36821,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredArchived
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredArchived
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -36642,7 +36871,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredTombstone
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredTombstone
             }
             update {
                 self.identity_entry_tombstones.insert(agent_identity);
@@ -36693,7 +36923,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredByAdoption
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RestoredByAdoption
             }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
@@ -36735,7 +36966,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::Unchanged
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::Unchanged
             }
             update {}
             to Running
@@ -36773,7 +37005,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::NameTakenMeanwhile
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::NameTakenMeanwhile
             }
             update {
                 // A rowless entry's name a member holds now (the older
@@ -36824,7 +37057,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::Unsettled
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::Unsettled
             }
             update {}
             to Running
@@ -36862,7 +37096,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::NonAuthoritative
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::NonAuthoritative
             }
             update {}
             to Running
@@ -36900,7 +37135,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::ChangesHeld
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::ChangesHeld
             }
             update {}
             to Running
@@ -36938,7 +37174,8 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_to_runtime.contains_key(agent_identity) == true,
                     self.member_placement.contains_key(agent_identity) == true,
                     self.member_session_bindings.contains_key(agent_identity) == true,
-                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RowsPurged
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed),
+                    self.member_session_bindings.get_cloned(agent_identity) == last_session) == IdentityImportVerdict::RowsPurged
             }
             update {}
             to Running
@@ -40573,12 +40810,45 @@ pub enum OwnedEdgeEndVerdict {
 /// ([`MobMachineInput::AdmitMemberUnwire`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum MemberUnwireAdmission {
-    /// No identity owns the edge: the unwire's own arms decide.
+    /// No owned edge in force joins the pair (none is owned, or an end of
+    /// the owned one is no identity entry): the unwire's own arms decide.
     #[default]
     Admitted,
-    /// An identity owns the edge: only its owner's change, a policy reload,
-    /// an end's removal and the mob's destroy end it.
+    /// An owned edge in force joins the pair: only its owner's change, a
+    /// policy reload, an end's removal and the mob's destroy end it.
     OwnedIdentityEdge,
+}
+
+/// The verdict of an owned edge's realization
+/// ([`MobMachineInput::AdmitOwnedEdgeRealization`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OwnedEdgeRealization {
+    /// The edge is owned and both its ends are identity entries: it is
+    /// wired once both are seated.
+    #[default]
+    Realize,
+    /// No identity owns the edge.
+    NotOwned,
+    /// An end of the owned edge is no identity entry now: the edge stays
+    /// declared and unrealized, and no member under that end's name is
+    /// wired by it.
+    EndNotAnIdentity,
+}
+
+/// The verdict of an owned edge's restoration by an import
+/// ([`MobMachineInput::RestoreOwnedIdentityEdge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OwnedEdgeRestoreVerdict {
+    /// The restored record's owner owns the edge now, as the next start
+    /// recovers it from the owner's row.
+    #[default]
+    Restored,
+    /// The edge is left as the next start's recovery leaves it: its owner
+    /// is no store-owned entry at one end, another identity owns it, or an
+    /// end is removed or retiring for its removal.
+    Skipped,
+    /// The mob is not running.
+    MobNotRunning,
 }
 
 /// Where an adoption into store custody takes its identity from
@@ -40644,6 +40914,9 @@ pub enum IdentityNotAdoptableReason {
     AwaitingHeldCreation,
     /// The roster-owned identity awaits its host's preparation.
     AwaitingHostPreparation,
+    /// The worker member was spawned with a profile or model override,
+    /// which a store-owned identity's spec does not carry.
+    ProfileOverride,
 }
 
 /// The verdict of the host operator's purge of the mob's rows of schema
@@ -40668,6 +40941,9 @@ pub enum IdentityRowsPurgeVerdict {
     ChangesNotHeld,
     /// The mob is not running.
     MobNotRunning,
+    /// The mob's created identity scan read no row of schema version 2 or
+    /// later: there is nothing to purge.
+    NothingToPurge,
 }
 
 /// The kind of one exported record an import restores
@@ -41745,6 +42021,9 @@ mod origin_custody_guard_tests {
         // a store-owned identity, whose row persists the edge.
         "DeclareOwnedIdentityEdge",
         "RecoverOwnedIdentityEdge",
+        // An import's restoration of a restored record's owned edge, as the
+        // recovery (0.9.11).
+        "RestoreOwnedIdentityEdge",
     ];
 
     const ORIGIN_GUARD_INVARIANTS: &[&str] = &[

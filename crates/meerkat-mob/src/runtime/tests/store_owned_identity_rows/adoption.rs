@@ -533,3 +533,73 @@ async fn an_unseated_roster_entry_owed_its_seat_is_adopted_and_seated() {
     assert!(mob.store_owned("listed"));
     assert!(mob.is_member("listed").await, "the adoption seats it");
 }
+
+/// Row (RED): a worker spawned with a model override is refused
+/// `not_adoptable` (`profile_override`), decided by MobMachine from the
+/// member's spawn facts, since a store-owned identity's spec carries no
+/// override: nothing is written, and the worker stays a worker on its
+/// session.
+///
+/// RED with the verdict reading no override: the worker is adopted.
+#[tokio::test]
+async fn a_worker_spawned_with_an_override_is_refused_not_adoptable() {
+    let mob = StoreOwnedMob::new("adopt-override").await;
+    let mut spec = SpawnMemberSpec::new("worker", id("overridden"));
+    spec.model_override = Some("override-model".to_string());
+    tokio::time::timeout(STEP, mob.handle.spawn_spec(spec))
+        .await
+        .expect("the spawn answers")
+        .expect("spawn the worker");
+    let session = mob.session("overridden").await;
+    let generation = mob.member("overridden").await.generation;
+    assert_eq!(
+        refusal(
+            mob.adopt(
+                "adopt-overridden",
+                "overridden",
+                AdoptionSource::worker(generation)
+            )
+            .await
+        ),
+        IdentityChangeRefusal::NotAdoptable {
+            identity: id("overridden"),
+            reason: NotAdoptableReason::ProfileOverride,
+        }
+    );
+    assert!(!mob.store_owned("overridden"));
+    assert!(mob.rows().await.is_empty(), "nothing is written");
+    assert_eq!(mob.session("overridden").await, session);
+}
+
+/// Row (RED): `not_adoptable` for a roster-owned identity whose host still
+/// settles it (hosted on its first use, awaiting its held creation or its
+/// host's preparation) is retryable, in its typed refusal and on the wire:
+/// the host settles the identity and retries the same adoption. Every other
+/// reason is final.
+///
+/// RED with every `not_adoptable` final.
+#[test]
+fn not_adoptable_while_its_host_settles_the_identity_is_retryable() {
+    for (reason, retryable) in [
+        (NotAdoptableReason::HostedOnFirstUse, true),
+        (NotAdoptableReason::AwaitingHeldCreation, true),
+        (NotAdoptableReason::AwaitingHostPreparation, true),
+        (NotAdoptableReason::StoreOwned, false),
+        (NotAdoptableReason::NotAnIdentity, false),
+        (NotAdoptableReason::RosterOwned, false),
+        (NotAdoptableReason::NotAMember, false),
+        (NotAdoptableReason::Placed, false),
+        (NotAdoptableReason::NoSession, false),
+        (NotAdoptableReason::ProfileOverride, false),
+    ] {
+        let refusal = IdentityChangeRefusal::NotAdoptable {
+            identity: id("listed"),
+            reason,
+        };
+        assert_eq!(refusal.is_retryable(), retryable, "{reason:?}");
+        let data = MobError::IdentityChangeRefused { refusal }
+            .structured_data()
+            .expect("a refused change carries its data");
+        assert_eq!(data["retryable"], retryable, "{reason:?}: {data}");
+    }
+}

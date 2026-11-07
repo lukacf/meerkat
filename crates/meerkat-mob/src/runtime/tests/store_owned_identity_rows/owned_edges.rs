@@ -675,3 +675,93 @@ async fn a_peer_that_is_no_identity_is_refused_peer_unknown() {
     );
     mob.wired_within("alpha", "beta", true).await;
 }
+
+/// Row (RED): an owned edge to an unlisted roster-owned identity binds no
+/// worker that takes the identity's free name: the edge stays declared, the
+/// worker's spawn and the mob's realization pass wire nothing for it, a
+/// plain wire and unwire of the pair are the worker's own, and once the
+/// worker is gone the identity's re-listing realizes the edge again.
+///
+/// RED with every owned edge in force whatever its ends: the worker is
+/// wired by the edge.
+#[tokio::test]
+async fn a_worker_that_takes_an_unlisted_peers_name_gets_no_owned_edge() {
+    let mob = StoreOwnedMob::new("owned-unlisted-name").await;
+    mob.declare(&["listed"]).await;
+    committed(
+        mob.create(
+            create_with_peers("create-alpha", "alpha", &["listed"]),
+            ALLOW,
+        )
+        .await,
+    );
+    mob.wired_within("alpha", "listed", true).await;
+    tokio::time::timeout(STEP, mob.handle.unlist_declared_identity(&id("listed")))
+        .await
+        .expect("the unlist answers")
+        .expect("the unlist runs");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("listed").await {
+        assert!(tokio::time::Instant::now() < deadline, "listed never left");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    tokio::time::timeout(
+        STEP,
+        mob.handle
+            .spawn_spec(SpawnMemberSpec::new("worker", id("listed"))),
+    )
+    .await
+    .expect("the spawn answers")
+    .expect("a worker takes the free name");
+    assert!(
+        matches!(
+            mob.read("listed"),
+            IdentityEntryRead::NotAnEntry { worker: Some(_) }
+        ),
+        "{:?}",
+        mob.read("listed")
+    );
+    mob.handle.realize_owned_identity_edges().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !mob.wired_to("alpha").await.contains(&id("listed")),
+        "alpha's owned edge to the unlisted identity wired the worker that took its name"
+    );
+    assert_eq!(
+        mob.owned_peers("alpha").await,
+        BTreeSet::from([id("listed")]),
+        "alpha's row keeps the edge declared"
+    );
+    tokio::time::timeout(STEP, mob.handle.wire(id("alpha"), id("listed")))
+        .await
+        .expect("the wire answers")
+        .expect("a plain wire of the worker");
+    mob.wired_within("alpha", "listed", true).await;
+    assert_eq!(
+        mob.plain_unwire_owner("alpha", "listed").await,
+        None,
+        "the worker's plain wiring takes a plain unwire"
+    );
+    mob.wired_within("alpha", "listed", false).await;
+
+    tokio::time::timeout(STEP, mob.handle.retire(id("listed")))
+        .await
+        .expect("the retirement answers")
+        .expect("retire the worker");
+    let deadline = tokio::time::Instant::now() + STEP;
+    while mob.is_member("listed").await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the worker never left"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    mob.declare(&["listed"]).await;
+    mob.wired_within("alpha", "listed", true).await;
+    assert_eq!(
+        mob.plain_unwire_owner("alpha", "listed").await,
+        Some(id("alpha")),
+        "the re-listed identity's edge is alpha's again"
+    );
+}

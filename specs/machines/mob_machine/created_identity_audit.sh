@@ -147,29 +147,37 @@
 #   composition before); the roster-owned identity removed through its
 #   retirement; the seated store-owned one archived through its
 #   retirement, unarchived and removed; the other archived, unarchived and
-#   removed at once; the declaration, the end for either cause and the
-#   boot's recovery of each edge among them (and of a self edge) by each
-#   store-owned identity, and a plain unwire's admission of each; and,
-#   once both members are seated and before any end begins, the host's
-#   changes hold, in a running and a stopped mob: exactly one arm answers
-#   each (AuditEdgesExactlyOne), an owned edge ends only by its owner's end
-#   or by an end's removal (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it
-#   keeps its owner while owned (AuditOwnedEdgeKeepsItsOwner), and no end
-#   naming another identity than its owner ends it
-#   (AuditOnlyTheOwnerEndsItsEdge). Its domains add a third identity, the
-#   run's third end.
+#   removed at once; the declaration, the end for either cause, the boot's
+#   recovery and an import's restoration of each edge among them (and of a
+#   self edge) by each store-owned identity, and a plain unwire's admission
+#   and a realization's verdict of each; and, once both members are seated
+#   and before any end begins, the host's changes hold, in a running and a
+#   stopped mob: exactly one arm answers each (AuditEdgesExactlyOne), an
+#   owned edge ends only by its owner's end or by an end's removal
+#   (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it keeps its owner while
+#   owned (AuditOwnedEdgeKeepsItsOwner), no end naming another identity
+#   than its owner ends it (AuditOnlyTheOwnerEndsItsEdge), it is realized
+#   and refused a plain unwire exactly while both its ends are identity
+#   entries (AuditOwnedEdgeBindsIdentitiesOnly; a recovery before the
+#   roster-owned identity's declaration owns an edge whose end no entry
+#   holds), and an import restores exactly the edges a start's recovery
+#   recovers (AuditRestoreIsTheRecovery). Its domains add a third identity,
+#   the run's third end.
 # - adoption (0.9.11): a worker the replay recovered and bound, then a
 #   roster-owned identity declared, owed its seat and seated, one step at a
 #   time (or a candidate composition before); the roster-owned identity
 #   unlisted and the worker retired; a store-owned identity recorded owed
 #   its seat, or a name the scan of its row reserves; a declared apply
 #   opened and closed; the adoption of each from either source at each
-#   generation; and, once both are seated and before any adoption, the
-#   host's changes hold, in a running and a stopped mob: exactly one arm
-#   answers each (AuditAdoptExactlyOne), an adoption keeps its member's
-#   runtime, generation and session (AuditAdoptionKeepsTheIncarnation),
-#   and takes a settled member only, outside a declared apply
-#   (AuditAdoptionTakesASettledMember). Its domains add a third identity.
+#   generation, of a member spawned with an override or not; and, once both
+#   are seated and before any adoption, the host's changes hold, in a
+#   running and a stopped mob: exactly one arm answers each
+#   (AuditAdoptExactlyOne), an adoption keeps its member's runtime,
+#   generation and session (AuditAdoptionKeepsTheIncarnation), takes a
+#   settled member only, outside a declared apply
+#   (AuditAdoptionTakesASettledMember), and takes no worker spawned with an
+#   override (AuditAdoptionTakesNoOverriddenWorker). Its domains add a
+#   third identity.
 # - cycle (0.9.11): a worker the replay recovered and bound, and a
 #   roster-owned identity declared owed its seat, its spawn ladder opened
 #   and its first incarnation seated, one step at a time; then the worker's
@@ -177,15 +185,18 @@
 #   its seat, each or not, under the host's changes hold, in a running and
 #   a stopped mob (or a candidate composition before the seed); a start's
 #   pass of each name its scan read no row of; the purge with each receipt,
-#   by the host operator or not; a change's admission; and the import of
-#   each kind of record for each name, a roster's adoption or not, over
-#   each row of its name: exactly one arm answers each
+#   by the host operator or not, of a mob whose scan read rows or none; a
+#   change's admission; and the import of each kind of record for each
+#   name, a roster's adoption or not, over each row of its name, naming the
+#   worker's session or another: exactly one arm answers each
 #   (AuditCycleExactlyOne), the purge changes nothing of the machine but
-#   its own fact (AuditPurgeTouchesNothingElse), an import restores a
-#   record only where the store holds no row of its name
-#   (AuditImportRestoresOverNoRow) and binds a member in place on its
-#   incarnation (AuditImportKeepsTheIncarnation), and a Created entry whose
-#   row was purged stays reserved (the generated
+#   its own fact (AuditPurgeTouchesNothingElse) and goes on only when the
+#   scan read rows (AuditPurgeNeedsRows), an import restores a record only
+#   where the store holds no row of its name
+#   (AuditImportRestoresOverNoRow), binds a member in place on its
+#   incarnation (AuditImportKeepsTheIncarnation) and a plain member only on
+#   the session its record names (AuditImportBindsOnTheRecordsSession), and
+#   a Created entry whose row was purged stays reserved (the generated
 #   created_origin_without_row_is_unreadable). Its domains add a third
 #   identity.
 #
@@ -275,7 +286,7 @@ unlist_states=336
 recovered_states=180
 edges_states=3089
 adoption_states=1620
-cycle_states=1735
+cycle_states=2599
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies
@@ -648,9 +659,11 @@ recovered_covered_actions=(
 )
 
 # The edges run fires every arm of an owned edge's declaration, end, plain
-# unwire's admission and recovery in a running and a stopped mob (their
-# completed and destroyed arms are arm_coverage_not_covered.txt's), and the
-# removal and archive arms that end or keep an edge.
+# unwire's admission and recovery in a running and a stopped mob, of its
+# realization's verdict and of an import's restoration of one (their
+# completed and destroyed arms, and a stopped mob's verdict on an edge out
+# of force, are arm_coverage_not_covered.txt's), and the removal and
+# archive arms that end or keep an edge.
 edges_covered_actions=(
   DeclareOwnedIdentityEdgeDeclared
   DeclareOwnedIdentityEdgeAlreadyOwned
@@ -671,6 +684,14 @@ edges_covered_actions=(
   RecoverOwnedIdentityEdgeRecoveredStopped
   RecoverOwnedIdentityEdgeSkippedRunning
   RecoverOwnedIdentityEdgeSkippedStopped
+  AdmitOwnedEdgeRealizationRealizeRunning
+  AdmitOwnedEdgeRealizationRealizeStopped
+  AdmitOwnedEdgeRealizationNotOwnedRunning
+  AdmitOwnedEdgeRealizationNotOwnedStopped
+  AdmitOwnedEdgeRealizationEndNotAnIdentityRunning
+  RestoreOwnedIdentityEdgeRestored
+  RestoreOwnedIdentityEdgeSkipped
+  RestoreOwnedIdentityEdgeMobNotRunningStopped
   RemoveIdentityEntryRetiring
   RemoveIdentityEntryRemoved
   ArchiveIdentityEntryArchiving
@@ -709,6 +730,7 @@ cycle_covered_actions=(
   PurgeIdentityRowsRowsPurged
   PurgeIdentityRowsNotHostOperator
   PurgeIdentityRowsChangesNotHeld
+  PurgeIdentityRowsNothingToPurge
   PurgeIdentityRowsMobNotRunningStopped
   RecoverRowlessCreatedEntryReservedRunning
   RecoverRowlessCreatedEntryReservedStopped
@@ -964,7 +986,9 @@ write_cfg() {
       run_properties="
   AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd
   AuditOwnedEdgeKeepsItsOwner
-  AuditOnlyTheOwnerEndsItsEdge"
+  AuditOnlyTheOwnerEndsItsEdge
+  AuditOwnedEdgeBindsIdentitiesOnly
+  AuditRestoreIsTheRecovery"
       run_invariants="
   AuditEdgesExactlyOne"
       ;;
@@ -972,7 +996,8 @@ write_cfg() {
       spec="AdoptionSpec"
       run_properties="
   AuditAdoptionKeepsTheIncarnation
-  AuditAdoptionTakesASettledMember"
+  AuditAdoptionTakesASettledMember
+  AuditAdoptionTakesNoOverriddenWorker"
       run_invariants="
   AuditAdoptExactlyOne"
       ;;
@@ -980,7 +1005,9 @@ write_cfg() {
       spec="CycleSpec"
       run_properties="
   AuditPurgeTouchesNothingElse
-  AuditImportKeepsTheIncarnation"
+  AuditPurgeNeedsRows
+  AuditImportKeepsTheIncarnation
+  AuditImportBindsOnTheRecordsSession"
       run_invariants="
   AuditCycleExactlyOne
   AuditImportRestoresOverNoRow"
@@ -1199,7 +1226,9 @@ for witness in \
   "edges:Action property:EdgeNotOwner" "edges:Action property:EdgeEndedByPeerRemoval" \
   "edges:Action property:EdgeEndedByOwnerRemoval" "edges:Action property:EdgeKeptByThirdRemoval" \
   "edges:Action property:EdgeKeptByArchive" "edges:Action property:EdgeUnwireRefused" \
-  "edges:Action property:EdgeRecovered" \
+  "edges:Action property:EdgeRecovered" "edges:Action property:EdgeOutOfForce" \
+  "edges:Action property:EdgeOutOfForceUnwire" "edges:Action property:EdgeRealized" \
+  "edges:Action property:EdgeRestoredToNoEntry" \
   "adoption:Action property:AdoptRosterSeated" "adoption:Action property:AdoptRosterOwedSeat" \
   "adoption:Action property:AdoptWorker" "adoption:Action property:AdoptStaleGeneration" \
   "adoption:Action property:AdoptUnlistingRefused" "adoption:Action property:AdoptRetiringRefused" \
@@ -1207,10 +1236,12 @@ for witness in \
   "adoption:Action property:AdoptNotAMember" "adoption:Action property:AdoptTombstoned" \
   "adoption:Action property:AdoptUnreadable" "adoption:Action property:AdoptHeld" \
   "adoption:Action property:AdoptCandidate" "adoption:Action property:AdoptStopped" \
+  "adoption:Action property:AdoptOverrideRefused" \
   "cycle:Action property:CycleReserved" "cycle:Action property:CycleDeclaredKept" \
   "cycle:Action property:CycleInPlace" "cycle:Action property:CycleOwedSeat" \
   "cycle:Action property:CycleTombstone" "cycle:Action property:CycleNameTaken" \
-  "cycle:Action property:CycleReleased"; do
+  "cycle:Action property:CycleReleased" "cycle:Action property:CyclePurgeNothing" \
+  "cycle:Action property:CyclePlainInPlace" "cycle:Action property:CyclePlainOtherSession"; do
   run="${witness%%:*}"
   if ! in_part "${run}"; then
     continue
@@ -1904,10 +1935,31 @@ PY
 drop_guard("DeclareOwnedIdentityEdgeDeclared", "identity_edge_owners) = FALSE)")
 PY
 
-  # A plain unwire of an owned edge is admitted (the admission's
-  # edge_not_owned guard dropped): two arms answer it.
+  # A plain unwire of an owned edge in force is admitted (the admission's
+  # edge_not_in_force guard dropped): two arms answer it.
   mutate edges unwire_admits_owned_edge "Invariant AuditEdgesExactlyOne" <<'PY'
-drop_guard("AdmitMemberUnwireAdmittedRunning", "identity_edge_owners) = FALSE)")
+drop_guard("AdmitMemberUnwireAdmittedRunning", "owned_edge_in_force(")
+PY
+
+  # An owned edge counts in force whatever its ends (the helper reads the
+  # custody alone): an edge one of whose ends no entry holds is realized,
+  # and its pair refused a plain unwire.
+  mutate edges realization_admits_a_name_no_identity_holds "Action property AuditOwnedEdgeBindsIdentitiesOnly" <<'PY'
+replace_text("owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == ((owned = TRUE) /\\ (a_is_an_entry = TRUE) /\\ (b_is_an_entry = TRUE))",
+             "owned_edge_in_force(owned, a_is_an_entry, b_is_an_entry) == (owned = TRUE)")
+PY
+
+  # An import's restoration needs the edge's other end to be an identity
+  # entry, as a declaration does: it holds fewer edges than the start's
+  # recovery of the same rows.
+  mutate edges restore_needs_an_identity_peer "Action property AuditRestoreIsTheRecovery" <<'PY'
+replace_in_arm("RestoreOwnedIdentityEdgeRestored",
+               "    /\\ ((edge \\in DOMAIN identity_edge_owners) = FALSE)\n",
+               "    /\\ ((edge \\in DOMAIN identity_edge_owners) = FALSE)\n"
+               "    /\\ (mob_machine_wiring_edge_other(edge, owner) \\in DOMAIN identity_entry_origins)\n")
+replace_in_arm("RestoreOwnedIdentityEdgeSkipped",
+               "ELSE ((mob_machine_wiring_edge_b(edge) \\in identity_entry_removing) = TRUE))",
+               "ELSE (((mob_machine_wiring_edge_b(edge) \\in identity_entry_removing) = TRUE) \\/ (mob_machine_wiring_edge_other(edge, owner) \\notin DOMAIN identity_entry_origins)))")
 PY
 
   # An adoption rotates its member: its generation moves on.
@@ -1932,6 +1984,13 @@ replace_in_arm("AdoptIdentityIntoStoreAdopted", "((agent_identity \\in identity_
                "FALSE")
 PY
 
+  # The adoption's verdict reads no spawn override: a worker spawned with
+  # one is adopted.
+  mutate adoption adopt_takes_an_overridden_worker "Action property AuditAdoptionTakesNoOverriddenWorker" <<'PY'
+replace_text("(IF (session_bound = FALSE) THEN TRUE ELSE (spawn_overridden = TRUE))",
+             "(session_bound = FALSE)")
+PY
+
   # The purge drops the archived session records: a session reference
   # the import re-binds is lost.
   mutate cycle purge_drops_a_session "Action property AuditPurgeTouchesNothingElse" <<'PY'
@@ -1942,6 +2001,19 @@ PY
   # readable, so a created custody seat may take it with no row.
   mutate cycle reseat_without_row "Invariant created_origin_without_row_is_unreadable" <<'PY'
 keep_var("RecoverRowlessCreatedEntryReservedRunning", "identity_entry_unreadable")
+PY
+
+  # The purge's verdict reads no row count: a mob whose scan read no row
+  # purges.
+  mutate cycle purge_with_no_row "Action property AuditPurgeNeedsRows" <<'PY'
+replace_text("(IF (rows_present = FALSE) THEN \"NothingToPurge\" ELSE \"Purged\")", "\"Purged\"")
+PY
+
+  # The import's verdict reads no session: a plain member on another
+  # session than its record names is bound in place.
+  mutate cycle import_binds_another_session "Action property AuditImportBindsOnTheRecordsSession" <<'PY'
+replace_text("(session_bound = TRUE) /\\ (session_matches = TRUE)) THEN \"RestoredInPlace\"",
+             "(session_bound = TRUE)) THEN \"RestoredInPlace\"")
 PY
 fi
 echo "created identity audit passed"

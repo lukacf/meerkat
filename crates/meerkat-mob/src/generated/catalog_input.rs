@@ -256,6 +256,8 @@ pub enum MobMachineCatalogInput {
     AdoptIdentityIntoStore,
     PurgeIdentityRows,
     ImportIdentityRecord,
+    AdmitOwnedEdgeRealization,
+    RestoreOwnedIdentityEdge,
 }
 
 impl MobMachineCatalogInput {
@@ -512,6 +514,8 @@ impl MobMachineCatalogInput {
         Self::AdoptIdentityIntoStore,
         Self::PurgeIdentityRows,
         Self::ImportIdentityRecord,
+        Self::AdmitOwnedEdgeRealization,
+        Self::RestoreOwnedIdentityEdge,
     ];
 
     #[must_use]
@@ -771,6 +775,8 @@ impl MobMachineCatalogInput {
             Self::AdoptIdentityIntoStore => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptIdentityIntoStore,
             Self::PurgeIdentityRows => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::PurgeIdentityRows,
             Self::ImportIdentityRecord => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ImportIdentityRecord,
+            Self::AdmitOwnedEdgeRealization => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitOwnedEdgeRealization,
+            Self::RestoreOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreOwnedIdentityEdge,
         }
     }
 
@@ -1055,6 +1061,8 @@ impl MobMachineCatalogInput {
             Self::AdoptIdentityIntoStore => "AdoptIdentityIntoStore",
             Self::PurgeIdentityRows => "PurgeIdentityRows",
             Self::ImportIdentityRecord => "ImportIdentityRecord",
+            Self::AdmitOwnedEdgeRealization => "AdmitOwnedEdgeRealization",
+            Self::RestoreOwnedIdentityEdge => "RestoreOwnedIdentityEdge",
         }
     }
 }

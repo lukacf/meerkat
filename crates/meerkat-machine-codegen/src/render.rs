@@ -1095,6 +1095,27 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ImportIdentityRecordMobNotRunningStopped",
             "ImportIdentityRecordMobNotRunningCompleted",
             "ImportIdentityRecordMobNotRunningDestroyed",
+            // Owned edges and the downgrade cycle (0.9.11): an owned edge's
+            // realization, an import's restoration of one, and the purge
+            // with no row to purge.
+            "AdmitOwnedEdgeRealizationRealizeRunning",
+            "AdmitOwnedEdgeRealizationRealizeStopped",
+            "AdmitOwnedEdgeRealizationRealizeCompleted",
+            "AdmitOwnedEdgeRealizationRealizeDestroyed",
+            "AdmitOwnedEdgeRealizationNotOwnedRunning",
+            "AdmitOwnedEdgeRealizationNotOwnedStopped",
+            "AdmitOwnedEdgeRealizationNotOwnedCompleted",
+            "AdmitOwnedEdgeRealizationNotOwnedDestroyed",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityRunning",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityStopped",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted",
+            "AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed",
+            "RestoreOwnedIdentityEdgeRestored",
+            "RestoreOwnedIdentityEdgeSkipped",
+            "RestoreOwnedIdentityEdgeMobNotRunningStopped",
+            "RestoreOwnedIdentityEdgeMobNotRunningCompleted",
+            "RestoreOwnedIdentityEdgeMobNotRunningDestroyed",
+            "PurgeIdentityRowsNothingToPurge",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

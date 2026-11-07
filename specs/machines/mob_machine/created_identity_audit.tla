@@ -1807,6 +1807,35 @@ RecoverEdgeVerdicts(e, owner) ==
        ENABLED RecoverOwnedIdentityEdgeRecoveredStopped(e, owner),
        ENABLED RecoverOwnedIdentityEdgeSkippedRunning(e, owner),
        ENABLED RecoverOwnedIdentityEdgeSkippedStopped(e, owner) >>
+\* Every arm of an owned edge's realization, in a running and a stopped
+\* mob, and of an import's restoration of one.
+RealizeEdgeArm(e) ==
+    \/ AdmitOwnedEdgeRealizationRealizeRunning(e)
+    \/ AdmitOwnedEdgeRealizationRealizeStopped(e)
+    \/ AdmitOwnedEdgeRealizationNotOwnedRunning(e)
+    \/ AdmitOwnedEdgeRealizationNotOwnedStopped(e)
+    \/ AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(e)
+    \/ AdmitOwnedEdgeRealizationEndNotAnIdentityStopped(e)
+RealizeEdgeVerdicts(e) ==
+    << ENABLED AdmitOwnedEdgeRealizationRealizeRunning(e),
+       ENABLED AdmitOwnedEdgeRealizationRealizeStopped(e),
+       ENABLED AdmitOwnedEdgeRealizationNotOwnedRunning(e),
+       ENABLED AdmitOwnedEdgeRealizationNotOwnedStopped(e),
+       ENABLED AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(e),
+       ENABLED AdmitOwnedEdgeRealizationEndNotAnIdentityStopped(e) >>
+RestoreEdgeArm(e, owner) ==
+    \/ RestoreOwnedIdentityEdgeRestored(e, owner)
+    \/ RestoreOwnedIdentityEdgeSkipped(e, owner)
+    \/ RestoreOwnedIdentityEdgeMobNotRunningStopped(e, owner)
+RestoreEdgeVerdicts(e, owner) ==
+    << ENABLED RestoreOwnedIdentityEdgeRestored(e, owner),
+       ENABLED RestoreOwnedIdentityEdgeSkipped(e, owner),
+       ENABLED RestoreOwnedIdentityEdgeMobNotRunningStopped(e, owner) >>
+\* An owned edge in force: owned, and both its ends identity entries.
+InForce(e) ==
+    /\ e \in DOMAIN identity_edge_owners
+    /\ e.a \in DOMAIN identity_entry_origins
+    /\ e.b \in DOMAIN identity_entry_origins
 
 \* The run's seed, one step at a time: members 2 and 3 store-owned
 \* identities recorded owed their seats, then member 1 a roster-owned
@@ -1849,11 +1878,13 @@ EdgesSeed ==
 \* The seed; member 1's removal through its retirement to its terminal;
 \* member 2's archive (through its retirement) and unarchive, or removal;
 \* member 3's archive and unarchive, or removal, at once; the declaration,
-\* the end for either cause and the boot's recovery of each edge among them
-\* (and of member 2's self edge) by each store-owned member, and a plain
-\* unwire's admission of each, in a running and a stopped mob. The boot
-\* plan is never sealed here, so the recovery's arms answer throughout, as
-\* declarations do.
+\* the end for either cause, the boot's recovery and an import's restoration
+\* of each edge among them (and of member 2's self edge) by each store-owned
+\* member, and a plain unwire's admission and a realization's verdict of
+\* each, in a running and a stopped mob. The boot plan is never sealed here,
+\* so the recovery's arms answer throughout, as declarations do; a recovery
+\* before member 1's declaration owns an edge one of whose ends no entry
+\* holds.
 EdgesNext ==
     \/ EdgesCandidate
     \/ EdgesSeed
@@ -1865,14 +1896,15 @@ EdgesNext ==
     \/ \E id \in EdgeOwners : ArchiveArm(id) \/ UnarchiveArm(id)
     \/ \E id \in EdgeIds : RemoveArm(id)
     \/ \E e \in Edges, owner \in EdgeOwners : DeclareEdgeArm(e, owner) \/ RecoverEdgeArm(e, owner)
+    \/ \E e \in Edges, owner \in EdgeOwners : RestoreEdgeArm(e, owner)
     \/ \E e \in Edges, owner \in EdgeOwners, cause \in EdgeCauses : EndEdgeArm(e, owner, cause)
-    \/ \E e \in Edges : AdmitUnwireArm(e)
+    \/ \E e \in Edges : AdmitUnwireArm(e) \/ RealizeEdgeArm(e)
 
 EdgesSpec == Init /\ [][EdgesNext]_vars
 
-\* Exactly one arm answers every declaration, end and plain unwire's
-\* admission in a running and a stopped mob, and every recovery while the
-\* boot plan is not sealed.
+\* Exactly one arm answers every declaration, end, plain unwire's admission,
+\* realization and restoration in a running and a stopped mob, and every
+\* recovery while the boot plan is not sealed.
 AuditEdgesExactlyOne ==
     phase \in {"Running", "Stopped"} =>
         /\ \A e \in Edges, owner \in EdgeOwners :
@@ -1880,9 +1912,59 @@ AuditEdgesExactlyOne ==
         /\ \A e \in Edges, owner \in EdgeOwners, cause \in EdgeCauses :
               Cardinality({i \in 1..6 : EndEdgeVerdicts(e, owner, cause)[i]}) = 1
         /\ \A e \in Edges : Cardinality({i \in 1..4 : AdmitUnwireVerdicts(e)[i]}) = 1
+        /\ \A e \in Edges : Cardinality({i \in 1..6 : RealizeEdgeVerdicts(e)[i]}) = 1
+        /\ \A e \in Edges, owner \in EdgeOwners :
+              Cardinality({i \in 1..3 : RestoreEdgeVerdicts(e, owner)[i]}) = 1
         /\ boot_plan_sealed = FALSE =>
               \A e \in Edges, owner \in EdgeOwners :
                   Cardinality({i \in 1..4 : RecoverEdgeVerdicts(e, owner)[i]}) = 1
+
+\* An owned edge binds identities only: no step realizes an owned edge, or
+\* refuses a plain unwire of one, unless it is in force (owned, both its
+\* ends identity entries), and no step answers an edge in force that it is
+\* not owned or out of force. An owned edge one of whose ends no entry holds
+\* stays declared and unrealized, and a member under that end's name is no
+\* end of it.
+AuditOwnedEdgeBindsIdentitiesOnly ==
+    [][\A e \in Edges :
+         /\ (\/ AdmitOwnedEdgeRealizationRealizeRunning(e)
+             \/ AdmitOwnedEdgeRealizationRealizeStopped(e)
+             \/ AdmitMemberUnwireOwnedEdgeRunning(e)
+             \/ AdmitMemberUnwireOwnedEdgeStopped(e))
+               => InForce(e)
+         /\ (\/ AdmitOwnedEdgeRealizationNotOwnedRunning(e)
+             \/ AdmitOwnedEdgeRealizationNotOwnedStopped(e)
+             \/ AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(e)
+             \/ AdmitOwnedEdgeRealizationEndNotAnIdentityStopped(e)
+             \/ AdmitMemberUnwireAdmittedRunning(e)
+             \/ AdmitMemberUnwireAdmittedStopped(e))
+               => ~InForce(e)
+      ]_vars
+
+\* The edges the start's recovery of an owner's row takes: its owner a
+\* store-owned entry at one end of an edge joining two identities, the edge
+\* owned by none yet, and neither end a removed identity's tombstone or
+\* retiring for its removal (its other end may be no entry).
+RecoverableEdge(e, owner) ==
+    /\ owner \in {e.a, e.b}
+    /\ e.a # e.b
+    /\ Origin(owner) = Some("Created")
+    /\ e \notin DOMAIN identity_edge_owners
+    /\ e.a \notin identity_entry_tombstones
+    /\ e.b \notin identity_entry_tombstones
+    /\ e.a \notin identity_entry_removing
+    /\ e.b \notin identity_entry_removing
+
+\* An import restores an owned edge exactly as the start's recovery of the
+\* owner's row recovers it: both take exactly the recoverable edges, so the
+\* custody map an import leaves is the one the next start reads.
+AuditRestoreIsTheRecovery ==
+    [][\A e \in Edges, owner \in EdgeOwners :
+         /\ RestoreOwnedIdentityEdgeRestored(e, owner) => RecoverableEdge(e, owner)
+         /\ RestoreOwnedIdentityEdgeSkipped(e, owner) => ~RecoverableEdge(e, owner)
+         /\ RecoverOwnedIdentityEdgeRecoveredRunning(e, owner) => RecoverableEdge(e, owner)
+         /\ RecoverOwnedIdentityEdgeSkippedRunning(e, owner) => ~RecoverableEdge(e, owner)
+      ]_vars
 
 \* An owned edge leaves the map only by its owner's change or a policy
 \* reload naming its owner (EndOwnedIdentityEdgeEnded), or by the removal of
@@ -1945,6 +2027,26 @@ AuditWitnessEdgeKeptByArchive ==
     /\ OwnerNext(Edge12) = Some(Id2)
 AuditWitnessEdgeUnwireRefused == AdmitMemberUnwireOwnedEdgeRunning(Edge12)
 AuditWitnessEdgeRecovered == RecoverOwnedIdentityEdgeRecoveredRunning(Edge23, Id3)
+\* An owned edge one of whose ends no entry holds is out of force: not
+\* realized, and its pair takes a plain unwire.
+AuditWitnessEdgeOutOfForce ==
+    /\ OwnerOf(Edge12) = Some(Id2)
+    /\ Id1 \notin DOMAIN identity_entry_origins
+    /\ AdmitOwnedEdgeRealizationEndNotAnIdentityRunning(Edge12)
+AuditWitnessEdgeOutOfForceUnwire ==
+    /\ OwnerOf(Edge12) = Some(Id2)
+    /\ Id1 \notin DOMAIN identity_entry_origins
+    /\ AdmitMemberUnwireAdmittedRunning(Edge12)
+AuditWitnessEdgeRealized ==
+    /\ Seated(Id1)
+    /\ Seated(Id2)
+    /\ AdmitOwnedEdgeRealizationRealizeRunning(Edge12)
+\* An import restores an edge one of whose ends no entry holds, as a
+\* start's recovery does.
+AuditWitnessEdgeRestoredToNoEntry ==
+    /\ Id1 \notin DOMAIN identity_entry_origins
+    /\ RestoreOwnedIdentityEdgeRestored(Edge12, Id2)
+    /\ OwnerNext(Edge12) = Some(Id2)
 
 NotAuditWitnessEdgeDeclared == [][~AuditWitnessEdgeDeclared]_vars
 NotAuditWitnessEdgeToUnseatedDeclared == [][~AuditWitnessEdgeToUnseatedDeclared]_vars
@@ -1959,6 +2061,10 @@ NotAuditWitnessEdgeKeptByThirdRemoval == [][~AuditWitnessEdgeKeptByThirdRemoval]
 NotAuditWitnessEdgeKeptByArchive == [][~AuditWitnessEdgeKeptByArchive]_vars
 NotAuditWitnessEdgeUnwireRefused == [][~AuditWitnessEdgeUnwireRefused]_vars
 NotAuditWitnessEdgeRecovered == [][~AuditWitnessEdgeRecovered]_vars
+NotAuditWitnessEdgeOutOfForce == [][~AuditWitnessEdgeOutOfForce]_vars
+NotAuditWitnessEdgeOutOfForceUnwire == [][~AuditWitnessEdgeOutOfForceUnwire]_vars
+NotAuditWitnessEdgeRealized == [][~AuditWitnessEdgeRealized]_vars
+NotAuditWitnessEdgeRestoredToNoEntry == [][~AuditWitnessEdgeRestoredToNoEntry]_vars
 (***************************************************************************)
 (* The adoption run (0.9.11).                                              *)
 (***************************************************************************)
@@ -1967,30 +2073,30 @@ AdoptionIds == {Id1, Id2, Id3}
 AdoptionSources == {"Roster", "Worker"}
 AdoptionGenerations == {None, Some(0), Some(1)}
 
-\* Every arm of an adoption into store custody, in a running and a stopped
-\* mob.
-AdoptIntoStoreArm(id, src, g) ==
-    \/ AdoptIdentityIntoStoreAdopted(id, src, g)
-    \/ AdoptIdentityIntoStoreNotAdoptable(id, src, g)
-    \/ AdoptIdentityIntoStorePredecessorMismatch(id, src, g)
-    \/ AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g)
-    \/ AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g)
-    \/ AdoptIdentityIntoStoreNameUnreadable(id, src, g)
-    \/ AdoptIdentityIntoStoreNameTombstoned(id, src, g)
-    \/ AdoptIdentityIntoStoreNonAuthoritative(id, src, g)
-    \/ AdoptIdentityIntoStoreChangesHeld(id, src, g)
-    \/ AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g)
-AdoptIntoStoreVerdicts(id, src, g) ==
-    << ENABLED AdoptIdentityIntoStoreAdopted(id, src, g),
-       ENABLED AdoptIdentityIntoStoreNotAdoptable(id, src, g),
-       ENABLED AdoptIdentityIntoStorePredecessorMismatch(id, src, g),
-       ENABLED AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g),
-       ENABLED AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g),
-       ENABLED AdoptIdentityIntoStoreNameUnreadable(id, src, g),
-       ENABLED AdoptIdentityIntoStoreNameTombstoned(id, src, g),
-       ENABLED AdoptIdentityIntoStoreNonAuthoritative(id, src, g),
-       ENABLED AdoptIdentityIntoStoreChangesHeld(id, src, g),
-       ENABLED AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g) >>
+\* Every arm of an adoption into store custody, of a member spawned with an
+\* override or not, in a running and a stopped mob.
+AdoptIntoStoreArm(id, src, g, ov) ==
+    \/ AdoptIdentityIntoStoreAdopted(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreNotAdoptable(id, src, g, ov)
+    \/ AdoptIdentityIntoStorePredecessorMismatch(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreNameUnreadable(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreNameTombstoned(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreNonAuthoritative(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreChangesHeld(id, src, g, ov)
+    \/ AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g, ov)
+AdoptIntoStoreVerdicts(id, src, g, ov) ==
+    << ENABLED AdoptIdentityIntoStoreAdopted(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreNotAdoptable(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStorePredecessorMismatch(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreNameUnreadable(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreNameTombstoned(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreNonAuthoritative(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreChangesHeld(id, src, g, ov),
+       ENABLED AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g, ov) >>
 
 \* The run's seed, one step at a time: member 2 a worker the replay
 \* recovered and bound, then member 1 a roster-owned identity declared owed
@@ -2026,8 +2132,8 @@ AdoptionSeed ==
 \* retirement; member 3 a store-owned identity recorded owed its seat, or a
 \* name the scan of its row reserves (removed or unreadable), or nothing; a
 \* declared apply opened and closed; and the adoption of each from either
-\* source, at no generation, the worker's or another, in a running and a
-\* stopped mob.
+\* source, at no generation, the worker's or another, of a member spawned
+\* with a profile or model override or not, in a running and a stopped mob.
 AdoptionNext ==
     \/ AdoptionCandidate
     \/ AdoptionSeed
@@ -2038,22 +2144,22 @@ AdoptionNext ==
     \/ \E presence \in {"Tombstone", "Unreadable"} : RecoverArm(Id3, presence, None)
     \/ OpenDeclaredApplyOpened
     \/ CloseDeclaredApplyRunning
-    \/ \E id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
-           AdoptIntoStoreArm(id, src, g)
+    \/ \E id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations, ov \in BOOLEAN :
+           AdoptIntoStoreArm(id, src, g, ov)
 
 AdoptionSpec == Init /\ [][AdoptionNext]_vars
 
 \* Exactly one arm answers every adoption in a running and a stopped mob.
 AuditAdoptExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        \A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
-            Cardinality({i \in 1..10 : AdoptIntoStoreVerdicts(id, src, g)[i]}) = 1
+        \A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations, ov \in BOOLEAN :
+            Cardinality({i \in 1..10 : AdoptIntoStoreVerdicts(id, src, g, ov)[i]}) = 1
 
 \* An adoption keeps its member's incarnation: its runtime, generation and
 \* session are the ones it had.
 AuditAdoptionKeepsTheIncarnation ==
-    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
-         AdoptIdentityIntoStoreAdopted(id, src, g)
+    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations, ov \in BOOLEAN :
+         AdoptIdentityIntoStoreAdopted(id, src, g, ov)
            => /\ identity_to_runtime' = identity_to_runtime
               /\ identity_runtime_generations' = identity_runtime_generations
               /\ member_session_bindings' = member_session_bindings
@@ -2063,8 +2169,8 @@ AuditAdoptionKeepsTheIncarnation ==
 \* spawn ladder of the name is, and no retirement of its member or end of
 \* its entry is under way.
 AuditAdoptionTakesASettledMember ==
-    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
-         AdoptIdentityIntoStoreAdopted(id, src, g)
+    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations, ov \in BOOLEAN :
+         AdoptIdentityIntoStoreAdopted(id, src, g, ov)
            => /\ declared_apply_open = FALSE
               /\ id \notin DOMAIN spawn_exec_phase
               /\ id \notin identity_entry_retiring
@@ -2074,39 +2180,55 @@ AuditAdoptionTakesASettledMember ==
                       /\ member_state_markers[identity_to_runtime[id]] = "Retiring"))
       ]_vars
 
+\* An adoption takes no worker spawned with a profile or model override: a
+\* store-owned identity's spec carries none.
+AuditAdoptionTakesNoOverriddenWorker ==
+    [][\A id \in AdoptionIds, g \in AdoptionGenerations :
+         ~AdoptIdentityIntoStoreAdopted(id, "Worker", g, TRUE)
+      ]_vars
+
 \* Witnesses of the adoption run.
 AuditWitnessAdoptRosterSeated ==
     /\ Origin(Id1) = Some("Declared")
     /\ Seated(Id1)
-    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None)
+    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None, FALSE)
     /\ OriginNext(Id1) = Some("Created")
 AuditWitnessAdoptRosterOwedSeat ==
     /\ Unseated(Id1) = Some("SeatOwed")
-    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None)
+    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None, FALSE)
     /\ UnseatedNext(Id1) = Some("SeatOwed")
 AuditWitnessAdoptWorker ==
     /\ Origin(Id2) = None
-    /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0))
+    /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0), FALSE)
     /\ OriginNext(Id2) = Some("Created")
-AuditWitnessAdoptStaleGeneration == AdoptIdentityIntoStorePredecessorMismatch(Id2, "Worker", Some(1))
+AuditWitnessAdoptStaleGeneration == AdoptIdentityIntoStorePredecessorMismatch(Id2, "Worker", Some(1), FALSE)
 AuditWitnessAdoptUnlistingRefused ==
     /\ Id1 \in identity_entry_retiring
-    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id1, "Roster", None)
+    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id1, "Roster", None, FALSE)
 AuditWitnessAdoptRetiringRefused ==
     /\ Origin(Id2) = None
-    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id2, "Worker", Some(0))
-AuditWitnessAdoptApplyOpen == AdoptIdentityIntoStoreDeclaredApplyOpen(Id2, "Worker", Some(0))
+    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id2, "Worker", Some(0), FALSE)
+AuditWitnessAdoptApplyOpen == AdoptIdentityIntoStoreDeclaredApplyOpen(Id2, "Worker", Some(0), FALSE)
 AuditWitnessAdoptStoreOwned ==
     /\ Created(Id3)
-    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Roster", None)
+    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Roster", None, FALSE)
 AuditWitnessAdoptNotAMember ==
     /\ Origin(Id3) = None
-    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Worker", Some(0))
-AuditWitnessAdoptTombstoned == AdoptIdentityIntoStoreNameTombstoned(Id3, "Roster", None)
-AuditWitnessAdoptUnreadable == AdoptIdentityIntoStoreNameUnreadable(Id3, "Worker", Some(0))
-AuditWitnessAdoptHeld == AdoptIdentityIntoStoreChangesHeld(Id2, "Worker", Some(0))
-AuditWitnessAdoptCandidate == AdoptIdentityIntoStoreNonAuthoritative(Id2, "Worker", Some(0))
-AuditWitnessAdoptStopped == AdoptIdentityIntoStoreMobNotRunningStopped(Id2, "Worker", Some(0))
+    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Worker", Some(0), FALSE)
+AuditWitnessAdoptTombstoned == AdoptIdentityIntoStoreNameTombstoned(Id3, "Roster", None, FALSE)
+AuditWitnessAdoptUnreadable == AdoptIdentityIntoStoreNameUnreadable(Id3, "Worker", Some(0), FALSE)
+AuditWitnessAdoptHeld == AdoptIdentityIntoStoreChangesHeld(Id2, "Worker", Some(0), FALSE)
+AuditWitnessAdoptCandidate == AdoptIdentityIntoStoreNonAuthoritative(Id2, "Worker", Some(0), FALSE)
+AuditWitnessAdoptStopped == AdoptIdentityIntoStoreMobNotRunningStopped(Id2, "Worker", Some(0), FALSE)
+\* The override alone refuses a seated, bound and settled worker the
+\* adoption takes without one (AuditWitnessAdoptWorker).
+AuditWitnessAdoptOverrideRefused ==
+    /\ Origin(Id2) = None
+    /\ Id2 \in DOMAIN member_session_bindings
+    /\ Id2 \notin DOMAIN member_placement
+    /\ declared_apply_open = FALSE
+    /\ identity_changes_held = FALSE
+    /\ AdoptIdentityIntoStoreNotAdoptable(Id2, "Worker", Some(0), TRUE)
 
 NotAuditWitnessAdoptRosterSeated == [][~AuditWitnessAdoptRosterSeated]_vars
 NotAuditWitnessAdoptRosterOwedSeat == [][~AuditWitnessAdoptRosterOwedSeat]_vars
@@ -2122,6 +2244,7 @@ NotAuditWitnessAdoptUnreadable == [][~AuditWitnessAdoptUnreadable]_vars
 NotAuditWitnessAdoptHeld == [][~AuditWitnessAdoptHeld]_vars
 NotAuditWitnessAdoptCandidate == [][~AuditWitnessAdoptCandidate]_vars
 NotAuditWitnessAdoptStopped == [][~AuditWitnessAdoptStopped]_vars
+NotAuditWitnessAdoptOverrideRefused == [][~AuditWitnessAdoptOverrideRefused]_vars
 
 
 (***************************************************************************)
@@ -2130,34 +2253,42 @@ NotAuditWitnessAdoptStopped == [][~AuditWitnessAdoptStopped]_vars
 
 CycleIds == {Id1, Id2, Id3}
 CycleRows == {"Absent", "Same", "Other"}
-\* The records the run imports, <<kind, from a roster's adoption, row of
-\* its name>>: a present record from a roster's adoption or not over each
-\* row of its name, and each other kind over no row.
-CycleImports ==
-    {<<"Present", a, row>> : a \in BOOLEAN, row \in CycleRows}
-    \cup {<<k, FALSE, "Absent">> : k \in {"PendingPreparation", "Archived", "Tombstone"}}
-\* The session reference an exported record names.
+\* The session reference an exported record names, and the one member 2,
+\* a worker the replay recovered and bound, is bound to.
 CycleSession == Some(Sess3)
+CycleWorkerSession == Some(Sess2)
+\* The records the run imports, <<kind, from a roster's adoption, row of
+\* its name, session reference>>: a present record from a roster's adoption
+\* or not over each row of its name, naming another session than member
+\* 2's; a present record over no row naming member 2's session; and each
+\* other kind over no row.
+CycleImports ==
+    {<<"Present", a, row, CycleSession>> : a \in BOOLEAN, row \in CycleRows}
+    \cup {<<"Present", FALSE, "Absent", CycleWorkerSession>>}
+    \cup {<<k, FALSE, "Absent", CycleSession>> : k \in {"PendingPreparation", "Archived", "Tombstone"}}
 
-\* Every arm of the purge, in a running and a stopped mob.
-PurgeArm(r, op) ==
-    \/ PurgeIdentityRowsPurged(r, op)
-    \/ PurgeIdentityRowsNonAuthoritative(r, op)
-    \/ PurgeIdentityRowsReplayed(r, op)
-    \/ PurgeIdentityRowsOperationReused(r, op)
-    \/ PurgeIdentityRowsRowsPurged(r, op)
-    \/ PurgeIdentityRowsNotHostOperator(r, op)
-    \/ PurgeIdentityRowsChangesNotHeld(r, op)
-    \/ PurgeIdentityRowsMobNotRunningStopped(r, op)
-PurgeVerdicts(r, op) ==
-    << ENABLED PurgeIdentityRowsPurged(r, op),
-       ENABLED PurgeIdentityRowsNonAuthoritative(r, op),
-       ENABLED PurgeIdentityRowsReplayed(r, op),
-       ENABLED PurgeIdentityRowsOperationReused(r, op),
-       ENABLED PurgeIdentityRowsRowsPurged(r, op),
-       ENABLED PurgeIdentityRowsNotHostOperator(r, op),
-       ENABLED PurgeIdentityRowsChangesNotHeld(r, op),
-       ENABLED PurgeIdentityRowsMobNotRunningStopped(r, op) >>
+\* Every arm of the purge, of a mob whose scan read rows or none, in a
+\* running and a stopped mob.
+PurgeArm(r, op, present) ==
+    \/ PurgeIdentityRowsPurged(r, op, present)
+    \/ PurgeIdentityRowsNonAuthoritative(r, op, present)
+    \/ PurgeIdentityRowsReplayed(r, op, present)
+    \/ PurgeIdentityRowsOperationReused(r, op, present)
+    \/ PurgeIdentityRowsRowsPurged(r, op, present)
+    \/ PurgeIdentityRowsNotHostOperator(r, op, present)
+    \/ PurgeIdentityRowsChangesNotHeld(r, op, present)
+    \/ PurgeIdentityRowsNothingToPurge(r, op, present)
+    \/ PurgeIdentityRowsMobNotRunningStopped(r, op, present)
+PurgeVerdicts(r, op, present) ==
+    << ENABLED PurgeIdentityRowsPurged(r, op, present),
+       ENABLED PurgeIdentityRowsNonAuthoritative(r, op, present),
+       ENABLED PurgeIdentityRowsReplayed(r, op, present),
+       ENABLED PurgeIdentityRowsOperationReused(r, op, present),
+       ENABLED PurgeIdentityRowsRowsPurged(r, op, present),
+       ENABLED PurgeIdentityRowsNotHostOperator(r, op, present),
+       ENABLED PurgeIdentityRowsChangesNotHeld(r, op, present),
+       ENABLED PurgeIdentityRowsNothingToPurge(r, op, present),
+       ENABLED PurgeIdentityRowsMobNotRunningStopped(r, op, present) >>
 \* Every arm of a start's pass of an entry name its scan read no row of,
 \* in a running and a stopped mob.
 RowlessArm(id) ==
@@ -2171,28 +2302,28 @@ RowlessVerdicts(id) ==
        ENABLED RecoverRowlessCreatedEntryKeptRunning(id),
        ENABLED RecoverRowlessCreatedEntryKeptStopped(id) >>
 \* Every arm of one record's import, in a running and a stopped mob.
-ImportVerdicts(id, k, a, row) ==
-    << ENABLED ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordUnchanged(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordUnsettled(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordNonAuthoritative(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordChangesHeld(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordRowsPurged(id, k, a, row, CycleSession),
-       ENABLED ImportIdentityRecordMobNotRunningStopped(id, k, a, row, CycleSession) >>
+ImportVerdicts(id, k, a, row, s) ==
+    << ENABLED ImportIdentityRecordRestoredInPlace(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRestoredOwedSeat(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRestoredPending(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRestoredArchived(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRestoredTombstone(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRestoredByAdoption(id, k, a, row, s),
+       ENABLED ImportIdentityRecordUnchanged(id, k, a, row, s),
+       ENABLED ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, s),
+       ENABLED ImportIdentityRecordUnsettled(id, k, a, row, s),
+       ENABLED ImportIdentityRecordNonAuthoritative(id, k, a, row, s),
+       ENABLED ImportIdentityRecordChangesHeld(id, k, a, row, s),
+       ENABLED ImportIdentityRecordRowsPurged(id, k, a, row, s),
+       ENABLED ImportIdentityRecordMobNotRunningStopped(id, k, a, row, s) >>
 \* An arm that restores a record.
-ImportRestores(id, k, a, row) ==
-    \/ ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession)
+ImportRestores(id, k, a, row, s) ==
+    \/ ImportIdentityRecordRestoredInPlace(id, k, a, row, s)
+    \/ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, s)
+    \/ ImportIdentityRecordRestoredPending(id, k, a, row, s)
+    \/ ImportIdentityRecordRestoredArchived(id, k, a, row, s)
+    \/ ImportIdentityRecordRestoredTombstone(id, k, a, row, s)
+    \/ ImportIdentityRecordRestoredByAdoption(id, k, a, row, s)
 \* The admission of a host's change under its allow rule.
 CycleAdmitFacts == <<"Absent", "Policy", FALSE, FALSE, FALSE, TRUE, TRUE>>
 CycleAdmit ==
@@ -2227,54 +2358,55 @@ CycleSeed ==
           /\ \/ AAuthorize
              \/ AOpen(AFirst)
              \/ ASeatAs(AFirst, FALSE, FALSE, FALSE)
-       \/ CycleSeeded /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0))
+       \/ CycleSeeded /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0), FALSE)
        \/ CycleSeeded /\ RecordAs(Id3, "SeatOwed")
 \* An import's restoring arms once the seed is done (the export is taken
 \* then; before it, each import is refused or changes nothing). Named
 \* wrappers of one arm each: TLC's coverage names an action whose body is a
 \* conjunction after its operator, and the runner's closed alias table
 \* counts each wrapper's coverage for the arm it wraps.
-CycleRestoresInPlace(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredInPlace(id, k, a, row, CycleSession)
-CycleRestoresOwedSeat(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, CycleSession)
-CycleRestoresPending(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredPending(id, k, a, row, CycleSession)
-CycleRestoresArchived(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredArchived(id, k, a, row, CycleSession)
-CycleRestoresTombstone(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredTombstone(id, k, a, row, CycleSession)
-CycleRestoresByAdoption(id, k, a, row) ==
-    CycleSeeded /\ ImportIdentityRecordRestoredByAdoption(id, k, a, row, CycleSession)
+CycleRestoresInPlace(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredInPlace(id, k, a, row, s)
+CycleRestoresOwedSeat(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredOwedSeat(id, k, a, row, s)
+CycleRestoresPending(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredPending(id, k, a, row, s)
+CycleRestoresArchived(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredArchived(id, k, a, row, s)
+CycleRestoresTombstone(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredTombstone(id, k, a, row, s)
+CycleRestoresByAdoption(id, k, a, row, s) ==
+    CycleSeeded /\ ImportIdentityRecordRestoredByAdoption(id, k, a, row, s)
 \* Every arm of one record's import as the run takes it.
-CycleImportArm(id, k, a, row) ==
-    \/ CycleRestoresInPlace(id, k, a, row)
-    \/ CycleRestoresOwedSeat(id, k, a, row)
-    \/ CycleRestoresPending(id, k, a, row)
-    \/ CycleRestoresArchived(id, k, a, row)
-    \/ CycleRestoresTombstone(id, k, a, row)
-    \/ CycleRestoresByAdoption(id, k, a, row)
-    \/ ImportIdentityRecordUnchanged(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordUnsettled(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordNonAuthoritative(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordChangesHeld(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordRowsPurged(id, k, a, row, CycleSession)
-    \/ ImportIdentityRecordMobNotRunningStopped(id, k, a, row, CycleSession)
+CycleImportArm(id, k, a, row, s) ==
+    \/ CycleRestoresInPlace(id, k, a, row, s)
+    \/ CycleRestoresOwedSeat(id, k, a, row, s)
+    \/ CycleRestoresPending(id, k, a, row, s)
+    \/ CycleRestoresArchived(id, k, a, row, s)
+    \/ CycleRestoresTombstone(id, k, a, row, s)
+    \/ CycleRestoresByAdoption(id, k, a, row, s)
+    \/ ImportIdentityRecordUnchanged(id, k, a, row, s)
+    \/ ImportIdentityRecordNameTakenMeanwhile(id, k, a, row, s)
+    \/ ImportIdentityRecordUnsettled(id, k, a, row, s)
+    \/ ImportIdentityRecordNonAuthoritative(id, k, a, row, s)
+    \/ ImportIdentityRecordChangesHeld(id, k, a, row, s)
+    \/ ImportIdentityRecordRowsPurged(id, k, a, row, s)
+    \/ ImportIdentityRecordMobNotRunningStopped(id, k, a, row, s)
 
 \* The seed; the start's pass of each name its scan read no row of; the
-\* purge with each receipt, by the host operator or not; the admission of a
-\* change; and the import of each kind of record for each name, recorded as
-\* a roster's adoption or not, over each row of its name; in a running and
-\* a stopped mob.
+\* purge with each receipt, by the host operator or not, of a mob whose
+\* scan read rows or none; the admission of a change; and the import of
+\* each kind of record for each name, recorded as a roster's adoption or
+\* not, over each row of its name, naming member 2's session or another;
+\* in a running and a stopped mob.
 CycleNext ==
     \/ CycleCandidate
     \/ CycleSeed
     \/ CycleSeeded /\ (HoldArm \/ CStop)
     \/ \E id \in CycleIds : RowlessArm(id)
-    \/ \E r \in Receipts, op \in BOOLEAN : PurgeArm(r, op)
+    \/ \E r \in Receipts, op \in BOOLEAN, present \in BOOLEAN : PurgeArm(r, op, present)
     \/ CycleAdmit
-    \/ \E id \in CycleIds, c \in CycleImports : CycleImportArm(id, c[1], c[2], c[3])
+    \/ \E id \in CycleIds, c \in CycleImports : CycleImportArm(id, c[1], c[2], c[3], c[4])
 
 CycleSpec == Init /\ [][CycleNext]_vars
 
@@ -2283,13 +2415,13 @@ CycleSpec == Init /\ [][CycleNext]_vars
 \* every import and the admission, in a running and a stopped mob.
 AuditCycleExactlyOne ==
     phase \in {"Running", "Stopped"} =>
-        /\ \A r \in Receipts, op \in BOOLEAN :
-               Cardinality({i \in 1..8 : PurgeVerdicts(r, op)[i]}) = 1
+        /\ \A r \in Receipts, op \in BOOLEAN, present \in BOOLEAN :
+               Cardinality({i \in 1..9 : PurgeVerdicts(r, op, present)[i]}) = 1
         /\ \A id \in CycleIds :
                Cardinality({i \in 1..4 : RowlessVerdicts(id)[i]})
                    = IF boot_plan_sealed THEN 0 ELSE 1
         /\ \A id \in CycleIds, c \in CycleImports :
-               Cardinality({i \in 1..13 : ImportVerdicts(id, c[1], c[2], c[3])[i]}) = 1
+               Cardinality({i \in 1..13 : ImportVerdicts(id, c[1], c[2], c[3], c[4])[i]}) = 1
         /\ Cardinality({i \in 1..12 : AdmitVerdicts(CycleAdmitFacts[1], CycleAdmitFacts[2],
                                                     CycleAdmitFacts[3], CycleAdmitFacts[4],
                                                     CycleAdmitFacts[5], CycleAdmitFacts[6],
@@ -2308,15 +2440,20 @@ AuditPurgeTouchesNothingElse ==
           /\ identity_entry_unseated' = identity_entry_unseated
           /\ identity_entry_tombstones' = identity_entry_tombstones
           /\ identity_entry_unreadable' = identity_entry_unreadable
-       \/ ~\E r \in Receipts, op \in BOOLEAN : PurgeIdentityRowsPurged(r, op)
+       \/ ~\E r \in Receipts, op \in BOOLEAN, present \in BOOLEAN : PurgeIdentityRowsPurged(r, op, present)
       ]_vars
+
+\* A purge goes on only for a mob whose scan read rows: one with none has
+\* nothing to purge.
+AuditPurgeNeedsRows ==
+    [][\A r \in Receipts, op \in BOOLEAN : ~PurgeIdentityRowsPurged(r, op, FALSE)]_vars
 
 \* An import restores a record only where the store holds no row of its
 \* name: in every state, no restoring arm answers a record over a row of
 \* its name.
 AuditImportRestoresOverNoRow ==
     \A id \in CycleIds, c \in CycleImports :
-        c[3] # "Absent" => ~ENABLED ImportRestores(id, c[1], c[2], c[3])
+        c[3] # "Absent" => ~ENABLED ImportRestores(id, c[1], c[2], c[3], c[4])
 
 \* An import binds a member in place on its unchanged runtime, generation
 \* and session: a step that changes any of them restores no record in place
@@ -2326,8 +2463,18 @@ AuditImportKeepsTheIncarnation ==
           /\ identity_runtime_generations' = identity_runtime_generations
           /\ member_session_bindings' = member_session_bindings
        \/ ~\E id \in CycleIds, c \in CycleImports :
-              \/ ImportIdentityRecordRestoredInPlace(id, c[1], c[2], c[3], CycleSession)
-              \/ ImportIdentityRecordRestoredByAdoption(id, c[1], c[2], c[3], CycleSession)
+              \/ ImportIdentityRecordRestoredInPlace(id, c[1], c[2], c[3], c[4])
+              \/ ImportIdentityRecordRestoredByAdoption(id, c[1], c[2], c[3], c[4])
+      ]_vars
+
+\* An import binds a plain member (no entry whose row was purged) in place
+\* only when it is bound to the session the record names.
+AuditImportBindsOnTheRecordsSession ==
+    [][\A id \in CycleIds, c \in CycleImports :
+         (ImportIdentityRecordRestoredInPlace(id, c[1], c[2], c[3], c[4])
+          /\ id \notin identity_entry_rowless)
+            => /\ id \in DOMAIN member_session_bindings
+               /\ Some(member_session_bindings[id]) = c[4]
       ]_vars
 
 \* Witnesses of the cycle run: the steps whose state says more than the arm
@@ -2357,6 +2504,21 @@ AuditWitnessCycleReleased ==
     /\ Id2 \in identity_entry_rowless
     /\ ImportIdentityRecordNameTakenMeanwhile(Id2, "Tombstone", FALSE, "Absent", CycleSession)
     /\ OriginNext(Id2) = None
+\* The host operator's purge, under held changes, of a mob whose scan read
+\* no row has nothing to purge, and records nothing.
+AuditWitnessCyclePurgeNothing ==
+    /\ identity_changes_held = TRUE
+    /\ PurgeIdentityRowsNothingToPurge("Absent", TRUE, FALSE)
+    /\ identity_rows_purged' = FALSE
+\* A plain member (the worker) is bound in place on the session its record
+\* names, and reported under a record naming another.
+AuditWitnessCyclePlainInPlace ==
+    /\ Origin(Id2) = None
+    /\ ImportIdentityRecordRestoredInPlace(Id2, "Present", FALSE, "Absent", CycleWorkerSession)
+AuditWitnessCyclePlainOtherSession ==
+    /\ Origin(Id2) = None
+    /\ Seated(Id2)
+    /\ ImportIdentityRecordNameTakenMeanwhile(Id2, "Present", FALSE, "Absent", CycleSession)
 
 NotAuditWitnessCycleReserved == [][~AuditWitnessCycleReserved]_vars
 NotAuditWitnessCycleDeclaredKept == [][~AuditWitnessCycleDeclaredKept]_vars
@@ -2365,5 +2527,8 @@ NotAuditWitnessCycleOwedSeat == [][~AuditWitnessCycleOwedSeat]_vars
 NotAuditWitnessCycleTombstone == [][~AuditWitnessCycleTombstone]_vars
 NotAuditWitnessCycleNameTaken == [][~AuditWitnessCycleNameTaken]_vars
 NotAuditWitnessCycleReleased == [][~AuditWitnessCycleReleased]_vars
+NotAuditWitnessCyclePurgeNothing == [][~AuditWitnessCyclePurgeNothing]_vars
+NotAuditWitnessCyclePlainInPlace == [][~AuditWitnessCyclePlainInPlace]_vars
+NotAuditWitnessCyclePlainOtherSession == [][~AuditWitnessCyclePlainOtherSession]_vars
 
 ====

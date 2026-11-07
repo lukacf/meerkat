@@ -263,6 +263,14 @@ AdmitMemberUnwireOwnedEdgeDestroyed a plain unwire's refusal in a destroyed mob,
 AdoptIdentityIntoStoreMobNotRunning* an adoption in the Completed and Destroyed phases (a pure verdict); created_identity_audit's adoption run drives the Stopped arm
 ImportIdentityRecordMobNotRunning* an import in the Completed and Destroyed phases (a pure verdict); created_identity_audit's cycle run drives the Stopped arm
 PurgeIdentityRowsMobNotRunning* a purge in the Completed and Destroyed phases (a pure verdict); created_identity_audit's cycle run drives the Stopped arm
+AdmitOwnedEdgeRealizationRealizeCompleted an owned edge's realization in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationRealizeDestroyed an owned edge's realization in a destroyed mob, which owns no edge; created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationNotOwnedCompleted a realization of an edge no identity owns in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationNotOwnedDestroyed a realization of an edge no identity owns in a destroyed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationEndNotAnIdentityStopped a stopped mob's realization of an owned edge whose end no entry holds (a pure verdict): created_identity_audit's edges run stops the mob only once every end is a seated entry, and drives the Running arm
+AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted a completed mob's realization of an owned edge whose end no entry holds (a pure verdict); created_identity_audit's edges run drives the Running arm
+AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed a destroyed mob's realization of an owned edge, which it does not own; created_identity_audit's edges run drives the Running arm
+RestoreOwnedIdentityEdgeMobNotRunning* an import's restoration of an owned edge in the Completed and Destroyed phases (a pure verdict); created_identity_audit's edges run drives the Stopped arm
 RecordMemberCustodyUnrestoredSeatedCompleted the custody deferral record in a Completed mob; member_residency_audit drives the Running and Stopped copies across the seat-ending arms, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs drive this copy
 RecordMemberCustodyUnrestoredNotSeated* a custody deferral record for an identity the mob does not seat changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs
 RecordMemberCustodyUnrestoredDestroyed a late custody deferral record in a destroyed mob changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs

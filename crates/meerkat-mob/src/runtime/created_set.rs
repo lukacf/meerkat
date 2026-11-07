@@ -8,9 +8,10 @@
 //! its archived session. The purge
 //! ([`super::MobHandle::purge_created_identities`]) is decided by MobMachine
 //! (`PurgeIdentityRows`: only the host operator, only while the mob's
-//! identity changes are held), and its store transaction removes the rows,
-//! and nothing else, only when their digest is the export's; from its
-//! commit on, every identity change is refused until the mob restarts. A
+//! identity changes are held, and only when the scan read a row), and its
+//! store transaction removes the rows, and nothing else, only when their
+//! digest is the export's; from its commit on, every identity change is
+//! refused until the mob restarts. A
 //! start that reads no row of a Created entry's name reserves the name
 //! (`RecoverRowlessCreatedEntry`): nothing acts on it and nothing seats it
 //! until the import restores its row. The import
@@ -358,7 +359,11 @@ impl super::MobHandle {
     /// MobMachine: a local member seated under its name, bound to a
     /// session, keeps its runtime, generation and session and becomes the
     /// store-owned identity again (a Created entry whose row was purged,
-    /// or a plain member the older build left); an unseated identity is
+    /// or a plain member the older build left bound to the very session
+    /// the record names: a member on another session is another member, or
+    /// the identity on a session the export does not name, and is reported
+    /// like any other holder, for the host to adopt); an unseated identity
+    /// is
     /// seated again, Dormant, on its archived session (the exported
     /// reference when the mob's journal holds none; a fresh session, read
     /// as history unavailable, when that session is gone); a pending, an
@@ -479,6 +484,9 @@ pub(super) fn purge_refusal(
         }),
         Verdict::ChangesNotHeld => Some(IdentityChangeRefusal::PurgeRefused {
             reason: PurgeRefusedReason::ChangesNotHeld,
+        }),
+        Verdict::NothingToPurge => Some(IdentityChangeRefusal::PurgeRefused {
+            reason: PurgeRefusedReason::NothingToPurge,
         }),
         Verdict::MobNotRunning => Some(IdentityChangeRefusal::MobNotRunning),
     }

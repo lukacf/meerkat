@@ -4609,6 +4609,16 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MemberUnwireAdmission",
                 &["Admitted", "OwnedIdentityEdge"],
             ),
+            // Owned edges (0.9.11): the verdicts of an owned edge's
+            // realization and of an import's restoration of one.
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRealization",
+                &["Realize", "NotOwned", "EndNotAnIdentity"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRestoreVerdict",
+                &["Restored", "Skipped", "MobNotRunning"],
+            ),
             // Adoption into store custody (0.9.11): its source, its verdict
             // and why an identity is not adoptable.
             NamedTypeBinding::string_enum("IdentityAdoptionSource", &["Roster", "Worker"]),
@@ -4639,6 +4649,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "HostedOnFirstUse",
                     "AwaitingHeldCreation",
                     "AwaitingHostPreparation",
+                    "ProfileOverride",
                 ],
             ),
             // The downgrade cycle (0.9.11): the purge's verdict, an imported
@@ -4654,6 +4665,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "NotHostOperator",
                     "ChangesNotHeld",
                     "MobNotRunning",
+                    "NothingToPurge",
                 ],
             ),
             NamedTypeBinding::string_enum(

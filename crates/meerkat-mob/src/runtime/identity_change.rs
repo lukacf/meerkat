@@ -771,6 +771,7 @@ impl NotAdoptableReason {
             mob_dsl::IdentityNotAdoptableReason::AwaitingHostPreparation => {
                 Self::AwaitingHostPreparation
             }
+            mob_dsl::IdentityNotAdoptableReason::ProfileOverride => Self::ProfileOverride,
         }
     }
 }

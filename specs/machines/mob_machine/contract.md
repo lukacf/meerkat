@@ -380,6 +380,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
 - `ConcludeObjective`(member_id: AgentIdentity, objective_id: String, outcome: String)
+- `AdmitOwnedEdgeRealization`(edge: WiringEdge)
+- `RestoreOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -605,8 +607,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DeclareOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 - `EndOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity, cause: OwnedEdgeEndCause)
 - `AdmitMemberUnwire`(edge: WiringEdge)
-- `AdoptIdentityIntoStore`(agent_identity: AgentIdentity, source: IdentityAdoptionSource, generation: Option<Generation>)
-- `PurgeIdentityRows`(receipt: IdentityChangeReceiptKind, host_operator: Bool)
+- `AdoptIdentityIntoStore`(agent_identity: AgentIdentity, source: IdentityAdoptionSource, generation: Option<Generation>, spawn_overridden: Bool)
+- `PurgeIdentityRows`(receipt: IdentityChangeReceiptKind, host_operator: Bool, rows_present: Bool)
 - `ImportIdentityRecord`(agent_identity: AgentIdentity, kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, last_session: Option<SessionId>)
 
 ## Signals
@@ -913,6 +915,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `IdentityAdoptionResolved`(agent_identity: AgentIdentity, verdict: IdentityAdoptionVerdict, reason: Option<IdentityNotAdoptableReason>)
 - `IdentityRowsPurgeResolved`(verdict: IdentityRowsPurgeVerdict)
 - `IdentityRecordImportResolved`(agent_identity: AgentIdentity, verdict: IdentityImportVerdict)
+- `OwnedEdgeRealizationResolved`(edge: WiringEdge, verdict: OwnedEdgeRealization)
+- `OwnedIdentityEdgeRestored`(edge: WiringEdge, verdict: OwnedEdgeRestoreVerdict)
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -920,10 +924,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `identity_change_admission`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, changes_held: Bool, consent: IdentityChangeConsentKind, permit_binds: Bool, permit_admits: Bool, host_operator: Bool, grant_current: Bool, spec_current: Bool) -> `IdentityChangeAdmissionKind`
 - `created_identity_record_verdict`(composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, held_by_identity: Bool, held_by_worker: Bool) -> `CreatedIdentityRecordVerdict`
 - `identity_entry_change_verdict`(kind: IdentityEntryChangeKind, composition_authoritative: Bool, changes_held: Bool, name_unreadable: Bool, name_tombstoned: Bool, entry_recorded: Bool, entry_store_owned: Bool, in_flight: Bool, seated: Bool, archived: Bool, preparation_pending: Bool) -> `IdentityEntryChangeVerdict`
-- `identity_adoption_verdict`(source: IdentityAdoptionSource, composition_authoritative: Bool, changes_held: Bool, declared_apply_open: Bool, name_unreadable: Bool, name_tombstoned: Bool, origin_declared: Bool, origin_created: Bool, seated: Bool, generation_current: Bool, unsettled: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool) -> `IdentityAdoptionVerdict`
-- `identity_not_adoptable_reason`(source: IdentityAdoptionSource, origin_declared: Bool, origin_created: Bool, seated: Bool, placed: Bool, hosted_on_first_use: Bool, held_creation: Bool) -> `IdentityNotAdoptableReason`
-- `identity_rows_purge_verdict`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, host_operator: Bool, changes_held: Bool) -> `IdentityRowsPurgeVerdict`
-- `identity_import_verdict`(kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, composition_authoritative: Bool, changes_held: Bool, rows_purged: Bool, unsettled: Bool, rowless: Bool, origin_declared: Bool, origin_created: Bool, name_reserved: Bool, seated: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool) -> `IdentityImportVerdict`
+- `identity_adoption_verdict`(source: IdentityAdoptionSource, composition_authoritative: Bool, changes_held: Bool, declared_apply_open: Bool, name_unreadable: Bool, name_tombstoned: Bool, origin_declared: Bool, origin_created: Bool, seated: Bool, generation_current: Bool, unsettled: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool, spawn_overridden: Bool) -> `IdentityAdoptionVerdict`
+- `identity_not_adoptable_reason`(source: IdentityAdoptionSource, origin_declared: Bool, origin_created: Bool, seated: Bool, placed: Bool, session_bound: Bool, hosted_on_first_use: Bool, held_creation: Bool) -> `IdentityNotAdoptableReason`
+- `identity_rows_purge_verdict`(composition_authoritative: Bool, receipt: IdentityChangeReceiptKind, rows_purged: Bool, host_operator: Bool, changes_held: Bool, rows_present: Bool) -> `IdentityRowsPurgeVerdict`
+- `identity_import_verdict`(kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, composition_authoritative: Bool, changes_held: Bool, rows_purged: Bool, unsettled: Bool, rowless: Bool, origin_declared: Bool, origin_created: Bool, name_reserved: Bool, seated: Bool, placed: Bool, session_bound: Bool, seat_owed: Bool, session_matches: Bool) -> `IdentityImportVerdict`
+- `owned_edge_in_force`(owned: Bool, a_is_an_entry: Bool, b_is_an_entry: Bool) -> `Bool`
 - `created_entry_cause`(preparation_required: Bool, placement: EntryPlacementKind, held_creation: Bool) -> `UnseatedEntryCause`
 - `unlist_entry_verdict`(composition_authoritative: Bool, declared_entry: Bool, in_flight: Bool, seated: Bool) -> `UnlistEntryVerdict`
 - `preparation_construction_verdict`(composition_authoritative: Bool, preparation_pending: Bool, constructed: Bool, construction_open: Bool) -> `PreparationConstructionVerdict`
@@ -20308,7 +20313,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_not_owned`
+  - `edge_not_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Running`
 
@@ -20316,7 +20321,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_not_owned`
+  - `edge_not_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Stopped`
 
@@ -20324,7 +20329,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_not_owned`
+  - `edge_not_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Completed`
 
@@ -20332,7 +20337,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_not_owned`
+  - `edge_not_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Destroyed`
 
@@ -20340,7 +20345,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_owned`
+  - `edge_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Running`
 
@@ -20348,7 +20353,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_owned`
+  - `edge_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Stopped`
 
@@ -20356,7 +20361,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Completed`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_owned`
+  - `edge_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Completed`
 
@@ -20364,7 +20369,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `AdmitMemberUnwire`(edge)
 - Guards:
-  - `edge_owned`
+  - `edge_in_force`
 - Emits: `MemberUnwireAdmissionResolved`
 - To: `Destroyed`
 
@@ -20404,9 +20409,146 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `edge_not_recoverable`
 - To: `Stopped`
 
+### `AdmitOwnedEdgeRealizationRealizeRunning`
+- From: `Running`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Running`
+
+### `AdmitOwnedEdgeRealizationRealizeStopped`
+- From: `Stopped`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Stopped`
+
+### `AdmitOwnedEdgeRealizationRealizeCompleted`
+- From: `Completed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Completed`
+
+### `AdmitOwnedEdgeRealizationRealizeDestroyed`
+- From: `Destroyed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Destroyed`
+
+### `AdmitOwnedEdgeRealizationNotOwnedRunning`
+- From: `Running`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Running`
+
+### `AdmitOwnedEdgeRealizationNotOwnedStopped`
+- From: `Stopped`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Stopped`
+
+### `AdmitOwnedEdgeRealizationNotOwnedCompleted`
+- From: `Completed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Completed`
+
+### `AdmitOwnedEdgeRealizationNotOwnedDestroyed`
+- From: `Destroyed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_not_owned`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Destroyed`
+
+### `AdmitOwnedEdgeRealizationEndNotAnIdentityRunning`
+- From: `Running`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_owned`
+  - `edge_not_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Running`
+
+### `AdmitOwnedEdgeRealizationEndNotAnIdentityStopped`
+- From: `Stopped`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_owned`
+  - `edge_not_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Stopped`
+
+### `AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted`
+- From: `Completed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_owned`
+  - `edge_not_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Completed`
+
+### `AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed`
+- From: `Destroyed`
+- On: `AdmitOwnedEdgeRealization`(edge)
+- Guards:
+  - `edge_owned`
+  - `edge_not_in_force`
+- Emits: `OwnedEdgeRealizationResolved`
+- To: `Destroyed`
+
+### `RestoreOwnedIdentityEdgeRestored`
+- From: `Running`
+- On: `RestoreOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `peer_is_an_identity`
+  - `owner_is_a_store_owned_end`
+  - `edge_not_owned`
+  - `ends_not_removed`
+- Emits: `OwnedIdentityEdgeRestored`
+- To: `Running`
+
+### `RestoreOwnedIdentityEdgeSkipped`
+- From: `Running`
+- On: `RestoreOwnedIdentityEdge`(edge, owner)
+- Guards:
+  - `edge_not_restorable`
+- Emits: `OwnedIdentityEdgeRestored`
+- To: `Running`
+
+### `RestoreOwnedIdentityEdgeMobNotRunningStopped`
+- From: `Stopped`
+- On: `RestoreOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeRestored`
+- To: `Stopped`
+
+### `RestoreOwnedIdentityEdgeMobNotRunningCompleted`
+- From: `Completed`
+- On: `RestoreOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeRestored`
+- To: `Completed`
+
+### `RestoreOwnedIdentityEdgeMobNotRunningDestroyed`
+- From: `Destroyed`
+- On: `RestoreOwnedIdentityEdge`(edge, owner)
+- Emits: `OwnedIdentityEdgeRestored`
+- To: `Destroyed`
+
 ### `AdoptIdentityIntoStoreAdopted`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_adopted`
 - Emits: `IdentityAdoptionResolved`
@@ -20414,7 +20556,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreNotAdoptable`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_not_adoptable`
 - Emits: `IdentityAdoptionResolved`
@@ -20422,7 +20564,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStorePredecessorMismatch`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_predecessor_mismatch`
 - Emits: `IdentityAdoptionResolved`
@@ -20430,7 +20572,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreAdmissionUnsettled`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_admission_unsettled`
 - Emits: `IdentityAdoptionResolved`
@@ -20438,7 +20580,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreDeclaredApplyOpen`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_declared_apply_open`
 - Emits: `IdentityAdoptionResolved`
@@ -20446,7 +20588,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreNameUnreadable`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_name_unreadable`
 - Emits: `IdentityAdoptionResolved`
@@ -20454,7 +20596,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreNameTombstoned`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_name_tombstoned`
 - Emits: `IdentityAdoptionResolved`
@@ -20462,7 +20604,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreNonAuthoritative`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_non_authoritative`
 - Emits: `IdentityAdoptionResolved`
@@ -20470,7 +20612,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreChangesHeld`
 - From: `Running`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Guards:
   - `verdict_changes_held`
 - Emits: `IdentityAdoptionResolved`
@@ -20478,19 +20620,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptIdentityIntoStoreMobNotRunningStopped`
 - From: `Stopped`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Emits: `IdentityAdoptionResolved`
 - To: `Stopped`
 
 ### `AdoptIdentityIntoStoreMobNotRunningCompleted`
 - From: `Completed`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Emits: `IdentityAdoptionResolved`
 - To: `Completed`
 
 ### `AdoptIdentityIntoStoreMobNotRunningDestroyed`
 - From: `Destroyed`
-- On: `AdoptIdentityIntoStore`(agent_identity, source, generation)
+- On: `AdoptIdentityIntoStore`(agent_identity, source, generation, spawn_overridden)
 - Emits: `IdentityAdoptionResolved`
 - To: `Destroyed`
 
@@ -20504,7 +20646,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsPurged`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_purged`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20512,7 +20654,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsNonAuthoritative`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_non_authoritative`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20520,7 +20662,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsReplayed`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_replayed`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20528,7 +20670,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsOperationReused`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_operation_reused`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20536,7 +20678,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsRowsPurged`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_rows_purged`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20544,7 +20686,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsNotHostOperator`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_not_host_operator`
 - Emits: `IdentityRowsPurgeResolved`
@@ -20552,27 +20694,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `PurgeIdentityRowsChangesNotHeld`
 - From: `Running`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Guards:
   - `purge_changes_not_held`
 - Emits: `IdentityRowsPurgeResolved`
 - To: `Running`
 
+### `PurgeIdentityRowsNothingToPurge`
+- From: `Running`
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
+- Guards:
+  - `purge_nothing_to_purge`
+- Emits: `IdentityRowsPurgeResolved`
+- To: `Running`
+
 ### `PurgeIdentityRowsMobNotRunningStopped`
 - From: `Stopped`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Emits: `IdentityRowsPurgeResolved`
 - To: `Stopped`
 
 ### `PurgeIdentityRowsMobNotRunningCompleted`
 - From: `Completed`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Emits: `IdentityRowsPurgeResolved`
 - To: `Completed`
 
 ### `PurgeIdentityRowsMobNotRunningDestroyed`
 - From: `Destroyed`
-- On: `PurgeIdentityRows`(receipt, host_operator)
+- On: `PurgeIdentityRows`(receipt, host_operator, rows_present)
 - Emits: `IdentityRowsPurgeResolved`
 - To: `Destroyed`
 
@@ -20736,9 +20886,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects
 - `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
 - `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
-- `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat realizes it again; a plain unwire of an owned edge is refused; and the boot recovers each owned edge from its owner's row
-- `mob_identity_adoption_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/adoption.rs` — MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason
-- `mob_identity_downgrade_cycle_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_set.rs` — MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps
+- `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an owned edge is in force while both its ends are identity entries, and only an edge in force is realized by a seat, a spawn or a realization pass and refused a plain unwire, so a worker that takes an unlisted end's free name is no end of it; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat or a re-listing realizes it again; and the boot recovers each owned edge from its owner's row, as an import restores the edges of the rows it restores
+- `mob_identity_adoption_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/adoption.rs` — MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, spawned with no profile or model override, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason
+- `mob_identity_downgrade_cycle_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_set.rs` — MobMachine downgrade cycle realized by the shell: the host operator's purge, under held identity changes, of a mob whose scan reads rows, removes the mob's rows of schema version 2 and later in one store transaction only when their digest is the export's, and never a session or a journal row, after which every identity change is refused until the mob restarts; a start whose scan reads no row of a Created entry's name reserves the name as unreadable and rowless, so nothing acts on it and no seat binds it; and the host operator's import restores each exported record (a seated local member in place, a plain one only on the session the record names, an entry owed its seat on its archived session, a pending or archived record as recorded, a tombstone, and a roster's adopted identity by the adoption's step), writing the rows, the binding rows and the receipt in one store transaction and reporting a name another holder keeps
 - `mob_identity_preparation_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_preparation.rs` — MobMachine host preparation realized by the shell: an identity never seated whose host's rule requires its preparation is unseated for it (a roster-owned one by the declared apply, derived again at each apply, a store-owned one by its create, from its row at a start), and a delivery to it is refused retryable; a settle without a construction commits its receipt and its row and leaves the entry owed its seat, which the shell seats Dormant from its spec or embodies for an owed kickoff, and a `constructed` preparation refuses that settle; a host asks for a held construction of the identity, an attempt the mob owns whose spawn ladder alone may open for the entry, and a settle naming that attempt, decided before its deadline and binding the identity's spec, accepts its activation, journaled by the settle's receipt; from then on no abort, expiry or newer attempt replaces it, and only the membership commit that publishes the construction or its failed publication ends it; an abort, the deadline or a refused construction ends a held attempt with the entry still pending, and an identity holds at most one attempt, emitting the construction resolved, settle resolved and construction ended effects
 - `mob_identity_entry_respawn_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine refuses a fresh-life respawn of an identity entry's member in every phase an entry lives in, realized by the actor: the respawn routes on that verdict, respawning an entry's member on its own session, and the retire-then-spawn admission answers the refusal typed, emitting the respawn refused effect
 - `mob_rotation_target_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/dormant_seat.rs` — MobMachine rotation targets realized by the actor: a same-session successor starts its retirement archive-only on the member's kept binding with its rotation recorded in one step, and its terminal seats the next incarnation Dormant on the same session after the shell released the runtime and kept the session; a restart records a rotation again from its retirement's start row and re-drives it; the intent and its target are recorded together, and a same-session rotation keeps its binding

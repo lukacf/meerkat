@@ -432,6 +432,12 @@ them.
   `thinking_binding_controls`), so their model profiles' `beta_headers`
   show it.
 
+- `meerkat-models`: `ANTHROPIC_THINKING_BINDING_CONTROLS_BETA` (also under
+  `meerkat_models::capabilities`) is the `anthropic-beta` header of
+  Anthropic's thinking-block binding controls, the one the rows that list
+  the beta carry; `meerkat-anthropic` sends it for a model id with no
+  catalog row.
+
 - `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
   `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
   host-plane operator releases a work item's claim it does not own, bound
@@ -519,12 +525,13 @@ them.
   which Anthropic does not hold to thinking-block binding, a replayed
   thinking block whose system prompt, tools or earlier messages changed is
   now dropped by the API (and logged) instead of reaching the model, since
-  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
-  the `drop_block` control on every account (see Fixed). A request that
-  forces a tool call with thinking omitted keeps its previous shape, with no
-  thinking and no control: the client refuses a forced tool call beside
-  explicit thinking, and a forced call skips thinking on the models that
-  accept one.
+  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5, and
+  requests that configure `adaptive` or `enabled` thinking for a model id
+  with no catalog row, carry the `drop_block` control on every account (see
+  Fixed). A request that forces a tool call with thinking omitted keeps its
+  previous shape, with no thinking and no control: the client refuses a
+  forced tool call beside explicit thinking, and a forced call skips
+  thinking on the models that accept one.
 
 - GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
   request continues the agent's own work (after a tool result or the
@@ -721,11 +728,21 @@ them.
   thinking omitted, beside `{"type": "adaptive"}`, the model's own default,
   which turns nothing on since each of these models thinks by default. The
   control is never sent beside `between_tools` or `disabled`, nor for a
-  model whose default is no thinking or an uncatalogued model id. A
-  non-empty `input_transformations` report (the blocks the API dropped or
-  let through) is logged as a warning that names each block and its reason:
-  the model answered without that reasoning, and the prompt cache restarts
-  at the first dropped block.
+  catalogued model whose row does not list the beta, such as one whose
+  default is no thinking. A non-empty `input_transformations` report (the
+  blocks the API dropped or let through) is logged as a warning that names
+  each block and its reason: the model answered without that reasoning, and
+  the prompt cache restarts at the first dropped block.
+
+- `meerkat-anthropic`: a model id with no catalog row (Claude Mythos 5.1, a
+  dated snapshot, a proxy alias, a `[models.<id>]` entry) whose model checks
+  replayed thinking blocks no longer fails after a mid-session tool change
+  on an account that enforces thinking-block binding, when its requests
+  configure `adaptive` or `enabled` thinking (a legacy budget lowers to
+  `enabled`): they carry the same `drop_block` control and beta header, on
+  every request of the session. With thinking omitted such an id still gets
+  no control, since no catalog row names its default (see Known
+  limitations).
 
 - `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
   claims forced tool choice support. Anthropic answers 400 to `tool_choice`
@@ -980,6 +997,13 @@ them.
   Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
+
+- `meerkat-anthropic`: a model id with no catalog row gets the thinking-block
+  binding control only beside configured `adaptive` or `enabled` thinking.
+  With thinking omitted it gets none, since no catalog row names its
+  default, so on an account that enforces thinking-block binding such a
+  session still fails after a mid-session tool change when its model checks
+  replayed thinking blocks. Configure thinking for such a model.
 
 - `meerkat-runtime`: a takeover acquire that a host store grants after the
   writer gave up on it, and after the writer's next successful acquire,

@@ -985,13 +985,12 @@ async def test_public_runtime_config_preserves_authenticated_revision_and_policy
     assert lifecycle == ["connect", "front_close", "shutdown", "pool_close", "tools_close"]
 
 
-async def test_console_access_lives_in_private_state_and_is_seeded_once(tmp_path, monkeypatch):
-    """The console's Access panel writes a live copy in private state.
+def console_access_host(tmp_path, monkeypatch):
+    """A generated host with a packaged config/access.toml and inert runtime parts.
 
-    The package's config/access.toml stays the accepted bytes Forge checks.
-    The first start seeds the live copy; later starts keep the console's edits.
+    Returns one start of that host, the live access copy, the packaged bytes
+    and every runtime configuration the starts built.
     """
-    import stat
     import meerkat_mobkit
 
     module = load_host(monkeypatch, tmp_path)
@@ -1045,8 +1044,22 @@ async def test_console_access_lives_in_private_state_and_is_seeded_once(tmp_path
     monkeypatch.setitem(sys.modules, "storage_setup", SimpleNamespace(prepare_storage=prepare_storage))
     args = SimpleNamespace(connections_check=False, activate_revision=7, definition_revision=False,
                            list_flows=False, run_flow=None, smoke=False)
-    await module.run(spec, args)
-    live = tmp_path / ".mobkit/console-access.toml"
+
+    async def start():
+        await module.run(spec, args)
+    return start, tmp_path / ".mobkit/console-access.toml", packaged, configs
+
+
+async def test_console_access_lives_in_private_state_and_is_seeded_once(tmp_path, monkeypatch):
+    """The console's Access panel writes a live copy in private state.
+
+    The package's config/access.toml stays the accepted bytes Forge checks.
+    The first start seeds the live copy; later starts keep the console's edits.
+    """
+    import stat
+
+    start, live, packaged, configs = console_access_host(tmp_path, monkeypatch)
+    await start()
     assert configs[-1].access_config_path == str(live)
     assert live.read_text() == packaged and stat.S_IMODE(live.stat().st_mode) == 0o600
     # The console's Access panel adds a second administrator to its live copy.
@@ -1054,9 +1067,52 @@ async def test_console_access_lives_in_private_state_and_is_seeded_once(tmp_path
               "# hand edits are preserved until the next console save.\n\n"
               'enabled = true\nadmins = ["operator", "second@example.test"]\nrules = []\n\n[groups]\n')
     live.write_text(edited)
-    await module.run(spec, args)
+    await start()
     assert configs[-1].access_config_path == str(live) and live.read_text() == edited
     assert (tmp_path / "config/access.toml").read_text() == packaged
+
+
+async def test_an_empty_live_access_copy_is_seeded_again_so_access_control_stays_on(tmp_path, monkeypatch, capsys):
+    """Only an interrupted first seed leaves an empty live copy: the console's
+    own saves always write. An empty file would load as access control off,
+    with no administrator left to turn it on, so the next start seeds it again.
+    """
+    import stat
+
+    start, live, packaged, configs = console_access_host(tmp_path, monkeypatch)
+    await start()
+    capsys.readouterr()
+    live.write_bytes(b"")
+    await start()
+    assert configs[-1].access_config_path == str(live)
+    assert live.read_text() == packaged and stat.S_IMODE(live.stat().st_mode) == 0o600
+    assert "WARN" in capsys.readouterr().err
+    assert (tmp_path / "config/access.toml").read_text() == packaged
+
+
+def test_a_start_killed_while_seeding_never_publishes_a_half_written_live_access_copy(tmp_path):
+    """A start killed between creating the seed and writing it leaves no live copy."""
+    import signal
+    from launchkit.templates_v2 import console_auth
+    packaged = b'enabled = true\nadmins = ["operator"]\nrules = []\n\n[groups]\n'
+    root = tmp_path / "application"
+    (root / "config").mkdir(parents=True)
+    (root / "config/access.toml").write_bytes(packaged)
+    script = tmp_path / "killed_seed.py"
+    script.write_text(
+        "import os, signal, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+        "from launchkit.templates_v2 import console_auth\n"
+        "def killed(*args, **kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "os.fdopen = killed\n"
+        f"console_auth.console_access_file({str(root)!r})\n")
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    assert result.returncode == -signal.SIGKILL, result.stderr
+    live = root / ".mobkit/console-access.toml"
+    assert not live.exists() and not live.is_symlink()
+    # The next start seeds the whole file.
+    assert console_auth.console_access_file(root) == live and live.read_bytes() == packaged
 
 
 DYNAMIC_APPLICATION = '''import copy

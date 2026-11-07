@@ -1146,6 +1146,79 @@ async def test_the_review_starts_at_an_administrators_first_login(tmp_path, revi
         await console.close()
 
 
+# P3-A: an administrator who opens the review starts it, when the start at
+# sign-in could not.
+async def test_the_review_starts_when_an_administrator_opens_it_after_a_failed_start(tmp_path, reviews):
+    native = ConsoleNative(admins=(ALICE,))
+
+    def unavailable(identity):
+        raise httpx.ConnectError("the console is still starting")
+    native.whoami_answer = unavailable
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            await started_reviews(console)
+            assert reviews == []
+            native.whoami_answer = None
+            state = await alice.get("/console/forge/controller-review/state")
+            assert state.status_code == 200 and state.json()["status"] == "prompt"
+            assert len(reviews) == 1 and reviews[0].started == 1
+    finally:
+        await console.close()
+
+
+async def test_the_review_starts_for_an_administrator_who_signed_in_during_another_check(
+        tmp_path, reviews, monkeypatch):
+    native = ConsoleNative(admins=(BOB,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    checking, release = asyncio.Event(), asyncio.Event()
+    original = console._console_administrator
+
+    async def slow_for_carol(login):
+        if login.principal == CAROL:
+            checking.set()
+            await release.wait()
+        return await original(login)
+    monkeypatch.setattr(console, "_console_administrator", slow_for_carol)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as carol, browser(app, console) as bob:
+            await sign_in(carol, console, CAROL, CAROL_PASSWORD)
+            await checking.wait()
+            # Bob signs in while Carol's check holds the start.
+            await sign_in(bob, console, BOB, BOB_PASSWORD)
+            release.set()
+            await started_reviews(console)
+            assert reviews == []
+            state = await bob.get("/console/forge/controller-review/state")
+            assert state.status_code == 200 and state.json()["status"] == "prompt"
+            assert len(reviews) == 1 and reviews[0].login_scope_id == login_of(bob, console).login_scope_id
+    finally:
+        await console.close()
+
+
+# P3-C: a native callback is never mounted on a route the console owns, the
+# consent routes included. Plain stand-ins: no toolkit is needed.
+@pytest.mark.parametrize("path,mounted", [
+    ("/host/toolkit/consent/decide", False), ("/host/toolkit/consent/read", False),
+    ("/host/toolkit/consent", False), ("/host/toolkit/consent/", False),
+    ("/host/toolkit/setup/callback", False), ("/login", False), ("/mcp/callback", True)])
+def test_native_callbacks_are_never_mounted_on_the_consoles_own_routes(tmp_path, path, mounted):
+    console = ConsoleFront(tmp_path, 8855, OPERATOR, OPERATOR_PASSWORD, runtime_namespace="meta",
+                           public_origin="https://console.example.test")
+    login = SimpleNamespace(mcp_attempts={})
+    attempt = SimpleNamespace(client=None, binding=object())
+    if mounted:
+        console._mount_mcp(login, attempt, console.origin + path)
+        assert console._mcp_routes[path] == (console.origin + path, attempt.binding)
+    else:
+        with pytest.raises(ValueError, match="cannot be mounted"):
+            console._mount_mcp(login, attempt, console.origin + path)
+        assert path not in console._mcp_routes
+
+
 @pytest.mark.parametrize("answer", ["transport", "not-served", "malformed"])
 async def test_the_review_is_unavailable_when_the_console_cannot_tell(tmp_path, reviews, answer):
     native = ConsoleNative(admins=(ALICE,))

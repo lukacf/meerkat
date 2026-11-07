@@ -16,6 +16,8 @@ pub mod gateway_bridges;
 pub(crate) mod held_bootstrap;
 pub mod local_lease;
 pub mod local_store;
+#[cfg(test)]
+mod operator_memory_delivery_tests;
 pub mod orchestrator;
 pub mod runtime;
 mod types;

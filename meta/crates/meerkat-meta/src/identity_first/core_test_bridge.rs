@@ -13,7 +13,8 @@
 //! built with [`CoreReadsBridge::with_host_human_input`] takes local host
 //! human input on the live member's session, and one built with
 //! [`CoreReadsBridge::with_deliveries`] admits a delivery to a live member on
-//! its current session, as Core's delivery does.
+//! its current session, as Core's delivery does, and keeps each delivery it
+//! admits as Meta prepared it.
 //! [`CoreReadsBridge::fail_history_reads`] places a fault on chosen reads of
 //! Core's member history, and [`CoreReadsBridge::refuse_release_of`] has
 //! Core refuse a member's release, retryably, as Core does while the member
@@ -205,6 +206,8 @@ pub(crate) struct CoreReadsBridge {
     delivers: bool,
     /// The incarnation each delivery this bridge admitted went to, in order.
     delivered: Mutex<Vec<AgentRuntimeId>>,
+    /// Each delivery this bridge admitted, as Meta prepared it, in order.
+    deliveries: Mutex<Vec<BridgeDelivery>>,
     /// The identities whose release Core refuses, retryably
     /// ([`Self::refuse_release_of`]). Empty: every release goes ahead.
     release_refusals: Mutex<BTreeSet<AgentIdentity>>,
@@ -252,8 +255,8 @@ impl CoreReadsBridge {
 
     /// A bridge that also admits a delivery to a live member on its current
     /// session, as Core's delivery does, and records the incarnation each
-    /// delivery went to. A delivery to an incarnation that is not its
-    /// identity's live member is refused.
+    /// delivery went to and the delivery itself. A delivery to an
+    /// incarnation that is not its identity's live member is refused.
     pub(crate) fn with_deliveries() -> Self {
         Self {
             delivers: true,
@@ -264,6 +267,15 @@ impl CoreReadsBridge {
     /// The incarnation each delivery this bridge admitted went to, in order.
     pub(crate) fn delivered(&self) -> Vec<AgentRuntimeId> {
         self.delivered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Each delivery this bridge admitted, as Meta prepared it (its content,
+    /// injected context and every other field), in order.
+    pub(crate) fn deliveries(&self) -> Vec<BridgeDelivery> {
+        self.deliveries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -463,7 +475,7 @@ impl SessionBridge for CoreReadsBridge {
     async fn deliver_admitted(
         &self,
         runtime_id: &AgentRuntimeId,
-        _delivery: BridgeDelivery,
+        delivery: BridgeDelivery,
     ) -> Result<SessionId, BridgeError> {
         if !self.delivers {
             return Err(BridgeError::Unsupported {
@@ -477,6 +489,10 @@ impl SessionBridge for CoreReadsBridge {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(runtime_id.clone());
+                self.deliveries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(delivery);
                 Ok(session_id)
             }
             _ => Err(BridgeError::Mob(format!(

@@ -69,6 +69,9 @@ test("ready replies permit only the exact credential-free observed loopback Cons
   // A Console with named accounts is an authenticated Console too.
   assert.equal(remoteBrowserReplyCurrent({ ...ready, scope: { ...closed.scope, authentication: "local-accounts" } },
     receipt, guide, build), true);
+  // So is one whose people sign in at an identity provider.
+  assert.equal(remoteBrowserReplyCurrent({ ...ready, scope: { ...closed.scope, authentication: "oidc" } },
+    receipt, guide, build), true);
   for (const changed of [{ guide_id: "another" }, { guide_version: 5 }, { build_id: "another" },
     { deployment_id: otherId }, { entry_id: "custom-ui" }, { accepted_source_digest: "e".repeat(64) },
     { package_sha256: "e".repeat(64) }, { transferred_source_digest: "e".repeat(64) },
@@ -262,6 +265,15 @@ test("a ready Console with named accounts tells each person to use their own acc
     assert.ok(link());
     assert.match(document.body.textContent, /Sign in with your own account name and password/);
     assert.doesNotMatch(document.body.textContent, /Sign in with the Console password you chose/);
+  });
+});
+
+test("a ready OIDC Console sends each person to the identity provider", async () => {
+  const oidc = { ...ready, scope: { ...ready.scope, authentication: "oidc" } };
+  await mountedAccess(oidc, async ({ document, link }) => {
+    assert.ok(link());
+    assert.match(document.body.textContent, /Sign in with your account at the identity provider/);
+    assert.doesNotMatch(document.body.textContent, /Console password|account name and password/);
   });
 });
 

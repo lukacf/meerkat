@@ -194,6 +194,19 @@ test("remote Console hints accept named accounts with the installation's own cre
   assert.equal(remotePrivateOptions({ ...receipt, fields: receipt.fields.slice(1) }), null);
 });
 
+test("remote Console hints accept OIDC sign-in with the operator's email field", () => {
+  const fields = [
+    { key: "CONSOLE_USER_ID", label: "Console operator email", required: true, secret: false },
+    { key: "CONSOLE_OIDC_CLIENT_SECRET", label: "OIDC client secret", required: true, secret: true },
+  ];
+  const receipt = { ...ready, fields, console_scope: { authentication: "oidc", health_scope: "native-bootstrap-and-console" } };
+  assert.deepEqual(remotePrivateOptions(receipt).console_scope, { authentication: "oidc" });
+  const valid = { CONSOLE_USER_ID: "operator@example.test", CONSOLE_OIDC_CLIENT_SECRET: "private client secret" };
+  assert.equal(remoteCanInstall(receipt, options, checked, guide, valid), true);
+  assert.equal(remoteCanInstall(receipt, options, checked, guide, { ...valid, CONSOLE_USER_ID: "operator" }), false);
+  assert.equal(remotePrivateOptions({ ...receipt, fields: receipt.fields.slice(1) }), null);
+});
+
 test("initial Console port selection needs exact current source and never-admitted custody", () => {
   assert.equal(remoteSetupConsolePort(initialPortSetup, portOptions, checked, guide), 18088);
   assert.equal(remoteSetupConsolePortValue(initialPortSetup, portOptions, checked, guide, {}), "18088");

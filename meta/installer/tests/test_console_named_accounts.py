@@ -1204,7 +1204,8 @@ async def test_the_review_starts_for_an_administrator_who_signed_in_during_anoth
 @pytest.mark.parametrize("path,mounted", [
     ("/host/toolkit/consent/decide", False), ("/host/toolkit/consent/read", False),
     ("/host/toolkit/consent", False), ("/host/toolkit/consent/", False),
-    ("/host/toolkit/setup/callback", False), ("/login", False), ("/mcp/callback", True)])
+    ("/host/toolkit/setup/callback", False), ("/login", False), ("/login/callback", False),
+    ("/mcp/callback", True)])
 def test_native_callbacks_are_never_mounted_on_the_consoles_own_routes(tmp_path, path, mounted):
     console = ConsoleFront(tmp_path, 8855, OPERATOR, OPERATOR_PASSWORD, runtime_namespace="meta",
                            public_origin="https://console.example.test")

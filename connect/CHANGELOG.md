@@ -14,6 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   force. Such an answer now withdraws the earlier proposal, as a changed
   answer already did, so a selection made from it no longer applies.
 
+### Security
+
+- `zip` is updated from 2.4.2 to 9.0.4 for RUSTSEC-2026-0367,
+  RUSTSEC-2026-0368, RUSTSEC-2026-0369 and RUSTSEC-2026-0429. They affect
+  `zip`'s archive extraction functions, which Connect never calls: it reads
+  MCPB bundles with its own bounded ZIP32 reader. `zip` is linked only
+  through `toolkit-package`'s `local-artifacts` feature, which
+  `toolkit-mcpb-install` uses; `meerkat-connect` and `toolkit_gateway` do
+  not link it.
+
 ### Known limitations
 
 - Provider setup and first-target setup read a realm's explicit tables only,

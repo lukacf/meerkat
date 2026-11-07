@@ -41,7 +41,7 @@ use meerkat_authorization_contracts::{constraints::DelegationDepth, grant::Grant
 use meerkat_mobkit::identity_first::{
     BoundGovernedInput, GovernedBindContext, GovernedBindError, GovernedEntryFence,
     GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntimeError, TurnTracking,
+    GovernedInputError, GovernedSettlement, GovernedWaitBudget, IdentityRuntimeError, TurnTracking,
 };
 use meerkat_runtime::{Input, PromptInput};
 use meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin;
@@ -1834,6 +1834,7 @@ impl PreparedWorkflowLaunch {
                     source,
                     route: &route,
                     review: &review_custody,
+                    dispatch_deadline: dispatch_deadline(dispatch),
                 };
                 self.submit_launch(source, dispatch, &mut binders).await
             })
@@ -1846,19 +1847,22 @@ impl PreparedWorkflowLaunch {
         source: &Arc<PrivateOriginals>,
         route: &PrivateOriginalRoute,
     ) -> Result<Arc<WorkflowBinder>, PrivateOriginalError> {
-        self.binder_with_review(source, route, ReviewCustody::default(), None)
+        self.binder_with_review(source, route, ReviewCustody::default(), None, None)
             .await
     }
 
     /// A fresh workflow binder. `replay_of` names a refused attempt's
     /// retained first custody when this binder replays that attempt: it then
-    /// binds only by rebinding exactly that custody.
+    /// binds only by rebinding exactly that custody. `dispatch_deadline` is
+    /// when the launch's dispatch ends ([`dispatch_deadline`]): the binder's
+    /// "not now" answers are waited out only until then.
     async fn binder_with_review(
         self: &Arc<Self>,
         source: &Arc<PrivateOriginals>,
         route: &PrivateOriginalRoute,
         review_custody: ReviewCustody,
         replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
+        dispatch_deadline: Option<tokio::time::Instant>,
     ) -> Result<Arc<WorkflowBinder>, PrivateOriginalError> {
         let delegate = OriginalBinder {
             source: source.clone(),
@@ -1883,6 +1887,7 @@ impl PreparedWorkflowLaunch {
             planning: self.clone(),
             replay_of,
             attempt: Arc::new(LaunchAttempt::default()),
+            dispatch_deadline,
             #[cfg(any(test, feature = "test-support"))]
             launch_diagnostics: Arc::new(WorkflowLaunchDiagnostics::default()),
         }))
@@ -2151,13 +2156,26 @@ trait LaunchBinders: Send {
     ) -> Result<LaunchBinding, PrivateOriginalError>;
 }
 
+/// When a launch's dispatch ends: its request deadline, or the end of its
+/// remaining tool time when that comes first. `None` without a dispatch.
+fn dispatch_deadline(
+    dispatch: Option<(&meerkat_core::ToolDispatchContext, tokio::time::Instant)>,
+) -> Option<tokio::time::Instant> {
+    dispatch.map(|(context, deadline)| {
+        context.remaining_tool_time().map_or(deadline, |tool| {
+            deadline.min(tokio::time::Instant::now() + tool)
+        })
+    })
+}
+
 /// The product's launch: a fresh workflow binder per attempt, under the
-/// same review custody and route.
+/// same review custody and route, and the launch's dispatch deadline.
 struct ReviewedBinders<'a> {
     launch: &'a Arc<PreparedWorkflowLaunch>,
     source: &'a Arc<PrivateOriginals>,
     route: &'a PrivateOriginalRoute,
     review: &'a ReviewCustody,
+    dispatch_deadline: Option<tokio::time::Instant>,
 }
 #[async_trait::async_trait]
 impl LaunchBinders for ReviewedBinders<'_> {
@@ -2167,7 +2185,13 @@ impl LaunchBinders for ReviewedBinders<'_> {
     ) -> Result<LaunchBinding, PrivateOriginalError> {
         let workflow = self
             .launch
-            .binder_with_review(self.source, self.route, self.review.clone(), replay_of)
+            .binder_with_review(
+                self.source,
+                self.route,
+                self.review.clone(),
+                replay_of,
+                self.dispatch_deadline,
+            )
             .await?;
         Ok(LaunchBinding {
             binder: self.review.bind(workflow.clone()),
@@ -2199,6 +2223,8 @@ struct WorkflowBinder {
     /// The refused attempt's retained first custody this binder replays.
     replay_of: Option<std::sync::Weak<PendingOriginalAdmission>>,
     attempt: Arc<LaunchAttempt>,
+    /// When the launch's dispatch ends; `None` without a dispatch.
+    dispatch_deadline: Option<tokio::time::Instant>,
     #[cfg(any(test, feature = "test-support"))]
     launch_diagnostics: Arc<WorkflowLaunchDiagnostics>,
 }
@@ -2241,6 +2267,16 @@ impl GovernedInputBinder for WorkflowBinder {
         self.bind_launch(context, input)
             .await
             .map_err(crate::private_originals::governed_submit::BindFailure::into_error)
+    }
+    /// The launch's dispatch deadline bounds its waits as well, as every
+    /// other wait of the launch, within Core's owner-change bound.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        GovernedWaitBudget::Bounded(self.dispatch_deadline.map_or(bound, |deadline| {
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(bound)
+        }))
     }
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {
         self.delegate.retain_unresolved(settlement, detail);

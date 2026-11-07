@@ -266,10 +266,12 @@ pub(crate) fn wait_at<T>(site: &'static str, wait: impl FnOnce() -> T) -> T {
 }
 
 /// Whether a binder's input check may answer "not now" here instead of
-/// waiting or answering what its door shipped: before the attempt's first
-/// durable effect.
+/// waiting or answering what its door shipped: inside a governed bind
+/// attempt, before its first durable effect. Called outside one (a caller
+/// that entered no section, or another section), it keeps its shipped form.
 pub(crate) fn may_answer_not_now() -> bool {
-    meerkat_core::protected_section::effect_recorded().is_none()
+    use meerkat_core::protected_section::{ProtectedSection, current, effect_recorded};
+    current() == Some(ProtectedSection::GovernedBind) && effect_recorded().is_none()
 }
 
 /// Waiting calls the source guard knows inside the protected impls

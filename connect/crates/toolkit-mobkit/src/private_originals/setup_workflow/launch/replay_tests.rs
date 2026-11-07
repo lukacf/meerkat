@@ -145,6 +145,7 @@ struct InjectedBinders {
     shared: Arc<Injected>,
     waiting: tokio::sync::mpsc::UnboundedSender<LaunchReplay>,
     record: bool,
+    dispatch_deadline: Option<tokio::time::Instant>,
 }
 #[async_trait::async_trait]
 impl LaunchBinders for InjectedBinders {
@@ -154,7 +155,13 @@ impl LaunchBinders for InjectedBinders {
     ) -> Result<LaunchBinding, PrivateOriginalError> {
         let inner = self
             .prepared
-            .binder_with_review(&self.source, &self.route, self.review.clone(), replay_of)
+            .binder_with_review(
+                &self.source,
+                &self.route,
+                self.review.clone(),
+                replay_of,
+                self.dispatch_deadline,
+            )
             .await?;
         inner
             .attempt
@@ -275,6 +282,7 @@ impl Launch {
             shared: self.shared.clone(),
             waiting: self.waiting.clone(),
             record,
+            dispatch_deadline: dispatch_deadline(dispatch),
         };
         self.review
             .retain_io(
@@ -973,6 +981,7 @@ async fn unselected_recovery_never_replays_or_stages_replay_custody() {
                     &launch.route,
                     witness.review.clone(),
                     Some(refused),
+                    dispatch_deadline(Some((&context, deadline))),
                 )
                 .await
                 .unwrap();

@@ -40,6 +40,8 @@ export function ConversationApprovals({ approvalSnapshot, approvalIdentity, onAp
     Boolean(request.origin?.interactionId) === Boolean(interactionIds)
     && approvalMatchesConversation(request, { identity: approvalIdentity, conversationId, interactionIds }));
   const readOnly = approvalSnapshot.readOnly || !onApprovalDecision;
+  const readOnlyReason = approvalSnapshot.readOnly ? approvalSnapshot.readOnlyReason : undefined;
   return <>{requests.map((request) => <ApprovalCard key={request.pendingId} request={request} resourceStatus={approvalSnapshot.status} decision={approvalSnapshot.decisions[request.pendingId]} readOnly={readOnly}
+    readOnlyReason={readOnlyReason}
     decideLinks={readOnly ? hostDecideLinks(decideSources, request.pendingId) : undefined} onDecide={onApprovalDecision ?? (() => {})} />)}</>;
 }

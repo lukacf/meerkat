@@ -197,11 +197,11 @@ async fn principal_revoke_ends_all_logins() {
     for login in &logins {
         assert!(accepted(&app, login).await, "signed in before the revoke");
     }
-    // On a console without an access controller any caller a token
-    // identified may revoke.
+    // On a console without an access controller a caller revokes only its
+    // own sessions: one login of the principal revokes them all.
     let (status, revoked) = console_answer(
         &app,
-        Some(&robot),
+        Some(&logins[0]),
         "meta/console/revoke_sessions",
         json!({ "principal": BOB }),
     )

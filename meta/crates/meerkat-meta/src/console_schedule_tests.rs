@@ -432,9 +432,9 @@ fn enforced(
     })?)
 }
 
-/// The list is a read of the agent and every write a send to it; the
-/// writes are console mutations a read-only console and a candidate launch
-/// refuse.
+/// The list is a read of the agent and every write a send to it that also
+/// needs `schedule.manage`; the writes are console mutations a read-only
+/// console and a candidate launch refuse.
 #[test]
 fn console_schedules_are_gated_as_view_and_send_on_their_agent() {
     let params = json!({ "identity": "alpha", "schedule_id": "not-read-here" });
@@ -447,7 +447,10 @@ fn console_schedules_are_gated_as_view_and_send_on_their_agent() {
     for method in schedules::SCHEDULE_WRITE_METHODS {
         assert_eq!(
             console_rpc_access_requirements(method, &params),
-            Some(vec![(ACTION_AGENT_SEND, Some("alpha".to_string()))]),
+            Some(vec![
+                (ACTION_AGENT_SEND, Some("alpha".to_string())),
+                (ACTION_SCHEDULE_MANAGE, Some("alpha".to_string())),
+            ]),
             "{method}"
         );
         assert!(is_console_mutating_rpc_method(method), "{method}");
@@ -550,8 +553,8 @@ async fn the_family_is_offered_where_a_schedule_service_is_attached() -> TestRes
 }
 
 /// A console schedule is created as a send to its agent by its caller,
-/// listed under that agent only, changed into the changer's send, paused,
-/// resumed as the resumer's send, and deleted.
+/// listed under that agent only, taken over by another caller's change,
+/// paused, taken back by a resume, and deleted.
 #[tokio::test]
 async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete() -> TestResult {
     let fixture = fixture(
@@ -630,7 +633,8 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
     .await;
     assert_eq!(other["result"]["schedules"], json!([]), "{other:#?}");
 
-    // A change is the changer's send; what it does not name stays.
+    // Another caller's change takes the schedule over; what it does not
+    // name stays.
     let updated = call(
         &fixture,
         Caller::human(FRANK),
@@ -639,6 +643,7 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
             "identity": "alpha",
             "schedule_id": schedule_id,
             "content": "Post the evening summary.",
+            "take_over_sender": true,
         }),
     )
     .await;
@@ -676,12 +681,12 @@ async fn a_console_schedule_lives_through_create_update_pause_resume_and_delete(
         "a pause keeps the sender"
     );
 
-    // A resume is the resumer's send.
+    // A resume by another caller takes the schedule over too.
     let resumed = call(
         &fixture,
         Caller::human(ERIN),
         "meta/schedule/resume",
-        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+        json!({ "identity": "alpha", "schedule_id": schedule_id, "take_over_sender": true }),
     )
     .await;
     assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
@@ -960,8 +965,9 @@ async fn schedule_methods_judge_view_and_send_on_the_agent() -> TestResult {
 }
 
 /// Only a caller who may send to the agent sees who its schedules send as:
-/// a viewer who holds `agent.view` alone reads the list with the sender
-/// withheld, while the sender's own writes and lists show it.
+/// a viewer who holds `agent.view` alone reads the list with the sender and
+/// its earlier senders withheld, while the senders' own writes and lists
+/// show them.
 #[tokio::test]
 async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult {
     let fixture = fixture(
@@ -977,6 +983,12 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
             &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
             "alpha",
         ),
+        grant(
+            "frank-drives-alpha",
+            FRANK,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
     ])?;
     let erin = Caller::human(ERIN).under(&controller);
     let created = call(
@@ -988,6 +1000,19 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     .await;
     assert_eq!(created["result"]["sender"], json!(ERIN), "{created:#?}");
     assert_eq!(created["result"]["sender_hidden"], json!(false));
+    let taken = call(
+        &fixture,
+        Caller::human(FRANK).under(&controller),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": created["result"]["schedule_id"],
+            "content": "Post the morning summary.",
+            "take_over_sender": true,
+        }),
+    )
+    .await;
+    assert_eq!(taken["result"]["sender"], json!(FRANK), "{taken:#?}");
 
     let viewed = call(
         &fixture,
@@ -999,6 +1024,7 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     let item = &viewed["result"]["schedules"][0];
     assert!(item["sender"].is_null(), "{viewed:#?}");
     assert_eq!(item["sender_hidden"], json!(true), "{viewed:#?}");
+    assert_eq!(item["sender_history"], json!([]), "{viewed:#?}");
     assert_eq!(
         item["content"],
         json!("Post the morning summary."),
@@ -1013,8 +1039,13 @@ async fn only_a_caller_who_may_send_sees_who_a_schedule_sends_as() -> TestResult
     )
     .await;
     let item = &managed["result"]["schedules"][0];
-    assert_eq!(item["sender"], json!(ERIN), "{managed:#?}");
+    assert_eq!(item["sender"], json!(FRANK), "{managed:#?}");
     assert_eq!(item["sender_hidden"], json!(false));
+    assert_eq!(
+        item["sender_history"][0]["sender"],
+        json!(ERIN),
+        "{managed:#?}"
+    );
     fixture.stop().await;
     Ok(())
 }
@@ -1772,6 +1803,7 @@ async fn a_write_at_a_stale_revision_is_a_conflict() -> TestResult {
             "identity": "alpha",
             "schedule_id": schedule_id,
             "content": "Changed meanwhile.",
+            "take_over_sender": true,
         }),
     )
     .await;
@@ -2131,6 +2163,741 @@ async fn sign_out_keeps_schedules() -> TestResult {
             .await
             .is_empty()
     );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The revision `schedule_id` is at now.
+async fn revision_of(
+    fixture: &Fixture,
+    schedule_id: &str,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(fixture
+        .service
+        .get(&ScheduleId::parse(schedule_id)?)
+        .await?
+        .revision
+        .0)
+}
+
+/// Two edits made from one revision (two tabs, or two people, read the
+/// schedule at the same revision): the first is written, and the second,
+/// which carries the revision it was made against, is refused as a conflict
+/// and changes nothing, so it never overwrites the first. A resume from a
+/// revision the schedule moved past is refused alike; one from the current
+/// revision resumes.
+#[tokio::test]
+async fn stale_schedule_edit_refused() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-stale-edit",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let seen = revision_of(&fixture, &schedule_id).await?;
+    let edit = |content: &str| {
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": content,
+            "expected_revision": seen,
+        })
+    };
+    let first = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/update",
+        edit("The first edit."),
+    )
+    .await;
+    assert!(first["error"].is_null(), "{first:#?}");
+    let second = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/update",
+        edit("The second edit."),
+    )
+    .await;
+    assert_eq!(
+        error_of(&second),
+        (json!(-32009), json!("schedule_revision_conflict")),
+        "{second:#?}"
+    );
+    assert_eq!(second["error"]["data"]["expected_revision"], json!(seen));
+    assert_eq!(
+        second["error"]["data"]["actual_revision"],
+        first["result"]["revision"]
+    );
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.content,
+        "The first edit.",
+        "the first edit stands"
+    );
+
+    let paused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let stale = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/resume",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "expected_revision": seen,
+        }),
+    )
+    .await;
+    assert_eq!(
+        error_of(&stale),
+        (json!(-32009), json!("schedule_revision_conflict")),
+        "{stale:#?}"
+    );
+    assert_eq!(
+        fixture
+            .service
+            .get(&ScheduleId::parse(&schedule_id)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Paused,
+        "the stale resume changed nothing"
+    );
+    let resumed = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/resume",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "expected_revision": paused["result"]["revision"],
+        }),
+    )
+    .await;
+    assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
+
+    let malformed = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": "Changed.",
+            "expected_revision": "latest",
+        }),
+    )
+    .await;
+    assert_eq!(malformed["error"]["code"], json!(-32602), "{malformed:#?}");
+    fixture.stop().await;
+    Ok(())
+}
+
+/// Changing who a schedule sends as is an explicit takeover. Another
+/// caller's update or resume without `take_over_sender` is refused, names
+/// who the schedule sends as, and changes nothing; with it, the caller
+/// becomes the sender and the schedule's sender history names the sender it
+/// replaced. The sender's own edits need no takeover and keep the history.
+#[tokio::test]
+async fn sender_takeover_is_explicit() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-takeover",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let update = |content: &str| {
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": content,
+        })
+    };
+    let take_over = |mut params: Value| {
+        params["take_over_sender"] = json!(true);
+        params
+    };
+
+    let refused = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/update",
+        update("Changed by another caller."),
+    )
+    .await;
+    assert_eq!(
+        error_of(&refused),
+        (json!(-32009), json!("sender_takeover_required")),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        refused["error"]["data"]["sender"],
+        json!(ERIN),
+        "the refusal names who the schedule sends as"
+    );
+    let kept = stored_send(&fixture, &schedule_id).await?;
+    assert_eq!(kept.content, "Post the morning summary.");
+    assert_eq!(kept.sender.principal(), Some(ERIN));
+
+    let own = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/update",
+        update("Changed by its sender."),
+    )
+    .await;
+    assert!(own["error"].is_null(), "{own:#?}");
+    assert_eq!(own["result"]["sender"], json!(ERIN));
+    assert_eq!(own["result"]["sender_history"], json!([]), "{own:#?}");
+
+    let taken = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/update",
+        take_over(update("Taken over.")),
+    )
+    .await;
+    assert!(taken["error"].is_null(), "{taken:#?}");
+    assert_eq!(taken["result"]["sender"], json!(FRANK));
+    let history = taken["result"]["sender_history"]
+        .as_array()
+        .ok_or("the schedule answers its sender history")?;
+    assert_eq!(history.len(), 1, "{taken:#?}");
+    assert_eq!(history[0]["sender"], json!(ERIN));
+    assert!(history[0]["defined_at_utc"].is_string(), "{taken:#?}");
+    assert!(history[0]["replaced_at_utc"].is_string(), "{taken:#?}");
+    assert_eq!(
+        stored_send(&fixture, &schedule_id)
+            .await?
+            .sender
+            .principal(),
+        Some(FRANK)
+    );
+
+    let again = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/update",
+        update("Changed by its new sender."),
+    )
+    .await;
+    assert!(again["error"].is_null(), "{again:#?}");
+    assert_eq!(
+        again["result"]["sender_history"], taken["result"]["sender_history"],
+        "the sender's own edit keeps the history"
+    );
+
+    // A resume by another caller is a takeover too; a pause is not.
+    let paused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    assert_eq!(paused["result"]["sender"], json!(FRANK));
+    let resume = json!({ "identity": "alpha", "schedule_id": schedule_id });
+    let refused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/resume",
+        resume.clone(),
+    )
+    .await;
+    assert_eq!(
+        error_of(&refused),
+        (json!(-32009), json!("sender_takeover_required")),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        fixture
+            .service
+            .get(&ScheduleId::parse(&schedule_id)?)
+            .await?
+            .phase,
+        meerkat::SchedulePhase::Paused,
+        "the refused resume changed nothing"
+    );
+    let resumed = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/resume",
+        take_over(resume),
+    )
+    .await;
+    assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
+    assert_eq!(resumed["result"]["sender"], json!(ERIN));
+    let senders = resumed["result"]["sender_history"]
+        .as_array()
+        .map(|history| {
+            history
+                .iter()
+                .map(|former| former["sender"].clone())
+                .collect::<Vec<_>>()
+        });
+    assert_eq!(
+        senders,
+        Some(vec![json!(ERIN), json!(FRANK)]),
+        "{resumed:#?}"
+    );
+
+    let malformed = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/update",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "content": "Changed.",
+            "take_over_sender": "yes",
+        }),
+    )
+    .await;
+    assert_eq!(malformed["error"]["code"], json!(-32602), "{malformed:#?}");
+    fixture.stop().await;
+    Ok(())
+}
+
+/// `schedule.manage` lets a deployment restrict who changes console
+/// schedules: under a configuration that names it, a caller who may send to
+/// the agent but holds no `schedule.manage` lists its schedules and changes
+/// none. A configuration that names no schedule action keeps the rule it
+/// had: `agent.send` on the agent lets a caller change its schedules, and
+/// the configuration says so from then on.
+#[tokio::test]
+async fn schedule_manage_restricts_schedule_writes() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-manage",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let restricted = enforced(vec![
+        grant(
+            "frank-schedules-alpha",
+            FRANK,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND, "schedule.manage"],
+            "alpha",
+        ),
+        grant(
+            "erin-messages-alpha",
+            ERIN,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+    ])
+    .map_err(|error| format!("a configuration may name schedule.manage: {error}"))?;
+    let frank = Caller::human(FRANK).under(&restricted);
+    let erin = Caller::human(ERIN).under(&restricted);
+    let schedule_id = create_as(&fixture, frank).await?;
+    let denied = |answer: &Value, method: &str| {
+        assert_eq!(
+            error_of(answer),
+            (json!(ACCESS_DENIED_RPC_CODE), json!("access_denied")),
+            "{method}: {answer:#?}"
+        );
+        assert_eq!(
+            answer["error"]["data"]["action"],
+            json!("schedule.manage"),
+            "{method}: {answer:#?}"
+        );
+    };
+    let by_id = json!({ "identity": "alpha", "schedule_id": schedule_id });
+    for (method, params) in [
+        ("meta/schedule/create", create_params("alpha")),
+        (
+            "meta/schedule/update",
+            json!({
+                "identity": "alpha",
+                "schedule_id": schedule_id,
+                "content": "Changed.",
+                "take_over_sender": true,
+            }),
+        ),
+        ("meta/schedule/pause", by_id.clone()),
+        ("meta/schedule/resume", by_id.clone()),
+        ("meta/schedule/delete", by_id.clone()),
+    ] {
+        denied(&call(&fixture, erin, method, params).await, method);
+    }
+    let listed = call(
+        &fixture,
+        erin,
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["schedules"].as_array().map(Vec::len),
+        Some(1),
+        "{listed:#?}"
+    );
+    assert_eq!(
+        stored_send(&fixture, &schedule_id).await?.content,
+        "Post the morning summary.",
+        "the schedule is as it was"
+    );
+
+    // A configuration that names no schedule action: `agent.send` still lets
+    // a caller change the agent's schedules.
+    let earlier = enforced(vec![grant(
+        "erin-messages-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let erin = Caller::human(ERIN).under(&earlier);
+    let own = create_as(&fixture, erin).await?;
+    let paused = call(
+        &fixture,
+        erin,
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": own }),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let (config, _) = earlier.snapshot();
+    assert!(
+        config.rules[0]
+            .actions
+            .iter()
+            .any(|action| action == "schedule.manage"),
+        "the configuration grants schedule.manage where it grants agent.send: {config:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A configuration that names no schedule action keeps `agent.send`
+/// sufficient for schedule changes when an edit puts it in place, as it does
+/// when it is loaded: the edit extends it as the load does.
+#[tokio::test]
+async fn edited_configuration_without_schedule_actions_keeps_send_sufficient() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-edited-naive",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let controller = enforced(vec![grant(
+        "frank-schedules-alpha",
+        FRANK,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND, "schedule.manage"],
+        "alpha",
+    )])?;
+    controller.replace_config(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![grant(
+            "erin-messages-alpha",
+            ERIN,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        )],
+        ..crate::access::AccessControlConfig::default()
+    })?;
+    let erin = Caller::human(ERIN).under(&controller);
+    let created = call(
+        &fixture,
+        erin,
+        "meta/schedule/create",
+        create_params("alpha"),
+    )
+    .await;
+    assert!(
+        created["error"].is_null(),
+        "agent.send still lets erin change schedules: {created:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A resume that would take the schedule over from its sender, refused for
+/// want of `take_over_sender`, writes nothing: the revision, the sender and
+/// the history stay as they were.
+#[tokio::test]
+async fn refused_resume_takeover_writes_nothing() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-refused-resume",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let paused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let before = revision_of(&fixture, &schedule_id).await?;
+    let refused = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/resume",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    )
+    .await;
+    assert_eq!(
+        error_of(&refused),
+        (json!(-32009), json!("sender_takeover_required")),
+        "{refused:#?}"
+    );
+    assert_eq!(
+        revision_of(&fixture, &schedule_id).await?,
+        before,
+        "the refused resume wrote nothing"
+    );
+    let kept = stored_send(&fixture, &schedule_id).await?;
+    assert_eq!(kept.sender.principal(), Some(ERIN));
+    assert!(kept.sender_history.is_empty(), "{kept:#?}");
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A resume answers the schedule as Core resumed it: when another change
+/// replaced the sender and the message between the resume's own write and
+/// the resume, the answer names that sender and message and the revision
+/// the schedule is at, never the resume's earlier view of it.
+#[tokio::test]
+async fn resume_answers_the_schedule_as_it_resumed() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-resume-answer",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let paused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    let seen = revision_of(&fixture, &schedule_id).await?;
+    let hold = crate::console_schedules::ScheduleWriteHold::default();
+    fixture
+        .runtime
+        .console_schedules()
+        .attached()
+        .ok_or("the schedules are attached")?
+        .hold_resumes(hold.clone());
+    let resume = call(
+        &fixture,
+        Caller::human(FRANK),
+        "meta/schedule/resume",
+        json!({
+            "identity": "alpha",
+            "schedule_id": schedule_id,
+            "expected_revision": seen,
+            "take_over_sender": true,
+        }),
+    );
+    let meanwhile = async {
+        tokio::time::timeout(Duration::from_secs(30), hold.reached())
+            .await
+            .map_err(|_| "the resume reached its hold")?;
+        let taken_back = call(
+            &fixture,
+            Caller::human(ERIN),
+            "meta/schedule/update",
+            json!({
+                "identity": "alpha",
+                "schedule_id": schedule_id,
+                "content": "Changed meanwhile.",
+                "take_over_sender": true,
+            }),
+        )
+        .await;
+        hold.release();
+        Ok::<Value, Box<dyn std::error::Error + Send + Sync>>(taken_back)
+    };
+    let (resumed, taken_back) = tokio::join!(resume, meanwhile);
+    let taken_back = taken_back?;
+    assert!(taken_back["error"].is_null(), "{taken_back:#?}");
+    assert!(resumed["error"].is_null(), "{resumed:#?}");
+    assert_eq!(resumed["result"]["phase"], json!("active"), "{resumed:#?}");
+    assert_eq!(
+        resumed["result"]["sender"],
+        json!(ERIN),
+        "the answer names who the schedule sends as: {resumed:#?}"
+    );
+    assert_eq!(
+        resumed["result"]["content"],
+        json!("Changed meanwhile."),
+        "{resumed:#?}"
+    );
+    assert_eq!(
+        resumed["result"]["revision"],
+        json!(revision_of(&fixture, &schedule_id).await?),
+        "{resumed:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A pause answers the schedule as Core paused it: when another caller took
+/// the schedule over between the pause's read and the pause, the answer
+/// names that sender and message and the revision the schedule is at, never
+/// the pause's earlier view of it.
+#[tokio::test]
+async fn pause_answers_the_schedule_as_it_paused() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-pause-answer",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let hold = crate::console_schedules::ScheduleWriteHold::default();
+    fixture
+        .runtime
+        .console_schedules()
+        .attached()
+        .ok_or("the schedules are attached")?
+        .hold_writes(hold.clone());
+    let pause = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        json!({ "identity": "alpha", "schedule_id": schedule_id }),
+    );
+    let meanwhile = async {
+        tokio::time::timeout(Duration::from_secs(30), hold.reached())
+            .await
+            .map_err(|_| "the pause reached its hold")?;
+        let taken = call(
+            &fixture,
+            Caller::human(FRANK),
+            "meta/schedule/update",
+            json!({
+                "identity": "alpha",
+                "schedule_id": schedule_id,
+                "content": "Changed meanwhile.",
+                "take_over_sender": true,
+            }),
+        )
+        .await;
+        hold.release();
+        Ok::<Value, Box<dyn std::error::Error + Send + Sync>>(taken)
+    };
+    let (paused, taken) = tokio::join!(pause, meanwhile);
+    let taken = taken?;
+    assert!(taken["error"].is_null(), "{taken:#?}");
+    assert!(paused["error"].is_null(), "{paused:#?}");
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
+    assert_eq!(
+        paused["result"]["sender"],
+        json!(FRANK),
+        "the answer names who the schedule sends as: {paused:#?}"
+    );
+    assert_eq!(
+        paused["result"]["content"],
+        json!("Changed meanwhile."),
+        "{paused:#?}"
+    );
+    assert_eq!(
+        paused["result"]["revision"],
+        json!(revision_of(&fixture, &schedule_id).await?),
+        "{paused:#?}"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A pause, a delete and a create take no `expected_revision` and no
+/// `take_over_sender`: Core pauses and deletes a schedule as it is, and none
+/// of them makes anyone the sender in another's place. Naming either is
+/// refused as `unsupported_param` and changes nothing, rather than read as a
+/// condition the call would not keep; a null names neither.
+#[tokio::test]
+async fn pause_delete_and_create_refuse_conditions_they_do_not_keep() -> TestResult {
+    let fixture = fixture(
+        "console-schedules-unkept",
+        Some(ScheduleFiringHostBinding::external_driver()),
+    )
+    .await?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN)).await?;
+    let seen = revision_of(&fixture, &schedule_id).await?;
+    let by_id = |param: &str, value: Value| {
+        let mut params = json!({ "identity": "alpha", "schedule_id": schedule_id });
+        params[param] = value;
+        params
+    };
+    let mut create = create_params("alpha");
+    create["expected_revision"] = json!(seen);
+    let mut create_takeover = create_params("alpha");
+    create_takeover["take_over_sender"] = json!(true);
+    for (method, params, param) in [
+        (
+            "meta/schedule/pause",
+            by_id("expected_revision", json!(seen)),
+            "expected_revision",
+        ),
+        (
+            "meta/schedule/pause",
+            by_id("take_over_sender", json!(true)),
+            "take_over_sender",
+        ),
+        (
+            "meta/schedule/delete",
+            by_id("expected_revision", json!(seen)),
+            "expected_revision",
+        ),
+        (
+            "meta/schedule/delete",
+            by_id("take_over_sender", json!(false)),
+            "take_over_sender",
+        ),
+        ("meta/schedule/create", create, "expected_revision"),
+        ("meta/schedule/create", create_takeover, "take_over_sender"),
+    ] {
+        let answer = call(&fixture, Caller::human(ERIN), method, params).await;
+        assert_eq!(
+            error_of(&answer),
+            (json!(-32602), json!("unsupported_param")),
+            "{method}: {answer:#?}"
+        );
+        assert_eq!(
+            answer["error"]["data"]["param"],
+            json!(param),
+            "{method}: {answer:#?}"
+        );
+    }
+    let schedule = fixture
+        .service
+        .get(&ScheduleId::parse(&schedule_id)?)
+        .await?;
+    assert_eq!(
+        schedule.phase,
+        meerkat::SchedulePhase::Active,
+        "nothing was paused or deleted"
+    );
+    assert_eq!(schedule.revision.0, seen, "nothing was written");
+    let listed = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/list",
+        json!({ "identity": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["schedules"].as_array().map(Vec::len),
+        Some(1),
+        "nothing was created: {listed:#?}"
+    );
+    let paused = call(
+        &fixture,
+        Caller::human(ERIN),
+        "meta/schedule/pause",
+        by_id("expected_revision", Value::Null),
+    )
+    .await;
+    assert_eq!(paused["result"]["phase"], json!("paused"), "{paused:#?}");
     fixture.stop().await;
     Ok(())
 }

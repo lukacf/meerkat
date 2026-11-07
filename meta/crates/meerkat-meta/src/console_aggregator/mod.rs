@@ -33,6 +33,9 @@ mod send_recovery_tests;
 mod send_scope;
 mod state;
 mod store;
+// The thread a send records is used outside tests; the delivery into it
+// waits for the console's requester reply route, its caller.
+#[cfg_attr(not(test), allow(dead_code))]
 mod thread;
 mod types;
 

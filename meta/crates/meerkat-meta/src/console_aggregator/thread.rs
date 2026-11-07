@@ -139,9 +139,6 @@ pub(crate) struct ConsoleThreadReference {
     /// The sender's console principal (the access subject: the verified
     /// email, else the `sub`), when the send names a person: what an
     /// approver's `people` entry is matched against.
-    // Read where an approver's `people` entry is matched against a request's
-    // sender.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) access_principal: Option<String>,
 }
 

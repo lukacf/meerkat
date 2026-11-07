@@ -5140,4 +5140,31 @@ comms = true
             Some(2048)
         );
     }
+
+    /// An operator-instruction target refuses a field its kind does not
+    /// have, the mob kind's too: an identity or a profile sent with the mob
+    /// kind must not widen a write to every member of the gateway's mob.
+    #[test]
+    fn an_instruction_target_refuses_a_field_its_kind_does_not_have() {
+        for target in [
+            serde_json::json!({ "kind": "mob", "identity": "triage:main" }),
+            serde_json::json!({ "kind": "mob", "profile": "worker" }),
+            serde_json::json!({ "kind": "profile", "profile": "worker", "identity": "triage:main" }),
+            serde_json::json!({ "kind": "member", "identity": "triage:main", "profile": "worker" }),
+        ] {
+            assert!(
+                serde_json::from_value::<InstructionTargetParams>(target.clone()).is_err(),
+                "a target with a field its kind does not have is refused: {target}"
+            );
+        }
+        assert!(
+            matches!(
+                serde_json::from_value::<InstructionTargetParams>(
+                    serde_json::json!({ "kind": "mob" })
+                ),
+                Ok(InstructionTargetParams::Mob { .. })
+            ),
+            "the mob target is its kind alone"
+        );
+    }
 }

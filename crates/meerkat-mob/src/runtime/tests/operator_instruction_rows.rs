@@ -383,12 +383,19 @@ struct CrashedInstructionMob {
 impl CrashedInstructionMob {
     /// Resume the mob over the restarted service: every member is dormant.
     async fn resume(&self) -> MobHandle {
+        self.resume_as(crate::MobCompositionAuthority::Authoritative)
+            .await
+    }
+
+    /// [`Self::resume`] with `authority` speaking for the mob's composition.
+    async fn resume_as(&self, authority: crate::MobCompositionAuthority) -> MobHandle {
         let mut builder = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
             self.events.clone(),
             self.runtime_metadata.clone(),
         ))
         .with_session_service(self.service.clone())
-        .notify_orchestrator_on_resume(false);
+        .notify_orchestrator_on_resume(false)
+        .with_composition_authority(authority);
         if let Some(concurrency) = self.concurrency {
             builder = builder.with_member_instruction_delivery_concurrency(concurrency);
         }
@@ -736,6 +743,91 @@ async fn restart_replay_restores_desired_and_owed() {
             "{identity} is written once"
         );
     }
+}
+
+/// How many delivery waves the mob's journal records.
+async fn recorded_target_events(events: &Arc<dyn MobEventStore>) -> usize {
+    events
+        .replay_all()
+        .await
+        .expect("replay the mob journal")
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                crate::event::MobEventKind::MemberInstructionTargetsRecorded(_)
+            )
+        })
+        .count()
+}
+
+/// A non-authoritative launch over the mob's store (a host's candidate
+/// launch, which may not act on the store) delivers no operator instruction:
+/// a member owed a snapshot when it starts stays owed, its session records
+/// nothing and the journal gains no delivery wave. The next authoritative
+/// launch over the store delivers it, once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_authoritative_launch_delivers_nothing_and_owed_members_stay_owed() {
+    let mob = InstructionMob::new("oi-candidate", &[("oi-candidate-w1", "worker")]).await;
+    let _held = mob.service.hold_instruction_records();
+    let written = mob
+        .handle
+        .set_operator_instruction(write("tone", 1, FORMAL, OperatorInstructionTarget::Mob))
+        .await
+        .expect("the write commits");
+    let crashed = mob.crash().await;
+    let (identity, session) = crashed.members[0].clone();
+    let waves_before = recorded_target_events(&crashed.events).await;
+
+    let candidate = crashed
+        .resume_as(crate::MobCompositionAuthority::NonAuthoritative)
+        .await;
+    // An authoritative launch's delivery owner scans 20 ms after it starts
+    // and records an owed dormant member at once.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let status = member_status(&candidate, &identity)
+        .await
+        .expect("the status page lists the member");
+    assert!(
+        matches!(
+            status.delivery.state,
+            MemberInstructionDeliveryState::Owed { generation, .. }
+                if generation == written.generation
+        ),
+        "the member stays owed on the non-authoritative launch: {status:?}"
+    );
+    assert_eq!(
+        writes_to(&crashed.service, &session),
+        0,
+        "the non-authoritative launch wrote no member session"
+    );
+    assert_eq!(
+        recorded_target_events(&crashed.events).await,
+        waves_before,
+        "the non-authoritative launch journaled no delivery wave"
+    );
+    crash_stop_and_release_routes(candidate).await;
+
+    let authoritative = CrashedInstructionMob {
+        service: Arc::new(
+            crashed
+                .service
+                .cold_restart_preserving_durable_state()
+                .await,
+        ),
+        events: crashed.events.clone(),
+        runtime_metadata: crashed.runtime_metadata.clone(),
+        members: crashed.members.clone(),
+        concurrency: crashed.concurrency,
+    };
+    let _ = authoritative.service.enable_runtime_adapter();
+    let handle = authoritative.resume().await;
+    current(&handle, &identity).await;
+    assert_eq!(
+        writes_to(&authoritative.service, &session),
+        1,
+        "the authoritative launch records the member once"
+    );
 }
 
 /// A reset clears the records and moves the generation past the one the mob

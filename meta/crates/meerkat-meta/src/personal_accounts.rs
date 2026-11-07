@@ -3,8 +3,8 @@
 //! The operator marks an MCP server as using personal accounts
 //! ([`McpAccountMode::Personal`]); every other server keeps one account per
 //! server and realm, as before ([`McpAccountMode::System`], the default).
-//! Server definitions stay where they are (the realm's configuration, a
-//! profile's `mcp_servers`): the mode is keyed by the server's name.
+//! Server definitions stay where they are (a profile's `mcp_servers`): the
+//! mode is keyed by the server's name.
 //!
 //! A personal account belongs to the person who connected it and is used
 //! only where its results reach that one person: in a member private to its
@@ -34,7 +34,10 @@
 //! Only a streamable HTTP server whose account the person proves at sign-in
 //! (`oauth_account_selection = "discover"`) can be personal; a stdio or
 //! connector-bound server, a fixed account or a static `Authorization`
-//! header is [`PersonalAccountRefusal::Unsupported`].
+//! header is [`PersonalAccountRefusal::Unsupported`]. So is a member placed
+//! on another host whose profile declares a personal server: that host would
+//! serve the server with its own credentials, so the spawn and every rebuild
+//! of such a member are refused.
 //!
 //! The owner check runs in an MCP adapter composition: a dispatcher over each
 //! member's MCP adapter, inside the agent's grant gate (which authorizes
@@ -43,6 +46,7 @@
 
 pub(crate) mod build;
 pub(crate) mod gate;
+pub(crate) mod placement;
 pub(crate) mod resolver;
 #[cfg(test)]
 mod tests;
@@ -136,14 +140,16 @@ fn plain_server_name(name: &str) -> bool {
 impl McpAccountsConfig {
     /// Parse a TOML configuration (see the type docs).
     pub fn from_toml_str(text: &str) -> Result<Self, McpAccountsConfigError> {
-        let _ = text;
-        Ok(Self::default())
+        let config: Self = toml::from_str(text)
+            .map_err(|error| McpAccountsConfigError::Invalid(error.message().to_string()))?;
+        config.validated()
     }
 
     /// Parse a JSON configuration (see the type docs).
     pub fn from_json_value(value: serde_json::Value) -> Result<Self, McpAccountsConfigError> {
-        let _ = value;
-        Ok(Self::default())
+        let config: Self = serde_json::from_value(value)
+            .map_err(|error| McpAccountsConfigError::Invalid(error.to_string()))?;
+        config.validated()
     }
 
     /// Read and parse the TOML configuration at `path`.
@@ -193,13 +199,16 @@ impl McpAccountsConfig {
         &self,
         definitions: impl IntoIterator<Item = &'a McpServerConfig>,
     ) -> Result<(), PersonalAccountRefusal> {
-        let _ = definitions.into_iter().count();
-        Ok(())
+        definitions
+            .into_iter()
+            .filter(|definition| self.is_personal(&definition.name))
+            .find_map(unsupported_refusal)
+            .map_or(Ok(()), Err)
     }
 
     /// [`Self::check_definitions`] over the MCP servers the inline profiles
     /// of `definition` declare: the definitions a launch reads at startup. A
-    /// server defined elsewhere (a realm profile, the realm's configuration)
+    /// server defined elsewhere (a realm profile, a host's document binding)
     /// is checked at each member build, which withholds it.
     pub fn check_mob_definition(
         &self,
@@ -255,6 +264,9 @@ pub enum UnsupportedPersonalServer {
     /// The definition does not bind the account the person proves at sign-in
     /// (`oauth_account_selection = "discover"`).
     NoAccountProof,
+    /// The member would be placed on another host, which serves the
+    /// server's credentials on its own side.
+    HostedElsewhere,
 }
 
 impl UnsupportedPersonalServer {
@@ -268,6 +280,9 @@ impl UnsupportedPersonalServer {
             Self::NoAccountProof => {
                 "its definition does not bind the account the person proves at sign-in \
                  (oauth_account_selection = \"discover\")"
+            }
+            Self::HostedElsewhere => {
+                "the member would run on another host, whose own credentials would serve it"
             }
         }
     }
@@ -345,12 +360,28 @@ impl std::error::Error for PersonalAccountRefusal {}
 /// "discover"`), with no connector binding, no fixed account and no static
 /// `Authorization` header.
 pub fn personal_server_shape(config: &McpServerConfig) -> Result<(), UnsupportedPersonalServer> {
-    let _ = (
-        config,
-        McpHttpTransport::StreamableHttp,
-        McpOAuthAccountSelection::Discover,
-        std::marker::PhantomData::<McpTransportConfig>,
-    );
+    if config.connector.is_some() {
+        return Err(UnsupportedPersonalServer::ConnectorBound);
+    }
+    let McpTransportConfig::Http(http) = &config.transport else {
+        return Err(UnsupportedPersonalServer::Stdio);
+    };
+    if http.transport.unwrap_or_default() != McpHttpTransport::StreamableHttp {
+        return Err(UnsupportedPersonalServer::NotStreamableHttp);
+    }
+    if http.oauth_account.is_some() {
+        return Err(UnsupportedPersonalServer::FixedAccount);
+    }
+    if http
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        return Err(UnsupportedPersonalServer::StaticAuthorization);
+    }
+    if http.oauth_account_selection != Some(McpOAuthAccountSelection::Discover) {
+        return Err(UnsupportedPersonalServer::NoAccountProof);
+    }
     Ok(())
 }
 
@@ -367,8 +398,17 @@ pub fn private_owner_key(issuer: &str, subject: &str) -> String {
 /// ([`crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX`] and the issuer).
 /// Every other principal owns nothing.
 pub fn private_owner_key_of_principal(principal: &meerkat_core::PrincipalRef) -> Option<String> {
-    let _ = principal;
-    None
+    if principal.kind != meerkat_core::PrincipalKind::Human {
+        return None;
+    }
+    let meerkat_core::PrincipalQualification::Qualified(domain) = &principal.qualification else {
+        return None;
+    };
+    let issuer = domain
+        .as_str()
+        .strip_prefix(crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX)
+        .filter(|issuer| !issuer.is_empty())?;
+    Some(private_owner_key(issuer, principal.id.as_str()))
 }
 
 /// A member's private owner, as its build established it.
@@ -516,13 +556,37 @@ impl PersonalMcpAccounts {
         owner: Option<&PrivateOwner>,
         requester: Option<&meerkat_core::PrincipalRef>,
     ) -> Option<PersonalAccountRefusal> {
-        let _ = (server, owner, requester, self.suspended_stub());
+        let server = server.to_string();
+        let Some(owner) = owner else {
+            return Some(PersonalAccountRefusal::SharedThread { server });
+        };
+        let acts_for_owner = requester
+            .and_then(private_owner_key_of_principal)
+            .is_some_and(|key| key == owner.key);
+        if !acts_for_owner {
+            return Some(PersonalAccountRefusal::NotOwner { server });
+        }
+        if self.suspended(owner) {
+            return Some(PersonalAccountRefusal::Suspended { server });
+        }
         None
     }
 
-    fn suspended_stub(&self) -> bool {
-        let _ = (self.session_fences(), plain_server_name(""));
-        false
+    /// Whether an access admin revoked the owner's sessions at or after the
+    /// member was opened.
+    fn suspended(&self, owner: &PrivateOwner) -> bool {
+        let Some(fence) = self
+            .session_fences()
+            .and_then(|fences| fences.not_before(&owner.access_principal))
+        else {
+            return false;
+        };
+        let opened = owner
+            .opened_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        fence >= opened
     }
 }
 

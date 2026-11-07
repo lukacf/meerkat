@@ -10604,6 +10604,12 @@ impl MobRuntime {
         let member_model_config = spec.member_model_config.clone();
         let binary_blob_store = spec.binary_blob_store.clone();
         let mob_id = spec.definition.id.clone();
+        // A member placed on another host never carries a personal MCP
+        // server of this composition (`crate::personal_accounts::placement`).
+        let personal_placement_guard = spec.personal_accounts_slot.accounts().map(|accounts| {
+            Arc::new(accounts.placement_guard(&spec.definition))
+                as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+        });
         let agent_mob_mcp_state = spec.agent_mob_mcp_state.clone();
         let implicit_delegate_retirement_overrides =
             spec.implicit_delegate_retirement_overrides.clone();
@@ -10766,10 +10772,19 @@ impl MobRuntime {
             .with_fork_instruction_policy(spec.fork_instruction_policy);
 
         // Every mob this runtime builds refuses runtime-plane member
-        // identities, after the spec's own customizers have run.
+        // identities, after the spec's own customizers have run, and a
+        // composition with personal MCP servers refuses a member placed on
+        // another host that would carry one.
+        let spawn_member_customizer = match personal_placement_guard {
+            Some(guard) => Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                spec.spawn_member_customizer.clone(),
+                guard,
+            )),
+            None => spec.spawn_member_customizer.clone(),
+        };
         if let Some(customizer) = crate::member_comms_id::runtime_plane_guarded_customizer(
             &mob_id,
-            spec.spawn_member_customizer.clone(),
+            spawn_member_customizer,
         ) {
             builder = builder.with_spawn_member_customizer(customizer);
         }

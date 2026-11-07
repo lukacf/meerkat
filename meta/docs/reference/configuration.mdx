@@ -106,6 +106,7 @@ The stock SDK gateway (`rpc_gateway`) consumes the `runtime_options` object of `
 | `routing_config_path` | String | Loads JSON or TOML route config (`routes = [...]` / `[[routes]]`) and installs the routes into the unified runtime before serving RPCs. |
 | `gating_config_path` | String | Loads JSON or TOML action policies from an `actions` object. For matching `meta/gating/evaluate` requests through the SDK/stdio dispatcher, the configured `risk_tier` fills an omitted tier or overrides any caller-supplied tier; a conflicting supplied string tier logs a warning. Unconfigured actions retain ordinary request behavior and still require a caller-supplied `risk_tier`. This rewriting is specific to `rpc_gateway`'s stdio dispatcher, not a guarantee for unrelated HTTP/library entrypoints. An optional `escalation` object (`default` and `routes`, approver id to approver id) sets where escalated gates go; without a matching route, escalation is refused. A non-string value, or a path that cannot be opened or read or whose contents are rejected, refuses initialization; absent or null leaves gating off. An empty string is refused too: it no longer switches gating off, as it did when the predecessor SDKs dropped it. To keep gating off, omit the key or send null; in the SDKs, do not call `.gating(...)` and keep nothing at `config/gating.toml` under the working directory, which the builders load when present. |
 | `access_config_path` | String | Loads the Console [access control](/concepts/access-control) TOML; admin edits from the Console persist back to the same file. A non-string value, or a path that is missing, a directory, unreadable or invalid, refuses initialization; absent or null leaves access control off. An empty string is refused too: it no longer switches access control off, as it did when the predecessor SDKs dropped it. To keep access control off, omit the key or send null; in the SDKs, do not call `.accessControl(...)` / `.access_control(...)` and keep nothing at `config/access.toml` under the working directory, which the builders load when present. |
+| `mcp_accounts` | Object | The account modes of MCP servers, `{"servers": {"<server>": {"accounts": "personal"}}}`, as `config/mcp_accounts.toml` sets them for `meta_gateway`: see [Personal accounts on MCP servers](#personal-accounts-on-mcp-servers). Any other key or mode, a name that is not a plain server name, or a personal server among the mob definition's profiles that cannot use personal accounts refuses initialization with `-32602`; absent or null keeps every server's account the system's. The Rust builder's `mcp_accounts(McpAccountsConfig)`. |
 | `auth_config` | Object | Supports the shared JWT (`provider = "jwt"` / `shared_secret`) and OIDC (`provider = "oidc"`) configuration and wires the reference HTTP console/SSE routes to the configured trusted issuer, audience, and email allowlist. See [Authentication](/guides/authentication). `rpc_gateway` consumes this under `runtime_options`; `meta_gateway` uses the same shape as a top-level init parameter. |
 | `console_config_path` | String | Loads a TOML `ConsoleUiConfig` and projects it through `/console/experience` as `console_config`. Python `.console_config(path)`, TypeScript `.consoleConfig(path)`. |
 | `console_require_app_auth` | Boolean | Overrides `ConsolePolicy.require_app_auth`. The default is fail-closed: without `auth_config` the gateway's decision state trusts no signing key, so a console that still requires app auth refuses every request with 401, and the gateway logs a startup warning naming this. `false` is the explicit opt-out for a local or host-protected console. Python `.console_auth_required(False)`, TypeScript `.consoleAuthRequired(false)`; the Rust library twin is `RuntimeDecisionState::local_console`. |
@@ -525,6 +526,66 @@ above, where `rkat auth login copilot --non-interactive` stores it when the
 gateway uses the process default store. Name the route for every member with
 `member_auth_binding`, for example
 `{"realm": "global", "binding": "copilot_anthropic"}`.
+
+## Personal accounts on MCP servers
+
+An MCP server is defined once, for the installation (a profile's
+`mcp_servers`), and by default its operations
+act with one account per server and realm (`system`). An operator can mark a
+server as using personal accounts instead: each signed-in person's own
+account, used only in that person's private conversations. The mode is keyed
+by the server's name; the definition stays where it is.
+
+```toml
+# config/mcp_accounts.toml (meta_gateway)
+[servers.notes]
+accounts = "personal"
+```
+
+`rpc_gateway` takes the same shape as `runtime_options.mcp_accounts`
+(`{"servers": {"notes": {"accounts": "personal"}}}`), and a Rust host as
+`UnifiedRuntimeBuilder::mcp_accounts`. A server the file does not name is
+`system`. Any other key or mode, and a name that is not a plain server name
+(1 to 64 ASCII letters, digits, `-`, `_` or `.`), refuses startup.
+
+- **Where.** A personal server is kept only in a console side chat a
+  signed-in person opened, the member private to them (see
+  [Side chats](/guides/console#side-chats)). Every other member's build
+  leaves it out: a shared agent, a shared side chat, a private side chat's
+  helpers and `fork_off` children, and an approval branch. A call that still
+  reaches it there is refused `personal_account_shared_thread`.
+- **Who.** In a private side chat, only a run its owner asked for directly
+  uses the account. A run for anyone else (an access admin included), a
+  requester carried across a peer hop, and a run with no requester are
+  refused `personal_account_not_owner`, and nothing is sent.
+- **Revocation.** An access admin's revocation of a person's sessions
+  suspends their accounts in the side chats they opened before it
+  (`personal_account_suspended`). A side chat opened after a fresh sign-in
+  uses them again; the credentials are kept.
+- **Credentials.** A person's credential for a personal server lives in the
+  launch's provider credential store, in a credential realm of their own
+  below the installation's realm, and only their private side chats read it.
+  No member falls back to another account: the members' own MCP credential
+  source holds nothing for a personal server, so a member without its
+  owner's credential awaits a sign-in. A gateway whose member factory has no
+  provider credential store refuses to start with personal servers, and a
+  Rust host's composition without one keeps no personal server.
+- **Shape.** A personal server is a streamable HTTP server whose account the
+  person proves at sign-in (`oauth_account_selection = "discover"`), without
+  a connector binding, a fixed `oauth_account` or a static `Authorization`
+  header. Connector OAuth, stdio servers and environment tokens stay system
+  level. A personal server of another shape among the MCP servers the mob
+  definition's profiles declare refuses startup
+  (`personal_accounts_unsupported`); one defined elsewhere is left out of
+  every build.
+- **Hosts.** A member placed on another host is built there from its
+  profile's MCP servers, which that host would serve with its own
+  credentials. Placing a member whose profile declares a personal server is
+  refused (`personal_accounts_unsupported`), and so is the rebuild of such a
+  member.
+
+Each refusal reaches the model as the tool call's policy denial, whose code
+is the refusal's kind.
 
 ## Native realm and member auth binding
 

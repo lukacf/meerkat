@@ -459,6 +459,14 @@ as they were.
 - A side chat's memory is its own: its `memory` tool writes to the side
   chat's identity, never to the agent it was forked from, and the memory
   distiller never reads a private side chat's conversation.
+- A private side chat is where personal accounts on MCP servers are used:
+  a server the operator marked personal acts with the account of the person
+  who opened the side chat, for that person's own messages only (see
+  [Personal accounts on MCP servers](/reference/configuration#personal-accounts-on-mcp-servers)).
+  An access admin who revokes a person's sessions suspends that person's
+  accounts in the side chats they opened before the revocation, while a side
+  chat opened after a fresh sign-in uses them again and the credentials are
+  kept.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,

@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unknown identity: <id>` with no data, `404` `unknown_identity` from
   `POST /console/send`, `member_not_found` from the agent event stream.
 
+- New tool call refusals for personal accounts on MCP servers, each the
+  code of the call's policy denial: `personal_account_shared_thread`,
+  `personal_account_not_owner`, `personal_account_suspended` and
+  `personal_accounts_unsupported`.
+- Rust: `ConventionalPaths` gains `mcp_accounts_toml` (the conventional
+  `config/mcp_accounts.toml`), so a struct literal needs it.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -116,6 +123,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Rust: `PRIVATE_TO_LABEL`, `AccessController::view_for_caller`,
   `AccessView::hides_agent` and `AccessView::private_owner_key`;
   `ConsoleSendGateRefusal::UnknownIdentity`.
+
+- Personal accounts on MCP servers. An operator marks a server as using
+  personal accounts (`config/mcp_accounts.toml` for `meta_gateway`,
+  `runtime_options.mcp_accounts` for `rpc_gateway`, or
+  `UnifiedRuntimeBuilder::mcp_accounts`). Such a server acts with the
+  account of the person who opened a private console side chat, only there
+  and only for that person's own messages. Every other member's build leaves
+  it out, and no system account is ever used for it. Each person's
+  credential lives in a credential realm of their own below the
+  installation's. An access admin's revocation of a person's sessions
+  suspends their accounts in the side chats they opened before it. Only a
+  streamable HTTP server whose account the person proves at sign-in can be
+  personal; connector OAuth, stdio servers and environment tokens stay
+  system level. A member placed on another host is refused when its profile
+  declares a personal server, since that host would serve it with its own
+  credentials.
+- Rust: `McpAccountsConfig`, `McpAccountMode`, `McpServerAccounts`,
+  `McpAccountsConfigError`, `PersonalMcpAccounts`,
+  `PersonalAccountCredentials`, `PersonalAccountRefusal`,
+  `UnsupportedPersonalServer`, `personal_server_shape`, `private_owner_key`,
+  `private_owner_key_of_principal`, `APPROVAL_BRANCH_LABEL` and
+  `MobBootstrapSpec::with_personal_mcp_accounts`.
 
 ### Changed
 

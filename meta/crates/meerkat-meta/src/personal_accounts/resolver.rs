@@ -64,8 +64,12 @@ impl PersonalAccountCredentials {
     /// `owner_key`: `<installation realm>.personal.<key digits>`. `None` for
     /// a key that is not a private-owner key.
     pub(crate) fn owner_realm(&self, owner_key: &str) -> Option<RealmId> {
-        let _ = (owner_key, OWNER_REALM_DIGITS, &self.installation_realm);
-        None
+        let digest = owner_key.strip_prefix("console-caller:v1:")?;
+        let digits = digest.get(..OWNER_REALM_DIGITS)?;
+        if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        RealmId::parse(format!("{}.personal.{digits}", self.installation_realm)).ok()
     }
 
     /// The credential source of a member private to the owner whose
@@ -135,7 +139,9 @@ impl McpAuthResolver for NoPersonalFallback {
         &self,
         target: &McpServerIdentity,
     ) -> Result<Option<String>, McpOAuthError> {
-        let _ = (&self.config, awaiting_owner);
+        if self.config.is_personal(target.server_name()) {
+            return Ok(None);
+        }
         self.inner.stored_bearer_token(target).await
     }
 
@@ -144,6 +150,9 @@ impl McpAuthResolver for NoPersonalFallback {
         target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<String, McpOAuthError> {
+        if self.config.is_personal(target.server_name()) {
+            return Err(awaiting_owner(target));
+        }
         self.inner.interactive_login(target, www_authenticate).await
     }
 

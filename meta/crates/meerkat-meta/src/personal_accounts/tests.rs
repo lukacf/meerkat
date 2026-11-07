@@ -1075,3 +1075,76 @@ async fn each_owner_keeps_personal_accounts_in_a_realm_of_their_own() {
     assert_ne!(keys[1], keys[2]);
     assert_ne!(keys[0], keys[2]);
 }
+
+/// A member placed on another host is built there from a portable spec that
+/// carries its profile's MCP servers, and that host would serve a personal
+/// server with its own credentials: such a spawn (and a placed member's
+/// rebuild, through the same check) is refused, typed. The same member kept
+/// on this host, or placed with a profile that declares no personal server,
+/// is not.
+#[test]
+fn hosted_member_refuses_personal_server() {
+    let definition = meerkat_mob::MobDefinition::from_toml(
+        r#"
+[mob]
+id = "team"
+
+[profiles.assistant]
+model = "gpt-5.5"
+
+[[profiles.assistant.tools.mcp_servers]]
+name = "notes"
+url = "https://notes.example.test/mcp"
+oauth_account_selection = "discover"
+
+[profiles.plain]
+model = "gpt-5.5"
+"#,
+    )
+    .expect("definition");
+    let guard = accounts().placement_guard(&definition);
+    let placed = |profile: &str| {
+        let mut spec = meerkat_mob::SpawnMemberSpec::new(profile, "member-1");
+        spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
+            "12D3KooWRemoteHost",
+        ));
+        spec
+    };
+
+    let refused = guard.refusal(&placed("assistant"));
+    assert_eq!(
+        refused,
+        Some(PersonalAccountRefusal::Unsupported {
+            server: "notes".to_string(),
+            reason: UnsupportedPersonalServer::HostedElsewhere,
+        })
+    );
+    assert_eq!(
+        refused.map(|refusal| refusal.kind()),
+        Some("personal_accounts_unsupported")
+    );
+
+    assert_eq!(
+        guard.refusal(&meerkat_mob::SpawnMemberSpec::new("assistant", "member-2")),
+        None,
+        "a member kept on this host"
+    );
+    assert_eq!(guard.refusal(&placed("plain")), None, "no personal server");
+
+    let mut overridden = placed("plain");
+    let mut profile = definition
+        .profiles
+        .values()
+        .find_map(meerkat_mob::ProfileBinding::as_inline)
+        .expect("a profile")
+        .clone();
+    profile.tools.mcp_servers = vec![personal_http_server(
+        "notes",
+        "https://notes.example.test/mcp",
+    )];
+    overridden.override_profile = Some(profile);
+    assert!(
+        guard.refusal(&overridden).is_some(),
+        "a spawn's own profile that adds a personal server"
+    );
+}

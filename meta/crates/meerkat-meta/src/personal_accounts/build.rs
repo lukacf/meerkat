@@ -112,6 +112,57 @@ impl PersonalMcpAccounts {
     /// Classify the personal servers of one member build (see the module
     /// docs). Nothing changes for a build without personal servers.
     pub(crate) fn classify_build(&self, req: &mut CreateSessionRequest) {
-        let _ = (req, build_owner, unsupported_refusal);
+        let config = Arc::clone(&self.config);
+        let labels = req.labels.clone().unwrap_or_default();
+        let Some(build) = req.build.as_mut() else {
+            return;
+        };
+        if !build
+            .mcp_servers
+            .iter()
+            .any(|server| config.is_personal(&server.name))
+        {
+            return;
+        }
+        // The owner, with the source the build carries for them; only where
+        // the owner check is installed on the member factory.
+        let served = build_owner(&labels, build)
+            .filter(|_| self.gate_installed())
+            .and_then(|(session, owner)| {
+                let source = self
+                    .credentials()?
+                    .owner_source(Arc::clone(&config), &owner.key)?;
+                Some((session, owner, source))
+            });
+        let mut kept = false;
+        build.mcp_servers.retain(|server| {
+            if !config.is_personal(&server.name) {
+                return true;
+            }
+            if let Some(refusal) = unsupported_refusal(server) {
+                tracing::info!(
+                    kind = refusal.kind(),
+                    server = %server.name,
+                    "a personal server is withheld from a member build"
+                );
+                return false;
+            }
+            if served.is_none() {
+                tracing::debug!(
+                    kind = "personal_account_shared_thread",
+                    server = %server.name,
+                    "a personal server is withheld from a member private to no person"
+                );
+                return false;
+            }
+            kept = true;
+            true
+        });
+        if let (true, Some((session, owner, source))) = (kept, served) {
+            build.mcp_auth_resolver_override = Some(
+                meerkat::encode_mcp_auth_resolver_override_for_service(source),
+            );
+            self.keep_plan(session, owner);
+        }
     }
 }

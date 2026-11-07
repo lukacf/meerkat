@@ -238,6 +238,7 @@ fn keyed_external_event(key: &str) -> Input {
             idempotency_key: Some(crate::identifiers::IdempotencyKey::new(key)),
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "terminal_receipt".into(),
         payload: serde_json::json!({ "key": key }),
@@ -614,6 +615,7 @@ fn response_progress(label: &str) -> Input {
             idempotency_key: None,
             supersession_key: Some(crate::identifiers::SupersessionKey::new("same-window")),
             correlation_id: None,
+            requester: None,
         },
         convention: Some(crate::input::PeerConvention::ResponseProgress {
             request_id: format!("request-{label}"),

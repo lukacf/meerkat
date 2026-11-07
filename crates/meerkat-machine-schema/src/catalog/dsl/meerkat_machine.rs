@@ -7381,6 +7381,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // request it staged, and nothing else
             // (AbortUntilChangedSwitchTurnReconfigure).
             AbortUntilChangedSwitchTurnReconfigure { request_id: String },
+            // Rehydrate an ungoverned recovered row's requester batch key, as
+            // BindInputAuthority rehydrates a governed row's binding.
+            BindInputRequesterBatchKey {
+                input_id: String,
+                #[redacted]
+                authority_batch_key: String,
+            },
         }
 
         surface_only [
@@ -10427,9 +10434,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.input_authority_bindings.contains_key(input_id))
         }
 
+        // Every governed binding has its batch key. A batch key without a
+        // binding is an ungoverned input's requester key. Either belongs to a
+        // tracked or admission-authorized input.
         invariant input_authority_bindings_have_native_owner {
-            self.input_authority_bindings.keys() == self.input_authority_batch_keys.keys()
-            && for_all(input_id in self.input_authority_bindings.keys(),
+            for_all(input_id in self.input_authority_bindings.keys(),
+                self.input_authority_batch_keys.contains_key(input_id))
+            && for_all(input_id in self.input_authority_batch_keys.keys(),
                 self.input_phases.contains_key(input_id)
                 || self.admission_authorized_plans.contains_key(input_id))
         }
@@ -19483,6 +19494,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
+        // Rehydrate an ungoverned recovered row's requester batch key, as
+        // BindInputAuthority rehydrates a governed row's binding. It names no
+        // binding and adds no permission; a different key is never replaced.
+        transition BindInputRequesterBatchKey {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BindInputRequesterBatchKey { input_id, authority_batch_key }
+            guard "tracked_input" { self.input_phases.contains_key(input_id) }
+            guard "nonempty_batch_key" { authority_batch_key != "" }
+            guard "ungoverned_input" { !self.input_authority_bindings.contains_key(input_id) }
+            guard "immutable_batch_key" {
+                !self.input_authority_batch_keys.contains_key(input_id)
+                || self.input_authority_batch_keys.get_cloned(input_id) == Some(authority_batch_key)
+            }
+            update {
+                self.input_authority_batch_keys.insert(input_id, authority_batch_key);
+            }
+            to Idle
+        }
+
         // Scoped destination binding of this session document. Only while no
         // run is in flight; the generation strictly increases.
         transition BindScopedContext {
@@ -19541,9 +19571,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedTerminalQueue {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19582,6 +19621,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19626,9 +19667,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedTerminalSteer {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19670,6 +19720,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -19726,9 +19778,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedQueue {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19769,6 +19830,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -19835,9 +19898,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanRequestedSteer {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -19881,6 +19953,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, if turn_append_shape == AdmissionTurnAppendShape::InTurnEligible
@@ -19972,9 +20046,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultQueueKind {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20015,6 +20098,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20071,9 +20156,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20113,6 +20207,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20170,9 +20266,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanPeerResponseProgress {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20217,6 +20322,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -20270,9 +20377,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20311,6 +20427,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20355,9 +20473,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanDefaultContinuation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20400,6 +20527,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.insert(input_id, LiveBoundaryDelivery::RequestOnly);
@@ -20461,9 +20590,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanWorkgraphAttentionContinuation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20502,6 +20640,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -20558,9 +20698,18 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ResolveAdmissionPlanOperation {
             per_phase [Idle, Attached, Running]
             on input ResolveAdmissionPlan { input_id, authority_binding, authority_batch_key, input_kind, requested_lane, continuation_kind, turn_append_shape, silent_intent_match, existing_superseded_input_id, runtime_running, active_turn_boundary_available, without_wake }
+            // An ungoverned input carries no binding. It carries a batch key
+            // only when its host supplied a requester: the key is that
+            // requester's, so inputs of different requesters never share a run.
             guard "exact_input_authority_binding" {
-                (authority_binding == None && authority_batch_key == None
-                    && !self.input_authority_bindings.contains_key(input_id))
+                (authority_binding == None
+                    && !self.input_authority_bindings.contains_key(input_id)
+                    && ((authority_batch_key == None
+                            && !self.input_authority_batch_keys.contains_key(input_id))
+                        || (authority_batch_key != None
+                            && authority_batch_key.get("value") != ""
+                            && (!self.input_authority_batch_keys.contains_key(input_id)
+                                || self.input_authority_batch_keys.get_cloned(input_id) == authority_batch_key))))
                 || (authority_binding != None && authority_batch_key != None
                     && authority_binding.get("value") != ""
                     && authority_batch_key.get("value") != ""
@@ -20599,6 +20748,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 if authority_binding != None {
                     self.input_authority_bindings.insert(input_id, authority_binding.get("value"));
+                }
+                if authority_batch_key != None {
                     self.input_authority_batch_keys.insert(input_id, authority_batch_key.get("value"));
                 }
                 self.admission_authorized_live_boundary_delivery.remove(input_id);
@@ -26634,6 +26785,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "live_join_run_is_ungoverned" {
                 for_all(owner_input_id in self.input_authority_bindings.keys(),
                     self.input_run_associations.get_cloned(owner_input_id) != Some(run_id))
+            }
+            // Inputs of different requesters never share a run: the joining
+            // input's batch key (its requester's, or none) is the key of the
+            // batch the run staged. An input with a requester never joins a
+            // run that staged no batch.
+            guard "live_join_same_requester" {
+                (self.authority_staged_run == Some(run_id)
+                    && self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id))
+                || (self.authority_staged_run != Some(run_id)
+                    && !self.input_authority_batch_keys.contains_key(input_id))
             }
             guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
             guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
@@ -40758,6 +40919,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 if input_ids.iter().any(|id| state.input_authority_batch_keys.get(id) != first_authority) {
                     return None;
                 }
+                // Mirrors the StageForRun guard `homogeneous_run_authority`:
+                // a run that staged a batch takes only inputs of its key.
+                if state.authority_staged_run.as_ref() == Some(run_id)
+                    && state.authority_staged_batch.as_ref() != first_authority
+                {
+                    return None;
+                }
                 // A separately requested stage must preserve terminal-response cardinality.
                 if input_ids.len() > 1 && input_ids.iter().any(|input_id| {
                     state.input_runtime_peer_response_terminal_apply_intent.get(input_id)
@@ -40800,6 +40968,29 @@ macro_rules! meerkat_catalog_machine_dsl {
                     input_ids: input_ids.to_vec(),
                     source,
                 })
+            }
+
+            /// Whether `input_id` may join the current run `run_id` at a live
+            /// boundary without mixing requesters: the input's batch key (its
+            /// governed binding's, its requester's, or none) is the key of the
+            /// batch the run staged, or the run staged no batch and the input
+            /// has no key. An input of another requester waits for a run of
+            /// its own. Mirrors the `JoinLiveBoundaryDurableAppend` guard
+            /// `live_join_same_requester`, which `StageForRun`'s
+            /// `homogeneous_run_authority` implies for a run that staged a
+            /// batch.
+            #[must_use]
+            pub fn live_boundary_joins_run_batch(
+                state: &MeerkatMachineState,
+                input_id: &String,
+                run_id: &RunId,
+            ) -> bool {
+                let key = state.input_authority_batch_keys.get(input_id);
+                if state.authority_staged_run.as_ref() == Some(run_id) {
+                    state.authority_staged_batch.as_ref() == key
+                } else {
+                    key.is_none()
+                }
             }
 
             // Mirrors the StageForRun `scoped_context_attached` guard: only

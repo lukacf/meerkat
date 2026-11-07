@@ -637,6 +637,32 @@ if run_part audits-r; then
   TLC_WORKERS="${tlc_workers}" "${generation_highwater_audit}" "${GENERATION_HIGHWATER_AUDIT_MAX_STEPS:-4}" --mutants
 fi
 
+# The requester batch rule (inputs of different requesters never share a
+# run: each run stages one batch key, which includes an ungoverned input's
+# requester, and a live-boundary join must carry the key the run staged) is
+# structural in the MeerkatMachine ci sweep, which takes one step. A
+# hand-written audit over the same generated model runs one runtime-loop run
+# whose batch input carries one key and a late Steer input of another key
+# (or none), through admission, the durable join and its resolutions,
+# normalization, staging into the running run or a follow-up run, and every
+# run-ending arm, under every generated invariant plus two safety invariants
+# (a run's bound inputs share one key; the late input never joins the batch
+# input's run), once per pair of different keys. It requires two witnesses
+# reached (a late input of the same key joins; one of another key runs in a
+# run of its own) and refuses two seeded defects (--mutants): the join
+# without its live_join_same_requester guard, and admission that records a
+# batch key only for a governed binding. 14 steps reach both witnesses with
+# room; deeper bounds run by hand.
+requester_batch_audit="${workspace_root}/specs/machines/meerkat_machine/requester_batch_audit.sh"
+if [[ ! -x "${requester_batch_audit}" ]]; then
+  echo "error: requester batch audit runner is missing from workspace runfiles: ${requester_batch_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded requester batch TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
+fi
+
 # The AuthMachine source-credential publication (a publisher that re-reads
 # its credential value from a source asks ResolveSourceCredentialPublication
 # with the value's fingerprint and fires Acquire naming it only on Publish)
@@ -1395,7 +1421,8 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s;
+# 248-375 s, and the requester batch audit with --mutants (90 s locally
+# with 4 workers at 14 steps);
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

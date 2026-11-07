@@ -619,6 +619,14 @@ pub struct WorkSpec {
     #[serde(skip)]
     pub(crate) request_reasoning:
         Option<meerkat_core::lifecycle::run_primitive::RequestReasoningPreference>,
+    /// The original requester of this work: an opaque, qualified principal
+    /// the host authenticated, never a request body, a tool argument or
+    /// model output. Only host human input carries one (the member's runtime
+    /// stores it with the admitted input and its run hands it to tool
+    /// dispatch); other work that carries one is refused. Set only through
+    /// [`Self::with_requester`]; never accepted from a wire.
+    #[serde(skip)]
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
 }
 
 impl WorkSpec {
@@ -635,7 +643,21 @@ impl WorkSpec {
             interaction_id: None,
             objective_id: None,
             request_reasoning: None,
+            requester: None,
         }
+    }
+
+    /// Carry the original requester the host authenticated for this work
+    /// (see the `requester` field): only host human input may carry one.
+    #[must_use]
+    pub fn with_requester(mut self, requester: meerkat_core::PrincipalRef) -> Self {
+        self.requester = Some(requester);
+        self
+    }
+
+    /// The original requester this work carries, if any.
+    pub fn requester(&self) -> Option<&meerkat_core::PrincipalRef> {
+        self.requester.as_ref()
     }
 
     /// Carry a live delegation admission's reasoning preference.

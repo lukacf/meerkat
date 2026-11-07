@@ -42,6 +42,10 @@ import type {
   OperationId,
   OutputSchema,
   PeerId,
+  PrincipalId,
+  PrincipalKind,
+  PrincipalQualification,
+  PrincipalRef,
   ProfileId,
   PromptText,
   Provider,
@@ -76,6 +80,7 @@ import type {
   TranscriptEditRewriteRange,
   TranscriptRewriteReason,
   TranscriptRewriteSelection,
+  TrustDomainId,
 } from './types.js';
 
 export type AgentErrorClass = "llm" | "operation_refused" | "store" | "tool" | "policy_indeterminate" | "mcp" | "session_not_found" | "budget" | "max_tokens" | "content_filtered" | "max_turns" | "cancelled" | "invalid_state" | "operation_not_found" | "depth_limit" | "concurrency_limit" | "config" | "internal" | "build" | "auth" | "callback_pending" | "skill" | "structured_output" | "invalid_output_schema" | "hook" | "terminal" | "no_pending_boundary";
@@ -1325,6 +1330,20 @@ export type ObjectiveId = string;
 export type TranscriptTurnInput = "runtime_authored" | "typed_text";
 
 /**
+ * The original requester of a turn: the principal its inputs share, and
+ * whether it reached them directly.
+ *
+ * The principal is opaque to Core. A host supplies it for the inputs it
+ * admits (the authenticated caller it acts for), or a governed input's work
+ * association names it. Core carries it and never interprets it: it has no
+ * person, account or assurance concept for it.
+ */
+export interface TurnRequester {
+  carried?: boolean;
+  principal: PrincipalRef;
+}
+
+/**
  * Stable runtime identity for a transcript message.
  *
  * These fields are optional so older persisted sessions deserialize without a
@@ -1335,6 +1354,7 @@ export type TranscriptMessageIdentity = {
   interaction_id?: InteractionId | null;
   objective_id?: ObjectiveId | null;
   realtime_origin?: RealtimeMessageOrigin | null;
+  requester?: TurnRequester | null;
   run_id?: RunId | null;
   turn_input?: TranscriptTurnInput | null;
 };

@@ -2,8 +2,9 @@
 //!
 //! A console send keeps its thread on its send record (the `user_input`
 //! frame of the send): the member it went to (the frame's identity), the
-//! send's interaction id (the frame's), who may read the replies to it (the
-//! audience) and the person they are for (the addressee). Everything is set
+//! send's interaction id (the frame's) and who may read the replies to it
+//! (the audience). The person the replies are for is the send's sender
+//! ([`ConsoleSender`]), when the sender names a requester. Everything is set
 //! by the console from the caller it resolved and the route the send took;
 //! no request field names any of it.
 
@@ -13,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     AppendDisposition, ConsoleFrame, ConsoleFrameMemberProvenance, ConsoleFrameSource,
-    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleTimelineEvent,
-    MetaConsoleAggregator, NewConsoleFrame,
+    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleSender,
+    ConsoleTimelineEvent, MetaConsoleAggregator, NewConsoleFrame,
 };
 
 /// The kind of the frame a private reply is appended to its thread as.
@@ -31,83 +32,67 @@ pub(crate) enum ConsoleThreadAudience {
     Person,
 }
 
-/// The person the replies to a console send are for: a verified person
-/// sending on a console that requires sign-in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConsoleReplyAddressee {
-    /// The person's private-owner key ([`crate::access::PRIVATE_TO_LABEL`]),
-    /// the `caller_scope` `meta/console/whoami` reports to them.
-    pub(crate) private_owner_key: String,
+/// The person the replies to a console send are for, read from its sender.
+struct ReplyAddressee<'a> {
+    /// The person's private-owner key ([`crate::access::PRIVATE_TO_LABEL`]):
+    /// the sender's caller scope, as `meta/console/whoami` reports it.
+    private_owner_key: &'a str,
     /// The person's console principal (the access subject: the verified
-    /// email, else the `sub`).
-    pub(crate) access_principal: String,
+    /// email, else the `sub`): the sender's display name.
+    access_principal: Option<&'a str>,
+}
+
+/// The person the replies to a send by `sender` are for: the sender, when it
+/// names a requester. Only a verified person on a console that requires
+/// sign-in does (a schedule's fire: the schedule's sender, by the same
+/// rule); a service, a token that names no person and every caller of an
+/// open console name none, and their requests have no one to reply to
+/// privately.
+fn reply_addressee(sender: &ConsoleSender) -> Option<ReplyAddressee<'_>> {
+    sender.requester.as_ref()?;
+    Some(ReplyAddressee {
+        private_owner_key: &sender.caller_scope,
+        access_principal: sender.display_name.as_deref(),
+    })
 }
 
 /// The thread a console send records in its `user_input` payload, under
-/// [`ConsoleSendThread::PAYLOAD_KEY`]. The access principal stays on the
-/// stored record: no console projection carries it
-/// ([`ConsoleSendThread::strip_for_view`]).
+/// [`ConsoleSendThread::PAYLOAD_KEY`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsoleSendThread {
     pub(crate) audience: ConsoleThreadAudience,
-    /// The private-owner key of the person the replies to this send are
-    /// for: the sender, when the send names a person. Absent for every other
-    /// send, whose replies have no one to go to privately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) addressee: Option<String>,
-    /// That person's console principal, kept next to the thread so an
-    /// approver's `people` entry can be matched against the request's
-    /// sender.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) access_principal: Option<String>,
 }
 
 impl ConsoleSendThread {
     /// The key of the thread in a `user_input` payload.
     pub(crate) const PAYLOAD_KEY: &'static str = "thread";
 
-    /// The thread of a send to the member `provenance` captured, by
-    /// `addressee` (none when the send names no person). It is a person
-    /// thread exactly when that member is private to the addressee: its
-    /// captured lineage, the input every console surface decides the
-    /// member's visibility with, names a private owner, and every owner it
-    /// names is the addressee. Every other send, an access admin's send into
-    /// another person's private member included, is a shared thread.
+    /// The thread of a send by `sender` to the member `provenance` captured.
+    /// It is a person thread exactly when the sender names the person the
+    /// replies are for ([`reply_addressee`]) and that member is private to
+    /// them: its captured lineage, the input every console surface decides
+    /// the member's visibility with, names a private owner, and every owner
+    /// it names is that person. Every other send, an access admin's send
+    /// into another person's private member included, is a shared thread.
     pub(crate) fn of_send(
         provenance: Option<&ConsoleFrameMemberProvenance>,
-        addressee: Option<&ConsoleReplyAddressee>,
+        sender: Option<&ConsoleSender>,
     ) -> Self {
+        let addressee = sender.and_then(reply_addressee);
         let audience = match (provenance, addressee) {
             (Some(provenance), Some(addressee))
-                if private_to(provenance, &addressee.private_owner_key) =>
+                if private_to(provenance, addressee.private_owner_key) =>
             {
                 ConsoleThreadAudience::Person
             }
             _ => ConsoleThreadAudience::Shared,
         };
-        Self {
-            audience,
-            addressee: addressee.map(|addressee| addressee.private_owner_key.clone()),
-            access_principal: addressee.map(|addressee| addressee.access_principal.clone()),
-        }
+        Self { audience }
     }
 
     /// The thread a send record's payload holds, if it holds a readable one.
     fn of_payload(payload: &Value) -> Option<Self> {
         serde_json::from_value(payload.get(Self::PAYLOAD_KEY)?.clone()).ok()
-    }
-
-    /// Drop from a `user_input` payload served to a viewer what only the
-    /// console reads: the addressee and the access principal. The audience
-    /// stays.
-    pub(crate) fn strip_for_view(payload: &mut Value) {
-        if let Some(thread) = payload
-            .get_mut(Self::PAYLOAD_KEY)
-            .and_then(Value::as_object_mut)
-        {
-            thread.remove("addressee");
-            thread.remove("access_principal");
-        }
     }
 }
 
@@ -134,11 +119,11 @@ pub(crate) struct ConsoleThreadReference {
     pub(crate) input_frame_id: String,
     pub(crate) audience: ConsoleThreadAudience,
     /// The private-owner key of the person the replies are for, when the
-    /// send names one.
+    /// send's sender names one (its caller scope).
     pub(crate) addressee: Option<String>,
-    /// The sender's console principal (the access subject: the verified
-    /// email, else the `sub`), when the send names a person: what an
-    /// approver's `people` entry is matched against.
+    /// That person's console principal (the access subject: the verified
+    /// email, else the `sub`; the sender's display name): what an approver's
+    /// `people` entry is matched against.
     pub(crate) access_principal: Option<String>,
 }
 
@@ -294,15 +279,22 @@ impl MetaConsoleAggregator {
     }
 }
 
-/// The thread reference a send record holds, read from its frame.
+/// The thread reference a send record holds, read from its frame: its thread,
+/// and the person the replies are for from its sender.
 fn thread_reference_of(record: &ConsoleFrame) -> Option<ConsoleThreadReference> {
     let thread = ConsoleSendThread::of_payload(&record.payload)?;
+    let sender = ConsoleSender::of_frame_payload(&record.payload);
+    let addressee = sender.as_ref().and_then(reply_addressee);
     Some(ConsoleThreadReference {
         identity: record.identity.clone(),
         interaction_id: record.interaction_id.clone()?,
         input_frame_id: record.id.clone(),
         audience: thread.audience,
-        addressee: thread.addressee,
-        access_principal: thread.access_principal,
+        addressee: addressee
+            .as_ref()
+            .map(|addressee| addressee.private_owner_key.to_string()),
+        access_principal: addressee
+            .and_then(|addressee| addressee.access_principal)
+            .map(str::to_string),
     })
 }

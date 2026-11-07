@@ -566,6 +566,7 @@ fn make_prompt(text: &str) -> Input {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),

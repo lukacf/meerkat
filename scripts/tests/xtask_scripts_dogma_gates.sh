@@ -399,6 +399,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # superseded_ack_retention_audit.sh (schedule_lifecycle) requires its three
 # witnesses violated, and with --mutants each seeded defect's invariant
 # violated.
+# requester_batch_audit.sh requires the success line for its three safety
+# runs, its two witnesses (AuditLateNeverJoins, AuditLateNeverRunsAlone)
+# violated, and with --mutants AuditLateNeverInBatchRun or
+# AuditRunsShareOneKey violated for each seeded defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -408,6 +412,8 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   'echo "Error: Invariant AuditLateNeverJoins is violated."' \
+  'echo "Error: Invariant AuditLateNeverRunsAlone is violated."' \
+  'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \

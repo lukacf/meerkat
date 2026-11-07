@@ -161,14 +161,14 @@ pub use compaction_policy::{
 };
 pub use config_convention::ConventionalPaths;
 pub use console_aggregator::{
-    AllowAllConsoleVisibilityPolicy, AppendDisposition, AppendOutcome, ConsoleAggregatorOptions,
-    ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind, ConsoleFrame, ConsoleFrameLineageLink,
-    ConsoleFrameMemberProvenance, ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus,
-    ConsoleIdentityInspection, ConsoleIdentityRecord,
+    AllowAllConsoleVisibilityPolicy, AppendDisposition, AppendOutcome, ConsoleActorKind,
+    ConsoleAggregatorOptions, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
+    ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,
+    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection, ConsoleIdentityRecord,
     ConsoleInteractionAccepted as ConsoleTimelineInteractionAccepted, ConsoleLogError,
     ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleRuntimeRegistration,
-    ConsoleSendDedupeDurability, ConsoleSendRequest, ConsoleTimelineEvent, ConsoleTimelineMode,
-    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
+    ConsoleSendDedupeDurability, ConsoleSendRequest, ConsoleSender, ConsoleTimelineEvent,
+    ConsoleTimelineMode, ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
     ConsoleTimelineQueryResult, ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery,
     ConsoleTurnOrigin, ConsoleVisibility, ConsoleVisibilityPolicy,
     HideImplicitDelegateMembersConsoleVisibilityPolicy, InMemoryConsoleLogStore,

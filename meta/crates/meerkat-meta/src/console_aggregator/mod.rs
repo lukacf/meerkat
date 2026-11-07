@@ -87,15 +87,15 @@ pub use store::{
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
 pub(crate) use thread::{
-    ConsoleReplyAddressee, ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference,
-    PrivateReplyAppend,
+    ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference, PrivateReplyAppend,
 };
 pub use types::{
-    AppendDisposition, AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleDeltaKind,
-    ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance, ConsoleFrameSource,
-    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection, ConsoleIdentityRecord,
-    ConsoleInteractionAccepted, ConsoleReplayUnavailable, ConsoleSendRequest, ConsoleTimelineEvent,
-    ConsoleTimelineMode, ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
+    AppendDisposition, AppendOutcome, ConsoleActorKind, ConsoleCursor, ConsoleDeltaCompaction,
+    ConsoleDeltaKind, ConsoleFrame, ConsoleFrameLineageLink, ConsoleFrameMemberProvenance,
+    ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityInspection,
+    ConsoleIdentityRecord, ConsoleInteractionAccepted, ConsoleReplayUnavailable,
+    ConsoleSendRequest, ConsoleSender, ConsoleTimelineEvent, ConsoleTimelineMode,
+    ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
     ConsoleTimelineWindowQuery, ConsoleTurnOrigin, ConsoleVisibility, IdentityFirstReservation,
     NewConsoleFrame,
 };
@@ -1138,12 +1138,16 @@ impl MetaConsoleAggregator {
         {
             frame.payload["frame"] = projected;
         }
-        // A send record's thread names the person its replies are for and
-        // their principal: the console reads them, no viewer does.
-        if frame.kind == "user_input" {
-            ConsoleSendThread::strip_for_view(&mut frame.payload);
-        }
         frame.source.member_provenance = None;
+        // The requester a send carried to the agent stays with the stored
+        // frame (a redispatch reads it there); no view reads it.
+        if let Some(sender) = frame
+            .payload
+            .get_mut("sender")
+            .and_then(Value::as_object_mut)
+        {
+            sender.remove("requester");
+        }
         frame
     }
 
@@ -2767,16 +2771,15 @@ impl MetaConsoleAggregator {
     /// replay of a send that has not settled, and whose dispatch has no live
     /// owner, is reconciled from native admission evidence: an admitted input
     /// settles it delivered; an absent one is dispatched again under the
-    /// send's own delivery identity, into the session it recorded.
-    ///
-    /// A scoped send records its thread ([`ConsoleSendThread`]):
-    /// `addressee` is the private-owner key of the person the replies to it
-    /// are for, when the console names one.
+    /// send's own delivery identity, into the session it recorded. A fresh
+    /// send's frame records its `sender`, and its dispatch carries the
+    /// sender's requester to the agent. A scoped send also records its
+    /// thread ([`ConsoleSendThread`]): who may read the replies to it.
     pub(crate) async fn send_scoped(
         &self,
         request: ConsoleSendRequest,
         scope: &ConsoleSendScope,
-        addressee: Option<&ConsoleReplyAddressee>,
+        sender: Option<&ConsoleSender>,
     ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
         validate_send_request(&request)?;
         let Some(resolved) = Box::pin(self.resolve_send_member(&request.identity)).await? else {
@@ -2953,7 +2956,7 @@ impl MetaConsoleAggregator {
         };
         let thread = scope
             .is_scoped()
-            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), addressee));
+            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
             id: Some(frame_id),
             dedupe_key,
@@ -2964,7 +2967,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.clone(),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value, thread.as_ref()),
+            payload: user_input_payload(&request, &handling_mode_value, sender, thread.as_ref()),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -3383,15 +3386,15 @@ impl MetaConsoleAggregator {
     /// [`Self::reserve_identity_first_interaction`] deduplicated in the
     /// sending caller's `scope`. A scoped caller gets the dispatch claim of a
     /// fresh interaction, and owns the reconciliation of a replayed one that
-    /// has not settled and whose dispatch has no live owner. A scoped send
-    /// records its thread, addressed to `addressee` as
-    /// [`Self::send_scoped`] says.
+    /// has not settled and whose dispatch has no live owner. A fresh
+    /// interaction's frame records its `sender`, and a scoped send its
+    /// thread, as [`Self::send_scoped`] says.
     pub(crate) async fn reserve_identity_first_interaction_scoped(
         &self,
         request: ConsoleSendRequest,
         session_id: Option<&str>,
         scope: &ConsoleSendScope,
-        addressee: Option<&ConsoleReplyAddressee>,
+        sender: Option<&ConsoleSender>,
     ) -> Result<ScopedReservation, ConsoleSendError> {
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
@@ -3468,7 +3471,7 @@ impl MetaConsoleAggregator {
         };
         let thread = scope
             .is_scoped()
-            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), addressee));
+            .then(|| ConsoleSendThread::of_send(provenance.as_ref(), sender));
         let mut new_frame = NewConsoleFrame {
             id: Some(frame_id),
             dedupe_key,
@@ -3479,7 +3482,7 @@ impl MetaConsoleAggregator {
             session_id: session_id.map(ToString::to_string),
             kind: "user_input".to_string(),
             status: ConsoleFrameStatus::Accepted,
-            payload: user_input_payload(&request, &handling_mode_value, thread.as_ref()),
+            payload: user_input_payload(&request, &handling_mode_value, sender, thread.as_ref()),
             source: ConsoleFrameSource {
                 member_provenance: provenance,
                 kind: ConsoleFrameSourceKind::Send,
@@ -4853,13 +4856,15 @@ async fn delegate_member_sources(entry: &RuntimeEntry) -> Vec<ResolvedConsoleMem
 
 /// Deliver a Console send to `resolved` and answer the session it landed
 /// on: best effort for an identity, empty when that read fails after the
-/// delivery (the send is delivered all the same).
+/// delivery (the send is delivered all the same). `requester` is the
+/// sender's person principal, carried to the agent's run.
 async fn dispatch_message_to_resolved_member(
     resolved: &ResolvedConsoleMember,
     content: ContentInput,
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &ConsoleInteractionAccepted,
+    requester: Option<&meerkat_core::PrincipalRef>,
 ) -> Result<String, ConsoleSendError> {
     if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
         && let Some(identity) = identity_runtime
@@ -4874,6 +4879,7 @@ async fn dispatch_message_to_resolved_member(
                 handling_mode,
                 skill_references,
                 accepted,
+                requester,
                 None,
             )
             .await
@@ -4897,6 +4903,7 @@ async fn dispatch_message_to_resolved_member(
         skill_references,
         handling_mode,
         accepted,
+        requester,
     )
     .await
     .map_err(|err| match err {
@@ -4932,12 +4939,17 @@ fn spawn_console_send_dispatch(
         // The claim names this task the frame's dispatch owner until it
         // settles the frame (dropped at the end of the task).
         let _claim = claim;
+        // The sender's requester, as the send's own frame recorded it, so a
+        // redispatch after a restart carries the same requester.
+        let requester = ConsoleSender::of_frame_payload(&user_frame.payload)
+            .and_then(|sender| sender.requester);
         match dispatch_message_to_resolved_member(
             &resolved,
             content,
             &skill_references,
             handling_mode,
             &accepted_from_frame(&user_frame),
+            requester.as_ref(),
         )
         .await
         {
@@ -10333,11 +10345,13 @@ fn send_request_fingerprint(
 }
 
 /// The `user_input` frame payload for a console send. `origin_kind` is
-/// written only when the caller declared one, and `thread` only for a
-/// console caller's send.
+/// written only when the caller declared one; `sender` only for a send whose
+/// caller the Console authenticated (the unscoped Rust send API has none);
+/// and `thread` only for a console caller's send.
 fn user_input_payload(
     request: &ConsoleSendRequest,
     handling_mode: &str,
+    sender: Option<&ConsoleSender>,
     thread: Option<&ConsoleSendThread>,
 ) -> Value {
     let mut payload = json!({
@@ -10348,6 +10362,11 @@ fn user_input_payload(
     });
     if let (Some(kind), Some(object)) = (request.origin_kind, payload.as_object_mut()) {
         object.insert("origin_kind".to_string(), Value::from(kind.as_str()));
+    }
+    if let (Some(sender), Some(object)) = (sender, payload.as_object_mut())
+        && let Ok(sender) = serde_json::to_value(sender)
+    {
+        object.insert("sender".to_string(), sender);
     }
     if !request.skill_refs.is_empty()
         && let (Ok(skills), Some(object)) = (
@@ -15053,6 +15072,7 @@ comms = true
             &[],
             meerkat_core::types::HandlingMode::Steer,
             &accepted,
+            None,
         )
         .await;
 

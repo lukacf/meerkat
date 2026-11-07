@@ -1202,26 +1202,42 @@ Submit an identity-addressed console interaction through the console aggregator.
 }
 ```
 
-`origin_kind` is optional. When present it must be one of `operator`,
-`operator_probe`, `connector`, `scheduler`, `policy`, `flow` or `system`
-(`ConsoleTurnOrigin`); other values are refused with invalid params. It is
-persisted on the `user_input` frame so the console transcript labels the
-turn from typed data.
+`origin_kind` is optional. The kinds are `operator`, `operator_probe`,
+`connector`, `scheduler`, `policy`, `flow` and `system` (`ConsoleTurnOrigin`);
+other values are refused with invalid params. `scheduler`, `connector`,
+`flow`, `policy` and `system` belong to Meerkat's own internal emitters (a
+scheduled fire is `scheduler`), so a console send over HTTP that declares one
+is refused with invalid params (`POST /console/send` answers 400
+`reserved_origin_kind`) and records nothing. A send declares `operator`,
+`operator_probe` or no kind. The kind is persisted on the `user_input` frame
+so the console transcript labels the turn from typed data.
+
+The `user_input` frame also names its `sender`, which the Console sets from
+the caller it authenticated, never from the request: `kind` (`person`,
+`service`, `token_principal` or `anonymous`, as `meta/console/whoami` reports
+the caller), `assurance` when the Console established one, `display_name`
+(the authenticated principal) and `caller_scope` (the opaque scope
+`meta/console/whoami` reports, so a client can tell its own messages from
+another caller's). On a console that requires sign-in, a person's send also
+carries the person's qualified principal to the agent's run as its original
+requester; the frame keeps it in storage and no view returns it. A
+service's, a token principal's and an anonymous caller's sends carry none,
+and on an Open console no send does.
 
 The `user_input` frame of a console caller's send also records the send's
 thread, `thread`, which the console sets from the caller and the agent and
 no param names. `thread.audience` is `person` when the agent is private to
 the sender (their own side chat on a console with sign-in, or a member such
-a side chat created) and `shared` otherwise. The console keeps, for itself,
-the person the replies to the send are for: the sender, when the sender is
-a verified person on a console with sign-in (a schedule's fire: the
-schedule's sender). A reply meant for that person alone reaches them in that
-thread when it is `person`, and as an item of their attention list when it
-is `shared` (see `meta/console/attention`); nothing is appended to a shared
-conversation. A send that names no person (an open console's caller, a
-service, a token that names no person) has no private reply route, and
-neither has a send whose `user_input` frame a host's payload policy redacted
-(the redaction takes the `thread` with it).
+a side chat created) and `shared` otherwise. The replies to a send are for
+its sender when the sender names a requester (a person on a console that
+requires sign-in; a schedule's fire: the schedule's sender). A reply meant
+for that person alone reaches them in that thread when it is `person`, and
+as an item of their attention list when it is `shared` (see
+`meta/console/attention`); nothing is appended to a shared conversation. A
+send whose sender names no requester (an open console's caller, a service,
+a token that names no person) has no private reply route, and neither has a
+send whose `user_input` frame a host's payload policy redacted (the
+redaction takes the `sender` and the `thread` with it).
 
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 

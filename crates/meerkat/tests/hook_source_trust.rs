@@ -25,8 +25,8 @@ use meerkat_core::confinement::{
 use meerkat_core::{
     AgentEvent, AgentToolDispatcher, Config, ConfinementConfig, CustomConfinement,
     HookAdapterConfig, HookCapability, HookEntryConfig, HookFailureReason, HookId, HookPoint,
-    LaunchConfinement, Message, Provider, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError,
-    ToolResult,
+    HookRunOverrides, LaunchConfinement, Message, Provider, ToolCallView, ToolDef,
+    ToolDispatchOutcome, ToolError, ToolResult,
 };
 use serde_json::json;
 
@@ -132,20 +132,19 @@ impl AgentToolDispatcher for GuardedTool {
     }
 }
 
-/// A host's trust record: the project config is trusted when the digest it
-/// recorded is the content's (rkat-tui's `HostTrustRecord` shape); any other
-/// source is the user's own. Every question the factory asks is kept.
+/// A host's trust record: the sources the host checked, each as the path and
+/// the digest of the content it judged. A source is trusted only when both
+/// match a record, so any other source, an unknown path included, is
+/// untrusted. Every question the factory asks is kept.
 struct RecordedTrust {
-    project_file: PathBuf,
-    recorded: HookSourceDigest,
+    records: Vec<(PathBuf, HookSourceDigest)>,
     asked: Mutex<Vec<(PathBuf, HookSourceDigest)>>,
 }
 
 impl RecordedTrust {
-    fn new(project_file: PathBuf, recorded: HookSourceDigest) -> Arc<Self> {
+    fn new(records: impl IntoIterator<Item = (PathBuf, HookSourceDigest)>) -> Arc<Self> {
         Arc::new(Self {
-            project_file,
-            recorded,
+            records: records.into_iter().collect(),
             asked: Mutex::new(Vec::new()),
         })
     }
@@ -161,7 +160,11 @@ impl HookSourceTrust for RecordedTrust {
             .lock()
             .unwrap()
             .push((source.path.to_path_buf(), source.sha256));
-        if source.path != self.project_file || source.sha256 == self.recorded {
+        if self
+            .records
+            .iter()
+            .any(|(path, digest)| path == source.path && *digest == source.sha256)
+        {
             HookSourceDecision::Trusted
         } else {
             HookSourceDecision::Untrusted
@@ -230,6 +233,73 @@ struct Run {
     client: Arc<ScriptedClient>,
     tool: Arc<GuardedTool>,
     events: Vec<AgentEvent>,
+    /// The run's own result: its final text, or the error that ended it.
+    outcome: Result<String, String>,
+}
+
+/// A factory over `project`, with a user config root, a trust and host
+/// confinement when they are given.
+fn factory_for(
+    base: &Path,
+    project: &Path,
+    user_root: Option<&Path>,
+    trust: Option<Arc<dyn HookSourceTrust>>,
+    host: Option<&HostConfinement>,
+) -> AgentFactory {
+    let mut factory = AgentFactory::new(base.join("sessions"))
+        .session_store(Arc::new(meerkat_store::MemoryStore::new()))
+        .runtime_root(base.join("runtime"))
+        .project_root(project)
+        .builtins(false)
+        .shell(false);
+    if let Some(user_root) = user_root {
+        factory = factory.user_config_root(user_root);
+    }
+    if let Some(trust) = trust {
+        factory = factory.with_hook_source_trust(trust);
+    }
+    if let Some(host) = host {
+        factory = factory.with_host_confinement(host);
+    }
+    factory
+}
+
+/// Builds an agent from `factory`, with `hooks_override` as its run
+/// overrides, and runs one turn that calls the guarded tool.
+async fn run_on(factory: &AgentFactory, hooks_override: HookRunOverrides) -> Run {
+    let client = Arc::new(ScriptedClient::default());
+    let tool = Arc::new(GuardedTool::default());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+    build.llm_client_override = Some(client.clone());
+    build.external_tools = Some(tool.clone());
+    build.event_tx = Some(tx);
+    build.hooks_override = hooks_override;
+    let mut agent = tokio::time::timeout(
+        Duration::from_secs(15),
+        factory.build_agent(build, &Config::default()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(15),
+        agent.run("Attempt the guarded operation".to_string().into()),
+    )
+    .await
+    .unwrap()
+    .map(|result| result.text)
+    .map_err(|error| error.to_string());
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    Run {
+        client,
+        tool,
+        events,
+        outcome,
+    }
 }
 
 /// Builds an agent over `project` (with `trust` installed, if any) and runs
@@ -255,7 +325,7 @@ async fn build_and_run_with(
 }
 
 /// [`build_and_run_with`], with host confinement installed when `host` is
-/// given.
+/// given. The run completes.
 async fn build_and_run_with_host(
     base: &Path,
     project: &Path,
@@ -263,52 +333,13 @@ async fn build_and_run_with_host(
     trust: Option<Arc<dyn HookSourceTrust>>,
     host: Option<&HostConfinement>,
 ) -> Run {
-    let client = Arc::new(ScriptedClient::default());
-    let tool = Arc::new(GuardedTool::default());
-    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-    let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
-    build.llm_client_override = Some(client.clone());
-    build.external_tools = Some(tool.clone());
-    build.event_tx = Some(tx);
-    let mut factory = AgentFactory::new(base.join("sessions"))
-        .session_store(Arc::new(meerkat_store::MemoryStore::new()))
-        .runtime_root(base.join("runtime"))
-        .project_root(project)
-        .builtins(false)
-        .shell(false);
-    if let Some(user_root) = user_root {
-        factory = factory.user_config_root(user_root);
-    }
-    if let Some(trust) = trust {
-        factory = factory.with_hook_source_trust(trust);
-    }
-    if let Some(host) = host {
-        factory = factory.with_host_confinement(host);
-    }
-    let mut agent = tokio::time::timeout(
-        Duration::from_secs(15),
-        factory.build_agent(build, &Config::default()),
+    let run = run_on(
+        &factory_for(base, project, user_root, trust, host),
+        HookRunOverrides::default(),
     )
-    .await
-    .unwrap()
-    .unwrap();
-    let result = tokio::time::timeout(
-        Duration::from_secs(15),
-        agent.run("Attempt the guarded operation".to_string().into()),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(result.text, "continued");
-    let mut events = Vec::new();
-    while let Ok(event) = rx.try_recv() {
-        events.push(event);
-    }
-    Run {
-        client,
-        tool,
-        events,
-    }
+    .await;
+    assert_eq!(run.outcome.as_deref(), Ok("continued"));
+    run
 }
 
 fn refused_hooks(events: &[AgentEvent]) -> Vec<(HookId, HookFailureReason)> {
@@ -340,7 +371,7 @@ async fn a_hook_written_after_the_hosts_check_never_runs() {
     let (_temp, base, project) = fixture();
     let marker = base.join("planted-hook-entered");
     write_project_hooks(&project, vec![]);
-    let trust = RecordedTrust::new(project_file(&project), host_digest(&project));
+    let trust = RecordedTrust::new([(project_file(&project), host_digest(&project))]);
 
     // The interval between the host's check and the factory's read.
     write_project_hooks(&project, vec![marker_guardrail("planted", &marker)]);
@@ -381,7 +412,7 @@ async fn a_hook_whose_content_the_host_trusted_runs() {
     let (_temp, base, project) = fixture();
     let marker = base.join("trusted-hook-entered");
     write_project_hooks(&project, vec![marker_guardrail("trusted", &marker)]);
-    let trust = RecordedTrust::new(project_file(&project), host_digest(&project));
+    let trust = RecordedTrust::new([(project_file(&project), host_digest(&project))]);
 
     let run = build_and_run(&base, &project, Some(Arc::clone(&trust))).await;
 
@@ -398,7 +429,7 @@ async fn a_hook_whose_content_the_host_trusted_runs() {
 async fn an_absent_hook_source_is_not_asked_about() {
     let (_temp, base, project) = fixture();
     std::fs::create_dir_all(&project).unwrap();
-    let trust = RecordedTrust::new(project_file(&project), HookSourceDigest::of(b"[hooks]\n"));
+    let trust = RecordedTrust::new([(project_file(&project), HookSourceDigest::of(b"[hooks]\n"))]);
 
     let run = build_and_run(&base, &project, Some(Arc::clone(&trust))).await;
 
@@ -425,10 +456,10 @@ async fn without_a_trust_the_project_hooks_run_as_before() {
     assert!(refused_hooks(&run.events).is_empty());
 }
 
-/// Counts the factory's questions per file; the project file is untrusted
-/// and the user file trusted.
+/// Counts the factory's questions per file and trusts only `trusted`, so
+/// the project file, and any other path, is untrusted.
 struct CountingTrust {
-    project_file: PathBuf,
+    trusted: Option<PathBuf>,
     asked: Mutex<HashMap<PathBuf, usize>>,
 }
 
@@ -440,10 +471,10 @@ impl HookSourceTrust for CountingTrust {
             .unwrap()
             .entry(source.path.to_path_buf())
             .or_default() += 1;
-        if source.path == self.project_file {
-            HookSourceDecision::Untrusted
-        } else {
+        if self.trusted.as_deref() == Some(source.path) {
             HookSourceDecision::Trusted
+        } else {
+            HookSourceDecision::Untrusted
         }
     }
 }
@@ -478,7 +509,7 @@ async fn each_hook_source_is_decided_once_per_build() {
             .collect(),
     );
     let trust = Arc::new(CountingTrust {
-        project_file: project_file(&project),
+        trusted: Some(user_file.clone()),
         asked: Mutex::new(HashMap::new()),
     });
 
@@ -549,7 +580,7 @@ async fn confinement_refusing_a_file_does_not_skip_the_trust() {
         "confinement refuses the project file on its own"
     );
     let trust = Arc::new(CountingTrust {
-        project_file: project_file(&project),
+        trusted: None,
         asked: Mutex::new(HashMap::new()),
     });
 

@@ -207,6 +207,22 @@ impl MeerkatMachine {
         driver.lock().await.resumable_run_id()
     }
 
+    /// The run `session_id`'s current registration keeps resumable while its
+    /// resumed-run admission could not decide, if any: the run stays marked,
+    /// with its inputs bound and none ended, until a later lap of the
+    /// runtime loop or a later registration asks the admission again and it
+    /// answers.
+    pub async fn resumed_run_admission_held(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<meerkat_core::lifecycle::RunId> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id)?.driver)
+        };
+        driver.lock().await.resumed_run_admission_held()
+    }
+
     /// Release the run `session_id`'s registration marked resumable to
     /// ordinary requeue: its provisional tail is discarded first, by its
     /// exact authority, and then its bound inputs go back to their lanes,
@@ -446,6 +462,32 @@ impl super::driver::DriverEntry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = authority.state();
         state.resumable_run_id.is_some() && state.run_stop_requested == state.resumable_run_id
+    }
+
+    /// The run marked resumable that the machine holds because its
+    /// resumed-run admission could not decide, if any.
+    pub(crate) fn resumed_run_admission_held(&self) -> Option<meerkat_core::lifecycle::RunId> {
+        self.shell_driver().resumed_run_admission_held()
+    }
+
+    /// Hold the run `run_id` marked resumable for its admission (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::hold_resumed_run_for_admission`]).
+    pub(crate) fn hold_resumed_run_for_admission(
+        &mut self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        self.shell_driver_mut()
+            .hold_resumed_run_for_admission(run_id)
+    }
+
+    /// Release the admission hold of the run `run_id` (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::release_resumed_run_admission`]).
+    pub(crate) fn release_resumed_run_admission(
+        &mut self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        self.shell_driver_mut()
+            .release_resumed_run_admission(run_id)
     }
 
     /// The session's unfinished inputs its store keeps: every active input

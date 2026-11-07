@@ -117,11 +117,14 @@ pub enum DurableResumeVerdict {
     },
     /// The host cannot decide now, for example because the record it reads
     /// is unreachable. The runtime asks again, up to
-    /// [`meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS`] times, and then
-    /// settles the run as it settles a superseded one. A gate that cannot
-    /// decide never lets the run resume.
+    /// [`meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS`] times; when every
+    /// attempt answers so, the run is neither resumed nor settled: it stays
+    /// marked, its inputs bound and none ended, and the runtime asks the gate
+    /// again at the next wake of the worker's runtime loop or at the next
+    /// registration of its session, never on a timer. A gate that cannot
+    /// decide never lets the run resume, and never ends it.
     Unavailable {
-        /// Why, for the run's terminal record when the attempts run out.
+        /// Why, for the runtime's log.
         reason: String,
     },
 }

@@ -416,13 +416,16 @@ The gate answers with a `DurableResumeVerdict`:
 |---------|--------|
 | `Continue` | The run continues |
 | `Superseded { reason }` | The run is settled at once, like a stop: its bound inputs are abandoned as refused resumes, the run ends failed, and it is closed as interrupted with its committed rounds kept |
-| `Unavailable { reason }` | Meerkat asks again, up to 3 attempts in about 30 seconds, then settles the run like `Superseded` |
+| `Unavailable { reason }` | Meerkat asks again, up to 3 attempts in about 30 seconds. When every attempt answers `Unavailable` (or takes too long), the run is neither resumed nor settled: it stays marked, with its inputs bound and none ended, and no other run of the session starts. Meerkat asks again at the next wake of the worker's runtime loop (a new input, for example) or at the next registration of its session, such as the next start, and never on a timer |
 
 Each attempt has 8 seconds. An attempt that takes longer is cancelled and
 counts as `Unavailable`, so a gate must be safe to cancel and must answer the
 same way when asked again for the same run. It maps its own failures to
-`Unavailable`, never to `Continue`. A host that keys work by owner gets a
-worker's owner key with `lower_agent_identity_owner_key`.
+`Unavailable`, never to `Continue`. A gate that can never decide keeps the run
+waiting: answer `Superseded`, or stop the run, to end it. A host that keys
+work by owner gets a worker's owner key with `lower_agent_identity_owner_key`.
+`MeerkatMachine::resumed_run_admission_held` names a run that waits on its
+gate this way.
 
 Without a gate, the run continues. Other members' runs continue without
 asking.

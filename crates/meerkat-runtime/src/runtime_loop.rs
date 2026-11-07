@@ -7588,6 +7588,24 @@ async fn admit_resumed_run(
     if held || waits_for_destination {
         return ResumedRunAdmissionLap::Exit(false);
     }
+    // A kept run past its stop's max age is settled as expired before its
+    // admission is asked: a run its admission could not decide, held across
+    // laps, ends here once that age passes.
+    if driver
+        .lock()
+        .await
+        .resumable_run_stop_requeue_expired(&run_id, chrono::Utc::now())
+    {
+        return settle_unresumed_run(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            &run_id,
+            UnresumedRun::Expired,
+        )
+        .await;
+    }
     let Some(machine) = authority_binding.machine.upgrade() else {
         return ResumedRunAdmissionLap::Exit(true);
     };
@@ -7618,6 +7636,17 @@ async fn admit_resumed_run(
     match crate::resumed_run_admission::ask_resumed_run_admission(Some(&admission), &request).await
     {
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Continue => {
+            // A run an earlier lap held because its admission could not
+            // decide is released before it resumes.
+            if let Err(error) = driver.lock().await.release_resumed_run_admission(&run_id) {
+                tracing::error!(
+                    session_id = %authority_binding.session_id,
+                    %run_id,
+                    %error,
+                    "the resumed run's admission hold could not be released"
+                );
+                return ResumedRunAdmissionLap::Exit(true);
+            }
             ResumedRunAdmissionLap::Resume(run_id)
         }
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Refused { detail } => {
@@ -7630,6 +7659,38 @@ async fn admit_resumed_run(
                 detail,
             )
             .await
+        }
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { detail } => {
+            // Neither resumed nor settled: the run stays marked, its inputs
+            // bound and none ended, and the machine holds it until a later
+            // answer. The next wake of the loop, or the session's next
+            // registration, asks again; nothing asks on a timer.
+            match driver.lock().await.hold_resumed_run_for_admission(&run_id) {
+                Ok(()) => {
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        attempts = crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPTS,
+                        %detail,
+                        "the resumed run's admission could not decide; the run stays marked and \
+                         is asked again at the next wake or registration"
+                    );
+                    ResumedRunAdmissionLap::Exit(false)
+                }
+                Err(error) => {
+                    // The machine refuses the hold of a run no longer marked,
+                    // or whose stop was asked meanwhile: the next lap settles
+                    // or serves what it finds.
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        %error,
+                        "the resumed run's admission could not decide, and the run can no longer \
+                         be held; the loop goes round again"
+                    );
+                    ResumedRunAdmissionLap::Again
+                }
+            }
         }
     }
 }
@@ -7671,6 +7732,10 @@ enum UnresumedRun {
     /// while it was marked resumable (suspended by the gap, or left open by
     /// a restart).
     Stopped,
+    /// The graceful stop that kept it open outlived its max age: checked
+    /// before each admission ask, so a run its admission could not decide
+    /// ends here once that age passes.
+    Expired,
 }
 
 impl UnresumedRun {
@@ -7678,6 +7743,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => crate::input_state::InputAbandonReason::ResumeRefused,
             Self::Stopped => crate::input_state::InputAbandonReason::Cancelled,
+            Self::Expired => crate::input_state::InputAbandonReason::RequeueExpired,
         }
     }
 
@@ -7687,6 +7753,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => "the resumed run was refused",
             Self::Stopped => STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+            Self::Expired => crate::meerkat_machine::EXPIRED_KEPT_RUN_TERMINATION_REASON,
         }
     }
 
@@ -7695,6 +7762,10 @@ impl UnresumedRun {
         match self {
             Self::Refused { detail } => format!("the resumed run was refused: {detail}"),
             Self::Stopped => "the suspended run was stopped before it resumed".to_string(),
+            Self::Expired => {
+                "the kept run outlived its stop's max age and was settled instead of resumed"
+                    .to_string()
+            }
         }
     }
 }
@@ -7735,6 +7806,12 @@ async fn settle_unresumed_run(
             %run_id,
             "the suspended run was stopped; it is settled without resuming"
         ),
+        UnresumedRun::Expired => tracing::info!(
+            session_id = %authority_binding.session_id,
+            %run_id,
+            "a run a graceful stop kept open outlived the stop's max age; it is settled instead \
+             of resumed"
+        ),
     }
     let mut runless_terminal = authority_binding.runless_terminal_announcement();
     let queue_authority_guard = match authority_binding
@@ -7747,14 +7824,16 @@ async fn settle_unresumed_run(
     // A stop of the run is staged under the session mutation gate this
     // guard holds: one recorded since the admission read the run is read
     // here, and the run is settled as stopped, never as a refused resume
-    // (the machine refuses that settlement of a stopped run).
-    let stopped_since = matches!(why, UnresumedRun::Refused { .. })
+    // (the machine refuses that settlement of a stopped run) or as expired
+    // (every settlement of a stopped run is a stop's).
+    let stopped_since = matches!(why, UnresumedRun::Refused { .. } | UnresumedRun::Expired)
         && driver.lock().await.resumable_run_stop_requested();
     let why = if stopped_since {
         tracing::info!(
             session_id = %authority_binding.session_id,
             %run_id,
-            "the run was stopped before its refused resume was settled; it is settled as stopped"
+            "the run was stopped before its refused or expired resume was settled; it is settled \
+             as stopped"
         );
         UnresumedRun::Stopped
     } else {

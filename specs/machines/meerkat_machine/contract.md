@@ -182,6 +182,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_stop_requested`: `Option<RunId>`
 - `run_start_holds`: `Set<RunStartHoldReason>`
 - `input_controller_holds`: `Set<String>`
+- `resumed_run_admission_hold`: `Option<RunId>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `registration_live_input_seen`: `Bool`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -913,6 +914,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ClaimCompositionResidency`(session_id: SessionId, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Option<Generation>)
 - `HoldInputController`(input_id: String)
 - `ReleaseInputController`(input_id: String)
+- `HoldResumedRunForAdmission`(run_id: RunId)
+- `ReleaseResumedRunAdmission`(run_id: RunId)
 - `ReplaceToolGrantGate`(gated: Set<ToolName>)
 - `ApplyToolGrantOpenSet`(open: Set<ToolName>)
 
@@ -1321,7 +1324,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `MarkRunResumableInitializing`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableIdle`: `no_current_run`, `no_other_resumable_run`
   - `MarkRunResumableAttached`: `no_current_run`, `no_other_resumable_run`
-  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_not_stopped`, `run_inputs_not_controller_held`, `resumed_run_destination_attached`
+  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`, `run_not_stopped`, `run_inputs_not_controller_held`, `run_admission_not_held`, `resumed_run_destination_attached`
 - Command Effects: `ResumableRunMarked`, `ResumedRunAuthorized`
 - Emitted By Transitions: `ResumableRunMarked`, `ResumedRunAuthorized`
 
@@ -1516,6 +1519,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `staged_inputs_are_not_queued`
 - `staged_inputs_have_run_association`
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
+- `resumed_run_admission_hold_names_the_marked_run`
 - `live_boundary_delivery_only_for_queued_steer`
 - `live_boundary_join_maps_lockstep`
 - `live_boundary_join_bound_to_current_run`
@@ -1941,6 +1945,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `run_is_resumable`
   - `run_not_stopped`
   - `run_inputs_not_controller_held`
+  - `run_admission_not_held`
   - `resumed_run_destination_attached`
 - Emits: `ResumedRunAuthorized`
 - To: `Running`
@@ -29141,6 +29146,81 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_controller_held`
 - Emits: `InputControllerReleased`
+- To: `Stopped`
+
+### `HoldResumedRunForAdmissionIdle`
+- From: `Idle`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Idle`
+
+### `HoldResumedRunForAdmissionAttached`
+- From: `Attached`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Attached`
+
+### `HoldResumedRunForAdmissionRunning`
+- From: `Running`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Running`
+
+### `HoldResumedRunForAdmissionRetired`
+- From: `Retired`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Retired`
+
+### `HoldResumedRunForAdmissionStopped`
+- From: `Stopped`
+- On: `HoldResumedRunForAdmission`(run_id)
+- Guards:
+  - `run_is_resumable`
+  - `run_not_stopped`
+- To: `Stopped`
+
+### `ReleaseResumedRunAdmissionIdle`
+- From: `Idle`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Idle`
+
+### `ReleaseResumedRunAdmissionAttached`
+- From: `Attached`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Attached`
+
+### `ReleaseResumedRunAdmissionRunning`
+- From: `Running`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Running`
+
+### `ReleaseResumedRunAdmissionRetired`
+- From: `Retired`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
+- To: `Retired`
+
+### `ReleaseResumedRunAdmissionStopped`
+- From: `Stopped`
+- On: `ReleaseResumedRunAdmission`(run_id)
+- Guards:
+  - `run_admission_held`
 - To: `Stopped`
 
 ## Coverage

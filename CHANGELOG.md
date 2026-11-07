@@ -109,7 +109,30 @@ them.
   contract and now loses its realm at its next re-acquire (see Upgrade
   notes).
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`, `meerkat-store-conformance`: a resumed-run admission
+  (`ResumedRunAdmissionDecision::Unavailable`), or a durable worker's resume
+  gate (`DurableResumeVerdict::Unavailable`), that cannot decide through
+  every attempt no longer ends the run as a refused resume. The run is
+  neither resumed nor settled: it stays marked, its inputs bound and none
+  ended, no `RunFailed` is published, and its waiters keep waiting; no other
+  run of the session starts meanwhile. The runtime asks again at the next
+  wake of the session's runtime loop or at the session's next registration,
+  never on a timer, and a kept run past its stop's max age is settled as
+  expired before it is asked again. Before, the run was settled
+  `ResumeRefused` after the third attempt. The `durable_worker` chapter's
+  `worker_gate_unavailable` row now expects the run kept at that restart and
+  resumed once at the next restart, with the gate recovered.
+
 ### Added
+
+- `meerkat-runtime`: `MeerkatMachine::resumed_run_admission_held`, the run a
+  session's registration keeps marked while its resumed-run admission could
+  not decide. `MeerkatMachine` holds such a run in its machine
+  (`resumed_run_admission_hold`, with the runtime-internal inputs
+  `HoldResumedRunForAdmission` and `ReleaseResumedRunAdmission`): it does not
+  resume until a later answer releases it, and settling or releasing the run
+  drops the hold.
 
 - `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
   last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
@@ -247,6 +270,13 @@ them.
   before that reopen. Affects 0.9.10.
 
 ### Upgrade notes
+
+- Hosts with a resumed-run admission or a durable resume gate: an answer of
+  `Unavailable` through every attempt now keeps the run waiting instead of
+  ending it. A gate that can never decide keeps it waiting for good: answer
+  `Superseded`, or stop the run, to end it. An implementation of the
+  conformance crate's `DurableWorkerHarness` is restarted a second time over
+  the same store after a restart whose gate answered `Unavailable`.
 
 - Host store hosts: Core now sends no commit attempt past the self-fence
   deadline of the token it carries, so while renews fail a

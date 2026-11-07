@@ -1022,11 +1022,17 @@ impl DurableWorkerHarness for ScriptedCore {
         plan: &LongRunPlan,
         gate: ResumeGate,
     ) -> Result<RestartedWorker, ConformanceFailure> {
-        let refused = matches!(gate, ResumeGate::Superseded | ResumeGate::Unavailable);
-        let report = if refused {
-            self.settled_report()
-        } else {
-            self.restart_report(plan)
+        let refused = gate == ResumeGate::Superseded;
+        let report = match gate {
+            ResumeGate::Superseded => self.settled_report(),
+            // The gate could not decide: the run stays open for the next
+            // start, nothing of it runs and nothing of it ends.
+            ResumeGate::Unavailable => RestartReport {
+                inputs_settled: false,
+                inputs_consumed: false,
+                ..self.settled_report()
+            },
+            _ => self.restart_report(plan),
         };
         Ok(RestartedWorker {
             identity: "worker".to_string(),

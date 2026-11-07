@@ -3525,6 +3525,11 @@ runtime_internal_inputs!(
         // either.
         ReplaceToolGrantGate,
         ApplyToolGrantOpenSet,
+        // The run marked resumable whose resumed-run admission could not
+        // decide, held until a later answer releases it: the runtime loop
+        // applies them. No caller can ask for either.
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
     ]
 );
 

@@ -4175,6 +4175,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             // drops its hold. Live only: never persisted, every registration
             // holds its recovered inputs again from their first answer.
             input_controller_holds: Set<String>,
+            // The run marked resumable whose host's resumed-run admission
+            // could not decide (every attempt answered unavailable or late):
+            // it stays marked, with its inputs bound and none ended, and
+            // waits for a later lap of the runtime loop or a later
+            // registration to ask again. While it is held, ResumeRun and the
+            // resumed-run plan refuse it; a later `Continue` releases it
+            // (ReleaseResumedRunAdmission), and settling or releasing the
+            // run drops it. It names only the run marked resumable. Live
+            // only: never persisted, every registration asks again.
+            resumed_run_admission_hold: Option<RunId>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
             // Whether the registration served live work: an input admitted
             // live (QueueAccepted, SteerAccepted), a resubmission
@@ -4930,6 +4940,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             run_stop_requested = None,
             run_start_holds = EmptySet,
             input_controller_holds = EmptySet,
+            resumed_run_admission_hold = None,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -7372,6 +7383,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             // releases it.
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
+            // The run marked resumable whose resumed-run admission could not
+            // decide is held (`resumed_run_admission_hold`); a later
+            // `Continue` releases it.
+            HoldResumedRunForAdmission { run_id: RunId },
+            ReleaseResumedRunAdmission { run_id: RunId },
             // The scoped tool grant gate: every build replaces the gated
             // names (every open name closes), and every model-request
             // boundary applies the gated names a live grant opens.
@@ -10466,6 +10482,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                                 == Some(InputPhase::AppliedPendingConsumption)))))
         }
 
+        // A resumed-run admission hold names only the run marked resumable:
+        // releasing, settling or resuming the run drops it with the mark.
+        invariant resumed_run_admission_hold_names_the_marked_run {
+            self.resumed_run_admission_hold == None
+            || self.resumed_run_admission_hold == self.resumable_run_id
+        }
+
         // Durable in-turn Steer delivery. The tracked delivery class exists
         // only while its input still awaits a live boundary in the Steer lane.
         invariant live_boundary_delivery_only_for_queued_steer {
@@ -11709,6 +11732,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 for_all(held_input_id in self.input_controller_holds,
                     self.input_run_associations.get_cloned(held_input_id) != Some(run_id))
             }
+            // A run whose resumed-run admission could not decide does not
+            // resume until a later answer releases it (the resumed-run plan
+            // refuses it too).
+            guard "run_admission_not_held" { self.resumed_run_admission_hold != Some(run_id) }
             // A governed run on a document that requires a destination
             // resumes only once one is bound again (or was bound, and then
             // retired), as `scoped_context_attached` stages recovered
@@ -11759,6 +11786,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
             update {
                 self.resumable_run_id = None;
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it: they requeue as
                 // inputs of no run, and the runtime asks their host again for
                 // a controller client they still miss.
@@ -11794,6 +11823,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.resumable_run_id = None;
                 self.turn_terminal_run_id = Some(run_id);
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it; the shell then ends
                 // them with the run.
                 for held_input_id in self.input_controller_holds {
@@ -40373,6 +40404,37 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit InputControllerReleased
         }
+
+        // The run marked resumable waits for its resumed-run admission. When
+        // every attempt of the host's admission answered unavailable or did
+        // not answer in time, the run is neither resumed nor settled: it is
+        // held, stays marked with its inputs bound, and a later lap of the
+        // runtime loop or a later registration asks again. A run whose stop
+        // was asked is settled instead, never held. Holding a run already
+        // held changes nothing.
+        transition HoldResumedRunForAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input HoldResumedRunForAdmission { run_id }
+            guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = Some(run_id);
+            }
+            to Idle
+        }
+
+        // A later answer of the admission let the held run continue: the
+        // hold is released, and the runtime resumes the run in the same lap
+        // (ResumeRun). Settling or releasing the run drops the hold instead.
+        transition ReleaseResumedRunAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReleaseResumedRunAdmission { run_id }
+            guard "run_admission_held" { self.resumed_run_admission_hold == Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = None;
+            }
+            to Idle
+        }
     }
         }
 
@@ -40539,7 +40601,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// `ResumeRun` guard `run_not_stopped`), at least one input
                 /// is bound to it, no input bound to it is held for its
                 /// controller (mirrors the `ResumeRun` guard
-                /// `run_inputs_not_controller_held`), and its destination is
+                /// `run_inputs_not_controller_held`), its admission does not
+                /// hold it (`run_admission_not_held`), and its destination is
                 /// attached (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
@@ -40558,6 +40621,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .iter()
                         .any(|held| state.input_run_associations.get(held) == Some(run_id))
                     {
+                        return None;
+                    }
+                    // Mirrors the `ResumeRun` guard `run_admission_not_held`.
+                    if state.resumed_run_admission_hold.as_ref() == Some(run_id) {
                         return None;
                     }
                     if !resumed_run_destination_attached(state, run_id) {

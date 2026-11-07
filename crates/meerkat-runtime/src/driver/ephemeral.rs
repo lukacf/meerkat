@@ -827,6 +827,54 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    /// The run marked resumable that the machine holds because its
+    /// resumed-run admission could not decide, if any
+    /// (`resumed_run_admission_hold`).
+    pub(crate) fn resumed_run_admission_held(&self) -> Option<RunId> {
+        self.with_dsl_state(|state| {
+            state
+                .resumed_run_admission_hold
+                .as_ref()
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+        })
+    }
+
+    /// Hold the run `run_id` marked resumable through the machine
+    /// (`HoldResumedRunForAdmission`): its resumed-run admission could not
+    /// decide, so the run stays marked, with its inputs bound and none
+    /// ended, and neither `ResumeRun` nor the resumed-run plan admits it
+    /// until a later answer releases it.
+    pub(crate) fn hold_resumed_run_for_admission(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "HoldResumedRunForAdmission",
+        )
+    }
+
+    /// Release the admission hold of the run `run_id`
+    /// (`ReleaseResumedRunAdmission`): a later answer let it continue, and
+    /// the caller resumes it. A run the machine does not hold is left as it
+    /// is.
+    pub(crate) fn release_resumed_run_admission(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        if self.resumed_run_admission_held().as_ref() != Some(run_id) {
+            return Ok(());
+        }
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ReleaseResumedRunAdmission {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "ReleaseResumedRunAdmission",
+        )
+    }
+
     /// Whether the pause since the held rows were last asked is over.
     fn controller_hold_ask_due(&self, now: meerkat_core::time_compat::Instant) -> bool {
         self.controller_hold_clock.last_asked.is_none_or(|last| {

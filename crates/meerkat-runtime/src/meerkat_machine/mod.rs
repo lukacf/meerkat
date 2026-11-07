@@ -3990,7 +3990,7 @@ const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
 
 /// The runtime-termination reason a kept run settled past its stop's max age
 /// carries to its interaction terminals.
-const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
+pub(crate) const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
     "a kept run outlived the stop's max age and was settled instead of resumed";
 
 /// The runtime-termination reason a kept governed input with no way back to

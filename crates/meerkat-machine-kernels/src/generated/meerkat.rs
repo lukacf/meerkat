@@ -14310,6 +14310,7 @@ pub struct State {
     pub run_stop_requested: Option<RunId>,
     pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub input_controller_holds: std::collections::BTreeSet<String>,
+    pub resumed_run_admission_hold: Option<RunId>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub registration_live_input_seen: bool,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -15170,6 +15171,10 @@ impl std::fmt::Debug for State {
             .field("run_stop_requested", &self.run_stop_requested)
             .field("run_start_holds", &self.run_start_holds)
             .field("input_controller_holds", &self.input_controller_holds)
+            .field(
+                "resumed_run_admission_hold",
+                &self.resumed_run_admission_hold,
+            )
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field(
                 "registration_live_input_seen",
@@ -19084,6 +19089,14 @@ pub mod inputs {
         pub input_id: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldResumedRunForAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumedRunAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceToolGrantGate {
         pub gated: std::collections::BTreeSet<ToolName>,
     }
@@ -19522,6 +19535,8 @@ pub enum Input {
     ClaimCompositionResidency(inputs::ClaimCompositionResidency),
     HoldInputController(inputs::HoldInputController),
     ReleaseInputController(inputs::ReleaseInputController),
+    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
+    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
 }
@@ -20119,6 +20134,8 @@ impl Input {
             Self::ClaimCompositionResidency(_) => InputKind::ClaimCompositionResidency,
             Self::HoldInputController(_) => InputKind::HoldInputController,
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
+            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
+            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
         }
@@ -20541,6 +20558,8 @@ pub enum InputKind {
     ClaimCompositionResidency,
     HoldInputController,
     ReleaseInputController,
+    HoldResumedRunForAdmission,
+    ReleaseResumedRunAdmission,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
 }
@@ -26076,6 +26095,16 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    HoldResumedRunForAdmissionIdle,
+    HoldResumedRunForAdmissionAttached,
+    HoldResumedRunForAdmissionRunning,
+    HoldResumedRunForAdmissionRetired,
+    HoldResumedRunForAdmissionStopped,
+    ReleaseResumedRunAdmissionIdle,
+    ReleaseResumedRunAdmissionAttached,
+    ReleaseResumedRunAdmissionRunning,
+    ReleaseResumedRunAdmissionRetired,
+    ReleaseResumedRunAdmissionStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26324,6 +26353,7 @@ pub fn initial_state() -> State {
         run_stop_requested: None,
         run_start_holds: Default::default(),
         input_controller_holds: Default::default(),
+        resumed_run_admission_hold: None,
         recovered_admitted_lanes: Default::default(),
         registration_live_input_seen: false,
         op_statuses: Default::default(),

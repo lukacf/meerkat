@@ -6244,6 +6244,10 @@ fn settled_run_report(
 struct PublishingRuns {
     runs: RecordedRuns,
     publications: Arc<RecordingPublications>,
+    /// The store and session a resumed run continues in, for an executor
+    /// that ends a resumed run as the session service does
+    /// ([`Self::resuming`]).
+    resumes_in: Option<(Arc<InMemoryRuntimeStore>, SessionId)>,
 }
 
 impl PublishingRuns {
@@ -6251,6 +6255,22 @@ impl PublishingRuns {
         Self {
             runs: RecordedRuns::default(),
             publications: RecordingPublications::new(),
+            resumes_in: None,
+        }
+    }
+
+    /// [`Self::new`], ending a resumed run as the session service does. A
+    /// `ResumeRun` dispatch continues the run's provisional tail, so its
+    /// boundary promotes that tail with the receipt the store derives for
+    /// it (`observe_open_run_continuation`, the receipt the service seeds
+    /// its actor with), and a run the store holds no tail of fails unrun.
+    /// Any other run commits as [`RecordedRuns`] does. The receipt-only
+    /// boundary that [`RecordedRuns`] answers is never a real executor's
+    /// for a resumed run, and the store refuses it beside the tail.
+    fn resuming(store: &Arc<InMemoryRuntimeStore>, session_id: &SessionId) -> Self {
+        Self {
+            resumes_in: Some((Arc::clone(store), session_id.clone())),
+            ..Self::new()
         }
     }
 }
@@ -6285,10 +6305,71 @@ impl meerkat_core::lifecycle::core_executor::CoreExecutor for PublishingRuns {
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::lifecycle::core_executor::CoreExecutorError,
     > {
+        let resumed = primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.execution_kind)
+            == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
+        if let (true, Some((store, session_id))) = (resumed, self.resumes_in.as_ref()) {
+            // As the session service's resumed dispatch: continue the run's
+            // provisional tail and promote it at the run's boundary.
+            let continuation = meerkat_runtime::recovery::observe_open_run_continuation(
+                store.as_ref() as &dyn RuntimeStore,
+                session_id,
+            )
+            .await
+            .ok()
+            .flatten()
+            .filter(|continuation| continuation.run_id == run_id)
+            .ok_or_else(|| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::apply_failed_runtime_turn(
+                    format!("resumed run {run_id} has no provisional tail to continue from"),
+                )
+            })?;
+            let contributing = primitive.contributing_input_ids().to_vec();
+            self.runs
+                .0
+                .lock()
+                .unwrap()
+                .extend(contributing.iter().cloned());
+            let receipt = continuation.receipt;
+            return Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput::new(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: contributing,
+                    conversation_digest: Some(receipt.conversation_digest().to_string()),
+                    message_count: usize::try_from(receipt.message_count()).unwrap(),
+                },
+                None,
+            )
+            .with_bound_session(
+                meerkat_core::lifecycle::core_executor::BoundSessionCommit::provisional_promotion(
+                    receipt,
+                ),
+            ));
+        }
         meerkat_core::lifecycle::core_executor::CoreExecutor::apply(
             &mut self.runs,
             run_id,
             primitive,
+        )
+        .await
+    }
+
+    /// The store-issued authority of a committed boundary, acknowledged as
+    /// the session service acknowledges it after its resumed run's promotion
+    /// (an executor that answers only receipt-only boundaries keeps the
+    /// rejecting default: it never receives store authority).
+    async fn acknowledge_committed_session_boundary(
+        &mut self,
+        authority: &meerkat_core::lifecycle::core_executor::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        if self.resumes_in.is_some() {
+            return Ok(());
+        }
+        meerkat_core::lifecycle::core_executor::CoreExecutor::acknowledge_committed_session_boundary(
+            &mut self.runs,
+            authority,
         )
         .await
     }
@@ -6706,7 +6787,7 @@ impl ScriptedResume {
 
     /// Wait, bounded, until it was asked `count` times.
     async fn wait_for_asks(&self, count: usize) {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(1);
         while self.asks() < count {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -6766,7 +6847,7 @@ async fn a_runtime_whose_resume_admission_could_not_decide(
         .bind_resumed_run_admission(&registration, Arc::clone(&admission) as _)
         .await
         .expect("bind the admission");
-    let executor = PublishingRuns::new();
+    let executor = PublishingRuns::resuming(store, session_id);
     machine
         .ensure_session_with_executor(session_id.clone(), Box::new(executor.clone()))
         .await
@@ -6782,6 +6863,11 @@ async fn a_runtime_whose_resume_admission_could_not_decide(
         machine.resumable_run_id(session_id).await,
         Some(run_id.clone()),
         "an admission that could not decide leaves the run marked"
+    );
+    assert_eq!(
+        machine.resumed_run_admission_held(session_id).await,
+        Some(run_id.clone()),
+        "the machine holds the run for its admission"
     );
     assert_eq!(
         stored_terminal(store, &runtime_id, input.id()).await,
@@ -6818,12 +6904,30 @@ async fn wait_for_applied(runs: &RecordedRuns, count: usize) -> Vec<InputId> {
     }
 }
 
+/// Wait, bounded, until `input_id`'s stored row reads `row`; the caller
+/// asserts the row afterwards.
+async fn wait_for_terminal(
+    store: &InMemoryRuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    input_id: &InputId,
+    row: Option<(InputLifecycleState, Option<InputTerminalOutcome>)>,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stored_terminal(store, runtime_id, input_id).await != row
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// A resumed-run admission that answers `Unavailable` to every attempt does
 /// not end the kept run: the run stays marked, and the next registration
 /// (a restart) asks again; with the admission recovered, the run resumes
-/// exactly once, under its own run id, and its input is consumed. RED
-/// before: the run was settled as a refused resume after the third attempt
-/// (its input ended `ResumeRefused`, with a `RunFailed`).
+/// exactly once, with its input. RED before: the run was settled as a
+/// refused resume after the third attempt (its input ended `ResumeRefused`,
+/// with a `RunFailed`). The executor ends the resumed run as the session
+/// service does ([`PublishingRuns::resuming`]), so the run's boundary
+/// promotes its kept tail and its input is consumed.
 #[tokio::test]
 async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration() {
     let store = Arc::new(InMemoryRuntimeStore::new());
@@ -6833,8 +6937,11 @@ async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration()
     let (machine, _admission, _executor) =
         a_runtime_whose_resume_admission_could_not_decide(&store, &session_id, &run_id, &input)
             .await;
-    // The process ends; the next one starts over the same store.
-    drop(machine);
+    // The process stops answering, as a crashed one does: nothing of its
+    // teardown runs (dropping the machine would stop its runtime loop and
+    // settle what it holds), and the next process starts over the same
+    // store.
+    let _crashed = machine;
 
     let restarted = Arc::new(
         MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
@@ -6849,6 +6956,11 @@ async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration()
         Some(run_id.clone()),
         "the next registration marks the run again"
     );
+    assert_eq!(
+        restarted.resumed_run_admission_held(&session_id).await,
+        None,
+        "a registration starts without the hold: it asks again"
+    );
     let admission = ScriptedResume::deciding(
         meerkat_runtime::resumed_run_admission::ResumedRunAdmissionDecision::Continue,
     );
@@ -6860,7 +6972,7 @@ async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration()
         .bind_resumed_run_admission(&registration, Arc::clone(&admission) as _)
         .await
         .expect("bind the admission");
-    let executor = PublishingRuns::new();
+    let executor = PublishingRuns::resuming(&store, &session_id);
     restarted
         .ensure_session_with_executor(session_id.clone(), Box::new(executor.clone()))
         .await
@@ -6869,6 +6981,12 @@ async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration()
         wait_for_applied(&executor.runs, 1).await,
         vec![input.id().clone()],
         "the run resumes once, with its input"
+    );
+    wait_for_terminal(&store, &runtime_id, input.id(), CONSUMED_ROW).await;
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        CONSUMED_ROW,
+        "the resumed run commits, and its input is consumed"
     );
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(
@@ -6882,30 +7000,25 @@ async fn an_undecided_resume_admission_keeps_the_run_for_the_next_registration()
         "the resumed run did not fail: {:?}",
         executor.publications.events()
     );
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    while stored_terminal(&store, &runtime_id, input.id()).await != CONSUMED_ROW
-        && tokio::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
     assert_eq!(
-        stored_terminal(&store, &runtime_id, input.id()).await,
-        CONSUMED_ROW,
-        "the run's input is consumed"
+        restarted.resumed_run_admission_held(&session_id).await,
+        None,
+        "nothing holds the resumed run"
     );
     assert_eq!(restarted.resumable_run_id(&session_id).await, None);
 }
 
 /// Within one registration: after an admission that could not decide, a
 /// wake of the runtime loop (a new input) asks it again, and once it
-/// answers `Continue` the kept run resumes once, before the new input runs.
-/// RED before: the run was settled as a refused resume, and only the new
-/// input ran.
+/// answers `Continue` the kept run resumes once and commits, before the new
+/// input runs. RED before: the run was settled as a refused resume, and only
+/// the new input ran.
 #[tokio::test]
 async fn a_wake_asks_an_undecided_resume_admission_again_and_the_run_resumes_once() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let (session_id, run_id, input) =
         a_kept_run(&store, InputLifecycleState::AppliedPendingConsumption).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let (machine, admission, executor) =
         a_runtime_whose_resume_admission_could_not_decide(&store, &session_id, &run_id, &input)
             .await;
@@ -6921,12 +7034,33 @@ async fn a_wake_asks_an_undecided_resume_admission_again_and_the_run_resumes_onc
         vec![input.id().clone(), later.id().clone()],
         "the kept run resumes once, then the later input runs"
     );
+    for (id, what) in [
+        (input.id(), "the kept run's input"),
+        (later.id(), "the later input"),
+    ] {
+        wait_for_terminal(&store, &runtime_id, id, CONSUMED_ROW).await;
+        assert_eq!(
+            stored_terminal(&store, &runtime_id, id).await,
+            CONSUMED_ROW,
+            "{what} is consumed"
+        );
+    }
+    assert_eq!(
+        admission.asks(),
+        meerkat_runtime::RESUMED_RUN_ADMISSION_ATTEMPTS as usize + 1,
+        "the wake asked the admission once more, and its answer resumed the run"
+    );
     assert!(
         executor.publications.run_failures(&run_id).is_empty(),
         "the resumed run did not fail: {:?}",
         executor.publications.events()
     );
     assert_eq!(machine.resumable_run_id(&session_id).await, None);
+    assert_eq!(
+        machine.resumed_run_admission_held(&session_id).await,
+        None,
+        "the later answer released the hold"
+    );
 }
 
 /// After an admission that could not decide, a later registration whose
@@ -6942,7 +7076,8 @@ async fn a_superseded_answer_after_an_undecided_one_settles_the_run_as_refused()
     let (machine, _admission, _executor) =
         a_runtime_whose_resume_admission_could_not_decide(&store, &session_id, &run_id, &input)
             .await;
-    drop(machine);
+    // A crash, as in the row above.
+    let _crashed = machine;
 
     let restarted = Arc::new(
         MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())

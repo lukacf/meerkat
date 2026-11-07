@@ -378,7 +378,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
 - `ConcludeObjective`(member_id: AgentIdentity, objective_id: String, outcome: String)
-- `ResolveMemberBuildPreparation`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -602,6 +601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EndPreparationConstruction`(agent_identity: AgentIdentity, attempt: u64, end: ConstructionEndKind)
 - `UnlistIdentityEntry`(agent_identity: AgentIdentity)
 - `TakeOverIdentityEntry`(agent_identity: AgentIdentity)
+- `ResolveMemberBuildPreparation`(agent_identity: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)

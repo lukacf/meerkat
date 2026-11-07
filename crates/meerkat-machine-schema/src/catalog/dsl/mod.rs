@@ -5227,6 +5227,7 @@ runtime_internal_inputs!(
         ClassifyPeerNotice,
         CommitDormantSeat,
         ResolveMemberHostPreparation,
+        ResolveMemberBuildPreparation,
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,

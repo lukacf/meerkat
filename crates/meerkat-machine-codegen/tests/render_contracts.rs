@@ -862,10 +862,12 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
 
 /// MobMachine's arms of a host's adoption over a declared identity entry
 /// (0.9.11: the archive terminals that end the entry, the takeover's
-/// verdicts and the replay of its mark) are emitted last, on the machine's
-/// late tail after the legacy adoption's arms, so no `TransitionId`
+/// verdicts and the replay of its mark) are emitted on the machine's late
+/// tail after the legacy adoption's arms, so no `TransitionId`
 /// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
-/// its last variant, keeps index 1902.
+/// its last variant, keeps index 1902. Only the arms appended after them
+/// follow them: the build preparation retry's
+/// (`mob_build_preparation_retry_arms_are_the_last_variants`).
 #[test]
 fn mob_host_adoption_arms_follow_every_earlier_variant() {
     let rendered = render_machine_kernel_module(&mob_machine());
@@ -891,14 +893,39 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         "RecoverIdentityEntryAdoptingMarkedRunning",
         "RecoverIdentityEntryAdoptingStaleRunning",
     ];
+    let after = MOB_BUILD_PREPARATION_RETRY_ARMS.len();
+    let end = variants.len() - after;
     assert_eq!(
-        variants[variants.len() - host_adoption_arms.len()..].to_vec(),
+        variants[end - host_adoption_arms.len()..end].to_vec(),
         host_adoption_arms.to_vec(),
-        "the host adoption's arms are the last TransitionId variants"
+        "the host adoption's arms are the last TransitionId variants before the build preparation retry's"
     );
     assert!(
         index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,
         "the legacy adoption's arms follow every variant 0.9.10 renders"
+    );
+}
+
+/// MobMachine's arms of a build preparation the host asked to retry
+/// (0.9.11: the wake feedback that records the cause, and the host's
+/// resolve in each phase) are the last `TransitionId` variants, appended
+/// on the machine's late tail after the host adoption's arms, so no
+/// earlier variant's discriminant moves.
+const MOB_BUILD_PREPARATION_RETRY_ARMS: [&str; 4] = [
+    "ResolveMemberRevivalRetryableBuildPreparationRunning",
+    "ResolveMemberBuildPreparationRunning",
+    "ResolveMemberBuildPreparationStopped",
+    "ResolveMemberBuildPreparationCompleted",
+];
+
+#[test]
+fn mob_build_preparation_retry_arms_are_the_last_variants() {
+    let rendered = render_machine_kernel_module(&mob_machine());
+    let variants = transition_id_variants(&rendered);
+    assert_eq!(
+        variants[variants.len() - MOB_BUILD_PREPARATION_RETRY_ARMS.len()..].to_vec(),
+        MOB_BUILD_PREPARATION_RETRY_ARMS.to_vec(),
+        "the build preparation retry's arms are the last TransitionId variants"
     );
 }
 

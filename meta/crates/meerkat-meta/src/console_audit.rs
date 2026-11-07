@@ -8,25 +8,30 @@
 //! content), the outcome (`committed`, `refused` or `failed`, with the
 //! JSON-RPC code or HTTP status and the typed kind of an error) and the
 //! owner's receipt (the identifiers in its answer). A row is bounded
-//! whatever the caller sends: at most 16 `id` fields in its target and in
-//! its receipt, no key longer than 64 bytes, no value longer than 256 bytes,
-//! and at most 4 KiB in all; a row that left anything out says so
+//! whatever the caller sends: at most 16 `id` fields beyond the change's
+//! known identifiers in its target and in its receipt, no key longer than
+//! 64 bytes, no value longer than 256 bytes, and at most 4 KiB in all, the
+//! known identifiers kept first; a row that left anything out says so
 //! (`truncated`). The console writes the row once the owner answered, and
 //! nothing reads the log to decide anything: each owner's own record stays
 //! the authority for what happened.
+//!
+//! The log keeps two record sets, each bounded on its own
+//! ([`ConsoleAuditSet`]): the console's changes, and MCP app tool calls, so
+//! however many tool calls an app makes, no change row gives way to them.
 //!
 //! The log lives in the realm's metadata store
 //! ([`crate::runtime::PersistentMetadataStore`]) as pages of rows, one realm
 //! document per page, and lasts as long as the store keeps its realm
 //! documents: for the life of the process or across restarts, which every
 //! read reports. A store that keeps no realm documents keeps no log
-//! ([`ConsoleAuditLog::over`] answers `None`). Rows are numbered from 1, and
-//! a store that keeps its documents never reuses a number: pruning never
-//! removes the page the next row goes to. A log a process keeps in memory
-//! starts again from 1 when the process does. The log is bounded by count and
-//! by age ([`ConsoleAuditLimits`]); whole pages are pruned, so up to one page
-//! more than a bound is kept. A row is read back exactly as it was stored,
-//! so the rows a newer build wrote stay readable.
+//! ([`ConsoleAuditLog::over`] answers `None`). Each set numbers its rows
+//! from 1, and a store that keeps its documents never reuses a number:
+//! pruning never removes the page the next row goes to. A log a process
+//! keeps in memory starts again from 1 when the process does. Each set is
+//! bounded by count and by age ([`ConsoleAuditLimits`]); whole pages are
+//! pruned, so up to one page more than a bound is kept. A row is read back
+//! exactly as it was stored, so the rows a newer build wrote stay readable.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,9 +41,12 @@ use serde_json::{Map, Value};
 
 use crate::runtime::{MetadataStoreError, PersistentMetadataStore, RecordRetention};
 
-/// The key prefix of the log's pages among the realm documents: the page
-/// number follows, zero-padded, so the keys sort as the pages do.
+/// The key prefix of the change rows' pages among the realm documents: the
+/// page number follows, zero-padded, so the keys sort as the pages do.
 const PAGE_PREFIX: &str = "console-audit/page/";
+
+/// The key prefix of the tool call rows' pages, as [`PAGE_PREFIX`].
+const TOOL_CALL_PAGE_PREFIX: &str = "console-audit/tool-calls/page/";
 
 /// Rows per page: page `n` holds the rows numbered `n * 64 + 1` to
 /// `(n + 1) * 64`.
@@ -53,7 +61,8 @@ pub(crate) const CONSOLE_AUDIT_MAX_PAGE: usize = 500;
 /// The rows one read answers when it names no limit.
 pub(crate) const CONSOLE_AUDIT_DEFAULT_PAGE: usize = 100;
 
-/// The most `id` fields (`id` and `*_id`) a row's target or receipt keeps.
+/// The most `id` fields (`id` and `*_id`) a row's target or receipt keeps
+/// beyond the change's known identifiers ([`Hold`]).
 const MAX_ID_FIELDS: usize = 16;
 
 /// The longest key a row keeps; a field with a longer one is left out.
@@ -69,16 +78,111 @@ const MAX_ROW_BYTES: usize = 4096;
 /// not known. Every other error is a refusal.
 const FAILURE_CODES: [i64; 2] = [-32603, -32000];
 
-/// The bounds of the console audit log: the most rows it keeps and the
-/// oldest a row may be.
+/// The fields that name what a change is of, besides its `id` fields.
+const TARGET_NAMED: &[&str] = &[
+    "identity",
+    "agent_identity",
+    "realm",
+    "role",
+    "principal",
+    "name",
+    "decision",
+    "action",
+    "operation",
+    "enabled",
+    "expected_revision",
+];
+
+/// The fields of an owner's answer that a receipt keeps besides its `id`
+/// fields; the audit token of a quarantine decision is one, read from the
+/// decision ([`audit_receipt`]).
+const RECEIPT_NAMED: &[&str] = &[
+    "revision",
+    "generation",
+    "agent_identity",
+    "supersedes",
+    "audit_token",
+];
+
+/// How firmly a row holds a field against its bounds. A caller can send any
+/// number of `id` fields, so the fields that name what a change is of hold
+/// over them, and the member a change targets and the access rule it edits
+/// hold longest: no invented field pushes them out of a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Hold {
+    /// An `id` field that is none of the change's known identifiers: at
+    /// most [`MAX_ID_FIELDS`] of them are kept, and they give way first.
+    Other,
+    /// A field that names what a change is of (`realm`, `role`, `name`,
+    /// ...), or a known field of the owner's receipt.
+    Named,
+    /// The member a change targets (the fields the console's access check
+    /// judges) or the access rule it edits.
+    Target,
+}
+
+/// How firmly a target holds its field `key`.
+fn target_hold(key: &str) -> Hold {
+    if key == "rule_id" || crate::http_console::CONSOLE_RPC_MEMBER_TARGET_FIELDS.contains(&key) {
+        Hold::Target
+    } else if TARGET_NAMED.contains(&key) {
+        Hold::Named
+    } else {
+        Hold::Other
+    }
+}
+
+/// How firmly a receipt holds its field `key`.
+fn receipt_hold(key: &str) -> Hold {
+    if RECEIPT_NAMED.contains(&key) {
+        Hold::Named
+    } else {
+        Hold::Other
+    }
+}
+
+/// The field of `fields` that holds least, by `hold`: the last key of the
+/// lowest hold.
+fn weakest(fields: &Map<String, Value>, hold: fn(&str) -> Hold) -> Option<(Hold, String)> {
+    let lowest = fields.keys().map(|key| hold(key)).min()?;
+    let key = fields.keys().rev().find(|key| hold(key) == lowest)?;
+    Some((lowest, key.clone()))
+}
+
+/// The two record sets of the log, each with a bound of its own, so neither
+/// pushes the other's rows out. A read names the one it reads (`log`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsoleAuditSet {
+    /// The console's changes: on `/console/rpc`, its multipart route and
+    /// the Flow Editor's RPC.
+    Changes,
+    /// MCP app tool calls (`/console/mcp-apps/call-tool`): an app may call
+    /// its tools as often as it likes.
+    ToolCalls,
+}
+
+impl ConsoleAuditSet {
+    /// The key prefix of the set's pages.
+    fn page_prefix(self) -> &'static str {
+        match self {
+            Self::Changes => PAGE_PREFIX,
+            Self::ToolCalls => TOOL_CALL_PAGE_PREFIX,
+        }
+    }
+}
+
+/// The bounds of one record set of the console audit log: the most rows it
+/// keeps and the oldest a row may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ConsoleAuditLimits {
-    /// The most rows the log keeps, give or take one page of 64 rows. At
+    /// The most rows the set keeps, give or take one page of 64 rows. At
     /// least 1: a runtime refuses a log that would keep no row when it is
     /// built.
     pub max_entries: u64,
-    /// How old the newest row of a page may be for the log to keep the page.
+    /// How old the newest row of a page may be for the set to keep the
+    /// page.
     pub max_age: Duration,
 }
 
@@ -223,21 +327,24 @@ impl ConsoleAuditEntry {
     }
 
     /// The change `actor` asked for on the route `method` with `target`,
-    /// ended by an HTTP answer with `status` and the JSON body `body`:
-    /// committed on a success, failed on a server error (whether anything
-    /// changed is not known), refused otherwise, with the status as its code
-    /// and the body's `error` as its kind.
+    /// ended by an HTTP answer with `status` and the JSON body `body`
+    /// (`null` for a success, whose body the row does not read): committed
+    /// on a success; failed on a server error, and on any error once the
+    /// change was `dispatched` to its owner (whether anything changed is
+    /// not known); refused otherwise, with the status as its code and the
+    /// body's `error` as its kind.
     pub(crate) fn answered_http(
         actor: ConsoleAuditActor,
         method: String,
         target: Identifiers,
         status: u16,
         body: &Value,
+        dispatched: bool,
     ) -> Self {
         let (outcome, code, kind) = if (200..300).contains(&status) {
             (ConsoleAuditOutcome::Committed, None, None)
         } else {
-            let outcome = if status >= 500 {
+            let outcome = if status >= 500 || dispatched {
                 ConsoleAuditOutcome::Failed
             } else {
                 ConsoleAuditOutcome::Refused
@@ -259,8 +366,11 @@ impl ConsoleAuditEntry {
     }
 
     /// This entry, made to fit [`MAX_ROW_BYTES`] with its number and time:
-    /// the receipt gives way first, then the target, a field at a time from
-    /// its last key, and the row says it was cut.
+    /// the field that holds least gives way first, a field at a time, and
+    /// the row says it was cut. An `id` field that is none of the change's
+    /// known identifiers goes before a named field, the target's before the
+    /// receipt's at the same [`Hold`], and the last key first; the member a
+    /// change targets and the access rule it edits go last.
     fn within_row_bound(mut self) -> Self {
         /// The most a row's number and time add to its encoding.
         const NUMBER_AND_TIME_BYTES: usize = 64;
@@ -269,17 +379,27 @@ impl ConsoleAuditEntry {
             if size.saturating_add(NUMBER_AND_TIME_BYTES) <= MAX_ROW_BYTES {
                 return self;
             }
-            let from = if self.receipt.is_empty() {
-                &mut self.target
-            } else {
-                &mut self.receipt
-            };
-            let Some(last) = from.keys().next_back().cloned() else {
+            let from_target = match (
+                weakest(&self.target, target_hold),
+                weakest(&self.receipt, receipt_hold),
+            ) {
+                (Some((in_target, key)), Some((in_receipt, _))) if in_target <= in_receipt => {
+                    Some((true, key))
+                }
+                (_, Some((_, key))) => Some((false, key)),
+                (Some((_, key)), None) => Some((true, key)),
                 // Only the actor, the method and the outcome are left, each
                 // bounded on its own.
+                (None, None) => None,
+            };
+            let Some((from_target, key)) = from_target else {
                 return self;
             };
-            from.remove(&last);
+            if from_target {
+                self.target.remove(&key);
+            } else {
+                self.receipt.remove(&key);
+            }
             self.truncated = true;
         }
     }
@@ -295,20 +415,23 @@ pub(crate) struct ConsoleAuditRow {
     pub(crate) fields: Map<String, Value>,
 }
 
-/// One read of the log: the rows after a cursor, oldest first.
+/// One read of the log: the rows of one record set after a cursor, oldest
+/// first.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ConsoleAuditPage {
+    /// The record set read.
+    pub(crate) log: ConsoleAuditSet,
     pub(crate) records: Vec<ConsoleAuditRow>,
     /// The cursor of the next read: the last row's `seq`, or the cursor this
     /// read started from when it found none.
     pub(crate) next_after_seq: u64,
-    /// The oldest row the log keeps; `None` while it keeps none.
+    /// The oldest row the set keeps; `None` while it keeps none.
     pub(crate) oldest_available_seq: Option<u64>,
-    /// The newest row the log has written, 0 before the first.
+    /// The newest row the set has written, 0 before the first.
     pub(crate) latest_seq: u64,
     /// More rows follow this read.
     pub(crate) has_more: bool,
-    /// The cursor named rows the log does not keep (pruned, or never
+    /// The cursor named rows the set does not keep (pruned, or never
     /// written): this read starts at the oldest row kept, and the reader
     /// resynchronizes.
     pub(crate) gap: bool,
@@ -325,18 +448,43 @@ struct StoredPage {
     rows: Vec<ConsoleAuditRow>,
 }
 
-/// The realm's console audit log over its metadata store.
+/// The realm's console audit log over its metadata store: its two record
+/// sets ([`ConsoleAuditSet`]), each bounded on its own.
 pub(crate) struct ConsoleAuditLog {
     store: Arc<dyn PersistentMetadataStore>,
     /// How long the store keeps the log's pages.
     retention: RecordRetention,
+    changes: RecordSet,
+    tool_calls: RecordSet,
+}
+
+/// One record set of the log: its bounds and where it stands.
+struct RecordSet {
+    set: ConsoleAuditSet,
     limits: ConsoleAuditLimits,
-    /// The log's position, read from the store at first use. Appends and
-    /// reads are serialized on it, so a read never sees a prune half done.
+    /// The set's position, read from the store at first use. The set's
+    /// appends and reads are serialized on it, so a read never sees a
+    /// prune half done.
     state: tokio::sync::Mutex<AppendState>,
 }
 
-/// Where the log stands: the next row's number and the pages it pruned.
+impl RecordSet {
+    fn new(set: ConsoleAuditSet, limits: ConsoleAuditLimits) -> Self {
+        Self {
+            set,
+            limits,
+            state: tokio::sync::Mutex::new(AppendState::default()),
+        }
+    }
+
+    /// The realm document key of the set's page `page`.
+    fn page_key(&self, page: u64) -> String {
+        format!("{}{page:020}", self.set.page_prefix())
+    }
+}
+
+/// Where a record set stands: the next row's number and the pages it
+/// pruned.
 #[derive(Debug, Default)]
 struct AppendState {
     /// The next row's number; `None` until it is read from the store.
@@ -352,11 +500,14 @@ impl std::fmt::Debug for ConsoleAuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsoleAuditLog")
             .field("retention", &self.retention)
-            .field("limits", &self.limits)
+            .field("changes", &self.changes.limits)
+            .field("tool_calls", &self.tool_calls.limits)
             .finish_non_exhaustive()
     }
 }
 
+/// The realm document key of the change rows' page `page`.
+#[cfg(test)]
 fn page_key(page: u64) -> String {
     format!("{PAGE_PREFIX}{page:020}")
 }
@@ -374,8 +525,8 @@ fn now_ms() -> u64 {
 }
 
 impl ConsoleAuditLog {
-    /// The log over `store`, bounded by `limits`; `None` when the store
-    /// keeps no realm documents.
+    /// The log over `store`, each of its record sets bounded by `limits`;
+    /// `None` when the store keeps no realm documents.
     pub(crate) fn over(
         store: Arc<dyn PersistentMetadataStore>,
         limits: ConsoleAuditLimits,
@@ -384,19 +535,34 @@ impl ConsoleAuditLog {
         Some(Self {
             store,
             retention,
-            limits,
-            state: tokio::sync::Mutex::new(AppendState::default()),
+            changes: RecordSet::new(ConsoleAuditSet::Changes, limits),
+            tool_calls: RecordSet::new(ConsoleAuditSet::ToolCalls, limits),
         })
     }
 
-    /// The page numbers the store lists, ascending, from `from` on.
-    async fn pages(&self, from: u64) -> Result<Vec<u64>, MetadataStoreError> {
+    /// This log with its MCP app tool calls bounded by `limits` instead.
+    pub(crate) fn with_tool_call_limits(mut self, limits: ConsoleAuditLimits) -> Self {
+        self.tool_calls = RecordSet::new(ConsoleAuditSet::ToolCalls, limits);
+        self
+    }
+
+    fn records(&self, set: ConsoleAuditSet) -> &RecordSet {
+        match set {
+            ConsoleAuditSet::Changes => &self.changes,
+            ConsoleAuditSet::ToolCalls => &self.tool_calls,
+        }
+    }
+
+    /// The page numbers the store lists for `records`, ascending, from
+    /// `from` on.
+    async fn pages(&self, records: &RecordSet, from: u64) -> Result<Vec<u64>, MetadataStoreError> {
+        let prefix = records.set.page_prefix();
         let mut pages = self
             .store
-            .realm_document_keys(PAGE_PREFIX)
+            .realm_document_keys(prefix)
             .await?
             .iter()
-            .filter_map(|key| key.strip_prefix(PAGE_PREFIX)?.parse::<u64>().ok())
+            .filter_map(|key| key.strip_prefix(prefix)?.parse::<u64>().ok())
             .filter(|page| *page >= from)
             .collect::<Vec<_>>();
         pages.sort_unstable();
@@ -404,12 +570,14 @@ impl ConsoleAuditLog {
         Ok(pages)
     }
 
-    /// The rows of `page`; `None` when the store holds no such page.
+    /// The rows of `records`' page `page`; `None` when the store holds no
+    /// such page.
     async fn stored_page(
         &self,
+        records: &RecordSet,
         page: u64,
     ) -> Result<Option<Vec<ConsoleAuditRow>>, MetadataStoreError> {
-        let key = page_key(page);
+        let key = records.page_key(page);
         let Some(document) = self.store.realm_document(&key).await? else {
             return Ok(None);
         };
@@ -424,16 +592,21 @@ impl ConsoleAuditLog {
         Ok(Some(stored.rows))
     }
 
-    async fn read_page(&self, page: u64) -> Result<Vec<ConsoleAuditRow>, MetadataStoreError> {
-        Ok(self.stored_page(page).await?.unwrap_or_default())
+    async fn read_page(
+        &self,
+        records: &RecordSet,
+        page: u64,
+    ) -> Result<Vec<ConsoleAuditRow>, MetadataStoreError> {
+        Ok(self.stored_page(records, page).await?.unwrap_or_default())
     }
 
     async fn write_page(
         &self,
+        records: &RecordSet,
         page: u64,
         rows: Vec<ConsoleAuditRow>,
     ) -> Result<(), MetadataStoreError> {
-        let key = page_key(page);
+        let key = records.page_key(page);
         let document = serde_json::to_string(&StoredPage {
             v: PAGE_VERSION,
             rows,
@@ -442,14 +615,24 @@ impl ConsoleAuditLog {
         self.store.set_realm_document(&key, Some(&document)).await
     }
 
-    /// The next row's number, read from the store the first time.
-    async fn next_seq(&self, state: &mut AppendState) -> Result<u64, MetadataStoreError> {
+    /// The next row's number in `records`, read from the store the first
+    /// time.
+    async fn next_seq(
+        &self,
+        records: &RecordSet,
+        state: &mut AppendState,
+    ) -> Result<u64, MetadataStoreError> {
         if let Some(seq) = state.next_seq {
             return Ok(seq);
         }
         let mut newest_seq = None;
-        for page in self.pages(state.pruned_below).await?.into_iter().rev() {
-            if let Some(rows) = self.stored_page(page).await? {
+        for page in self
+            .pages(records, state.pruned_below)
+            .await?
+            .into_iter()
+            .rev()
+        {
+            if let Some(rows) = self.stored_page(records, page).await? {
                 newest_seq = Some(
                     rows.iter()
                         .map(|row| row.seq)
@@ -464,11 +647,15 @@ impl ConsoleAuditLog {
         Ok(seq)
     }
 
-    /// Append `entry` as the next row. A row that cannot be written is
-    /// logged and dropped: the change it records stands as its owner
-    /// answered it.
-    pub(crate) async fn record(&self, entry: ConsoleAuditEntry) -> Option<ConsoleAuditRow> {
-        match self.append(entry, now_ms()).await {
+    /// Append `entry` as the next row of the record set `set`. A row that
+    /// cannot be written is logged and dropped: the change it records
+    /// stands as its owner answered it.
+    pub(crate) async fn record_in(
+        &self,
+        set: ConsoleAuditSet,
+        entry: ConsoleAuditEntry,
+    ) -> Option<ConsoleAuditRow> {
+        match self.append_in(set, entry, now_ms()).await {
             Ok(row) => Some(row),
             Err(error) => {
                 tracing::warn!(%error, "a console audit row could not be written");
@@ -477,9 +664,27 @@ impl ConsoleAuditLog {
         }
     }
 
-    /// Append `entry` as the next row, written at `at_ms`.
+    /// [`Self::record_in`] the change rows.
+    #[cfg(test)]
+    pub(crate) async fn record(&self, entry: ConsoleAuditEntry) -> Option<ConsoleAuditRow> {
+        self.record_in(ConsoleAuditSet::Changes, entry).await
+    }
+
+    /// Append `entry` as the next change row, written at `at_ms`.
+    #[cfg(test)]
     async fn append(
         &self,
+        entry: ConsoleAuditEntry,
+        at_ms: u64,
+    ) -> Result<ConsoleAuditRow, MetadataStoreError> {
+        self.append_in(ConsoleAuditSet::Changes, entry, at_ms).await
+    }
+
+    /// Append `entry` as the next row of the record set `set`, written at
+    /// `at_ms`.
+    async fn append_in(
+        &self,
+        set: ConsoleAuditSet,
         entry: ConsoleAuditEntry,
         at_ms: u64,
     ) -> Result<ConsoleAuditRow, MetadataStoreError> {
@@ -496,18 +701,19 @@ impl ConsoleAuditLog {
                 )));
             }
         };
-        let mut state = self.state.lock().await;
-        let seq = self.next_seq(&mut state).await?;
+        let records = self.records(set);
+        let mut state = records.state.lock().await;
+        let seq = self.next_seq(records, &mut state).await?;
         let row = ConsoleAuditRow { seq, at_ms, fields };
         let page = page_of(seq);
-        let mut rows = self.read_page(page).await?;
+        let mut rows = self.read_page(records, page).await?;
         rows.push(row.clone());
-        self.write_page(page, rows).await?;
+        self.write_page(records, page, rows).await?;
         state.next_seq = Some(seq.saturating_add(1));
         // A full page closes it: the bound is applied once per page.
         if seq % ROWS_PER_PAGE == 0
             && let Err(error) = self
-                .prune(&mut state, page_of(seq.saturating_add(1)), at_ms)
+                .prune(records, &mut state, page_of(seq.saturating_add(1)), at_ms)
                 .await
         {
             tracing::warn!(%error, "the console audit log could not be pruned");
@@ -515,19 +721,20 @@ impl ConsoleAuditLog {
         Ok(row)
     }
 
-    /// Remove the oldest whole pages past the limits' count or age as of
-    /// `now_ms`, never `open_page` (the page the next row goes to) nor a
-    /// page after it. Pages go oldest first, so the pages from the oldest one
-    /// kept on are all still held; a listed page the store no longer holds
-    /// is skipped and never removed again.
+    /// Remove the oldest whole pages of `records` past its limits' count or
+    /// age as of `now_ms`, never `open_page` (the page the next row goes to)
+    /// nor a page after it. Pages go oldest first, so the pages from the
+    /// oldest one kept on are all still held; a listed page the store no
+    /// longer holds is skipped and never removed again.
     async fn prune(
         &self,
+        records: &RecordSet,
         state: &mut AppendState,
         open_page: u64,
         now_ms: u64,
     ) -> Result<(), MetadataStoreError> {
         let mut closed = self
-            .pages(state.pruned_below)
+            .pages(records, state.pruned_below)
             .await?
             .into_iter()
             .filter(|page| *page < open_page)
@@ -536,7 +743,7 @@ impl ConsoleAuditLog {
         // earlier prune of this process, or listed stale.
         let mut oldest_rows = None;
         while let Some(&page) = closed.front() {
-            match self.stored_page(page).await? {
+            match self.stored_page(records, page).await? {
                 Some(rows) => {
                     oldest_rows = Some(rows);
                     break;
@@ -547,7 +754,7 @@ impl ConsoleAuditLog {
                 }
             }
         }
-        let kept_pages = self
+        let kept_pages = records
             .limits
             .max_entries
             .max(1)
@@ -557,12 +764,12 @@ impl ConsoleAuditLog {
             .saturating_add(1)
             .saturating_sub(kept_pages);
         let cutoff_ms = now_ms
-            .saturating_sub(u64::try_from(self.limits.max_age.as_millis()).unwrap_or(u64::MAX));
+            .saturating_sub(u64::try_from(records.limits.max_age.as_millis()).unwrap_or(u64::MAX));
         for (index, page) in closed.into_iter().enumerate() {
             let rows = match oldest_rows.take() {
                 Some(rows) => rows,
                 None if (index as u64) < over_count => Vec::new(),
-                None => self.read_page(page).await?,
+                None => self.read_page(records, page).await?,
             };
             let expired = (index as u64) < over_count
                 || rows
@@ -573,34 +780,49 @@ impl ConsoleAuditLog {
             if !expired {
                 break;
             }
-            self.store.set_realm_document(&page_key(page), None).await?;
+            self.store
+                .set_realm_document(&records.page_key(page), None)
+                .await?;
             state.pruned_below = page.saturating_add(1);
         }
         Ok(())
     }
 
-    /// The rows after `after_seq` (from the oldest row kept without one),
-    /// oldest first, at most `limit` of them (clamped to 1 to
-    /// [`CONSOLE_AUDIT_MAX_PAGE`]). The read holds the append lock, so no
-    /// append or prune changes the log under it.
+    /// [`Self::page_in`] the change rows.
+    #[cfg(test)]
     pub(crate) async fn page(
         &self,
         after_seq: Option<u64>,
         limit: usize,
     ) -> Result<ConsoleAuditPage, MetadataStoreError> {
+        self.page_in(ConsoleAuditSet::Changes, after_seq, limit)
+            .await
+    }
+
+    /// The rows of the record set `set` after `after_seq` (from the oldest
+    /// row kept without one), oldest first, at most `limit` of them
+    /// (clamped to 1 to [`CONSOLE_AUDIT_MAX_PAGE`]). The read holds the
+    /// set's append lock, so no append or prune changes the set under it.
+    pub(crate) async fn page_in(
+        &self,
+        set: ConsoleAuditSet,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<ConsoleAuditPage, MetadataStoreError> {
         let limit = limit.clamp(1, CONSOLE_AUDIT_MAX_PAGE);
-        let mut state = self.state.lock().await;
-        let latest_seq = self.next_seq(&mut state).await?.saturating_sub(1);
-        let pages = self.pages(state.pruned_below).await?;
+        let records = self.records(set);
+        let mut state = records.state.lock().await;
+        let latest_seq = self.next_seq(records, &mut state).await?.saturating_sub(1);
+        let pages = self.pages(records, state.pruned_below).await?;
         let mut oldest_available_seq = None;
         for page in &pages {
-            if let Some(first) = self.read_page(*page).await?.first() {
+            if let Some(first) = self.read_page(records, *page).await?.first() {
                 oldest_available_seq = Some(first.seq);
                 break;
             }
         }
         // The cursor of the oldest row kept: the reads that start there miss
-        // nothing the log keeps.
+        // nothing the set keeps.
         let floor = oldest_available_seq.map_or(latest_seq, |oldest| oldest.saturating_sub(1));
         let gap = after_seq.is_some_and(|after| after < floor || after > latest_seq);
         let after = match after_seq {
@@ -608,24 +830,25 @@ impl ConsoleAuditLog {
             _ => floor,
         };
         let first_page = page_of(after.saturating_add(1));
-        let mut records = Vec::new();
+        let mut rows = Vec::new();
         let mut has_more = false;
         'pages: for page in pages.into_iter().filter(|page| *page >= first_page) {
-            for row in self.read_page(page).await? {
+            for row in self.read_page(records, page).await? {
                 if row.seq <= after || row.seq > latest_seq {
                     continue;
                 }
-                if records.len() == limit {
+                if rows.len() == limit {
                     has_more = true;
                     break 'pages;
                 }
-                records.push(row);
+                rows.push(row);
             }
         }
         drop(state);
-        let next_after_seq = records.last().map_or(after, |row| row.seq);
+        let next_after_seq = rows.last().map_or(after, |row| row.seq);
         Ok(ConsoleAuditPage {
-            records,
+            log: set,
+            records: rows,
             next_after_seq,
             oldest_available_seq,
             latest_seq,
@@ -636,34 +859,23 @@ impl ConsoleAuditLog {
     }
 }
 
-/// The identifiers among `params` a row keeps as the change's target: each
-/// top-level `id` or `*_id` field and the fields that name what a change is
-/// of (an identity, a realm, a role, a principal, a group or rule name, a
-/// decision, an action, the revision a checked edit expected), when their
-/// value is a string, a number or a boolean, and the id of an access rule
-/// an upsert carries. A checked access edit's fields are read inside its
-/// `checked_v1` envelope. Content (messages, memory bodies, labels,
-/// configurations, reasons) is never kept, and the identifiers are bounded
-/// ([`identifier_fields`]).
+/// The identifiers among `params` a row keeps as the change's target: the
+/// member a change targets (the fields the console's access check judges),
+/// the fields that name what a change is of (an identity, a realm, a role,
+/// a principal, a group or rule name, a decision, an action, the revision a
+/// checked edit expected) and every other top-level `id` or `*_id` field,
+/// when their value is a string, a number or a boolean, and the id of an
+/// access rule an upsert carries. A checked access edit's fields are read
+/// inside its `checked_v1` envelope. Content (messages, memory bodies,
+/// labels, configurations, reasons) is never kept, and the identifiers are
+/// bounded ([`identifier_fields`]), the change's known ones first
+/// ([`Hold`]).
 pub(crate) fn audit_target(params: &Value) -> Identifiers {
-    const NAMED: &[&str] = &[
-        "identity",
-        "agent_identity",
-        "realm",
-        "role",
-        "principal",
-        "name",
-        "decision",
-        "action",
-        "operation",
-        "enabled",
-        "expected_revision",
-    ];
     let params = params
         .get("checked_v1")
         .filter(|envelope| envelope.is_object())
         .unwrap_or(params);
-    let mut target = identifier_fields(params, |key| NAMED.contains(&key));
+    let mut target = identifier_fields(params, target_hold);
     if let Some(rule_id) = params
         .get("rule")
         .and_then(|rule| rule.get("id"))
@@ -682,8 +894,7 @@ pub(crate) fn audit_target(params: &Value) -> Identifiers {
 /// memory update supersedes, and the audit token of a quarantine decision,
 /// bounded as a target is.
 pub(crate) fn audit_receipt(result: &Value) -> Identifiers {
-    const NAMED: &[&str] = &["revision", "generation", "agent_identity", "supersedes"];
-    let mut receipt = identifier_fields(result, |key| NAMED.contains(&key));
+    let mut receipt = identifier_fields(result, receipt_hold);
     if let Some(token) = result
         .get("decision")
         .and_then(|decision| decision.get("audit_token"))
@@ -714,20 +925,21 @@ pub(crate) fn target_of(fields: &[(&str, Option<&str>)]) -> Identifiers {
     target
 }
 
-/// The top-level fields of `value` a row keeps: `id` and each `*_id` field
-/// (at most [`MAX_ID_FIELDS`] of them, in key order) and the fields `named`
-/// names, when their value is a string, a number or a boolean. A field whose
-/// key is longer than [`MAX_KEY_BYTES`] is left out and a string longer than
+/// The top-level fields of `value` a row keeps, by `hold`: every field the
+/// change knows ([`Hold::Named`], [`Hold::Target`]) and at most
+/// [`MAX_ID_FIELDS`] other `id` and `*_id` fields, in key order, when their
+/// value is a string, a number or a boolean. A field whose key is longer
+/// than [`MAX_KEY_BYTES`] is left out and a string longer than
 /// [`MAX_VALUE_BYTES`] is cut; either marks the result truncated.
-fn identifier_fields(value: &Value, named: impl Fn(&str) -> bool) -> Identifiers {
+fn identifier_fields(value: &Value, hold: fn(&str) -> Hold) -> Identifiers {
     let mut kept = Identifiers::default();
     let Some(object) = value.as_object() else {
         return kept;
     };
-    let mut ids = 0_usize;
+    let mut others = 0_usize;
     for (key, value) in object {
-        let is_id = key == "id" || key.ends_with("_id");
-        if !is_id && !named(key) {
+        let known = hold(key) != Hold::Other;
+        if !known && key != "id" && !key.ends_with("_id") {
             continue;
         }
         let value = match value {
@@ -738,12 +950,12 @@ fn identifier_fields(value: &Value, named: impl Fn(&str) -> bool) -> Identifiers
             Value::Number(_) | Value::Bool(_) => value.clone(),
             _ => continue,
         };
-        if key.len() > MAX_KEY_BYTES || (is_id && ids == MAX_ID_FIELDS) {
+        if key.len() > MAX_KEY_BYTES || (!known && others == MAX_ID_FIELDS) {
             kept.truncated = true;
             continue;
         }
-        if is_id {
-            ids += 1;
+        if !known {
+            others += 1;
         }
         kept.fields.insert(key.clone(), value);
     }

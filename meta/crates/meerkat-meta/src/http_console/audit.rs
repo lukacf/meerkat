@@ -14,7 +14,7 @@ use super::{
 };
 use crate::console_audit::{
     CONSOLE_AUDIT_DEFAULT_PAGE, CONSOLE_AUDIT_MAX_PAGE, ConsoleAuditActor, ConsoleAuditEntry,
-    ConsoleAuditLog, Identifiers, audit_target, bounded,
+    ConsoleAuditLog, ConsoleAuditSet, Identifiers, audit_target, bounded,
 };
 use crate::runtime::AuthenticatedConsoleHuman;
 
@@ -43,6 +43,7 @@ pub(super) fn is_audited_console_method(method: &str) -> bool {
 /// A console change the audit log records once its answer is known.
 pub(crate) struct ConsoleAuditIntent {
     log: Arc<ConsoleAuditLog>,
+    set: ConsoleAuditSet,
     actor: ConsoleAuditActor,
     method: String,
     target: Identifiers,
@@ -79,21 +80,41 @@ impl ConsoleAuditIntent {
     ) -> Self {
         Self {
             log,
+            set: ConsoleAuditSet::Changes,
             actor: audit_actor(auth),
             method,
             target,
         }
     }
 
-    /// Make the change `change` and write its row, both on a task of their
-    /// own: a caller that goes away cuts neither short, and the row records
-    /// the outcome the change reached ([`ConsoleAuditEntry`] from `row_of`).
-    /// The answer comes back once the row is written, or once [`ROW_WAIT`]
-    /// passed, whichever is first; the row still lands. `None` when the
-    /// change's task ended without an answer (it panicked).
+    /// The intent to record an MCP app tool call on `target` by the caller
+    /// `auth` in `log`, among its tool calls.
+    pub(super) fn tool_call(
+        log: Arc<ConsoleAuditLog>,
+        auth: &ConsoleHttpAuthContext,
+        target: Identifiers,
+    ) -> Self {
+        Self {
+            log,
+            set: ConsoleAuditSet::ToolCalls,
+            actor: audit_actor(auth),
+            method: MCP_APP_CALL_TOOL_ROUTE.to_string(),
+            target,
+        }
+    }
+
+    /// Make the change `change` and write its row, both on the server: a
+    /// caller that goes away cuts neither short, and the row records the
+    /// outcome the change reached ([`ConsoleAuditEntry`] from `row_of`). The
+    /// change runs on a task of its own, so when it panics its row is the
+    /// row of `lost`, the answer the caller then gets. The answer comes back
+    /// once the row is written, or once [`ROW_WAIT`] passed, whichever is
+    /// first; the row still lands. `None` only when the task writing the row
+    /// ended without an answer.
     pub(crate) async fn run<T, F>(
         self,
         change: F,
+        lost: T,
         row_of: fn(ConsoleAuditActor, String, Identifiers, &T) -> ConsoleAuditEntry,
     ) -> Option<T>
     where
@@ -104,15 +125,16 @@ impl ConsoleAuditIntent {
         let (written_sender, written) = tokio::sync::oneshot::channel::<()>();
         let Self {
             log,
+            set,
             actor,
             method,
             target,
         } = self;
         tokio::spawn(async move {
-            let answered = change.await;
+            let answered = tokio::spawn(change).await.unwrap_or(lost);
             let entry = row_of(actor, method, target, &answered);
             let _ = answer_sender.send(answered);
-            log.record(entry).await;
+            log.record_in(set, entry).await;
             let _ = written_sender.send(());
         });
         let answered = answer.await.ok()?;
@@ -141,16 +163,38 @@ pub(crate) fn status_json_rpc_row(
     ConsoleAuditEntry::answered(actor, method, target, &answer.1)
 }
 
-/// The row of a route change an HTTP answer ended: its status and its JSON
-/// body, read whole (a body that is no JSON reads as none).
-pub(super) fn http_row(
+/// An MCP app tool call's answer, as the route gives it, and whether the
+/// call reached the member's tool application: from then on its tool may
+/// have run, whatever the route answers.
+pub(super) struct ToolCallAnswer {
+    pub(super) parts: axum::http::response::Parts,
+    pub(super) body: axum::body::Bytes,
+    pub(super) dispatched: bool,
+}
+
+/// The row of an MCP app tool call: its status, and the `error` of its
+/// body when it is no success (a success's body is the tool's result, which
+/// the row does not read).
+pub(super) fn tool_call_row(
     actor: ConsoleAuditActor,
     method: String,
     target: Identifiers,
-    answer: &(axum::http::response::Parts, axum::body::Bytes),
+    answer: &ToolCallAnswer,
 ) -> ConsoleAuditEntry {
-    let body = serde_json::from_slice::<Value>(&answer.1).unwrap_or(Value::Null);
-    ConsoleAuditEntry::answered_http(actor, method, target, answer.0.status.as_u16(), &body)
+    let status = answer.parts.status;
+    let body = if status.is_success() {
+        Value::Null
+    } else {
+        serde_json::from_slice::<Value>(&answer.body).unwrap_or(Value::Null)
+    };
+    ConsoleAuditEntry::answered_http(
+        actor,
+        method,
+        target,
+        status.as_u16(),
+        &body,
+        answer.dispatched,
+    )
 }
 
 /// The actor a row names for the caller `auth`, as `meta/console/whoami`
@@ -189,9 +233,10 @@ fn login_scope_digest(human: &AuthenticatedConsoleHuman) -> String {
 /// creator.
 const PERSON_FIELDS: [&str; 4] = ["principal", "issuer", "subject", "login_scope_digest"];
 
-/// `meta/console/audit` on the console route: one page of the console audit
-/// log, oldest first, after `after_seq` (from the oldest row kept without
-/// it), at most `limit` rows (100 by default, 500 at most). It needs
+/// `meta/console/audit` on the console route: one page of a record set of
+/// the console audit log (`log`: `changes` by default, or `tool_calls`),
+/// oldest first, after `after_seq` (from the oldest row kept without it),
+/// at most `limit` rows (100 by default, 500 at most). It needs
 /// `audit.view`; a console that keeps no log answers that the method is not
 /// found. A `meta/fork_member` row names its actor, a side chat's creator,
 /// only to that person and to admins of an enforced policy, as every other
@@ -216,6 +261,15 @@ pub(super) async fn console_audit_rpc(
     ) {
         return response_value(response_id, None, Some(violation));
     }
+    let set = match request.params.get("log") {
+        None | Some(Value::Null) => ConsoleAuditSet::Changes,
+        Some(value) => match serde_json::from_value::<ConsoleAuditSet>(value.clone()) {
+            Ok(set) => set,
+            Err(_) => {
+                return invalid_params(response_id, "log must be \"changes\" or \"tool_calls\"");
+            }
+        },
+    };
     let after_seq = match request.params.get("after_seq") {
         None | Some(Value::Null) => None,
         Some(value) => match value.as_u64() {
@@ -241,7 +295,7 @@ pub(super) async fn console_audit_rpc(
             }
         },
     };
-    let mut page = match log.page(after_seq, limit).await {
+    let mut page = match log.page_in(set, after_seq, limit).await {
         Ok(page) => page,
         Err(error) => {
             return response_value(

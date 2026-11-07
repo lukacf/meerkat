@@ -473,27 +473,29 @@ async fn protected_flow_editor_rpc_handler(
             ))
         });
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let lost = || {
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": response_id.clone(),
+                "error": {
+                    "code": -32603,
+                    "message": "the flow editor change ended without an answer",
+                }
+            }),
+        )
+    };
     let (status, response) = match intent {
         None => flow_editor_rpc_answer(state, parsed_request, access_view).await,
         Some(intent) => intent
             .run(
                 flow_editor_rpc_answer(state, parsed_request, access_view),
+                lost(),
                 crate::http_console::audit::status_json_rpc_row,
             )
             .await
-            .unwrap_or_else(|| {
-                (
-                    StatusCode::OK,
-                    serde_json::json!({
-                        "jsonrpc": JSONRPC_VERSION,
-                        "id": response_id,
-                        "error": {
-                            "code": -32603,
-                            "message": "the flow editor change ended without an answer",
-                        }
-                    }),
-                )
-            }),
+            .unwrap_or_else(lost),
     };
     (status, Json::<Value>(response))
 }

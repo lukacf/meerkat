@@ -1457,6 +1457,7 @@ pub async fn console_rpc_handler(
                     async move {
                         console_rpc_answer(&state, voice, &auth_context, parsed_request).await
                     },
+                    console_change_lost(response_id.clone()),
                     audit::json_rpc_row,
                 )
                 .await
@@ -5112,8 +5113,9 @@ fn normalized_console_rpc_string_param(params: &Value, key: &str) -> Option<Stri
 
 /// The member target fields a console RPC may carry, in the order the access
 /// requirements pick one. Every present field is judged, and they must all
-/// name one member.
-const CONSOLE_RPC_MEMBER_TARGET_FIELDS: [&str; 4] =
+/// name one member. The console audit log keeps them before any other field
+/// of a change's target.
+pub(crate) const CONSOLE_RPC_MEMBER_TARGET_FIELDS: [&str; 4] =
     ["identity", "member_id", "agent_id", "agent_identity"];
 
 /// The present, non-empty member target fields of a request.
@@ -7733,6 +7735,7 @@ pub async fn console_rpc_multipart_handler(
                         console_rpc_multipart_answer(&state, &auth_context, parsed_request, files)
                             .await
                     },
+                    (StatusCode::OK, console_change_lost(response_id.clone())),
                     audit::status_json_rpc_row,
                 )
                 .await

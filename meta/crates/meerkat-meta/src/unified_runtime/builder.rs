@@ -222,6 +222,9 @@ pub struct UnifiedRuntimeBuilder {
     /// The console audit log's bounds, when not the default (see
     /// [`console_audit_limits`](Self::console_audit_limits)).
     console_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// The bounds of the log's MCP app tool calls, when set apart (see
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)).
+    console_tool_call_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1377,11 +1380,25 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
-    /// Bound the console audit log (by default 20000 rows, none older than
-    /// 365 days). The log is kept in the composition's metadata store.
-    /// [`Self::build`] refuses limits that keep no row (`max_entries` 0).
+    /// Bound the console audit log. Its two record sets, the console's
+    /// changes and MCP app tool calls, each keep their own budget of
+    /// `limits` (by default 20000 rows, none older than 365 days, each), so
+    /// tool calls never push a change row out;
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)
+    /// bounds the tool calls apart. The log is kept in the composition's
+    /// metadata store. [`Self::build`] refuses limits that keep no row
+    /// (`max_entries` 0).
     pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
         self.console_audit_limits = Some(limits);
+        self
+    }
+
+    /// Bound the console audit log's MCP app tool calls apart from its
+    /// changes (by default as [`console_audit_limits`](Self::console_audit_limits)
+    /// bounds each record set). [`Self::build`] refuses limits that keep no
+    /// row (`max_entries` 0).
+    pub fn console_tool_call_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_tool_call_audit_limits = Some(limits);
         self
     }
 
@@ -1433,7 +1450,9 @@ impl UnifiedRuntimeBuilder {
 
         if self
             .console_audit_limits
-            .is_some_and(|limits| limits.max_entries == 0)
+            .iter()
+            .chain(&self.console_tool_call_audit_limits)
+            .any(|limits| limits.max_entries == 0)
         {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "console audit limits: max_entries must be at least 1; a log that keeps no row \
@@ -2219,12 +2238,14 @@ impl UnifiedRuntimeBuilder {
 
         // The console audit log over the composition's metadata store, with
         // the host's bounds when it set them.
-        if let Some(limits) = self.console_audit_limits {
+        if self.console_audit_limits.is_some() || self.console_tool_call_audit_limits.is_some() {
+            let limits = self.console_audit_limits.unwrap_or_default();
+            let tool_call_limits = self.console_tool_call_audit_limits.unwrap_or(limits);
             runtime.console_audit = crate::console_audit::ConsoleAuditLog::over(
                 Arc::clone(&runtime.persistent_metadata),
                 limits,
             )
-            .map(Arc::new);
+            .map(|log| Arc::new(log.with_tool_call_limits(tool_call_limits)));
         }
         // Restored before anything can evaluate a gating action.
         if self.keep_gating_state {

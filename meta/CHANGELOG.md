@@ -112,15 +112,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (kind, principal, a person's verified issuer and subject, assurance and a
   digest of the login, never the token), the method, its target
   identifiers, the outcome and the owner's receipt; sends, voice and live
-  media are left out. A row is bounded (at most 16 identifiers each way,
-  4 KiB in all) and says when it left anything out (`truncated`), and the
-  change and its row run on the server, so a caller that goes away cuts
-  neither short. The log is kept in the realm's metadata store (a console
-  without a local runtime keeps none), bounded by count and age
-  (`UnifiedRuntimeBuilder::console_audit_limits`), and read with
-  `meta/console/audit` under the new `audit.view` access action. Its reads,
-  and `meta/gating/audit`, report `retention`: `durable` where the records
-  survive a restart, `process` where the gateway keeps them in memory.
+  media are left out, and a request the console cannot authenticate writes
+  none. A row is bounded (at most 16 identifiers each way beyond the
+  change's known ones, which it keeps first, and 4 KiB in all) and says
+  when it left anything out (`truncated`), and the change and its row run
+  on the server, so a caller that goes away cuts neither short. A tool call
+  answered with an error after it reached the member's app is `failed`,
+  not `refused`. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), in two record sets each bounded by
+  count and age, the changes and the MCP app tool calls, so tool calls
+  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
+  and `console_tool_call_audit_limits`), and read with
+  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
+  `audit.view` access action. Its reads, and `meta/gating/audit`, report
+  `retention`: `durable` where the records survive a restart, `process`
+  where the gateway keeps them in memory.
 - Rust: `PersistentMetadataStore` gains provided realm-document methods
   (`realm_document_retention`, `realm_document`, `set_realm_document`,
   `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps

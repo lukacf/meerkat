@@ -1238,6 +1238,84 @@ async def test_the_review_starts_for_an_administrator_who_signed_in_during_anoth
         await console.close()
 
 
+def method_not_found(identity):
+    """The answer of a console that predates the method (Meta 0.9.10 and earlier)."""
+    return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
+                                     "error": {"code": -32601, "message": "Method not found"}})
+
+
+# A console that predates `meta/console/whoami` (and `meta/console/sign_out`)
+# names no administrator. The review then opens at the first ready login and
+# is that login's: as before the console could name one.
+async def test_the_review_opens_at_the_first_ready_login_when_the_console_predates_whoami(tmp_path, reviews):
+    native = ConsoleNative(sign_out=method_not_found)
+    native.whoami_answer = method_not_found
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice, browser(app, console) as bob:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            await started_reviews(console)
+            assert len(reviews) == 1 and reviews[0].started == 1
+            assert reviews[0].login_scope_id == login_of(alice, console).login_scope_id
+            assert (await review_state(alice)).json()["status"] == "prompt"
+            # Another login neither sees nor answers it.
+            await sign_in(bob, console, BOB, BOB_PASSWORD)
+            for refused in (await bob.get("/console/forge/controller-review/state"),
+                            await answer_review(bob, console)):
+                assert refused.status_code == 409 and refused.json() == {"error": {"code": "unavailable"}}
+            answered = await answer_review(alice, console)
+            assert answered.status_code == 202 and reviews[0].answers == [("review-approval", "approve")]
+            assert len(reviews) == 1
+    finally:
+        await console.close()
+
+
+def whoami_answer(answer):
+    """A console's `meta/console/whoami` answer that names no administrator."""
+    def respond(identity):
+        if answer == "unavailable":
+            raise httpx.ConnectError("the console is unavailable")
+        if answer == "timeout":
+            raise httpx.ReadTimeout("the console did not answer in time")
+        if answer == "malformed":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity, "result": {"actor": "person"}})
+        if answer == "another-error":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
+                                             "error": {"code": -32603, "message": "Internal error"}})
+        # Only a 200 answer is read: "method not found" with an error status tells nothing.
+        return httpx.Response(500, json={"jsonrpc": "2.0", "id": identity,
+                                         "error": {"code": -32601, "message": "Method not found"}})
+    return respond
+
+
+# With whoami served, the review stays an administrator's; every other answer
+# the console cannot vouch for opens nothing, at sign-in or when the page asks.
+@pytest.mark.parametrize("answer,opens", [
+    ("administrator", True), ("not-administrator", False), ("unavailable", False), ("timeout", False),
+    ("malformed", False), ("another-error", False), ("not-found-in-an-error-status", False)])
+async def test_the_review_start_needs_an_administrator_when_the_console_can_name_one(
+        tmp_path, reviews, answer, opens):
+    native = ConsoleNative(admins=(ALICE,) if answer == "administrator" else ())
+    if answer not in ("administrator", "not-administrator"):
+        native.whoami_answer = whoami_answer(answer)
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            await started_reviews(console)
+            state = await alice.get("/console/forge/controller-review/state")
+            if opens:
+                assert len(reviews) == 1 and reviews[0].login_scope_id == login_of(alice, console).login_scope_id
+                assert state.status_code == 200 and state.json()["status"] == "prompt"
+            else:
+                assert state.status_code == 409 and state.json() == {"error": {"code": "unavailable"}}
+                assert reviews == []
+    finally:
+        await console.close()
+
+
 # P3-C: a native callback is never mounted on a route the console owns, the
 # consent routes included. Plain stand-ins: no toolkit is needed.
 @pytest.mark.parametrize("path,mounted", [

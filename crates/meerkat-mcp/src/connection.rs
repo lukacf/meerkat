@@ -7417,6 +7417,10 @@ mod cancel_http_tests;
 mod http_abandon_tests;
 
 #[cfg(test)]
+#[path = "http_abandon_session_tests.rs"]
+mod http_abandon_session_tests;
+
+#[cfg(test)]
 #[path = "process_confinement_tests.rs"]
 mod process_confinement_tests;
 

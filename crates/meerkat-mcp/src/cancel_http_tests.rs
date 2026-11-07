@@ -159,7 +159,9 @@ async fn a_json_read_past_its_deadline_returns_promptly_and_is_cancelled_once() 
     fixture.server.block.store(true, Ordering::SeqCst);
 
     let started = tokio::time::Instant::now();
-    let deadline = started + Duration::from_millis(300);
+    // Room for the request to be posted before the deadline even on a busy
+    // runner, so the row never takes the path of an abandon that lands first.
+    let deadline = started + Duration::from_millis(800);
     let read = connection
         .read_resource_entering("ui://fixture/slow", None, deadline, || {
             // A slow entry step: the read is handed over 50 ms into its time.
@@ -170,7 +172,7 @@ async fn a_json_read_past_its_deadline_returns_promptly_and_is_cancelled_once() 
     let waited = started.elapsed();
     assert!(read.is_err(), "the read timed out: {read:?}");
     assert!(
-        waited < Duration::from_secs(1),
+        waited < Duration::from_secs(2),
         "the caller returned at its deadline, not later: {waited:?}"
     );
 

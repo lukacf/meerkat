@@ -234,123 +234,156 @@ impl Fixture {
 
 /// A tool call whose future is dropped while the server works on it ends
 /// its HTTP exchange: the server sees the disconnect within a second.
-#[tokio::test]
-async fn a_dropped_tool_call_ends_its_http_exchange() {
-    for mode in [Mode::Sse, Mode::Json] {
-        let fixture = Fixture::start(mode).await;
-        let connection = fixture.connect().await;
-        let args = json!({});
-        let mut call = Box::pin(connection.call_tool("slow", &args));
-        tokio::select! {
-            result = &mut call => panic!("{mode:?}: the slow call returned: {result:?}"),
-            () = fixture.server.entered.notified() => {}
-        }
-        drop(call);
-        assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
-        assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
-        // The aborted stream is never resumed, and the session stays usable.
-        tokio::time::sleep(DISCONNECT_WITHIN).await;
-        assert_eq!(
-            *fixture.probe.resumes.lock().unwrap(),
-            0,
-            "{mode:?}: resumed"
-        );
-        let after = tokio::time::timeout(LIMIT, connection.call_tool("quick", &args))
-            .await
-            .expect("inside the deadline")
-            .expect("a call after the abandon completes");
-        assert_eq!(
-            meerkat_core::types::text_content(&after),
-            "done",
-            "{mode:?}"
-        );
-        assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
-        fixture.stop(connection).await;
+async fn a_dropped_tool_call_ends_its_http_exchange(mode: Mode) {
+    let fixture = Fixture::start(mode).await;
+    let connection = fixture.connect().await;
+    let args = json!({});
+    let mut call = Box::pin(connection.call_tool("slow", &args));
+    tokio::select! {
+        result = &mut call => panic!("{mode:?}: the slow call returned: {result:?}"),
+        () = fixture.server.entered.notified() => {}
     }
+    drop(call);
+    assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
+    assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
+    // The aborted stream is never resumed, and the session stays usable.
+    tokio::time::sleep(DISCONNECT_WITHIN).await;
+    assert_eq!(
+        *fixture.probe.resumes.lock().unwrap(),
+        0,
+        "{mode:?}: resumed"
+    );
+    let after = tokio::time::timeout(LIMIT, connection.call_tool("quick", &args))
+        .await
+        .expect("inside the deadline")
+        .expect("a call after the abandon completes");
+    assert_eq!(
+        meerkat_core::types::text_content(&after),
+        "done",
+        "{mode:?}"
+    );
+    assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
+    fixture.stop(connection).await;
+}
+
+#[tokio::test]
+async fn a_dropped_tool_call_ends_its_http_exchange_sse() {
+    a_dropped_tool_call_ends_its_http_exchange(Mode::Sse).await;
+}
+
+#[tokio::test]
+async fn a_dropped_tool_call_ends_its_http_exchange_json() {
+    a_dropped_tool_call_ends_its_http_exchange(Mode::Json).await;
 }
 
 /// A tool call whose caller's deadline expires ends its HTTP exchange.
-#[tokio::test]
-async fn a_tool_call_past_its_deadline_ends_its_http_exchange() {
-    for mode in [Mode::Sse, Mode::Json] {
-        let fixture = Fixture::start(mode).await;
-        let connection = fixture.connect().await;
-        let args = json!({});
-        let timed_out = tokio::time::timeout(
-            Duration::from_millis(300),
-            connection.call_tool("slow", &args),
-        )
-        .await;
-        assert!(timed_out.is_err(), "{mode:?}: the deadline expired");
-        assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
-        assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
-        fixture.stop(connection).await;
+async fn a_tool_call_past_its_deadline_ends_its_http_exchange(mode: Mode) {
+    let fixture = Fixture::start(mode).await;
+    let connection = fixture.connect().await;
+    let args = json!({});
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    let mut call = Box::pin(connection.call_tool("slow", &args));
+    // The request reaches the server before the deadline is let fire, so
+    // this row never takes the path of an abandon that lands first.
+    tokio::select! {
+        result = &mut call => panic!("{mode:?}: the slow call returned: {result:?}"),
+        () = fixture.server.entered.notified() => {}
     }
+    let timed_out = tokio::time::timeout_at(deadline, &mut call).await;
+    drop(call);
+    assert!(timed_out.is_err(), "{mode:?}: the deadline expired");
+    assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
+    assert_eq!(fixture.probe.disconnects(), 1, "{mode:?}");
+    fixture.stop(connection).await;
+}
+
+#[tokio::test]
+async fn a_tool_call_past_its_deadline_ends_its_http_exchange_sse() {
+    a_tool_call_past_its_deadline_ends_its_http_exchange(Mode::Sse).await;
+}
+
+#[tokio::test]
+async fn a_tool_call_past_its_deadline_ends_its_http_exchange_json() {
+    a_tool_call_past_its_deadline_ends_its_http_exchange(Mode::Json).await;
 }
 
 /// A call that completes ends its exchange normally: no disconnect.
-#[tokio::test]
-async fn a_completed_tool_call_ends_its_http_exchange_normally() {
-    for mode in [Mode::Sse, Mode::Json] {
-        let fixture = Fixture::start(mode).await;
-        let connection = fixture.connect().await;
-        let args = json!({});
-        for _ in 0..2 {
-            tokio::time::timeout(LIMIT, connection.call_tool("quick", &args))
-                .await
-                .expect("inside the deadline")
-                .expect("quick answers");
-        }
-        assert!(
-            !fixture.disconnected().await,
-            "{mode:?}: a completed call disconnected"
-        );
-        assert_eq!(*fixture.probe.calls.lock().unwrap(), 2, "{mode:?}");
-        fixture.stop(connection).await;
+async fn a_completed_tool_call_ends_its_http_exchange_normally(mode: Mode) {
+    let fixture = Fixture::start(mode).await;
+    let connection = fixture.connect().await;
+    let args = json!({});
+    for _ in 0..2 {
+        tokio::time::timeout(LIMIT, connection.call_tool("quick", &args))
+            .await
+            .expect("inside the deadline")
+            .expect("quick answers");
     }
+    assert!(
+        !fixture.disconnected().await,
+        "{mode:?}: a completed call disconnected"
+    );
+    assert_eq!(*fixture.probe.calls.lock().unwrap(), 2, "{mode:?}");
+    fixture.stop(connection).await;
+}
+
+#[tokio::test]
+async fn a_completed_tool_call_ends_its_http_exchange_normally_sse() {
+    a_completed_tool_call_ends_its_http_exchange_normally(Mode::Sse).await;
+}
+
+#[tokio::test]
+async fn a_completed_tool_call_ends_its_http_exchange_normally_json() {
+    a_completed_tool_call_ends_its_http_exchange_normally(Mode::Json).await;
 }
 
 /// Two calls on one session: the one abandoned ends its own exchange and
 /// only that; the other returns its whole result.
-#[tokio::test]
-async fn abandoning_one_of_two_concurrent_calls_leaves_the_other() {
-    for mode in [Mode::Sse, Mode::Json] {
-        let fixture = Fixture::start(mode).await;
-        let connection = fixture.connect().await;
-        let args = json!({});
-        let mut slow = Box::pin(connection.call_tool("slow", &args));
-        tokio::select! {
-            result = &mut slow => panic!("{mode:?}: the slow call returned: {result:?}"),
-            () = fixture.server.entered.notified() => {}
-        }
-        // The second call is sent while the first is still open; with JSON
-        // responses it waits behind the first until that one is abandoned.
-        let mut quick_call = Box::pin(connection.call_tool("quick", &args));
-        let early = tokio::time::timeout(Duration::from_millis(300), &mut quick_call).await;
-        drop(slow);
-        let quick = match early {
-            Ok(result) => result,
-            Err(_) => tokio::time::timeout(LIMIT, &mut quick_call)
-                .await
-                .expect("the second call completes after the abandon"),
-        }
-        .expect("the second call answers");
-        drop(quick_call);
-        assert_eq!(
-            meerkat_core::types::text_content(&quick),
-            "done",
-            "{mode:?}"
-        );
-        assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            fixture.probe.disconnects(),
-            1,
-            "{mode:?}: only the abandoned call"
-        );
-        assert_eq!(*fixture.probe.calls.lock().unwrap(), 2, "{mode:?}");
-        fixture.stop(connection).await;
+async fn abandoning_one_of_two_concurrent_calls_leaves_the_other(mode: Mode) {
+    let fixture = Fixture::start(mode).await;
+    let connection = fixture.connect().await;
+    let args = json!({});
+    let mut slow = Box::pin(connection.call_tool("slow", &args));
+    tokio::select! {
+        result = &mut slow => panic!("{mode:?}: the slow call returned: {result:?}"),
+        () = fixture.server.entered.notified() => {}
     }
+    // The second call is sent while the first is still open; with JSON
+    // responses it waits behind the first until that one is abandoned.
+    let mut quick_call = Box::pin(connection.call_tool("quick", &args));
+    let early = tokio::time::timeout(Duration::from_millis(300), &mut quick_call).await;
+    drop(slow);
+    let quick = match early {
+        Ok(result) => result,
+        Err(_) => tokio::time::timeout(LIMIT, &mut quick_call)
+            .await
+            .expect("the second call completes after the abandon"),
+    }
+    .expect("the second call answers");
+    drop(quick_call);
+    assert_eq!(
+        meerkat_core::types::text_content(&quick),
+        "done",
+        "{mode:?}"
+    );
+    assert!(fixture.disconnected().await, "{mode:?}: no disconnect seen");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        fixture.probe.disconnects(),
+        1,
+        "{mode:?}: only the abandoned call"
+    );
+    assert_eq!(*fixture.probe.calls.lock().unwrap(), 2, "{mode:?}");
+    fixture.stop(connection).await;
+}
+
+#[tokio::test]
+async fn abandoning_one_of_two_concurrent_calls_leaves_the_other_sse() {
+    abandoning_one_of_two_concurrent_calls_leaves_the_other(Mode::Sse).await;
+}
+
+#[tokio::test]
+async fn abandoning_one_of_two_concurrent_calls_leaves_the_other_json() {
+    abandoning_one_of_two_concurrent_calls_leaves_the_other(Mode::Json).await;
 }
 
 /// A connection without an HTTP client keeps a registry nothing registers

@@ -13,7 +13,7 @@ import { memberKickoffNotice, memberKickoffPhaseLabel } from "../../../packages/
 import { stripPeerTransportScaffold } from "./adapters";
 import { describeFailure, summarizeFailureData } from "./failure-summary";
 import { isOpenLoopNudge, quarantineVerdictWords } from "./memory-event-words";
-import { turnSender, turnSenderWords } from "./turn-origin";
+import { turnSender, turnSenderName, turnSenderWords } from "./turn-origin";
 import type { ConsoleFrame } from "../types";
 
 export type FrameFamily =
@@ -374,9 +374,9 @@ function classifyTurn(frame: ConsoleFrame, data: Data, who: FrameSegment): Parts
   const event = frame.event;
   const agent = frameAgent(frame);
   if (event === "user_input") {
-    // The typed origin names the sender: you, another operator, a
-    // scheduled run, a connector.
-    const words = turnSenderWords(turnSender(data));
+    // The typed origin and the recorded sender name who sent it: you,
+    // another person by name, an operator, a scheduled run, a connector.
+    const words = turnSenderWords(turnSender(data), turnSenderName(data));
     return {
       family: "turn",
       tone: "info",

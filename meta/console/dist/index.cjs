@@ -59342,6 +59342,7 @@ function framesForPanelRuntime(frames, runtimeKey) {
 // src/lib/turn-origin.ts
 var OWN_SEND_LIMIT = 500;
 var ownSendKeys = /* @__PURE__ */ new Set();
+var ownCallerScope;
 function rememberOwnSend(key) {
   const trimmed = typeof key === "string" ? key.trim() : "";
   if (!trimmed) return;
@@ -59354,12 +59355,24 @@ function rememberOwnSend(key) {
 }
 function forgetOwnSends() {
   ownSendKeys.clear();
+  ownCallerScope = void 0;
+}
+function rememberOwnCallerScope(scope) {
+  const trimmed = typeof scope === "string" ? scope.trim() : "";
+  ownCallerScope = trimmed || void 0;
 }
 function isOwnSend(key) {
   return typeof key === "string" && ownSendKeys.has(key.trim());
 }
 function text10(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+function senderOf(data) {
+  const sender = data?.sender;
+  return sender && typeof sender === "object" && !Array.isArray(sender) ? sender : void 0;
+}
+function turnSenderName(data) {
+  return text10(senderOf(data)?.display_name);
 }
 function turnSender(data) {
   const kind = text10(data?.origin_kind);
@@ -59371,14 +59384,26 @@ function turnSender(data) {
   if (kind === "policy") return "policy";
   if (kind === "system") return "system";
   if (kind === "operator" || origin.startsWith("console:")) {
+    const sender = senderOf(data);
+    const senderScope = text10(sender?.caller_scope);
+    if (senderScope) {
+      if (ownCallerScope) {
+        if (senderScope === ownCallerScope) return "you";
+      } else if (isOwnSend(data?.idempotency_key)) {
+        return "you";
+      }
+      return text10(sender?.display_name) ? "named" : "operator";
+    }
     return isOwnSend(data?.idempotency_key) ? "you" : "operator";
   }
   return "unknown";
 }
-function turnSenderWords(sender) {
+function turnSenderWords(sender, name2) {
   switch (sender) {
     case "you":
       return { before: "You asked ", after: "" };
+    case "named":
+      return name2 ? { before: "".concat(name2, " asked "), after: "" } : { before: "An operator asked ", after: "" };
     case "operator":
       return { before: "An operator asked ", after: "" };
     case "scheduler":
@@ -59398,7 +59423,7 @@ function turnSenderWords(sender) {
   }
 }
 function turnSenderLine(data, agentName) {
-  const words2 = turnSenderWords(turnSender(data));
+  const words2 = turnSenderWords(turnSender(data), turnSenderName(data));
   return "".concat(words2.before).concat(agentName).concat(words2.after);
 }
 
@@ -63383,7 +63408,7 @@ function classifyTurn(frame2, data, who) {
   const event = frame2.event;
   const agent = frameAgent(frame2);
   if (event === "user_input") {
-    const words2 = turnSenderWords(turnSender(data));
+    const words2 = turnSenderWords(turnSender(data), turnSenderName(data));
     return {
       family: "turn",
       tone: "info",
@@ -92955,6 +92980,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     const scope = sendScope;
     void Promise.resolve().then(() => consoleTransport.whoami ? consoleTransport.whoami() : null).then((whoami) => {
       if (!active) return;
+      rememberOwnCallerScope(whoami?.callerScope);
       const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : void 0;
       setApprovalDecider({
         scope,

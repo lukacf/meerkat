@@ -178,6 +178,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The stock console names each message's sender from the frame's recorded
+  sender: "You asked" for the caller's own messages in every tab (the
+  sender's `caller_scope` equals the one `meta/console/whoami` reports),
+  and the sender's display name for anyone else's. A frame from an older
+  gateway, which names no sender, keeps the earlier words.
 - The stock console sends no approver with a decision and shows approvals
   read-only unless `meta/console/whoami` reports a signed-in person.
 - A console approval decision's audit entry records the assurance the

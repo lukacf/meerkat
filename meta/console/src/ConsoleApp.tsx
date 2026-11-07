@@ -31,7 +31,7 @@ import {
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
 import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
-import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
+import { forgetOwnSends, rememberOwnCallerScope, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -2875,6 +2875,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
       .then((whoami) => {
         if (!active) return;
+        // The same read names this console's caller for the transcript: a
+        // message whose recorded sender carries this caller scope reads
+        // "You asked", in every tab.
+        rememberOwnCallerScope(whoami?.callerScope);
         const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
         setApprovalDecider({
           scope,

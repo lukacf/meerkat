@@ -91399,7 +91399,9 @@ fn mob_runtime_parity_field_value(
         | "member_rotation_profile_names"
         | "identity_entry_origins"
         | "identity_entry_unseated"
-        | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "identity_entry_archived_sessions"
+        // Owned edges: the parity probes declare none.
+        | "identity_edge_owners" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }

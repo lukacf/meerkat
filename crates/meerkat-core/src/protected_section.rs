@@ -344,12 +344,19 @@ pub fn assert_may_wait(site: &'static str) {
 /// Run the synchronous `wait` as a known wait at `site`: one its owner has
 /// listed as still waiting inside a protected section, to be removed by a
 /// named later change. [`assert_may_wait`] does not report what runs inside.
-/// Only a host's checked-in list of known sites may name one.
+/// Only a host's checked-in list of known sites may name one. The exemption
+/// ends with the wait, also when the wait unwinds.
 pub fn known_wait<T>(site: &'static str, wait: impl FnOnce() -> T) -> T {
-    let previous = KNOWN_WAIT.with(|known| known.replace(Some(site)));
-    let result = wait();
-    KNOWN_WAIT.with(|known| known.set(previous));
-    result
+    /// Restores the enclosing known wait when dropped, on return or unwind.
+    struct Restore(Option<&'static str>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // A thread being torn down has no exemption left to restore.
+            let _ = KNOWN_WAIT.try_with(|known| known.set(self.0));
+        }
+    }
+    let _restore = Restore(KNOWN_WAIT.with(|known| known.replace(Some(site))));
+    wait()
 }
 
 #[cfg(test)]

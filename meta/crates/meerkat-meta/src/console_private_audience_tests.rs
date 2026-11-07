@@ -1150,14 +1150,9 @@ async fn a_meta_fork_blanks_the_lineage_labels_its_source_carries() -> TestResul
 /// creation policy counts the four among the label keys Meta itself sets.
 #[tokio::test]
 async fn reserved_labels_are_refused_by_host_and_sdk_member_creation() -> TestResult {
-    let runtime = crate::UnifiedRuntime::builder()
-        .definition(meerkat_mob::MobDefinition::from_toml(
-            "[mob]\nid = 'reserved-host-labels'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
-             [profiles.worker.tools]\ncomms = true\n",
-        )?)
-        .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
-        .build()
-        .await?;
+    // `alpha` has had a turn, so it is a fork source the host fork API can
+    // copy: a fork that names a reserved label fails on the label alone.
+    let (_state, runtime, _app) = signed_in_unified_runtime("reserved-host-labels").await?;
     for key in crate::member_comms_id::RESERVED_AUTHORITY_LABELS {
         let labels = BTreeMap::from([(key.to_string(), "alpha".to_string())]);
         let refused = runtime

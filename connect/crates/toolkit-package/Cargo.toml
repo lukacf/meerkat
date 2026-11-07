@@ -54,8 +54,8 @@ toolkit-store = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-rustix = { version = "=1.1.5", features = ["fs"], optional = true }
-zip = { version = "=2.4.2", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
+rustix = { version = "=1.1.6", features = ["fs"], optional = true }
+zip = { version = "=2.6.1", default-features = false, features = ["deflate-flate2", "flate2"], optional = true }
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"], optional = true }
 
 [target.'cfg(unix)'.dependencies]

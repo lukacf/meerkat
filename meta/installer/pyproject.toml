@@ -10,17 +10,17 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
-  "meerkat-meta==0.9.3",
+  "meerkat-meta==0.9.7",
   "httpx>=0.28,<1",
   "mcp==1.30.0",
   "jsonschema>=4.26,<5",
   "tinycss2==1.5.1",
   "python-multipart>=0.0.20,<1",
-  "pypdf==6.1.1",
+  "pypdf==6.21.4",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "meerkat-mobkit==0.8.42"]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "meerkat-mobkit==0.8.49"]
 
 [tool.setuptools.packages.find]
 include = ["launchkit*"]

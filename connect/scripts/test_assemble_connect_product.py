@@ -2505,9 +2505,12 @@ class InstalledConsoleBoundaryTests(unittest.TestCase):
                 decision["provenance"] = provenance
             return {"approval_id": "software-approval", "status": "approved", "decision": decision}
 
-        report = {"enrollment": {"login_scope_id": scope}, "decisions": [
+        journey = {"enrollment": {"login_scope_id": scope}, "decisions": [
             {"kind": "software", "prompt": {"review_id": 1, "prompt": {"approval_id": "software-approval"}}},
             {"kind": "public_access", "prompt": {"review_id": 2, "prompt": {"approval_id": "access-approval"}}}]}
+        # The harness hands the check its case report, which holds the
+        # journey's own report under console_journey.
+        report = {"status": "passed", "console_journey": journey}
         scenario = c.ConsoleScenario(VERIFIER, "http://127.0.0.1:18444")
         with tempfile.TemporaryDirectory(prefix="inert-console-decisions-") as scratch:
             directory = Path(scratch)
@@ -2515,7 +2518,10 @@ class InstalledConsoleBoundaryTests(unittest.TestCase):
             store.mkdir(parents=True)
             path = store / "native-decisions.json"
             path.write_text(json.dumps({"approvals": [record(c.SUBJECT, {"approver": approver})]}))
-            scenario.check_final_artifacts(directory, report)
+            try:
+                scenario.check_final_artifacts(directory, report)
+            except (AssertionError, KeyError) as refused:
+                self.fail(f"a correct stored decision was refused: {refused!r}")
             for actor, provenance in (
                     ("connect-console-presenter", None),
                     (c.SUBJECT, None),
@@ -2525,11 +2531,15 @@ class InstalledConsoleBoundaryTests(unittest.TestCase):
                     (c.SUBJECT, {"approver": {**approver, "authentication_scope_digest": scope}})):
                 with self.subTest(actor=actor, provenance=provenance):
                     path.write_text(json.dumps({"approvals": [record(actor, provenance)]}))
-                    with self.assertRaises(AssertionError):
+                    with self.assertRaisesRegex(
+                            AssertionError, "does not name the person who answered"):
                         scenario.check_final_artifacts(directory, report)
             path.write_text(json.dumps({"approvals": []}))
             with self.assertRaisesRegex(AssertionError, "the stored software decision is missing"):
                 scenario.check_final_artifacts(directory, report)
+            # A case that already failed keeps its own refusal: the check
+            # reads nothing more.
+            scenario.check_final_artifacts(directory, {"status": "failed"})
 
 
 if __name__ == "__main__":

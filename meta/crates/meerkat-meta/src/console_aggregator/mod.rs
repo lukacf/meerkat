@@ -3419,6 +3419,28 @@ impl MetaConsoleAggregator {
         session_id: Option<&str>,
         scope: &ConsoleSendScope,
     ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, session_id, scope, false)).await
+    }
+
+    /// [`Self::reserve_identity_first_interaction_scoped`] for a governed
+    /// send: a host's binder admits it.
+    pub(crate) async fn reserve_governed_interaction_scoped(
+        &self,
+        request: ConsoleSendRequest,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        Box::pin(self.reserve_identity_first_send(request, session_id, scope, true)).await
+    }
+
+    async fn reserve_identity_first_send(
+        &self,
+        request: ConsoleSendRequest,
+        session_id: Option<&str>,
+        scope: &ConsoleSendScope,
+        governed: bool,
+    ) -> Result<ScopedReservation, ConsoleSendError> {
+        let _ = governed;
         validate_send_request(&request)?;
         let _content = content_input_from_value(&request.content)?;
         let (runtime_key, host_policy) =
@@ -3723,11 +3745,13 @@ impl MetaConsoleAggregator {
     /// A governed send's bind answered bound, before its input is
     /// submitted: `MarkSubmitted`, applied to the send's own state
     /// (dispatching). From here the send is delivered or fails, and is never
-    /// held.
+    /// held. `session_id` is the session the bind bound.
     pub(crate) async fn mark_interaction_submitted(
         &self,
         input_frame_id: &str,
+        session_id: &meerkat_core::types::SessionId,
     ) -> Result<(), ConsoleSendError> {
+        let _ = session_id;
         self.transition_send(
             input_frame_id,
             SendTransition::MarkSubmitted,

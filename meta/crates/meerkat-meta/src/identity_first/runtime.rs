@@ -3627,6 +3627,14 @@ pub struct IdentityRuntime {
     /// answered its rotation, before anything after it.
     #[cfg(test)]
     fresh_life_answered_hook: StdMutex<Option<HeldFreshnessHook>>,
+    /// Test seam: runs in a governed send right after its binder recorded
+    /// the submission, before the input reaches native admission.
+    #[cfg(test)]
+    governed_submitted_hook: StdMutex<Option<HeldFreshnessHook>>,
+    /// The operation refusal observer the host installed for its agents:
+    /// the waits of a governed send's "not now" answers are reported to it
+    /// ([`Self::with_operation_refusal_observer`]).
+    operation_refusal_observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
     bootstrap_task: Mutex<Option<JoinHandle<()>>>,
     bootstrap_cancel: StdRwLock<Option<watch::Sender<bool>>>,
     bootstrap_shutdown: AtomicBool,
@@ -4177,6 +4185,33 @@ impl IdentityRuntime {
         }
     }
 
+    /// Test seam: run `hook` in the next governed send right after its
+    /// binder recorded the submission, before the input reaches native
+    /// admission.
+    #[cfg(test)]
+    pub(crate) fn set_governed_submitted_hook(&self, hook: HeldFreshnessHook) {
+        *self
+            .governed_submitted_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Test seam: run the hook a test set to run right after a governed
+    /// send's binder recorded the submission.
+    async fn run_governed_submitted_hook(&self) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .governed_submitted_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(hook) = hook {
+                hook().await;
+            }
+        }
+    }
+
     /// The held bootstrap pass in progress, if any.
     pub(crate) fn held_create_pass(&self) -> Option<Arc<super::held_bootstrap::HeldCreatePass>> {
         self.held_create_pass
@@ -4457,6 +4492,9 @@ impl IdentityRuntime {
             held_after_freshness_hook: StdMutex::new(None),
             #[cfg(test)]
             fresh_life_answered_hook: StdMutex::new(None),
+            #[cfg(test)]
+            governed_submitted_hook: StdMutex::new(None),
+            operation_refusal_observer: None,
             bootstrap_task: Mutex::new(None),
             bootstrap_cancel: StdRwLock::new(None),
             bootstrap_shutdown: AtomicBool::new(false),
@@ -4480,6 +4518,31 @@ impl IdentityRuntime {
     pub fn with_runtime_services(mut self, runtime_services: AgentRuntimeServices) -> Self {
         self.runtime_services = runtime_services;
         self
+    }
+
+    /// Report the waits of a governed send's binder "not now" answers to
+    /// `observer`, the operation refusal observer the host installed for its
+    /// agents: each wait is one
+    /// [`meerkat_core::OperationRefusalDisposition::WaitedForOwnerChange`]
+    /// on [`meerkat_core::OperationRefusalSurface::GovernedInput`], for the
+    /// session the send's first "not now" bind was handed.
+    #[must_use]
+    pub fn with_operation_refusal_observer(
+        mut self,
+        observer: Arc<dyn meerkat_core::OperationRefusalObserver>,
+    ) -> Self {
+        self.operation_refusal_observer = Some(observer);
+        self
+    }
+
+    /// The waiting state of one governed send's "not now" answers: one
+    /// deadline and one set of free rebuilds for the whole send.
+    fn governed_not_now_churn(
+        &self,
+        session_id: &SessionId,
+    ) -> meerkat_core::authorization::OwnerChangeChurn {
+        let _ = (&self.operation_refusal_observer, session_id);
+        meerkat_core::authorization::OwnerChangeChurn::new()
     }
 
     pub fn with_reset_roster_provider(self, provider: Arc<dyn RosterProvider>) -> Self {
@@ -10959,8 +11022,9 @@ impl IdentityRuntime {
         };
         let budget = binder.wait_budget();
         // One deadline and one set of free rebinds for the whole send, armed
-        // by its first wait and never re-armed (Core's owner-change churn).
-        let mut churn = meerkat_core::authorization::OwnerChangeChurn::new();
+        // by its first wait and never re-armed (Core's owner-change churn),
+        // taken at the send's first "not now".
+        let mut churn = None;
         let mut waited = std::time::Duration::ZERO;
         let mut binds: u32 = 0;
         let (_lifecycle_guard, bridge, runtime_id, session_id, token, completion_baseline, bound) = loop {
@@ -11107,6 +11171,7 @@ impl IdentityRuntime {
             let GovernedWaitBudget::Bounded(within) = budget else {
                 return Err(held(waited));
             };
+            let churn = churn.get_or_insert_with(|| self.governed_not_now_churn(&session_id));
             let mut closed = self.foreground_cancel.subscribe();
             let wait = tokio::select! {
                 biased;
@@ -11139,12 +11204,13 @@ impl IdentityRuntime {
         // send's state records the submission now, outside the protected
         // section, so nothing can record the send held after this point. A
         // refusal here submits nothing: the custody is withdrawn.
-        if let Err(refusal) = binder.submitting().await {
+        if let Err(refusal) = binder.submitting(&session_id).await {
             drop(settlement);
             return Err(IdentityRuntimeError::GovernedInput(
                 GovernedInputError::Refused(refusal),
             ));
         }
+        self.run_governed_submitted_hook().await;
         // Where this submission's outcome is read by its key, through Core,
         // when its answer is lost: the raw key and the digest of the exact
         // association it is submitted under.

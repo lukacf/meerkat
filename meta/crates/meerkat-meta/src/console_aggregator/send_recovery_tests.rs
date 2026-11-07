@@ -11,6 +11,11 @@ use super::*;
 
 const SESSION: &str = "0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6b";
 
+/// [`SESSION`], parsed.
+fn session() -> meerkat_core::types::SessionId {
+    meerkat_core::types::SessionId::parse(SESSION).expect("the session id")
+}
+
 fn request(key: &str, content: &str) -> ConsoleSendRequest {
     ConsoleSendRequest {
         identity: "agent".to_string(),
@@ -689,7 +694,7 @@ async fn a_submitted_send_records_no_hold_and_moves_once() {
         drop(claim);
         assert!(
             aggregator
-                .mark_interaction_submitted(&accepted.input_frame_id)
+                .mark_interaction_submitted(&accepted.input_frame_id, &session())
                 .await
                 .is_err(),
             "an accepted send is not submitted before its dispatch begins"
@@ -699,7 +704,7 @@ async fn a_submitted_send_records_no_hold_and_moves_once() {
             .await
             .expect("the dispatch begins");
         aggregator
-            .mark_interaction_submitted(&accepted.input_frame_id)
+            .mark_interaction_submitted(&accepted.input_frame_id, &session())
             .await
             .expect("the bind answered bound");
         let before = frame_of(&aggregator, &accepted.input_frame_id).await;
@@ -757,4 +762,91 @@ async fn a_submitted_send_records_no_hold_and_moves_once() {
         }
         assert_eq!(moved, 1, "round {round}");
     }
+}
+
+/// Admission evidence held in one session only; every read records the
+/// session it read.
+struct OneSessionEvidence {
+    session: meerkat_core::types::SessionId,
+    admitted: BTreeMap<String, String>,
+    reads: std::sync::Mutex<Vec<meerkat_core::types::SessionId>>,
+}
+
+#[async_trait::async_trait]
+impl SendAdmissionReader for OneSessionEvidence {
+    async fn admitted_input(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        idempotency_key: &str,
+    ) -> Result<Option<AdmittedInput>, String> {
+        self.reads.lock().unwrap().push(session_id.clone());
+        Ok((*session_id == self.session)
+            .then(|| self.admitted.get(idempotency_key))
+            .flatten()
+            .map(|input_id| AdmittedInput {
+                input_id: input_id.clone(),
+                phase: Some("queued".to_string()),
+            }))
+    }
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String> {
+        self.admitted_input(session_id, &input_id.to_string()).await
+    }
+}
+
+/// A governed send accepted for the member's session (S1, recorded at
+/// acceptance) whose identity was reset before its bind binds the new session
+/// (S2), and its submission record names S2. The process stops after the
+/// submission, its input admitted on S2. The gateway's start reads the
+/// runtime's evidence in S2, the session the bind bound, and settles the send
+/// delivered; nothing is read in S1.
+///
+/// RED before the fix: the start reads S1, finds none of the input there and
+/// fails the send, its outcome unknown.
+#[tokio::test]
+async fn a_submitted_send_is_settled_from_the_session_its_bind_bound() {
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let (accepted, claim) = fresh(reserve(&aggregator, "rebound", "hello", &human("u1")).await);
+    drop(claim);
+    let bound = meerkat_core::types::SessionId::new();
+    assert_ne!(bound, session());
+    aggregator
+        .mark_interaction_dispatching(&accepted.input_frame_id)
+        .await
+        .expect("the dispatch begins");
+    aggregator
+        .mark_interaction_submitted(&accepted.input_frame_id, &bound)
+        .await
+        .expect("the bind bound the new session");
+    let evidence = Arc::new(OneSessionEvidence {
+        session: bound.clone(),
+        admitted: [(
+            governed_input_id(&accepted.interaction_id, &accepted.input_frame_id).to_string(),
+            "input-b".to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        reads: std::sync::Mutex::new(Vec::new()),
+    });
+    aggregator.read_send_admission_from(evidence.clone());
+
+    let outcome = aggregator.reconcile_interrupted_sends().await;
+    assert_eq!(
+        (outcome.delivered, outcome.lost),
+        (1, 0),
+        "settled delivered from the bound session: {outcome:?}"
+    );
+    assert_eq!(
+        status_of(&aggregator, &accepted.input_frame_id).await,
+        ConsoleFrameStatus::Delivered
+    );
+    let reads = evidence.reads.lock().unwrap().clone();
+    assert!(
+        !reads.is_empty() && reads.iter().all(|read| *read == bound),
+        "only the bound session is read: {reads:?}"
+    );
 }

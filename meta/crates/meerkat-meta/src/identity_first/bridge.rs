@@ -3530,11 +3530,15 @@ pub trait GovernedInputBinder: Send + Sync {
 
     /// Called once, after a bind answered bound and before the bound input
     /// is submitted: outside the protected section, under the identity's
-    /// lifecycle lock. A door that records its send's state records the
-    /// submission here, so nothing records the send held after it. An `Err`
-    /// refuses the send: nothing is submitted. Answers `Ok` unless the door
-    /// says otherwise.
-    async fn submitting(&self) -> Result<(), GovernedBindRefusal> {
+    /// lifecycle lock. `session_id` is the session the bind bound. A door
+    /// that records its send's state records the submission here, so nothing
+    /// records the send held after it. An `Err` refuses the send: nothing is
+    /// submitted. Answers `Ok` unless the door says otherwise.
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), GovernedBindRefusal> {
+        let _ = session_id;
         Ok(())
     }
 

@@ -534,6 +534,19 @@ mod tests {
         );
     }
 
+    /// A governed Console input's id is permanent once shipped (a replay reads
+    /// the runtime's evidence by it), so its derivation is pinned: the
+    /// namespace, a fixed random value that names nothing, and the
+    /// `console:{interaction}:{frame}` key it hashes.
+    #[test]
+    fn the_governed_input_id_derivation_is_pinned() {
+        assert_eq!(
+            governed_input_id("0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6c", "console-frame-1")
+                .to_string(),
+            "05170309-1079-5e5f-b678-d1e8a35af2b2"
+        );
+    }
+
     #[test]
     fn a_frame_has_one_dispatch_owner_until_its_claim_drops() {
         let claims = Arc::new(SendDispatchClaims::default());

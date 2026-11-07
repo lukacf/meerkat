@@ -2760,8 +2760,11 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
         self.inner.wait_budget()
     }
 
-    async fn submitting(&self) -> Result<(), crate::identity_first::GovernedBindRefusal> {
-        self.inner.submitting().await
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting(session_id).await
     }
 
     fn retain_unresolved(
@@ -2782,6 +2785,25 @@ struct SubmittingSendBinder {
     inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
     aggregator: MetaConsoleAggregator,
     frame_id: String,
+    /// The frame's dispatch ownership, kept for as long as anything holds
+    /// this binder.
+    _owner: Option<Arc<crate::console_aggregator::SendDispatchClaim>>,
+}
+
+impl SubmittingSendBinder {
+    fn new(
+        inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
+        aggregator: MetaConsoleAggregator,
+        frame_id: String,
+        owner: Option<Arc<crate::console_aggregator::SendDispatchClaim>>,
+    ) -> Self {
+        Self {
+            inner,
+            aggregator,
+            frame_id,
+            _owner: owner,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -2799,10 +2821,13 @@ impl crate::identity_first::GovernedInputBinder for SubmittingSendBinder {
         self.inner.wait_budget()
     }
 
-    async fn submitting(&self) -> Result<(), crate::identity_first::GovernedBindRefusal> {
-        self.inner.submitting().await?;
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting(session_id).await?;
         self.aggregator
-            .mark_interaction_submitted(&self.frame_id)
+            .mark_interaction_submitted(&self.frame_id, session_id)
             .await
             .map_err(|error| {
                 crate::identity_first::GovernedBindRefusal::unavailable(format!(
@@ -3064,13 +3089,22 @@ async fn console_send_identity_first_governed(
         .agent_runtime_id
         .as_ref()
         .map(|id| id.as_str().to_string());
-    let (accepted, claim) = match Box::pin(aggregator.reserve_identity_first_interaction_scoped(
-        request.clone(),
-        session_id.as_deref(),
-        &governance.scope,
-    ))
-    .await?
-    {
+    let reservation = if governed.is_some() {
+        Box::pin(aggregator.reserve_governed_interaction_scoped(
+            request.clone(),
+            session_id.as_deref(),
+            &governance.scope,
+        ))
+        .await?
+    } else {
+        Box::pin(aggregator.reserve_identity_first_interaction_scoped(
+            request.clone(),
+            session_id.as_deref(),
+            &governance.scope,
+        ))
+        .await?
+    };
+    let (accepted, claim) = match reservation {
         // An idempotent replay of a settled send, or of one whose dispatch
         // runs in this process: the original acceptance is the answer.
         // Dispatching again would run a second turn under this interaction.
@@ -3149,11 +3183,12 @@ async fn console_send_identity_first_governed(
             aggregator
                 .mark_interaction_dispatching(&accepted.input_frame_id)
                 .await?;
-            Some(Arc::new(SubmittingSendBinder {
+            Some(Arc::new(SubmittingSendBinder::new(
                 inner,
-                aggregator: aggregator.clone(),
-                frame_id: accepted.input_frame_id.clone(),
-            })
+                aggregator.clone(),
+                accepted.input_frame_id.clone(),
+                None,
+            ))
                 as Arc<dyn crate::identity_first::GovernedInputBinder>)
         }
         None => None,

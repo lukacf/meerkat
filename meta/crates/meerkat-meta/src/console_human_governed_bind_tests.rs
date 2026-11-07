@@ -1323,7 +1323,7 @@ async fn a_submitted_send_whose_input_never_reached_the_runtime_fails_on_replay(
         .await
         .expect("the dispatch begins");
     aggregator
-        .mark_interaction_submitted(&accepted.input_frame_id)
+        .mark_interaction_submitted(&accepted.input_frame_id, &fixture.session_id)
         .await
         .expect("the bind answered bound");
     let binds = bind_count(&host);
@@ -1619,4 +1619,587 @@ async fn a_held_console_send_ends_at_shutdown_with_nothing_submitted() {
     );
     assert!(host.bound.lock().unwrap().is_none(), "nothing bound");
     assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
+}
+
+/// The send's frame as the Console holds it now.
+async fn frame_now(
+    aggregator: &MetaConsoleAggregator,
+    accepted: &ConsoleInteractionAccepted,
+) -> crate::console_aggregator::ConsoleFrame {
+    aggregator
+        .query_timeline(ConsoleTimelineQuery {
+            identity: Some(accepted.identity.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .frames
+        .into_iter()
+        .find(|frame| frame.id == accepted.input_frame_id)
+        .expect("the send's frame")
+}
+
+/// A governed send whose native admission is unresolved.
+fn unresolved_admission(
+    receipt: Option<Box<crate::identity_first::GovernedSubmissionReceipt>>,
+) -> crate::identity_first::IdentityRuntimeError {
+    crate::identity_first::IdentityRuntimeError::GovernedInput(
+        crate::identity_first::GovernedInputError::AdmissionUnresolved {
+            detail: "native admission settled None".to_string(),
+            receipt,
+        },
+    )
+}
+
+/// The JSON body of a Console HTTP answer.
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("HTTP body");
+    serde_json::from_slice(&body).expect("JSON body")
+}
+
+/// A governed send whose native admission is unresolved (the input may have
+/// run) has its own answer, never a refusal: HTTP 504
+/// `governed_admission_unresolved`, as an admission timeout answers
+/// (`admission_timeout`), with a message saying the input may have run and may
+/// be retried only with the same idempotency key or
+/// `meta/console/recover_send`, never as a new send. The Console's JSON-RPC
+/// answers -32000 with the same message and data. A refusal keeps HTTP 409
+/// `governed_input_refused`.
+///
+/// RED before the fix: the unresolved answer is 409 `governed_input_refused`,
+/// "governed input refused".
+#[tokio::test]
+async fn console_governed_unresolved_admission_answers_its_own_kind() {
+    let response = super::console_send_error_response(
+        super::identity_runtime_error_to_console_send_error(MEMBER, unresolved_admission(None)),
+    );
+    assert_eq!(response.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "governed_admission_unresolved", "{body}");
+    assert_eq!(
+        body["data"]["kind"], "governed_admission_unresolved",
+        "{body}"
+    );
+    let message = body["message"].as_str().expect("the answer's message");
+    for says in [
+        "may have run",
+        "same idempotency key",
+        "meta/console/recover_send",
+        "never as a new send",
+    ] {
+        assert!(message.contains(says), "{says:?} in {message:?}");
+    }
+
+    let rpc = super::console_send_rpc_error(
+        json!(7),
+        super::identity_runtime_error_to_console_send_error(MEMBER, unresolved_admission(None)),
+    );
+    assert_eq!(rpc["error"]["code"], json!(-32000), "{rpc}");
+    assert_eq!(rpc["error"]["message"], json!(message), "{rpc}");
+    assert_eq!(
+        rpc["error"]["data"]["kind"], "governed_admission_unresolved",
+        "{rpc}"
+    );
+
+    let refused = crate::identity_first::IdentityRuntimeError::GovernedInput(
+        crate::identity_first::GovernedInputError::Refused(
+            crate::identity_first::GovernedBindRefusal::denied("the original was not reviewed"),
+        ),
+    );
+    let response = super::console_send_error_response(
+        super::identity_runtime_error_to_console_send_error(MEMBER, refused),
+    );
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "governed_input_refused", "{body}");
+}
+
+/// A governed submission's receipt (its session, raw key, association digest
+/// and input id) stays on Meta's internal seams. The structured data of an
+/// unresolved admission carries its `kind` and no `receipt` on every wire: the
+/// Console's HTTP body, the Console's JSON-RPC error data and the identity
+/// JSON-RPC error data.
+///
+/// RED before the fix: all three carry the receipt.
+#[tokio::test]
+async fn an_unresolved_admissions_receipt_stays_off_every_wire() {
+    let receipt = || {
+        Some(Box::new(crate::identity_first::GovernedSubmissionReceipt {
+            v: crate::identity_first::GOVERNED_SUBMISSION_RECEIPT_VERSION,
+            session_id: SessionId::new(),
+            idempotency_key: meerkat_runtime::IdempotencyKey::new("console:interaction:frame"),
+            association_digest: meerkat_runtime::AssociationDigest::parse(&format!(
+                "v1:{}",
+                "ab".repeat(32)
+            ))
+            .expect("a digest"),
+            input_id: meerkat_core::lifecycle::InputId::new(),
+        }))
+    };
+    let http = json_body(super::console_send_error_response(
+        super::identity_runtime_error_to_console_send_error(
+            MEMBER,
+            unresolved_admission(receipt()),
+        ),
+    ))
+    .await;
+    let console_rpc = super::console_send_rpc_error(
+        json!(7),
+        super::identity_runtime_error_to_console_send_error(
+            MEMBER,
+            unresolved_admission(receipt()),
+        ),
+    );
+    let identity_rpc = crate::rpc::identity_json_rpc_error(&unresolved_admission(receipt()));
+    let identity_rpc = identity_rpc.data.expect("the identity RPC's data");
+    for (wire, data) in [
+        ("console http", &http["data"]),
+        ("console rpc", &console_rpc["error"]["data"]),
+        ("identity rpc", &identity_rpc),
+    ] {
+        assert_eq!(
+            data["kind"], "governed_admission_unresolved",
+            "{wire}: {data}"
+        );
+        assert!(data.get("receipt").is_none(), "{wire}: {data}");
+    }
+}
+
+/// A governed steer whose request went away (its client disconnected) after its
+/// binder recorded the submission, while its runtime-owned operation still
+/// holds the input between that record and native admission, is not failed by a
+/// replay of its key: the operation keeps the frame's dispatch until it
+/// returns, so the replay answers the acceptance and the frame stays
+/// `submitted`. Once the input is admitted and the operation returned, a replay
+/// settles the send `delivered` from the runtime's evidence. One bind, admitted
+/// once.
+///
+/// RED before the fix: the request alone owned the dispatch, so the replay
+/// found it free and the input not yet admitted, and failed the send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_whose_request_went_away_after_its_submission_is_not_failed_by_a_replay() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "dropped-steer"));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    runtime.set_governed_submitted_hook({
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        Box::new(move || {
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+            })
+        })
+    });
+    let mut steer = request("dropped-steer", HUMAN);
+    steer.handling_mode = Some("steer".to_string());
+    let first = tokio::spawn({
+        let aggregator = aggregator.clone();
+        let runtime = Arc::clone(&runtime);
+        let host = Arc::clone(&host);
+        let steer = steer.clone();
+        async move { send(&aggregator, &runtime, &host, steer).await }
+    });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("the steer's submission is recorded");
+    // The steer's request goes away; its runtime-owned operation goes on.
+    first.abort();
+    assert!(
+        first.await.is_err_and(|error| error.is_cancelled()),
+        "the steer's request went away"
+    );
+
+    let replayed = send(&aggregator, &runtime, &host, steer.clone())
+        .await
+        .expect("the replay is answered");
+    let frame = frame_now(&aggregator, &replayed).await;
+    assert_eq!(
+        frame.status,
+        ConsoleFrameStatus::Submitted,
+        "a replay while the operation may still submit does not fail the send: {frame:?}"
+    );
+
+    release.notify_one();
+    tokio::time::timeout(WAIT, async {
+        while host.admitted.lock().unwrap().is_empty()
+            || aggregator.send_dispatch_claimed(&replayed.input_frame_id)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the input is admitted and the operation returned");
+    let settling = send(&aggregator, &runtime, &host, steer)
+        .await
+        .expect("the replay is answered");
+    assert_eq!(
+        settled(&aggregator, &settling).await,
+        ConsoleFrameStatus::Delivered
+    );
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+    assert_eq!(bind_count(&host), 1, "one bind");
+}
+
+/// A held send whose replay recorded its dispatch (`dispatching`) and took its
+/// hold, then stopped before it dispatched (the process went away), is left
+/// `dispatching` with no hold and no owner. Nothing was submitted (the
+/// submission record precedes every submission) and no operation is left, so a
+/// replay of its key treats it as held and dispatches it once: delivered,
+/// admitted once.
+///
+/// RED before the fix: with no hold the replay answers the acceptance and
+/// dispatches nothing; the send stays `dispatching` for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_stopped_after_its_hold_was_taken_is_dispatched_once_on_replay() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "taken-original"));
+    let (accepted, _held) = held_send(&aggregator, &runtime, &host, "taken-original").await;
+    // A replay recorded the dispatch and took the hold, then stopped.
+    aggregator
+        .mark_interaction_dispatching(&accepted.input_frame_id)
+        .await
+        .expect("the replay's dispatch begins");
+    assert!(
+        aggregator
+            .take_interaction_delivery_hold(&accepted.input_frame_id)
+            .await
+            .expect("the hold's take"),
+        "the replay took the hold"
+    );
+    let stopped = frame_now(&aggregator, &accepted).await;
+    assert_eq!(stopped.status, ConsoleFrameStatus::Dispatching);
+    assert!(
+        stopped.payload.get("delivery_hold").is_none(),
+        "{stopped:?}"
+    );
+    let binds = bind_count(&host);
+
+    host.release();
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("taken-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered
+    );
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+    assert_eq!(bind_count(&host), binds + 1, "dispatched once");
+}
+
+/// A governed send an earlier version left `accepted` (no hold, no dispatch
+/// owner, and none of this version's governed record), whose input that
+/// version's dispatch admitted under a random input id, is never dispatched
+/// again by a replay of its key: the runtime's evidence of it (by the
+/// frame-derived input id) reads absent, and such a frame is settled from
+/// evidence only. One bind, admitted once, and the frame stays `accepted`.
+///
+/// Passes before the fix; RED against a mutant that treats every unowned
+/// `accepted` governed frame as held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_earlier_versions_unowned_accepted_send_is_never_dispatched_again() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "earlier-original"));
+    let sent = request("earlier-original", HUMAN);
+    let session = fixture.session_id.to_string();
+    let scope = super::ConsoleSendGovernance::default().scope;
+    // The earlier version reserved the send as it reserved every send ...
+    let accepted = match aggregator
+        .reserve_identity_first_interaction_scoped(sent.clone(), Some(session.as_str()), &scope)
+        .await
+        .expect("the Console reserves the send")
+    {
+        crate::console_aggregator::ScopedReservation::Fresh(accepted, claim) => {
+            drop(claim);
+            accepted
+        }
+        other => panic!("a fresh reservation: {other:?}"),
+    };
+    // ... and its dispatch submitted the send's keyed input under a random
+    // id; the input was admitted, and the process stopped before it settled
+    // the frame.
+    let binder = host
+        .binder_for_send(
+            &identity,
+            &super::console_human_input_tests::current_console_human(),
+            &ConsoleSendContext::for_request(&sent),
+        )
+        .expect("the host's binder for the send");
+    let mut prompt = meerkat_runtime::PromptInput::from_content_input(
+        ContentInput::Text(HUMAN.to_string()),
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                ..Default::default()
+            },
+        ),
+    );
+    prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
+        crate::console_aggregator::governed_delivery_key(
+            &accepted.interaction_id,
+            &accepted.input_frame_id,
+        ),
+    ));
+    runtime
+        .send_governed_with_turn_ticket(
+            &identity,
+            None,
+            meerkat_runtime::Input::Prompt(prompt),
+            binder,
+        )
+        .await
+        .expect("the earlier dispatch is admitted");
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+    let binds = bind_count(&host);
+
+    let replayed = send(&aggregator, &runtime, &host, sent)
+        .await
+        .expect("the replay is answered");
+    tokio::time::sleep(HOLD_BUDGET).await;
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
+    assert_eq!(
+        host.admitted.lock().unwrap().len(),
+        1,
+        "still admitted once"
+    );
+    let frame = frame_now(&aggregator, &replayed).await;
+    assert_eq!(frame.status, ConsoleFrameStatus::Accepted, "{frame:?}");
+}
+
+/// A governed send this version reserved, whose process stopped before its
+/// first dispatch began (`accepted`, no hold, no owner), submitted nothing: its
+/// frame's governed record says this version reserved it, so a replay of its
+/// key treats it as held and dispatches it once: delivered, admitted once.
+///
+/// RED before the fix: the replay answers the acceptance and dispatches
+/// nothing; the send stays `accepted` for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_governed_send_stopped_before_its_first_dispatch_is_dispatched_once_on_replay() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unstarted-original"));
+    let session = fixture.session_id.to_string();
+    let scope = super::ConsoleSendGovernance::default().scope;
+    let accepted = match aggregator
+        .reserve_governed_interaction_scoped(
+            request("unstarted-original", HUMAN),
+            Some(session.as_str()),
+            &scope,
+        )
+        .await
+        .expect("the Console reserves the send")
+    {
+        crate::console_aggregator::ScopedReservation::Fresh(accepted, claim) => {
+            // The process stopped before the dispatch began.
+            drop(claim);
+            accepted
+        }
+        other => panic!("a fresh reservation: {other:?}"),
+    };
+
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unstarted-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered
+    );
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+    assert_eq!(bind_count(&host), 1, "dispatched once");
+}
+
+/// A held send's replay takes the hold before it dispatches: while the dispatch
+/// is in flight (its native admission held), the frame records no hold.
+/// Released, the send is delivered, admitted once.
+///
+/// Passes before the fix; RED against the mutant that dispatches without
+/// taking the hold (the hold stays on the frame).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replayed_held_send_takes_its_hold_before_it_dispatches() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "retaken-original"));
+    let (accepted, _held) = held_send(&aggregator, &runtime, &host, "retaken-original").await;
+
+    host.release();
+    fixture.adapter.gate.hold();
+    send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("retaken-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    tokio::time::timeout(WAIT, async {
+        while fixture.adapter.gate.entered() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the replay's dispatch is in flight");
+    let in_flight = frame_now(&aggregator, &accepted).await;
+    assert!(
+        in_flight.payload.get("delivery_hold").is_none(),
+        "the replay took the hold before it dispatched: {in_flight:?}"
+    );
+    assert_eq!(in_flight.status, ConsoleFrameStatus::Submitted);
+
+    fixture.adapter.gate.release();
+    assert_eq!(
+        settled(&aggregator, &accepted).await,
+        ConsoleFrameStatus::Delivered
+    );
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+}
+
+/// A log store that implements none of the send machine's own transitions
+/// (as a store written before them, or a wrapper that forwards only what
+/// it knew of): it forwards everything else to the in-memory store.
+struct NoSendStates(Arc<crate::console_aggregator::InMemoryConsoleLogStore>);
+
+#[async_trait::async_trait]
+impl crate::console_aggregator::ConsoleLogStore for NoSendStates {
+    async fn append_if_absent(
+        &self,
+        frame: crate::console_aggregator::NewConsoleFrame,
+    ) -> crate::console_aggregator::ConsoleLogResult<crate::console_aggregator::AppendOutcome> {
+        self.0.append_if_absent(frame).await
+    }
+
+    async fn update_frame_status(
+        &self,
+        frame_id: &str,
+        status: ConsoleFrameStatus,
+    ) -> crate::console_aggregator::ConsoleLogResult<Option<crate::console_aggregator::ConsoleFrame>>
+    {
+        self.0.update_frame_status(frame_id, status).await
+    }
+
+    async fn query_frames(
+        &self,
+        query: ConsoleTimelineQuery,
+    ) -> crate::console_aggregator::ConsoleLogResult<crate::console_aggregator::ConsoleTimelinePage>
+    {
+        self.0.query_frames(query).await
+    }
+
+    async fn query_windowed_frames(
+        &self,
+        query: crate::console_aggregator::ConsoleTimelineWindowQuery,
+    ) -> crate::console_aggregator::ConsoleLogResult<
+        crate::console_aggregator::ConsoleTimelineWindowPage,
+    > {
+        self.0.query_windowed_frames(query).await
+    }
+
+    async fn frame_by_dedupe_key(
+        &self,
+        dedupe_key: &str,
+    ) -> crate::console_aggregator::ConsoleLogResult<Option<crate::console_aggregator::ConsoleFrame>>
+    {
+        self.0.frame_by_dedupe_key(dedupe_key).await
+    }
+
+    async fn latest_cursor(
+        &self,
+    ) -> crate::console_aggregator::ConsoleLogResult<Option<crate::console_aggregator::ConsoleCursor>>
+    {
+        self.0.latest_cursor().await
+    }
+
+    async fn clear_frames(&self) -> crate::console_aggregator::ConsoleLogResult<()> {
+        self.0.clear_frames().await
+    }
+
+    async fn record_source_watermark(
+        &self,
+        runtime_key: &str,
+        source_kind: crate::console_aggregator::ConsoleFrameSourceKind,
+        source_cursor: &str,
+    ) -> crate::console_aggregator::ConsoleLogResult<()> {
+        self.0
+            .record_source_watermark(runtime_key, source_kind, source_cursor)
+            .await
+    }
+
+    async fn source_watermark(
+        &self,
+        runtime_key: &str,
+        source_kind: crate::console_aggregator::ConsoleFrameSourceKind,
+    ) -> crate::console_aggregator::ConsoleLogResult<Option<String>> {
+        self.0.source_watermark(runtime_key, source_kind).await
+    }
+}
+
+/// A Console whose log store cannot move a send through the send machine's
+/// states (nor record or take a hold) refuses a governed send before anything
+/// is reserved, typed: no frame is stranded and the host's binder is never
+/// asked. The store's support is checked first.
+///
+/// RED before the fix: the send is reserved, its dispatch cannot begin, and
+/// its frame stays `accepted` with no owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_governed_send_through_a_store_without_send_states_is_refused_before_it_is_reserved() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let store = Arc::new(crate::console_aggregator::InMemoryConsoleLogStore::new());
+    let aggregator = MetaConsoleAggregator::new(Arc::new(NoSendStates(Arc::clone(&store))));
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unmoved-original"));
+    let error = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unmoved-original", HUMAN),
+    )
+    .await
+    .expect_err("the governed send is refused");
+    assert!(
+        matches!(&error, ConsoleSendError::GovernedRefused(_)),
+        "a typed refusal before anything is reserved: {error:?}"
+    );
+    let frames = crate::console_aggregator::ConsoleLogStore::query_frames(
+        store.as_ref(),
+        ConsoleTimelineQuery {
+            identity: None,
+            conversation_id: None,
+            after: None,
+            limit: 500,
+        },
+    )
+    .await
+    .expect("the store's frames")
+    .frames;
+    assert!(
+        frames.iter().all(|frame| frame.kind != "user_input"),
+        "no frame was reserved: {frames:?}"
+    );
+    assert_eq!(bind_count(&host), 0, "the host's binder was never asked");
 }

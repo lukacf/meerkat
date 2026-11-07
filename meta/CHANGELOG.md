@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `console_operator_resolver`. The operator memory of a turn comes from the
   turn's requester instead (`RecallCoordinator::operator_context_for_turn`
   and `AgentMemoryRuntimeInjector::operator_context_for_turn`).
+- Rust: `BridgeDelivery` gains the public field `request_only_context`
+  (`None` keeps the previous behaviour): the operator memory a local
+  host-human turn carries as request-only context. Every other lane refuses
+  one.
 
 - The console send routes refuse the `origin_kind` values reserved for
   Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
@@ -141,11 +145,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Operator memory reaches only the turns of the person who asked: a turn
   recalls the operator memory of its direct requester (the person whose
-  own console message started it) in a request-only section that every
-  model request of the turn sees and that never enters the agent's
-  transcript, a stored message, a session read or a retry. A turn without a
-  direct person requester recalls none, and a member's build-time memory no
-  longer carries operator memory.
+  own console message, or whose schedule, started it, on a console that
+  requires sign-in) in a request-only section that every model request of
+  the turn sees and that never enters the agent's transcript, a stored
+  message, a session read or a retry. A turn without a direct person
+  requester recalls none, nor does a turn of a member placed on another
+  host or of an externally bound member, and a member's build-time memory
+  no longer carries operator memory.
 - Reading another person's operator memory needs `operator.memory.read_any`
   (admins hold it; a rule that grants `operator.memory.*` or `*` grants it
   too). `operator.memory.read` reads the caller's own operator memory.

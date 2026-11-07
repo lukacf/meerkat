@@ -223,10 +223,15 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
             injected.contains(IDENTITY_FACT),
             "the ambient recall ran for the member's own memory: {delivery:#?}"
         );
-        assert!(
-            !format!("{delivery:?}").contains(OPERATOR_FACT),
-            "a bridged delivery carries no operator memory: {delivery:#?}"
-        );
     }
+    // Every door is judged, so a leak names each delivery that carries one.
+    let leaking = deliveries
+        .iter()
+        .filter(|delivery| format!("{delivery:?}").contains(OPERATOR_FACT))
+        .collect::<Vec<_>>();
+    assert!(
+        leaking.is_empty(),
+        "a bridged delivery carries no operator memory: {leaking:#?}"
+    );
     Ok(())
 }

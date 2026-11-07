@@ -2518,6 +2518,10 @@ struct InternalBridgeWork<'a> {
     /// The original requester of the explicit human lane's turn, carried to
     /// the member's admitted input. Absent on every other lane.
     requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The request-only context of the explicit human lane's turn (its
+    /// requester's operator memory), carried to the member's admitted input.
+    /// Absent on every other lane.
+    request_only_context: Option<&'a meerkat_core::lifecycle::TurnRequestContext>,
 }
 
 /// Which lane a submission runs in.
@@ -2669,6 +2673,11 @@ async fn submit_internal_bridge_work(
     // every other lane before this), onto the member's admitted input.
     if let Some(requester) = work.requester {
         spec = spec.with_requester(requester.clone());
+    }
+    // So does its request-only context: the member's runtime input carries
+    // it into every model request of the turn and never stores it.
+    if let Some(context) = work.request_only_context {
+        spec = spec.with_request_only_context(context.clone());
     }
     if let Some(expected_session) = work.host_human_session {
         if entry.bridge_session_id() != Some(expected_session) {
@@ -3774,6 +3783,14 @@ pub struct BridgeDelivery {
     /// the member's admitted input; every other lane refuses one typed
     /// instead of delivering the turn without it.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// Request-only context of this turn
+    /// ([`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::request_only_context`]):
+    /// the operator memory of the turn's requester. Every model request of
+    /// the turn sees it, and no transcript row, stored input or replay holds
+    /// it. Only the explicit local host-human lane carries it, to the
+    /// member's admitted input; every other lane refuses one typed instead of
+    /// delivering the turn without it.
+    pub request_only_context: Option<meerkat_core::lifecycle::TurnRequestContext>,
 }
 
 impl BridgeDelivery {
@@ -3787,6 +3804,7 @@ impl BridgeDelivery {
             delivery_identity: None,
             skill_references: Vec::new(),
             requester: None,
+            request_only_context: None,
         }
     }
 }
@@ -9617,6 +9635,12 @@ impl MobSessionBridge {
                 "a requester is carried only on the local host-human lane".to_string(),
             ));
         }
+        let request_only_context = delivery.request_only_context.as_ref();
+        if request_only_context.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "request-only context is carried only on the local host-human lane".to_string(),
+            ));
+        }
         let mid = self.member_id_for_runtime_id(runtime_id).await?;
         // One admission budget for the whole attempt, shared by every actor
         // round trip below: the serialized hops must not each cost a budget.
@@ -9667,6 +9691,7 @@ impl MobSessionBridge {
                 host_human_session,
                 skill_references,
                 requester,
+                request_only_context,
             },
             handling_mode,
             &deadline,

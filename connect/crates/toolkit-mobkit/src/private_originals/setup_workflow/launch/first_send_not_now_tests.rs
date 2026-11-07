@@ -36,6 +36,11 @@ impl Seen {
 /// Install a probe that holds the source collection at `site` on its first
 /// hit, and records every site it is asked at with the effect mark there.
 fn hold_at(site: Site) -> Arc<Seen> {
+    hold_at_for(site, HOLD)
+}
+
+/// [`hold_at`], holding the collection for `duration`.
+fn hold_at_for(site: Site, duration: Duration) -> Arc<Seen> {
     let seen = Arc::new(Seen::default());
     let recorder = seen.clone();
     crate::source_hold_probe::install(Arc::new(move |at, key| {
@@ -52,7 +57,7 @@ fn hold_at(site: Site) -> Arc<Seen> {
         ));
         (at == site && first).then_some(Hold {
             owner_change: false,
-            duration: HOLD,
+            duration,
         })
     }));
     seen
@@ -236,6 +241,92 @@ async fn a_bound_launch_sent_again_while_its_source_is_held_is_not_now_then_star
             3,
             "the launch input was admitted once"
         );
+    }))
+    .catch_unwind()
+    .await;
+    clear_probe().await;
+    let cleanup = f.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match result {
+        Ok(result) => result.expect("bounded launch control"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// How much tool time the dispatch of [`a_launch_with_little_tool_time_left_waits_only_within_it`]
+/// has left.
+const TOOL_TIME_LEFT: Duration = Duration::from_millis(300);
+
+/// A launch dispatched with little tool time left waits out its source held at
+/// the admitted-custody check only within that time. A planning original
+/// already bound, sent again while its source is held far past the dispatch's
+/// deadline, answers "not now" once and then its shipped uncertain outcome
+/// (`native_outcome_unavailable`, nothing started) within the dispatch's time,
+/// never after Core's owner-change bound.
+///
+/// RED before the fix: the launch's binder waited Core's whole bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_with_little_tool_time_left_waits_only_within_it() {
+    let f = FirstFixture::for_continuation().await;
+    let result = AssertUnwindSafe(tokio::time::timeout(GUARD, async {
+        let c = prepare(&f).await;
+        assert_eq!(
+            f.inputs().await.unwrap(),
+            2,
+            "A and independent P are admitted"
+        );
+        let first_seen = hold_at(Site::OriginalPrepare);
+        let first = launch_once(&f, &c).await;
+        clear_probe().await;
+        assert!(
+            matches!(first, WorkflowLaunchObservation::NotAdmitted),
+            "the first launch ended without admission: {}",
+            serde_json::to_string(&first).unwrap()
+        );
+        assert!(first_seen.at(Site::OriginalNotNow).is_empty());
+
+        // The source is held well past the dispatch's deadline and past
+        // Core's owner-change bound.
+        let seen = hold_at_for(
+            Site::OriginalAdmitted,
+            meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND + Duration::from_secs(1),
+        );
+        let prepared = Arc::new(PreparedWorkflowLaunch {
+            selection: c.planning.clone(),
+            reference: c.snapshot.reference().clone(),
+        });
+        let dispatch = ToolDispatchContext::default()
+            .with_work_authorization(c.a_dispatch.work_authorization().cloned());
+        let started = tokio::time::Instant::now();
+        let observed = prepared
+            .submit_with_review(
+                &f.source,
+                ReviewCustody::default(),
+                Some((&dispatch, started + TOOL_TIME_LEFT)),
+            )
+            .await
+            .unwrap();
+        let answered = started.elapsed();
+        assert!(
+            answered < TOOL_TIME_LEFT + Duration::from_millis(700),
+            "the launch answered within its dispatch's time: {answered:?}"
+        );
+        assert!(
+            matches!(
+                observed,
+                WorkflowLaunchObservation::Native {
+                    observation: PrivateOriginalSubmission::NativeOutcomeUnavailable
+                }
+            ),
+            "the shipped uncertain outcome: {}",
+            serde_json::to_string(&observed).unwrap()
+        );
+        assert_eq!(
+            seen.at(Site::OriginalNotNow),
+            vec![("source_held".to_string(), None)],
+            "the bound original's check answered not now, once"
+        );
+        assert_eq!(f.inputs().await.unwrap(), 2, "nothing started");
     }))
     .catch_unwind()
     .await;

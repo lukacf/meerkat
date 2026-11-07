@@ -1420,7 +1420,7 @@ impl PrepareHelperBinder {
         // this binder again.
         match source.owner.try_check_admitted_helper(&self.admitted) {
             Ok(true) => {}
-            Ok(false) if meerkat_core::protected_section::effect_recorded().is_none() => {
+            Ok(false) if crate::no_wait::may_answer_not_now() => {
                 return Err(helper_source_held(&source, "prepare"));
             }
             Ok(false) => return Err("Toolkit helper source is held".into()),
@@ -1555,7 +1555,7 @@ impl SubmitHelperBinder {
             crate::aa1_failure("helper.bind.source", "Unavailable");
             "Toolkit helper source is unavailable"
         };
-        if meerkat_core::protected_section::effect_recorded().is_none() {
+        if crate::no_wait::may_answer_not_now() {
             if !self
                 .source
                 .owner

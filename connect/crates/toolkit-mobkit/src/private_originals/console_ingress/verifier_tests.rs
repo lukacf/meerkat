@@ -22,6 +22,98 @@ enum Case {
     TamperedSignature,
     WrongIssuer,
     HeldRecoveryControl,
+    /// The source collection held at the shared binder's `Site` under the
+    /// Console delegate.
+    HeldSource(crate::source_hold_probe::Site),
+}
+
+/// What the held-source probe saw: each site it was asked at, its key, and
+/// the bind attempt's effect mark there.
+#[derive(Default)]
+struct SeenSites(Mutex<Vec<(crate::source_hold_probe::Site, String, Option<&'static str>)>>);
+
+impl SeenSites {
+    fn at(&self, site: crate::source_hold_probe::Site) -> Vec<(String, Option<&'static str>)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(seen, ..)| *seen == site)
+            .map(|(_, key, mark)| (key.clone(), *mark))
+            .collect()
+    }
+}
+
+/// Hold the source collection at `site` on its first hit, for 300 ms, and
+/// record every site the probe is asked at with the effect mark there.
+fn hold_source_at(site: crate::source_hold_probe::Site) -> Arc<SeenSites> {
+    let seen = Arc::new(SeenSites::default());
+    let recorder = seen.clone();
+    crate::source_hold_probe::install(Arc::new(move |at, key| {
+        let first = !recorder
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(seen, ..)| *seen == at);
+        recorder.0.lock().unwrap().push((
+            at,
+            key.to_owned(),
+            meerkat_core::protected_section::effect_recorded(),
+        ));
+        (at == site && first).then_some(crate::source_hold_probe::Hold {
+            owner_change: false,
+            duration: std::time::Duration::from_millis(300),
+        })
+    }));
+    seen
+}
+
+// One bounded HTTP/1 read of the existing router's Console timeline, as
+// `post` sends.
+async fn timeline(address: std::net::SocketAddr, bearer: &str) -> serde_json::Value {
+    tokio::time::timeout(WAIT, async {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let request = format!("GET /console/timeline HTTP/1.1\r\nHost: {address}\r\nAuthorization: {bearer}\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.len() <= 4 * 1024 * 1024, "bounded fixture response");
+        let split = bytes.windows(4).position(|part| part == b"\r\n\r\n").unwrap();
+        let headers = std::str::from_utf8(&bytes[..split]).unwrap();
+        let status: u16 = headers.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert_eq!(status, 200, "the Console timeline answers");
+        let length: usize = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
+        }).expect("normal finite Console JSON response");
+        let body = &bytes[split + 4..];
+        assert_eq!(body.len(), length);
+        serde_json::from_slice(body).unwrap()
+    }).await.expect("bounded real Console timeline read")
+}
+
+/// The send's `user_input` frame once its delivery settled.
+async fn settled_user_input(address: std::net::SocketAddr, bearer: &str) -> serde_json::Value {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let page = timeline(address, bearer).await;
+            if let Some(frame) = page["frames"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|frame| frame["kind"] == "user_input")
+                .filter(|frame| {
+                    frame["status"] == "delivered" || frame["status"] == "delivery_failed"
+                })
+            {
+                return frame.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the Console send's delivery settles")
 }
 
 struct RouteObservation {
@@ -376,6 +468,10 @@ async fn controlled_console(case: Case) {
                 _ => None,
             }));
         }
+        let held_source = match case {
+            Case::HeldSource(site) => Some(hold_source_at(site)),
+            _ => None,
+        };
         if matches!(case, Case::Retired) {
             let retired = tokio::time::timeout(WAIT, logins.fixture_retire(1).unwrap())
                 .await
@@ -385,7 +481,12 @@ async fn controlled_console(case: Case) {
         }
         // Subscribe before the HTTP send so positive completion is an actual
         // native event, not a race on the provider's first request counter.
-        let mut completion = if matches!(case, Case::Valid | Case::HeldRecoveryControl) {
+        let mut completion = if matches!(
+            case,
+            Case::Valid
+                | Case::HeldRecoveryControl
+                | Case::HeldSource(crate::source_hold_probe::Site::OriginalAdmitted)
+        ) {
             Some(
                 fixture
                     .service
@@ -424,7 +525,10 @@ async fn controlled_console(case: Case) {
             reply
         } else {
             let reply = post(address, &bearer, &member).await;
-            if matches!(case, Case::Valid | Case::HeldRecoveryControl) {
+            if matches!(
+                case,
+                Case::Valid | Case::HeldRecoveryControl | Case::HeldSource(_)
+            ) {
                 require_queued_reply(&reply, &observation);
             }
             reply
@@ -443,7 +547,10 @@ async fn controlled_console(case: Case) {
         }
         if matches!(
             case,
-            Case::Valid | Case::RetiredAfterSelection | Case::HeldRecoveryControl
+            Case::Valid
+                | Case::RetiredAfterSelection
+                | Case::HeldRecoveryControl
+                | Case::HeldSource(_)
         ) {
             let permit = tokio::time::timeout(WAIT, observation.finished.acquire())
                 .await
@@ -501,6 +608,69 @@ async fn controlled_console(case: Case) {
                 .expect("bounded Console login retirement")
                 .unwrap();
             assert!(retired.fenced && retired.reservations_drained && !retired.uncertain);
+            tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+                .await
+                .unwrap();
+        } else if let Case::HeldSource(site) = case {
+            // The Console delegate's input checks run after its source
+            // record, the bind attempt's first durable effect: the send keeps
+            // its shipped outcome there, never a "not now", and no hold.
+            let seen = held_source.as_ref().expect("the held source's probe");
+            assert!(
+                seen.at(crate::source_hold_probe::Site::OriginalNotNow)
+                    .is_empty(),
+                "the Console delegate never answered not now"
+            );
+            assert_eq!(
+                seen.at(site).first().and_then(|(_, mark)| *mark),
+                Some("console.source_record"),
+                "the check runs after the Console's source record"
+            );
+            let frame = settled_user_input(address, &bearer).await;
+            assert!(
+                frame["payload"].get("delivery_hold").is_none(),
+                "no hold is recorded: {frame}"
+            );
+            if site == crate::source_hold_probe::Site::OriginalAdmitted {
+                // Shipped: the check waits in place; delivered once.
+                assert!(
+                    observation.failure.lock().unwrap().is_none(),
+                    "the bind waited at the check: {:?}",
+                    observation.failure.lock().unwrap()
+                );
+                assert_eq!(frame["status"], "delivered", "{frame}");
+                tokio::time::timeout(WAIT, async {
+                    loop {
+                        let event = completion
+                            .as_mut()
+                            .expect("the held-source Console subscription")
+                            .next()
+                            .await
+                            .expect("native Console completion stream");
+                        match event.payload {
+                            meerkat_core::AgentEvent::RunCompleted { session_id, .. } => {
+                                assert_eq!(session_id, fixture.session);
+                                break;
+                            }
+                            meerkat_core::AgentEvent::StreamTruncated { .. } => {
+                                panic!("native Console completion observation truncated");
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("the delivered send's turn completes");
+                assert_eq!(fixture.inputs().await, Ok(1), "delivered once");
+            } else {
+                // Shipped: the check refuses; nothing is admitted.
+                assert!(
+                    observation.failure.lock().unwrap().is_some(),
+                    "the shipped refusal at the input preparation"
+                );
+                assert_eq!(frame["status"], "delivery_failed", "{frame}");
+                assert_eq!(fixture.inputs().await, Ok(0), "nothing admitted");
+            }
             tokio::task::spawn_blocking(crate::source_hold_probe::clear)
                 .await
                 .unwrap();
@@ -826,6 +996,35 @@ async fn tampered_signature_never_selects_installed_console_ingress() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_issuer_never_selects_installed_console_ingress() {
     controlled_console(Case::WrongIssuer).await;
+}
+
+/// A normal Console send whose source is held at the shared binder's input
+/// preparation, under the Console delegate, keeps its shipped refusal there
+/// (the frame `delivery_failed`, nothing admitted), never a "not now" and no
+/// hold: the Console's source record precedes the check and marks the attempt.
+///
+/// Passes before the fix; RED against a mutant whose check ignores the mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_send_held_at_its_input_preparation_keeps_its_shipped_refusal() {
+    controlled_console(Case::HeldSource(
+        crate::source_hold_probe::Site::OriginalPrepare,
+    ))
+    .await;
+}
+
+/// A normal Console send whose source is held at the shared binder's
+/// admitted-custody check, under the Console delegate, waits there as shipped
+/// and is delivered once, never a "not now" and no hold: the Console's source
+/// record precedes the check and marks the attempt.
+///
+/// Passes before the fix; RED against a mutant whose admitted-custody check
+/// ignores the mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_send_held_at_its_admitted_check_waits_as_shipped_and_is_delivered_once() {
+    controlled_console(Case::HeldSource(
+        crate::source_hold_probe::Site::OriginalAdmitted,
+    ))
+    .await;
 }
 
 // A Console send whose bind meets the custody recovery's control held by

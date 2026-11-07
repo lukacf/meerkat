@@ -1021,9 +1021,8 @@ impl OriginalBinder {
         // (P), the input preparation's retained-source check: before the
         // attempt's first durable effect a held source answers "not now";
         // past it, the shipped refusal.
-        let mut prepared = match meerkat_core::protected_section::effect_recorded() {
-            None => self
-                .source
+        let mut prepared = if crate::no_wait::may_answer_not_now() {
+            self.source
                 .owner
                 .try_prepare_authenticated_input(
                     &held.original,
@@ -1034,9 +1033,9 @@ impl OriginalBinder {
                     context.controller.clone(),
                 )
                 .map_err(input_refused)?
-                .ok_or_else(|| self.source_held())?,
-            Some(_) => self
-                .source
+                .ok_or_else(|| self.source_held())?
+        } else {
+            self.source
                 .owner
                 .prepare_authenticated_input(
                     &held.original,
@@ -1046,7 +1045,7 @@ impl OriginalBinder {
                     self.authentication.clone(),
                     context.controller.clone(),
                 )
-                .map_err(input_refused)?,
+                .map_err(input_refused)?
         };
         // Peer projections refresh only their observation time on retry.
         // Select the source's first exact bytes before observing admitted
@@ -1080,17 +1079,18 @@ impl OriginalBinder {
             crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
         }
         // (A), the admitted-custody check: as (P).
-        let admitted = match meerkat_core::protected_section::effect_recorded() {
-            None => match prepared
+        let admitted = if crate::no_wait::may_answer_not_now() {
+            match prepared
                 .try_admitted()
                 .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?
             {
                 crate::original_ingress::AdmittedNow::Held => return Err(self.source_held()),
                 crate::original_ingress::AdmittedNow::Checked(admitted) => *admitted,
-            },
-            Some(_) => prepared
+            }
+        } else {
+            prepared
                 .admitted()
-                .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?,
+                .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?
         };
         // The decision point: this binder answers no "not now" after its
         // admitted-custody check, so the writes below need no effect mark.

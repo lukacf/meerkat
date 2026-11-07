@@ -265,6 +265,13 @@ pub(crate) fn wait_at<T>(site: &'static str, wait: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Whether a binder's input check may answer "not now" here instead of
+/// waiting or answering what its door shipped: before the attempt's first
+/// durable effect.
+pub(crate) fn may_answer_not_now() -> bool {
+    meerkat_core::protected_section::effect_recorded().is_none()
+}
+
 /// Waiting calls the source guard knows inside the protected impls
 /// (`file`, `type`, `call`, `owner`): each still waits and names the change
 /// that removes it.
@@ -777,5 +784,27 @@ mod tests {
         );
         let code = "impl<T> crate::a::GovernedInputBinder for Wrapper<T> { fn enroll(&self) {} fn b() { x.enroll(); } }";
         assert_eq!(calls_in(code, &blocks[0].body, "enroll(").len(), 1);
+    }
+
+    /// A binder's input check answers "not now" only inside a governed bind
+    /// attempt, before the attempt's first durable effect. Outside every
+    /// section (a caller that did not enter one) and inside any other section
+    /// it answers what its door shipped.
+    #[tokio::test]
+    async fn only_a_governed_bind_before_its_first_effect_may_answer_not_now() {
+        use meerkat_core::protected_section::{ProtectedSection, enter, note_effect, within};
+        assert!(!super::may_answer_not_now(), "outside every section");
+        within(ProtectedSection::GovernedBind, async {
+            assert!(super::may_answer_not_now(), "in a bind, before its effect");
+            note_effect("test.effect");
+            assert!(!super::may_answer_not_now(), "in a bind, after its effect");
+        })
+        .await;
+        within(ProtectedSection::HostStoreTransaction, async {
+            assert!(!super::may_answer_not_now(), "in a host store transaction");
+        })
+        .await;
+        let _section = enter(ProtectedSection::NativeAdmissionRead);
+        assert!(!super::may_answer_not_now(), "in a native admission read");
     }
 }

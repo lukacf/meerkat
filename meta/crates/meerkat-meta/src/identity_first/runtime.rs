@@ -16687,7 +16687,7 @@ mod reset_reprofile_tests {
         assert!(
             runtime
                 .customizer_tools_pending_for(&identity)
-                .expect("the hold reads")
+                .map_err(|error| error.to_string())?
                 .is_none()
         );
 

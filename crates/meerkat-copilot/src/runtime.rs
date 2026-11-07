@@ -9287,6 +9287,101 @@ mod tests {
             assert_eq!(lease.generation, 0, "no lease was acquired");
         }
 
+        /// A model listing gets one immediate second attempt for an answer
+        /// the next try may change (a 408, 502, 503 or 504, or a network
+        /// failure or timeout), inside the listing's one HTTP bound; any
+        /// other answer (a 500, a rate limit, a refusal) is the listing's
+        /// answer at once.
+        #[tokio::test]
+        async fn a_model_listing_is_tried_once_more_for_a_transient_failure() {
+            let config = CopilotBackendConfig::default();
+            let transient: Vec<(&str, Outcome)> = vec![
+                (
+                    "408",
+                    Ok(json_response(
+                        408,
+                        serde_json::json!({"message": "timeout"}),
+                    )),
+                ),
+                (
+                    "502",
+                    Ok(json_response(
+                        502,
+                        serde_json::json!({"message": "bad gateway"}),
+                    )),
+                ),
+                (
+                    "503",
+                    Ok(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                ),
+                (
+                    "504",
+                    Ok(json_response(
+                        504,
+                        serde_json::json!({"message": "gateway timeout"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+            ];
+            for (label, first) in transient {
+                let transport = OutcomeTransport::new([first, Ok(models_response())]);
+                let snapshot = fetch_copilot_models(
+                    transport.as_ref(),
+                    &config,
+                    DEFAULT_COPILOT_API_BASE,
+                    "listing-token",
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{label}: the second attempt lists the models: {error}")
+                });
+                assert!(snapshot.model("gpt-test").is_some(), "{label}");
+                assert_eq!(transport.request_count(), 2, "{label}");
+            }
+            let answers: Vec<(&str, Outcome)> = vec![
+                (
+                    "500",
+                    Ok(json_response(
+                        500,
+                        serde_json::json!({"message": "internal"}),
+                    )),
+                ),
+                ("429", Ok(rate_limited(429, 60))),
+                (
+                    "403",
+                    Ok(json_response(
+                        403,
+                        serde_json::json!({"message": "forbidden"}),
+                    )),
+                ),
+                (
+                    "401",
+                    Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    )),
+                ),
+            ];
+            for (label, first) in answers {
+                let transport = OutcomeTransport::new([first, Ok(models_response())]);
+                assert!(
+                    fetch_copilot_models(
+                        transport.as_ref(),
+                        &config,
+                        DEFAULT_COPILOT_API_BASE,
+                        "listing-token",
+                    )
+                    .await
+                    .is_err(),
+                    "{label}: the listing's own answer"
+                );
+                assert_eq!(transport.request_count(), 1, "{label}: no second attempt");
+            }
+        }
+
         /// T8: a GitHub App installation token (server-to-server) has no
         /// user: it skips the identity lookup and lists models on the default
         /// host. A later 401 there (off the request path) has the next

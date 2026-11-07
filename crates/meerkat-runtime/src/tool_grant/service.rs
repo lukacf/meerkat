@@ -65,6 +65,11 @@ pub struct StoredToolGrant {
     /// set exactly when it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Whether the grant ended with its subject (`Revoked` with the machine's
+    /// end reason `SubjectEnded`): the identity it was issued to ended. Such a
+    /// grant explains no refusal. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subject_ended: bool,
 }
 
 impl StoredToolGrant {
@@ -93,13 +98,23 @@ impl StoredToolGrant {
     /// The generated machine, rebuilt from this row. The machine's
     /// invariants refuse a torn row.
     fn authority(&self) -> Result<ToolGrantLifecycleMachineAuthority, ToolGrantServiceError> {
-        let (lifecycle_phase, end_reason) = match self.status {
-            ToolGrantStatus::Active => (ToolGrantPhase::Active, None),
-            ToolGrantStatus::Expired => {
+        let (lifecycle_phase, end_reason) = match (self.status, self.subject_ended) {
+            (ToolGrantStatus::Active, false) => (ToolGrantPhase::Active, None),
+            (ToolGrantStatus::Expired, false) => {
                 (ToolGrantPhase::Expired, Some(ToolGrantEndReason::Deadline))
             }
-            ToolGrantStatus::Revoked => {
+            (ToolGrantStatus::Revoked, false) => {
                 (ToolGrantPhase::Revoked, Some(ToolGrantEndReason::Revoked))
+            }
+            (ToolGrantStatus::Revoked, true) => (
+                ToolGrantPhase::Revoked,
+                Some(ToolGrantEndReason::SubjectEnded),
+            ),
+            (status, true) => {
+                return Err(ToolGrantServiceError::CorruptRow {
+                    grant_id: self.record.grant_id.to_string(),
+                    detail: format!("a {status:?} grant cannot have ended with its subject"),
+                });
             }
         };
         ToolGrantLifecycleMachineAuthority::recover_from_state(ToolGrantLifecycleMachineState {
@@ -138,6 +153,7 @@ impl StoredToolGrant {
             issued_at_ms: state.issued_at_ms,
             expires_at_ms: state.expires_at_ms,
             ended_at_ms: state.ended_at_ms,
+            subject_ended: state.end_reason == Some(ToolGrantEndReason::SubjectEnded),
         })
     }
 }
@@ -353,6 +369,12 @@ fn use_verdict(
                     grant_id: row.record.grant_id.clone(),
                 }));
             }
+            // A grant that ended with its subject explains nothing: a later
+            // life of the subject needs a grant of its own.
+            ToolGrantLifecycleEffect::UseRefused {
+                reason: ToolGrantUseRefusal::SubjectEnded,
+                ..
+            } => return Ok(Err(ToolGrantRefusal::Required)),
             _ => {}
         }
     }
@@ -366,7 +388,8 @@ fn use_verdict(
 
 /// Which refusal explains a refused call when several grants cover its
 /// name: an expired grant, then a revoked one, then an unavailable read;
-/// with none of them the call needs a grant.
+/// with none of them the call needs a grant. A grant that ended with its
+/// subject explains nothing (it answers `Required`).
 fn refusal_rank(refusal: &ToolGrantRefusal) -> u8 {
     match refusal {
         ToolGrantRefusal::Expired { .. } => 3,
@@ -635,9 +658,11 @@ impl ToolGrantService {
         Ok(RevokedToolGrant { grant, changed })
     }
 
-    /// Revoke every live grant of `subject`: its owner ended the subject (a
-    /// mob member identity whose identity ended). Each grant is revoked as
-    /// [`Self::revoke`] revokes one: a grant at or after its deadline records
+    /// End every live grant of `subject` with it: its owner ended the subject
+    /// (a mob member identity whose identity ended, or a session that
+    /// identity held). Each grant ends through the machine's
+    /// `EndWithSubject`: revoked, its end reason `SubjectEnded`, so it
+    /// explains no later refusal; a grant at or after its deadline records
     /// the expiry it reached instead, and a grant that already ended is left
     /// as it stands. A row this binary cannot read admits nothing and is left
     /// as it is, logged. A store without the grant domain holds no grant, so
@@ -666,7 +691,7 @@ impl ToolGrantService {
             let effects = match self
                 .apply_and_commit(
                     read,
-                    &|| ToolGrantLifecycleInput::Revoke { now_ms },
+                    &|| ToolGrantLifecycleInput::EndWithSubject { now_ms },
                     AuditContext::Revocation(&revocation),
                 )
                 .await

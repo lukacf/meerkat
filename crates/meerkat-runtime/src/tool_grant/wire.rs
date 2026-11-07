@@ -224,6 +224,7 @@ mod tests {
             issued_at_ms: 1_000,
             expires_at_ms: 61_000,
             ended_at_ms: Some(2_000),
+            subject_ended: false,
         };
         assert_eq!(
             serde_json::to_value(wire_tool_grant(&grant)).unwrap(),

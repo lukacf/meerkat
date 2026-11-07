@@ -477,6 +477,31 @@ pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::Ses
     )
 }
 
+/// The mob's answer to a failure to end `identity`'s scoped tool grants: a
+/// concurrent writer that changed one of them twice meanwhile answers the
+/// busy class ([`MobError::LifecycleOperationPending`], `SESSION_BUSY` on
+/// the wire), so the step that ends the identity is retried; any other
+/// failure is internal.
+#[cfg(feature = "runtime-adapter")]
+pub(super) fn tool_grant_end_failure(
+    identity: &AgentIdentity,
+    error: meerkat_runtime::tool_grant::ToolGrantServiceError,
+) -> MobError {
+    match error {
+        meerkat_runtime::tool_grant::ToolGrantServiceError::Conflict { grant_id } => {
+            MobError::LifecycleOperationPending {
+                intent: format!(
+                    "end the tool grants of the identity '{identity}': another writer changed \
+                     grant {grant_id} twice meanwhile (retry)"
+                ),
+            }
+        }
+        error => MobError::Internal(format!(
+            "ending the tool grants of the identity '{identity}' failed: {error}"
+        )),
+    }
+}
+
 /// Whether a member's session is still present, live or durable, as read by
 /// a step that decides whether the member's session archive is still owed.
 ///
@@ -32108,7 +32133,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SealDeclaredRoster { desired, reply_tx } => {
-                    let result = self.seal_declared_roster(desired);
+                    let result = Box::pin(self.seal_declared_roster(desired)).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::OpenDeclaredApply { reply_tx } => {
@@ -52320,6 +52345,15 @@ impl MobActor {
             // machine no-ops and must not append another journal carrier.
             return Ok(());
         }
+        // An abandonment after the old member's archive ends the identity
+        // the respawn hold kept (MobMachine names it, `IdentityEnded`): its
+        // scoped tool grants end before the step's journal row, so a replay
+        // that finds the row finds them ended. A failure fails the step.
+        self.end_tool_grants_of_ended_identities(
+            prepared.transition.effects(),
+            "its respawn was abandoned",
+        )
+        .await?;
 
         let cursor_floor = self.events.latest_cursor().await?;
         let append = self
@@ -54243,9 +54277,11 @@ impl MobActor {
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
             // An identity's tool grants end with the identity: a retirement
-            // that ends it ends them here, before its terminal row, so a name
-            // created again later inherits none. A failure fails the step,
-            // which keeps the retirement for its retry.
+            // that ends it ends them here, before its terminal row, with the
+            // grants of the session the retirement archives, so a name
+            // created again later inherits none (a resume of that session
+            // included). A failure fails the step, which keeps the
+            // retirement for its retry.
             #[cfg(feature = "runtime-adapter")]
             {
                 if super::identity_entry::retirement_ends_identity(
@@ -54253,8 +54289,24 @@ impl MobActor {
                     &ctx.entry.agent_identity,
                     &ctx.entry.agent_runtime_id,
                 ) {
+                    let sessions = if is_peer_only {
+                        std::collections::BTreeSet::new()
+                    } else {
+                        session_id
+                            .iter()
+                            .map(|session| {
+                                SessionId::parse(&session.0).map_err(|error| {
+                                    MobError::Internal(format!(
+                                        "'{}' retires an invalid session: {error}",
+                                        ctx.entry.agent_identity
+                                    ))
+                                })
+                            })
+                            .collect::<Result<_, _>>()?
+                    };
                     self.end_identity_tool_grants(
                         &ctx.entry.agent_identity,
+                        &sessions,
                         format!("the identity '{}' left the mob", ctx.entry.agent_identity),
                     )
                     .await?;
@@ -65122,55 +65174,145 @@ impl MobActor {
     }
 
     /// End every live scoped tool grant of `identity` in this mob
-    /// incarnation, recording `reason`: its identity ended. Without a
-    /// runtime there are no grants.
+    /// incarnation, and of each of `sessions` (the sessions MobMachine held
+    /// for it when it ended), recording `reason`: its identity ended. Each
+    /// grant ends with its subject, so it explains no later refusal. Without
+    /// a runtime there are no grants.
+    ///
+    /// # Errors
+    /// A concurrent writer that changed one of the grants twice answers the
+    /// busy class ([`MobError::LifecycleOperationPending`]): the step that
+    /// ends the identity is retried. Any other failure is internal.
     #[cfg(feature = "runtime-adapter")]
     async fn end_identity_tool_grants(
         &self,
         identity: &AgentIdentity,
+        sessions: &std::collections::BTreeSet<SessionId>,
         reason: String,
     ) -> Result<(), MobError> {
         let Some(runtime) = self.runtime_adapter.as_ref() else {
             return Ok(());
         };
-        let subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+        let identity_subject = meerkat_core::tool_grant::ToolGrantSubject::member(
             self.definition.id.as_str(),
             &self.incarnation,
             identity.as_str(),
         );
-        runtime
-            .end_tool_grants_of(
-                &subject,
-                meerkat_runtime::tool_grant::ToolGrantRevocation {
-                    actor: None,
-                    reason: Some(reason),
-                },
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "ending the tool grants of the identity '{identity}' failed: {error}"
-                ))
+        let subjects = std::iter::once(identity_subject).chain(
+            sessions
+                .iter()
+                .cloned()
+                .map(meerkat_core::tool_grant::ToolGrantSubject::session),
+        );
+        for subject in subjects {
+            runtime
+                .end_tool_grants_of(
+                    &subject,
+                    meerkat_runtime::tool_grant::ToolGrantRevocation {
+                        actor: None,
+                        reason: Some(reason.clone()),
+                    },
+                )
+                .await
+                .map_err(|error| tool_grant_end_failure(identity, error))?;
+        }
+        Ok(())
+    }
+
+    /// The sessions `state` holds for `identity`: its member's session
+    /// binding and its identity entry's archived session record.
+    #[cfg(feature = "runtime-adapter")]
+    fn sessions_held_for(
+        state: &mob_dsl::MobMachineState,
+        identity: &mob_dsl::AgentIdentity,
+    ) -> Result<std::collections::BTreeSet<SessionId>, MobError> {
+        state
+            .member_session_bindings
+            .get(identity)
+            .into_iter()
+            .chain(state.identity_entry_archived_sessions.get(identity))
+            .map(|session| {
+                SessionId::parse(&session.0).map_err(|error| {
+                    MobError::Internal(format!(
+                        "'{}' holds an invalid session: {error}",
+                        identity.0
+                    ))
+                })
             })
+            .collect()
+    }
+
+    /// End the scoped tool grants of every identity a prepared MobMachine
+    /// step ends (its `IdentityEnded` effects), before the step commits:
+    /// each identity's grants and those of the sessions MobMachine holds for
+    /// it before the step (its member's session, its identity entry's
+    /// archived session record). `cause` says what ended it, for the audit.
+    /// A failure fails the step, which then commits nothing.
+    async fn end_tool_grants_of_ended_identities(
+        &self,
+        effects: &[mob_dsl::MobMachineEffect],
+        cause: &str,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let ended = {
+                let state = self.dsl_authority.state();
+                effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        mob_dsl::MobMachineEffect::IdentityEnded { agent_identity } => {
+                            Some(agent_identity)
+                        }
+                        _ => None,
+                    })
+                    .map(|agent_identity| {
+                        Ok((
+                            AgentIdentity::from(agent_identity.0.as_str()),
+                            Self::sessions_held_for(state, agent_identity)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, MobError>>()?
+            };
+            for (identity, sessions) in ended {
+                self.end_identity_tool_grants(
+                    &identity,
+                    &sessions,
+                    format!("the identity '{identity}' ended: {cause}"),
+                )
+                .await?;
+            }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = (effects, cause);
+        Ok(())
     }
 
     /// End the live scoped tool grants of every identity MobMachine holds as
     /// a reset commits: each identity an incarnation held since the last
     /// reset (its members', the retired ones included) and each identity
-    /// entry, seated or not. The reset ends them all and keeps the mob's
-    /// incarnation.
+    /// entry, seated or not, with the grants of the sessions MobMachine holds
+    /// for each (an entry's archived session record). The reset ends them all
+    /// and keeps the mob's incarnation.
     #[cfg(feature = "runtime-adapter")]
     async fn end_reset_identity_tool_grants(&self) -> Result<(), MobError> {
-        let state = self.dsl_authority.state();
-        let identities = state
-            .identity_runtime_generations
-            .keys()
-            .chain(state.identity_entry_origins.keys())
-            .map(|identity| AgentIdentity::from(identity.0.as_str()))
-            .collect::<std::collections::BTreeSet<_>>();
-        for identity in &identities {
-            self.end_identity_tool_grants(identity, "the mob was reset".to_string())
+        let identities = {
+            let state = self.dsl_authority.state();
+            state
+                .identity_runtime_generations
+                .keys()
+                .chain(state.identity_entry_origins.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|identity| {
+                    Ok((
+                        AgentIdentity::from(identity.0.as_str()),
+                        Self::sessions_held_for(state, identity)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, MobError>>()?
+        };
+        for (identity, sessions) in &identities {
+            self.end_identity_tool_grants(identity, sessions, "the mob was reset".to_string())
                 .await?;
         }
         Ok(())

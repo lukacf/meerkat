@@ -154,9 +154,9 @@ async fn an_identitys_role_gate_leaves_out_the_families_its_declaration_disables
     );
 }
 
-/// Material sealed before it recorded where its profile came from keeps
-/// part 2's rule: its role's gate joins as role entries only, never as the
-/// identity's own gate, until the material is sealed again.
+/// Material sealed before it recorded where its profile came from keeps the
+/// rule of the release that sealed it: its role's gate joins as role entries
+/// only, never as the identity's own gate.
 #[tokio::test]
 async fn material_with_no_recorded_profile_source_keeps_role_entries_only() {
     let definition = gated_definition(&["shell"]);
@@ -284,4 +284,33 @@ async fn a_placed_member_answers_the_empty_gate_whatever_its_role_gates() {
     *handle.roster.write().await =
         super::super::roster_authority::RosterAuthority::from_roster(original);
     handle.shutdown().await.expect("shutdown test mob");
+}
+
+/// A grant end that met a concurrent writer twice answers the busy class,
+/// which the step that ends the identity retries (`SESSION_BUSY` on the
+/// wire); any other failure to end the grants stays internal.
+#[test]
+fn a_grant_end_that_meets_a_concurrent_writer_is_retried() {
+    use meerkat_runtime::tool_grant::ToolGrantServiceError;
+    let identity = AgentIdentity::from("busy-identity");
+    let busy = super::super::actor::tool_grant_end_failure(
+        &identity,
+        ToolGrantServiceError::Conflict {
+            grant_id: "grant-1".to_string(),
+        },
+    );
+    assert!(
+        matches!(busy, MobError::LifecycleOperationPending { .. }),
+        "a concurrent writer answers the busy class: {busy:?}"
+    );
+    assert_eq!(
+        busy.wire_error_code(),
+        Some(meerkat_contracts::ErrorCode::SessionBusy)
+    );
+    let internal =
+        super::super::actor::tool_grant_end_failure(&identity, ToolGrantServiceError::Clock);
+    assert!(
+        matches!(internal, MobError::Internal(_)),
+        "any other failure stays internal: {internal:?}"
+    );
 }

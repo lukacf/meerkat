@@ -1045,6 +1045,54 @@ async fn an_aborted_held_add_stays_owed_within_its_process() {
     let _ = runtime.shutdown().await;
 }
 
+/// A name the host declares held is reserved while its held creation is
+/// owed: a raw spawn under it (a host's spawn without the identity entry's
+/// custody) is refused typed (`IdentityMember`), and Core holds no member of
+/// it. The reservation is Core's held creation entry, which stands from the
+/// declaration on; a host must not raw-spawn under a name it declares held.
+/// A pin of Core's entry guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raw_spawn_under_a_held_name_is_refused_while_its_held_creation_is_owed() {
+    let running = AgentIdentity::parse("held-name-running").unwrap();
+    let held = AgentIdentity::parse("held-name-reserved").unwrap();
+    let roster = vec![member(&running)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-name");
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .expect("the running member is published");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&held)).await;
+
+    let raw = runtime
+        .mob_handle()
+        .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+            "worker",
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(held.as_str()),
+        ))
+        .await;
+    assert!(
+        matches!(raw, Err(meerkat_mob::MobError::IdentityMember { .. })),
+        "a raw spawn under the held name is refused typed: {raw:?}"
+    );
+    drop(context);
+    assert!(
+        core_last_binding(&runtime, &held).await.is_none(),
+        "Core holds no member of the held name"
+    );
+    let _ = runtime.shutdown().await;
+}
+
 /// An aborted held add, and a restart whose ordinary bootstrap lists the
 /// added identity: its host no longer holds it, so the identity is seated
 /// and created as any other identity.

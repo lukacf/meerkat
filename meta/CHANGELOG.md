@@ -115,9 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   back with every request; after a 401 or a refusal of its caller it reads
   the capabilities again before it sends another request. The changes are
   the ones a candidate launch refuses, read from one list as each handler
-  parses its request, so a candidate now serves a validation whose
-  `rkat_validate` is `false` (it runs no `rkat`) whatever `rkatValidate`
-  says.
+  parses its request.
+
+### Changed
+
+- A candidate launch serves a `meta/mobpacks/validate` whose
+  `rkat_validate` is `false`, which runs no `rkat`, whatever `rkatValidate`
+  says; before, it refused it.
 
 ## [0.9.10] - 2026-11-04
 

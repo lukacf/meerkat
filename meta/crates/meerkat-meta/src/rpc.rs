@@ -8451,6 +8451,49 @@ mod tests {
         );
     }
 
+    /// A candidate launch refuses a sign-out, which would write the session
+    /// fence record the authoritative launch reads, and sends the caller to
+    /// the authoritative launch.
+    #[test]
+    fn a_candidate_launch_refusal_of_a_sign_out_names_the_authoritative_launch() {
+        let refusal = super::candidate_launch_refusal(
+            false,
+            None,
+            super::CONSOLE_SIGN_OUT_METHOD,
+            &json!({}),
+            json!(7),
+        )
+        .and_then(|refusal| refusal.error)
+        .expect("a candidate refuses a sign-out");
+        assert_eq!(
+            (
+                refusal.code,
+                refusal.data,
+                refusal
+                    .message
+                    .contains("sign out on the authoritative launch"),
+            ),
+            (
+                crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+                Some(json!({ "kind": "candidate_launch" })),
+                true,
+            ),
+            "{}",
+            refusal.message
+        );
+        assert!(
+            super::candidate_launch_refusal(
+                true,
+                None,
+                super::CONSOLE_SIGN_OUT_METHOD,
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "an authoritative launch serves it"
+        );
+    }
+
     /// A candidate launch writes no Flow Editor draft store the
     /// authoritative launch reads: a draft write to the default store, to a
     /// file in its state directory or to a path that climbs out of one is

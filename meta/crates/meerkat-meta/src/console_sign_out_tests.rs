@@ -388,3 +388,140 @@ async fn a_sign_out_ends_the_streams_of_its_login_only() {
         "the stream of the other login stays open"
     );
 }
+
+/// `n - s` for the P-256 group order `n` and an ECDSA `s` (32 bytes each,
+/// big-endian): the other valid `s` of a signature with the same `r`.
+fn p256_order_minus(s: &[u8]) -> [u8; 32] {
+    const ORDER: [u8; 32] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63,
+        0x25, 0x51,
+    ];
+    let mut out = [0_u8; 32];
+    let mut borrow = 0_u16;
+    for ((out, order), s) in out.iter_mut().zip(ORDER).zip(s).rev() {
+        let subtrahend = u16::from(*s) + borrow;
+        let minuend = u16::from(order);
+        let (value, next_borrow) = if minuend >= subtrahend {
+            (minuend - subtrahend, 0)
+        } else {
+            (minuend + 256 - subtrahend, 1)
+        };
+        *out = u8::try_from(value).expect("a byte");
+        borrow = next_borrow;
+    }
+    out
+}
+
+/// A token without `sid` is a login of its own. Once it signed out, the
+/// same token (the same header and claims, signed by the issuer) stays
+/// refused whatever valid encoding of its signature it comes with: an
+/// ES256 signature `(r, s)` also verifies as `(r, n - s)`.
+#[tokio::test]
+async fn a_signed_out_es256_token_stays_refused_with_its_other_signature() {
+    use base64::Engine as _;
+    use ring::signature::KeyPair as _;
+    let rng = ring::rand::SystemRandom::new();
+    let algorithm = &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING;
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(algorithm, &rng).expect("pkcs8");
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(algorithm, pkcs8.as_ref(), &rng)
+        .expect("key pair");
+    let public = key.public_key().as_ref().to_vec();
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let (_dir, fences) = durable_fences();
+    let mut console = state();
+    let mut jwks: Value =
+        serde_json::from_str(&console.decisions.trusted_oidc.jwks_json).expect("jwks");
+    jwks["keys"].as_array_mut().expect("keys").push(json!({
+        "kid": "es-signer",
+        "kty": "EC",
+        "crv": "P-256",
+        "alg": "ES256",
+        "x": b64.encode(&public[1..33]),
+        "y": b64.encode(&public[33..65]),
+    }));
+    console.decisions.trusted_oidc.jwks_json = jwks.to_string();
+    console.session_fences = fences;
+    let app = console_json_router_with_state(console);
+
+    let now = now_seconds();
+    let header =
+        b64.encode(json!({ "alg": "ES256", "typ": "JWT", "kid": "es-signer" }).to_string());
+    let payload = b64.encode(
+        json!({
+            "iss": "https://trusted.meta.localhost",
+            "aud": "meerkat-console",
+            "sub": "oidc-sub-7",
+            "email": BOB,
+            "provider": "google_oauth",
+            "iat": now - 60,
+            "exp": now + 3600,
+        })
+        .to_string(),
+    );
+    let signing_input = format!("{header}.{payload}");
+    let signature = key.sign(&rng, signing_input.as_bytes()).expect("sign");
+    let signature = signature.as_ref();
+    let original = format!("{signing_input}.{}", b64.encode(signature));
+    let mut other = [0_u8; 64];
+    other[..32].copy_from_slice(&signature[..32]);
+    other[32..].copy_from_slice(&p256_order_minus(&signature[32..]));
+    let other_encoding = format!("{signing_input}.{}", b64.encode(other));
+    assert_ne!(original, other_encoding, "two encodings of one token");
+
+    assert!(
+        accepted(&app, &original).await,
+        "an ES256 token is accepted"
+    );
+    assert!(
+        accepted(&app, &other_encoding).await,
+        "its other signature verifies too"
+    );
+    let (status, signed_out) = console_answer(&app, Some(&original), SIGN_OUT, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{signed_out}");
+    assert!(signed_out["error"].is_null(), "{signed_out}");
+    assert_eq!(signed_out["result"]["login"], "token", "{signed_out}");
+    assert!(
+        !accepted(&app, &original).await,
+        "the token that signed out"
+    );
+    assert!(
+        !accepted(&app, &other_encoding).await,
+        "the token that signed out, with its other valid signature"
+    );
+}
+
+/// The sign-out of a token without `sid` refuses that token for as long as
+/// the verifier would accept it, its expiry leeway included: a token that
+/// expired 10 s ago is accepted for 20 s more, and its sign-out holds
+/// through a later change of the record (each change drops the sign-outs of
+/// tokens the verifier refuses on expiry, and this one it does not refuse
+/// yet).
+#[tokio::test]
+async fn a_signed_out_token_stays_refused_through_its_expiry_leeway() {
+    let (_dir, _fences, app) = signed_in_console();
+    let now = now_seconds();
+    let mut claims = human_claims();
+    claims["iat"] = json!(now - 60);
+    let lapsing = token(claims, Some(now - 10));
+    assert!(
+        accepted(&app, &lapsing).await,
+        "accepted within the expiry leeway"
+    );
+    let (status, signed_out) = console_answer(&app, Some(&lapsing), SIGN_OUT, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{signed_out}");
+    assert!(signed_out["error"].is_null(), "{signed_out}");
+    assert_eq!(signed_out["result"]["login"], "token", "{signed_out}");
+    assert!(
+        !accepted(&app, &lapsing).await,
+        "refused right after its sign-out"
+    );
+    let other = login_token(Some("another-login"), now - 60);
+    let (_, changed) = console_answer(&app, Some(&other), SIGN_OUT, json!({})).await;
+    assert!(changed["error"].is_null(), "{changed}");
+    assert!(
+        !accepted(&app, &lapsing).await,
+        "still refused after a later change of the record, inside its leeway"
+    );
+}

@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use super::console_human_admission_tests::{BOB, state};
-use super::console_sign_out_tests::console_answer;
+use super::console_sign_out_tests::{console_answer, login_token};
 use super::console_token_lapse_tests::{durable_fences, human_claims, now_seconds, token};
 use super::*;
 
@@ -423,4 +423,145 @@ async fn flow_editor_capabilities_name_the_caller() {
     .await;
     assert_eq!(status, StatusCode::OK, "{refused}");
     assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+}
+
+/// A draft write whose caller's login signs out (not a revoke) while it
+/// waits for the draft store is refused with `caller_not_current` right
+/// before it writes: the re-check reads the login's fence, not only the
+/// principal's.
+#[tokio::test]
+async fn flow_editor_change_rechecks_caller_after_a_sign_out() {
+    let (_dir, fences) = durable_fences();
+    let app = flow_editor(fences.clone());
+    let mut console = state();
+    console.session_fences = fences.clone();
+    let console = console_json_router_with_state(console);
+    let store = tempfile::tempdir().expect("draft store directory");
+    let store_path = store.path().join("drafts.json");
+    let login = login_token(Some("flow-editor-login"), now_seconds() - 60);
+
+    let hold = DraftStoreHold::hold();
+    let pending = tokio::spawn({
+        let app = app.clone();
+        let login = login.clone();
+        let params = json!({
+            "template": "blank",
+            "name": "Written after the login signed out",
+            "store_path": store_path,
+        });
+        async move { flow_editor_rpc(&app, &login, "meta/mobpacks/create", params).await }
+    });
+    let_the_request_reach_the_draft_store().await;
+    // Another token of the same login signs it out on the console.
+    let (status, signed_out) = console_answer(
+        &console,
+        Some(&login_token(Some("flow-editor-login"), now_seconds() - 30)),
+        "meta/console/sign_out",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{signed_out}");
+    assert!(signed_out["error"].is_null(), "{signed_out}");
+    hold.release();
+    let (status, answer) = tokio::time::timeout(Duration::from_mins(1), pending)
+        .await
+        .expect("the write answers")
+        .expect("the request task");
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["error"]["code"], json!(-32056), "{answer}");
+    assert_eq!(
+        answer["error"]["data"]["kind"], "caller_not_current",
+        "{answer}"
+    );
+    assert!(!store_path.exists(), "nothing was written");
+    assert_eq!(fences.not_before(BOB), None, "a sign-out, not a revoke");
+}
+
+/// A validation through `rkat` whose caller's sessions are revoked while it
+/// reads its draft guard is refused with `caller_not_current` right before
+/// it writes its archive and runs `rkat`: nothing runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn flow_editor_rkat_validation_rechecks_caller_before_it_runs() {
+    let (_dir, fences) = durable_fences();
+    let app = flow_editor(fences.clone());
+    let work = tempfile::tempdir().expect("work directory");
+    let store_path = work.path().join("drafts.json");
+    let validate_dir = work.path().join("validate");
+    let marker = work.path().join("rkat.runs");
+    let rkat = recording_rkat(work.path(), &marker);
+    let bob = bob_token();
+
+    let document = sample_document(&app, &bob).await;
+    let (_, saved) = flow_editor_rpc(
+        &app,
+        &bob,
+        "meta/mobpacks/save",
+        json!({ "id": "validate-check", "document": document, "store_path": store_path }),
+    )
+    .await;
+    assert!(saved["error"].is_null(), "{saved}");
+    let revision = saved["result"]["row"]["revision"].clone();
+
+    let hold = DraftStoreHold::hold();
+    let pending = tokio::spawn({
+        let app = app.clone();
+        let bob = bob.clone();
+        let params = json!({
+            "id": "validate-check",
+            "document": document,
+            "expected_revision": revision,
+            "store_path": store_path,
+            "rkat_validate": true,
+            "rkat_bin": rkat,
+            "validation_output_dir": validate_dir,
+        });
+        async move { flow_editor_rpc(&app, &bob, "meta/mobpacks/validate", params).await }
+    });
+    let_the_request_reach_the_draft_store().await;
+    fences
+        .revoke_sessions(BOB, std::time::SystemTime::now())
+        .expect("revoke");
+    hold.release();
+    let (status, answer) = tokio::time::timeout(Duration::from_mins(1), pending)
+        .await
+        .expect("the validation answers")
+        .expect("the request task");
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["error"]["code"], json!(-32056), "{answer}");
+    assert_eq!(
+        answer["error"]["data"]["kind"], "caller_not_current",
+        "{answer}"
+    );
+    assert!(!marker.exists(), "rkat never ran");
+    assert!(!validate_dir.exists(), "no archive was written");
+}
+
+/// The control of the row above: for a caller still current, the same
+/// validation through `rkat` runs it.
+#[cfg(unix)]
+#[tokio::test]
+async fn flow_editor_rkat_validation_runs_for_a_current_caller() {
+    let (_dir, fences) = durable_fences();
+    let app = flow_editor(fences);
+    let work = tempfile::tempdir().expect("work directory");
+    let validate_dir = work.path().join("validate");
+    let marker = work.path().join("rkat.runs");
+    let rkat = recording_rkat(work.path(), &marker);
+    let bob = bob_token();
+    let document = sample_document(&app, &bob).await;
+    let (status, answer) = flow_editor_rpc(
+        &app,
+        &bob,
+        "meta/mobpacks/validate",
+        json!({
+            "document": document,
+            "rkat_validate": true,
+            "rkat_bin": rkat,
+            "validation_output_dir": validate_dir,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(marker.exists(), "rkat ran: {answer}");
 }

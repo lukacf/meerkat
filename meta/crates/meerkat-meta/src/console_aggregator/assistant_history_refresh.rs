@@ -77,7 +77,9 @@ pub(super) enum AssistantHistoryRefreshGate {
     /// deadline elapsed or it failed) or carried no run state, or the run
     /// state itself is unknown. Treated like `Pending`, but an idle member
     /// emits no event of its own that would re-drive it, so the backfill arms
-    /// a re-drive on the next typed change.
+    /// a re-drive on the next typed change. The member's status is then not
+    /// read for 1 s, doubled for each further such read in a row up to 30 s:
+    /// a pass in that time reads `StatusUnknown` without asking.
     StatusUnknown,
     /// The member is idle on this session but its durable work has not
     /// landed: inputs are still queued, staged or awaiting their boundary
@@ -226,7 +228,12 @@ async fn read_member_status(
             return MemberStatusRead::NotMaterialized;
         }
         #[cfg(test)]
-        core_status_reads::record(session_id);
+        {
+            core_status_reads::record(session_id);
+            if let Some(read) = core_status_reads::scripted(session_id) {
+                return read;
+            }
+        }
         // The binding only routes the observation. Fresh typed status
         // must still prove that this exact session is idle.
         let Ok(status) = crate::member_status_observation::observe_member_status_until(
@@ -256,20 +263,33 @@ async fn read_member_status(
 }
 
 /// The Core member-status reads the refresh gate made, by session: what a
-/// row counts when it requires that a member's status is not read.
+/// row counts when it requires that a member's status is not read, and when
+/// each read was made.
 #[cfg(test)]
 pub(crate) mod core_status_reads {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex, PoisonError};
 
-    static READS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+    use super::{MemberRunState, MemberStatusRead};
+
+    /// What a session's later status reads answer instead of reading Core.
+    #[derive(Clone, Copy)]
+    enum Scripted {
+        Unanswered,
+        RunOpen,
+    }
+
+    static READS: LazyLock<Mutex<HashMap<String, Vec<tokio::time::Instant>>>> =
+        LazyLock::new(Default::default);
+    static SCRIPTED: LazyLock<Mutex<HashMap<String, Scripted>>> = LazyLock::new(Default::default);
 
     pub(super) fn record(session_id: &str) {
-        *READS
+        READS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .entry(session_id.to_string())
-            .or_default() += 1;
+            .or_default()
+            .push(tokio::time::Instant::now());
     }
 
     /// The reads of `session_id` so far.
@@ -278,8 +298,53 @@ pub(crate) mod core_status_reads {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(session_id)
-            .copied()
+            .map_or(0, Vec::len)
+    }
+
+    /// When each read of `session_id` so far was made, oldest first.
+    pub(crate) fn instants(session_id: &str) -> Vec<tokio::time::Instant> {
+        READS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
             .unwrap_or_default()
+    }
+
+    /// Answer every later status read of `session_id` with nothing, as when
+    /// the bounded read runs out of time: the refresh gate reads
+    /// `StatusUnknown`. The read still counts.
+    pub(crate) fn leave_unanswered(session_id: &str) {
+        script(session_id, Scripted::Unanswered);
+    }
+
+    /// Answer every later status read of `session_id` with a run open on
+    /// that session, as for a member whose runtime still reports a run its
+    /// gone session actor never ended: the refresh gate reads `Running`. The
+    /// read still counts.
+    pub(crate) fn answer_run_open(session_id: &str) {
+        script(session_id, Scripted::RunOpen);
+    }
+
+    fn script(session_id: &str, scripted: Scripted) {
+        SCRIPTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session_id.to_string(), scripted);
+    }
+
+    /// The answer scripted for a read of `session_id`, if any.
+    pub(super) fn scripted(session_id: &str) -> Option<MemberStatusRead> {
+        let scripted = *SCRIPTED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(session_id)?;
+        Some(match scripted {
+            Scripted::Unanswered => MemberStatusRead::NoAnswer,
+            Scripted::RunOpen => {
+                MemberStatusRead::Observed(session_id.to_string(), MemberRunState::RunOpen)
+            }
+        })
     }
 }
 

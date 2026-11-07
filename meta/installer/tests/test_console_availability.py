@@ -22,7 +22,7 @@ async def test_availability_is_stateless_even_with_expired_browser_state(tmp_pat
     # Probe traffic must not become login traffic or drive session retirement.
     front.sessions["expired"] = 0
     front.login_tokens["expired"] = 0
-    front.failures.append(0)
+    front.failures[("client", "192.0.2.1")] = [0]
     monkeypatch.setattr(front, "_live_login", forbidden)
     monkeypatch.setattr(front, "_retire_login", forbidden)
     monkeypatch.setattr(front, "_login_response", forbidden)
@@ -38,7 +38,7 @@ async def test_availability_is_stateless_even_with_expired_browser_state(tmp_pat
                 assert "set-cookie" not in response.headers
             assert front.sessions == {"expired": 0}
             assert front.login_tokens == {"expired": 0}
-            assert front.failures == [0] and not front._logins
+            assert front.failures == {("client", "192.0.2.1"): [0]} and not front._logins
     finally:
         front.sessions.clear()
         await front.close()

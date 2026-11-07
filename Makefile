@@ -89,8 +89,8 @@ CONFINEMENT_MCP_POSITIVE := test(/^connection::process_confinement_tests::suppor
 CONFINEMENT_MCP_POSITIVE_COUNT := 9
 CONFINEMENT_HOOK_POSITIVE := test(=process_custody::tests::required_command_hook_enters_only_with_its_durable_custody_record) | test(=required_command_hook_enters_with_exact_argv_cwd_environment_and_custody)
 CONFINEMENT_HOOK_POSITIVE_COUNT := 2
-CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
-CONFINEMENT_SANDBOX_POSITIVE_COUNT := 21
+CONFINEMENT_SANDBOX_POSITIVE := test(=allowed_command_runs_but_outside_read_write_and_symlink_escape_fail) | test(=baseline_supports_declared_shell_commands_and_spawn_preserves_pid) | test(=child_has_only_explicit_environment) | test(=denial_does_not_prevent_a_later_permitted_launch) | test(=deny_ip_blocks_tcp_udp_and_proxy_environment_cannot_bypass_it) | test(=independent_agent_roots_remain_separate_in_simultaneous_launches) | test(=inherited_connected_socket_cannot_bypass_network_denial) | test(=inherited_descriptor_cannot_bypass_filesystem_denial) | test(=linux_denies_host_signal_and_resource_mutation_equivalents) | test(=linux_denies_unix_connect_independently_of_ip_permission) | test(=linux_initial_backend_compiles_a_supported_profile) | test(=linux_late_setup_failure_never_executes_and_reaps_the_failed_child) | test(=linux_refuses_directory_and_non_stream_stdio_before_target_entry) | test(=linux_resolves_a_host_name_through_a_symlinked_resolv_conf) | test(=linux_strict_paths_cover_metadata_and_namespace_escape) | test(=linux_unix_pair_cannot_bypass_unix_denial_when_ip_is_permitted) | test(=sparse_high_descriptor_is_closed_without_changing_parent_limits) | test(=cancelled_native_wait_retains_child_for_kill_and_cached_reaping) | test(=confined_custody_gate_eof_or_wrong_release_never_runs_target) | test(=confined_custody_gate_waits_for_release_and_preserves_pid) | test(=dropping_live_native_child_kills_and_reaps_the_exact_pid) | test(=one_compiled_profile_binds_distinct_launches_with_exact_capability_report)
+CONFINEMENT_SANDBOX_POSITIVE_COUNT := 22
 CONFINEMENT_SHELL_POSITIVE := test(/^builtin::shell::confinement_tests::platform::/)
 CONFINEMENT_SHELL_POSITIVE_COUNT := 4
 
@@ -552,10 +552,15 @@ machine-codegen: xtask-build
 # documented over-budget composition skips (meerkat_mob_seam,
 # adaptive_mob_bundle full ci.cfg sweeps) plus the bounded adaptive witness
 # proof; a bare `machine-verify --all` runs the full mob-seam sweep, which
-# does not fit any local or CI budget.
+# does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
+# the lane: machine-verify (the bounded adaptive witness, then
+# `machine-verify --all` with those skips) or one audit shard
+# (audits-a..audits-o, audits-q..audits-y); without it every part runs.
+# Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
+# audit shards on every machine-authority change.
 machine-verify: xtask-build
 	@echo "$(GREEN)Running machine-verify (canonical TLC lane)...$(NC)"
-	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
+	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN) $(if $(MACHINE_VERIFY_PART),--part $(MACHINE_VERIFY_PART))
 
 # Deep-profile TLC (deep.cfg, -coverage 1, every witness with its completion
 # proof, and the zero-hit route/scheduler audit) over the compositions whose

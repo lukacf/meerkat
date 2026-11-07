@@ -303,7 +303,8 @@ mod update {
     };
     use meerkat_core::storage_layout::ResolvedStorage;
     use meerkat_core::{
-        AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration, McpServerConfig,
+        AdministeredChange, AdministrationEntry, AdministrationEntryRefusal, AdministrationOutcome,
+        EnteredAdministration, McpServerConfig,
     };
 
     /// Which value [`remove_mcp_service_secret`] removes.
@@ -526,13 +527,17 @@ mod update {
                 ))
             })?;
         admits(installed.as_ref()).map_err(NotWritten::Refused)?;
-        let admission = entry.enter().map_err(|refusal| {
-            NotWritten::Refused(McpServiceSecretUpdateError::NotAdmitted(refusal))
-        })?;
+        let change = administered_change(reference, &write);
+        let admission = entry
+            .enter()
+            .map_err(|refusal| {
+                NotWritten::Refused(McpServiceSecretUpdateError::NotAdmitted(refusal))
+            })?
+            .for_change(change);
         *entered
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(admission);
-        match write {
+        let written = match write {
             Write::Set(value) => save_mcp_service_secret(token_store, reference, value.expose())
                 .await
                 .map(CredentialMutationOutcome::Persisted),
@@ -540,7 +545,46 @@ mod update {
                 .await
                 .map(|()| CredentialMutationOutcome::Cleared),
         }
-        .map_err(NotWritten::Store)
+        .map_err(NotWritten::Store);
+        // The write's durable result is known: the admission's record says
+        // how it ended, whoever releases the admission last.
+        if let Some(admission) = entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            admission.settle(if written.is_ok() {
+                AdministrationOutcome::Committed
+            } else {
+                AdministrationOutcome::Unknown
+            });
+        }
+        written
+    }
+
+    /// What an update of `reference` changes, as its admission's record
+    /// names it: the exact slot, never the value.
+    fn administered_change(reference: &McpServiceSecretRef, write: &Write) -> AdministeredChange {
+        let (realm, server, env, meaning) = (
+            reference.realm().clone(),
+            reference.server().to_owned(),
+            reference.env().to_owned(),
+            reference.meaning().to_owned(),
+        );
+        match write {
+            Write::Set(_) => AdministeredChange::McpServiceSecretSet {
+                realm,
+                server,
+                env,
+                meaning,
+            },
+            Write::Clear => AdministeredChange::McpServiceSecretRemove {
+                realm,
+                server,
+                env,
+                meaning,
+            },
+        }
     }
 
     /// Store `value` for slot `env` of `reviewed`, the MCP server
@@ -583,7 +627,11 @@ mod update {
     /// ([`McpServiceSecretUpdateError::NotAdmitted`]). The entered admission
     /// is held until the mutation owner has received the write's durable
     /// result and this update has settled; an entered write that fails is
-    /// [`McpServiceSecretUpdateError::OutcomeUnknown`], never a success.
+    /// [`McpServiceSecretUpdateError::OutcomeUnknown`], never a success. An
+    /// admission that states its administrator
+    /// ([`EnteredAdministration::administered_by`]) hands the host's
+    /// recorder one record when the update settles, even after the caller
+    /// stopped waiting: the exact slot set, committed or unknown.
     pub async fn set_mcp_service_secret_entered(
         storage: &ResolvedStorage,
         persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
@@ -649,7 +697,8 @@ mod update {
     /// re-checks it at the removal's entry, exactly as
     /// [`set_mcp_service_secret_entered`] does: after both custodies are held
     /// and the installation checked, immediately before the value is
-    /// removed, with the entered admission held until the removal settles.
+    /// removed, with the entered admission held until the removal settles
+    /// and, when it states its administrator, recorded then.
     pub async fn remove_mcp_service_secret_entered(
         storage: &ResolvedStorage,
         persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,

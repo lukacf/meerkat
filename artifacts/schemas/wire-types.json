@@ -8435,13 +8435,21 @@
         ]
       },
       "ApprovalConsentApprover": {
-        "description": "The authenticated approver recorded on a consent decision.",
+        "description": "The authenticated approver recorded on a consent decision: the one record\nof who decided. The decision's `actor` is only its principal's id.",
         "properties": {
           "assurance": {
             "$ref": "#/$defs/ApprovalAssurance"
           },
+          "authentication_scope_digest": {
+            "description": "The digest of the host authentication scope (the login or session)\nthe decision event was authenticated in, when the host named one\n([`consent::HostAuthenticationScope::digest`]): `sha256:` and 64\nlowercase hex digits. Never the scope itself. Absent on a row decided\nbefore the digest was recorded; a Core that predates it ignores the\nfield and drops it when it rewrites the row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
-            "$ref": "#/$defs/PrincipalRef"
+            "$ref": "#/$defs/PrincipalRef",
+            "description": "The decider's qualified principal: its kind, trust domain and id."
           }
         },
         "required": [
@@ -9259,13 +9267,21 @@
         ]
       },
       "ApprovalConsentApprover": {
-        "description": "The authenticated approver recorded on a consent decision.",
+        "description": "The authenticated approver recorded on a consent decision: the one record\nof who decided. The decision's `actor` is only its principal's id.",
         "properties": {
           "assurance": {
             "$ref": "#/$defs/ApprovalAssurance"
           },
+          "authentication_scope_digest": {
+            "description": "The digest of the host authentication scope (the login or session)\nthe decision event was authenticated in, when the host named one\n([`consent::HostAuthenticationScope::digest`]): `sha256:` and 64\nlowercase hex digits. Never the scope itself. Absent on a row decided\nbefore the digest was recorded; a Core that predates it ignores the\nfield and drops it when it rewrites the row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
-            "$ref": "#/$defs/PrincipalRef"
+            "$ref": "#/$defs/PrincipalRef",
+            "description": "The decider's qualified principal: its kind, trust domain and id."
           }
         },
         "required": [
@@ -135517,6 +135533,11 @@
             "const": "not_observed_while_retiring",
             "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
             "type": "string"
+          },
+          {
+            "const": "store_refused",
+            "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
+            "type": "string"
           }
         ]
       },
@@ -192270,6 +192291,11 @@
       {
         "const": "not_observed_while_retiring",
         "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
+        "type": "string"
+      },
+      {
+        "const": "store_refused",
+        "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
         "type": "string"
       }
     ],

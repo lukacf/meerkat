@@ -225,6 +225,79 @@ test("console contract documents the side chat refusals", () => {
   }
 });
 
+test("console contract decides approvals as the signed-in person only", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as {
+    surfaces: {
+      rpc: {
+        methods: Record<string, {
+          policy_error_refs?: string[];
+          request?: { optional_fields?: string[]; refused_fields?: string[] };
+          success?: { required_fields?: string[]; actor_kind_values?: string[] };
+          errors?: ContractError[];
+        }>;
+        policy_errors: Record<string, { code?: number; data?: { kind?: string } }>;
+      };
+    };
+  };
+  const decide = schema.surfaces.rpc.methods[CONSOLE_RPC_METHODS.gatingDecide];
+  assert.deepEqual(decide?.request?.refused_fields, ["approver_id"]);
+  assert.equal(decide?.request?.optional_fields?.includes("approver_id"), false);
+  assert.equal(
+    decide?.policy_error_refs?.includes("#/surfaces/rpc/policy_errors/approver_unauthenticated"),
+    true,
+  );
+  assert.equal(
+    (decide?.errors || []).some((entry) => entry.codes?.includes(-32057)),
+    true,
+    "expected meta/gating/decide to document -32057",
+  );
+  const refusal = schema.surfaces.rpc.policy_errors.approver_unauthenticated;
+  assert.equal(refusal?.code, -32057);
+  assert.equal(refusal?.data?.kind, "approver_unauthenticated");
+  const whoami = schema.surfaces.rpc.methods[CONSOLE_RPC_METHODS.whoami];
+  assert.equal(whoami?.success?.required_fields?.includes("actor"), true);
+  assert.equal(whoami?.success?.actor_kind_values?.includes("person"), true);
+});
+
+test("console contract documents the person-only quarantine review, goal confirmation and claim refusals", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as {
+    surfaces: {
+      rpc: {
+        methods: Record<string, { policy_error_refs?: string[]; errors?: Array<{ codes?: number[] }> }>;
+        policy_errors: Record<string, { code?: number; data?: { kind?: string } }>;
+      };
+    };
+  };
+  const method = (name: string) => schema.surfaces.rpc.methods[name];
+  for (const [name, refusal] of [
+    ["meta/memory/quarantine/decide", "approver_unauthenticated"],
+    ["meta/workgraph/goal/confirm", "approver_unauthenticated"],
+    ["meta/workgraph/claim", "person_authentication_required"],
+    ["meta/workgraph/release", "person_authentication_required"],
+  ]) {
+    assert.equal(method(name)?.policy_error_refs?.includes(`#/surfaces/rpc/policy_errors/${refusal}`), true, name);
+    assert.equal((method(name)?.errors || []).some((entry) => entry.codes?.includes(-32057)), true, name);
+  }
+  const refusal = schema.surfaces.rpc.policy_errors.person_authentication_required;
+  assert.equal(refusal?.code, -32057);
+  assert.equal(refusal?.data?.kind, "person_authentication_required");
+});
+
+test("console contract documents a login that ended before a decision was taken up as -32056", () => {
+  const schema = JSON.parse(
+    readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
+  ) as { surfaces: { rpc: { methods: Record<string, { errors?: Array<{ codes?: number[] }> }> } } };
+  for (const name of ["meta/gating/decide", "meta/memory/quarantine/decide", "meta/workgraph/goal/confirm"]) {
+    const codes = (schema.surfaces.rpc.methods[name]?.errors || []).flatMap((entry) => entry.codes || []);
+    assert.equal(codes.includes(-32057), true, name);
+    assert.equal(codes.includes(-32056), true, name);
+  }
+});
+
 test("console contract route and method names stay synchronized with Rust http console source", () => {
   const schema = JSON.parse(
     readFileSync(resolve(process.cwd(), "../docs/rct/console-rest-sse-contract-v0.5.0.json"), "utf8"),
@@ -273,6 +346,16 @@ test("console contract route and method names stay synchronized with Rust http c
     for (const method of parseConsoleDecisionMethods(decisionWireSource, decisionConsoleSource)) {
       dispatchedRpcMethods.add(method);
     }
+  }
+  // Console-only methods dispatch through named constants of rpc.rs
+  // (`request_method == crate::rpc::CONSOLE_WHOAMI_METHOD`); resolve the ones
+  // the HTTP dispatcher compares the request method with.
+  const rpcSource = readFileSync(
+    resolve(process.cwd(), "../crates/meerkat-meta/src/rpc.rs"),
+    "utf8",
+  );
+  for (const method of parseDispatchedConsoleConstants(rustSource, rpcSource)) {
+    dispatchedRpcMethods.add(method);
   }
   const contractedRoutes = contractRoutes(schema);
   const frontendRoutes = new Set([
@@ -403,6 +486,17 @@ function parseConsoleDecisionMethods(wireSource: string, consoleSource: string):
     for (const name of arm[1]!.matchAll(/[A-Z_]+_METHOD/g)) {
       const value = values.get(name[0]);
       if (value) methods.add(value);
+    }
+  }
+  return methods;
+}
+
+function parseDispatchedConsoleConstants(dispatcher: string, rpcSource: string): Set<string> {
+  const methods = new Set<string>();
+  const constantPattern = /pub const (CONSOLE_[A-Z_]+_METHOD): &str = "([^"]+)"/g;
+  for (const match of rpcSource.matchAll(constantPattern)) {
+    if (dispatcher.includes(`request_method == crate::rpc::${match[1]!}`)) {
+      methods.add(match[2]!);
     }
   }
   return methods;

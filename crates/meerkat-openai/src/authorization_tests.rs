@@ -47,8 +47,8 @@ use crate::{OpenAiBackendKind, OpenAiProviderRuntime};
 const MODEL: &str = "gpt-5.4";
 const REMOTE_MODEL: &str = "fixture-remote-model";
 const RESPONSES_SSE: &str = concat!(
-    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
-    "data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n",
+    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+    "data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
     "data: [DONE]\n\n",
 );
 const CHAT_SSE: &str = concat!(

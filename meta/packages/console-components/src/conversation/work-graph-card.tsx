@@ -35,8 +35,8 @@ const ITEM_STATUS_LABEL: Record<string, string> = {
 // classes: goal actions (confirm / request-close) CAS against the goal WORK
 // ITEM's revision; attention actions (pause / resume / reassign) CAS against
 // the binding's machine revision. An absent revision means the card never
-// observed one — the handler must resolve the live revision before sending
-// (never substitute 0).
+// observed one: the handler sends nothing then and reads the card again,
+// never a revision read at the click (and never 0).
 export interface WorkGraphCardActions {
   onClaim?: (input: { itemId: string; revision?: number }) => void;
   onClose?: (input: { itemId: string; revision?: number }) => void;

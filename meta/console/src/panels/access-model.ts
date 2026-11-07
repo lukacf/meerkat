@@ -17,7 +17,7 @@ export interface AccessFamily {
  * family names lands in "Other". */
 export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
-  { id: "message", label: "Message", actions: ["agent.send"] },
+  { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
   {
     id: "approvals",

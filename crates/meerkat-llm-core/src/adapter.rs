@@ -688,9 +688,12 @@ impl AgentLlmClient for LlmClientAdapter {
         provider_params: Option<&ProviderParamsOverride>,
         authorization: Option<meerkat_core::LlmRequestAuthorization>,
     ) -> Result<LlmStreamResult, AgentError> {
+        // A request-local call commits no transcript message: it is the
+        // agent's own work whatever its last input is.
         let request = self
             .build_request(messages, tools, max_tokens, temperature, provider_params)?
-            .with_authorization(authorization);
+            .with_authorization(authorization)
+            .agent_initiated();
         self.stream_prepared_response(&request, messages, None)
             .await
     }

@@ -294,8 +294,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # firing run, so the fake prints one trace state.
 # live_context_causal_tail_batch_audit.sh requires its four goals violated,
 # and with --mutants each seeded defect's property violated.
-# run_start_hold_audit.sh requires each of its eight reachability witnesses
-# (seven in its main run, one in its reasons run) to be reported violated.
+# run_start_hold_audit.sh requires each of its nine reachability witnesses
+# (seven in its main run, two in its reasons run) to be reported violated.
+# retained_run_settle_audit.sh requires its eleven witnesses violated, and
+# with --mutants each seeded defect's action property violated.
 # requeue_across_stop_audit.sh requires each of its fifteen reachability
 # witnesses to be reported violated.
 # materialization_rollback_keep_audit.sh requires each of its eleven
@@ -432,6 +434,23 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
   'echo "Error: Invariant NotAuditWitnessHostPreparationHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessHostRecoveryHeld is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAcceptedUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSettledUnderHostHold is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRepeatAccepted is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWithRunCurrent is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyStaleObservation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyWhileDraining is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetryNotRetained is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingInitializing is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingRetired is violated."' \
+  'echo "Error: Invariant NotAuditWitnessBusyNotServingStopped is violated."' \
+  'echo "Error: Invariant NotAuditWitnessInertDestroyed is violated."' \
+  'echo "Error: Action property AuditAcceptedSettlesTheRetainedRun is violated."' \
+  'echo "Error: Action property AuditSettleNotAcceptedWhileDraining is violated."' \
+  'echo "Error: Action property AuditRefusedSettleRecordsNothing is violated."' \
+  'echo "Error: Action property AuditSettledRunNeverResumes is violated."' \
+  'echo "Error: Action property AuditSettledRunEndsCancelled is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterGracefulStop is violated."' \
   'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterCrash is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredSettled is violated."' \

@@ -1,5 +1,6 @@
 import React from "react";
-import { ApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock } from "../../../packages/console-components/src/conversation/approval-card";
+import { ApprovalCard, DepartedApprovalCard, HostAttentionCard, deadlineWords, useApprovalClock, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
+import { approvalAudience } from "../../../packages/console-core/src/pending-approvals";
 import type { GatingAuditEntryView } from "../../../packages/console-core/src/control-plane";
 import { hostDecideLinks, type HostAttentionSnapshot, type HostAttentionSourceConfig } from "../../../packages/console-core/src/host-attention";
 import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
@@ -446,6 +447,7 @@ export function GatingInboxPanel({
   signedIn = false,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
+  const viewer = useApprovalViewer();
   const tabIds = React.useId();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
@@ -538,6 +540,9 @@ export function GatingInboxPanel({
     // Soonest deadline first; a request decided here stays in place until
     // the owner drops it.
     const cards = byDeadline(resource.requests);
+    // Requests decided elsewhere that waited for this viewer (all of them
+    // while the viewer is unknown) stay, saying who decided them.
+    const departed = (resource.departed ?? []).filter((item) => !viewer || approvalAudience(item.request, viewer).kind === "you");
     content = (
       <>
         {state && resource.requests.length === 0 ? (
@@ -570,11 +575,17 @@ export function GatingInboxPanel({
                   resourceStatus={resource.status}
                   decision={resource.decisions[request.pendingId]}
                   readOnly={readOnly || resource.readOnly}
+                  readOnlyReason={readOnly ? undefined : resource.readOnlyReason}
                   decideLinks={readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : undefined}
                   onDecide={onDecide}
                 />
               </div>
             ))}
+          </div>
+        ) : null}
+        {departed.length ? (
+          <div className="gating-inbox__cards gating-inbox__departed" data-testid="gating-departed-list">
+            {departed.map((item) => <DepartedApprovalCard key={item.request.pendingId} departed={item} />)}
           </div>
         ) : null}
         {hostList}

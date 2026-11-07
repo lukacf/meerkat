@@ -6,6 +6,7 @@
 const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "agent.view": "View agents",
   "agent.send": "Message agents",
+  "schedule.manage": "Change agents' schedules",
   "agent.memory.read": "Read agent memory",
   "agent.memory.write": "Write agent memory",
   "agent.memory.delete": "Delete agent memory",
@@ -52,6 +53,7 @@ const FAMILY_WORDS: Readonly<Record<string, string>> = {
   "mob.memory": "team memory",
   memory: "memory",
   "memory.quarantine": "quarantine",
+  schedule: "schedule",
   gating: "approval",
   decisions: "durable decision",
   workgraph: "work item",

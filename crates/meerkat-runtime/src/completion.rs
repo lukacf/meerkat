@@ -85,7 +85,9 @@ pub enum CompletionWaitError {
     ///   and the stop's unregister kept it durably queued for the next start
     ///   ([`UnregisterQueuedInputs::Requeue`](crate::UnregisterQueuedInputs::Requeue)).
     ///   The next start runs it, or ends it as abandoned with reason
-    ///   `requeue_expired` when it is older than the stop's max age by then.
+    ///   `requeue_expired` when more than the stop's max age has passed since
+    ///   the stop by then (the age counts from the stop, not from the input's
+    ///   admission).
     /// - A store fence gap: the session store's writer stayed stopped through
     ///   a dispatch wait or a round commit of the run the input is bound to,
     ///   or a stop reached the run at the stopped writer's fence, and the run

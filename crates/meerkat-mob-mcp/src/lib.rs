@@ -18,6 +18,8 @@ pub(crate) mod detached_completion_sink;
 pub(crate) mod detached_completion_sink;
 pub mod detached_delivery;
 pub mod fork_relink;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_entry_doors_tests;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
@@ -78,6 +80,16 @@ pub const MEMBER_SEND_CONTINUATION_NAMESPACE: &str = "meerkat.member_send";
 /// The prefix a caller's member-send key carries in the continuation key
 /// ledger, so it never meets another producer's key for the same member.
 pub const MEMBER_SEND_CONTINUATION_KEY_PREFIX: &str = "member_send:";
+
+/// Which door a keyed member send came through: the external door
+/// ([`MobMcpState::mob_member_send_keyed`]) or the member's host's own
+/// ([`MobMcpState::mob_member_send_keyed_as_host`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyedMemberSendDoor {
+    External,
+    Host,
+}
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
@@ -6858,14 +6870,19 @@ impl MobMcpState {
     }
 
     /// Resolve the member runtime mode and private bridge session for
-    /// `mob/turn_start` only after SendCommand admission.
+    /// `mob/turn_start` only after its host door's admission: a turn start
+    /// acts on the member's session as its host, so the console principal
+    /// needs SendCommand, and AdminHost too when the member is an identity
+    /// entry or its name is reserved unreadable
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_turn_start_target(
         &self,
         mob_id: &MobId,
         identity: &AgentIdentity,
     ) -> Result<(Option<MobRuntimeMode>, Option<SessionId>), MobError> {
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, identity)
             .await?;
         let runtime_mode = handle
             .list_members()
@@ -6877,6 +6894,11 @@ impl MobMcpState {
         Ok((runtime_mode, bridge_session_id))
     }
 
+    /// Append a system context to the member's session. The append acts on
+    /// the member's session as its host: the console principal needs
+    /// SendCommand, and AdminHost too when the member is an identity entry
+    /// or its name is reserved unreadable
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_append_system_context(
         &self,
         mob_id: &MobId,
@@ -6886,8 +6908,9 @@ impl MobMcpState {
         // Session-control mechanics sit below a mob operator verb.  Enter the
         // serialized mob gate before resolving the member's private session
         // identity or touching its transcript.
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, identity)
             .await?;
         let bridge_session_id = handle
             .resolve_bridge_session_id(identity)
@@ -6958,8 +6981,23 @@ impl MobMcpState {
             .await
     }
 
-    /// Deliver `content` to a member under a caller idempotency key: the one
-    /// keyed member-send door for RPC, the public MCP tool and Meta.
+    /// Deliver `content` to a member under a caller idempotency key: the
+    /// keyed member-send door for RPC (`mob/member_send` with a key) and the
+    /// public MCP tool. A keyed send is external work, as the unkeyed send
+    /// ([`Self::mob_member_send`]) is: before its first commit it asks
+    /// MobMachine the same external admission
+    /// ([`MobHandle::admit_external_work`]) and answers exactly as the
+    /// unkeyed send does, for every caller: [`MobError::IdentityMember`] for
+    /// an identity entry or a member whose name is reserved unreadable,
+    /// [`MobError::NotExternallyAddressable`] for a member whose runtime
+    /// admits no external work, with nothing committed. The commit carries
+    /// the mark of external work
+    /// ([`meerkat::ContinuationOwnerService::submit_external_work_for_member_incarnation`]),
+    /// so its delivery asks again: a send committed before its member became
+    /// an entry, or before its member's runtime stopped admitting external
+    /// work, settles refused (`authority_denied`), and nothing is admitted.
+    /// The member's host delivers its own keyed sends through
+    /// [`Self::mob_member_send_keyed_as_host`].
     ///
     /// A keyed send is committed as a member continuation, so the key is kept
     /// for the member identity in the continuation key ledger, together with
@@ -6978,7 +7016,8 @@ impl MobMcpState {
     /// # Errors
     /// [`MobError::MemberSendIdempotency`] for an invalid key, a conflict, a
     /// host without a continuation service, a governed runtime, or a status
-    /// read that cannot be made; [`MobError::MemberNotFound`] and
+    /// read that cannot be made; the external admission's refusal for a
+    /// first commit; [`MobError::MemberNotFound`] and
     /// [`MobError::DeliveryScopeUnavailable`] for a first commit to a member
     /// that does not exist or has no session binding, and
     /// [`MobError::MemberNotFound`] when the mob it was admitted against is no
@@ -6992,15 +7031,79 @@ impl MobMcpState {
         handling_mode: HandlingMode,
         idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        self.commit_member_send_keyed(
+            handle,
+            KeyedMemberSendDoor::External,
+            identity,
+            content,
+            handling_mode,
+            idempotency_key,
+        )
+        .await
+    }
+
+    /// The host's own keyed send to its member: [`Self::mob_member_send_keyed`]
+    /// as internal work. The host delivers to its members, its identity
+    /// entries included, through its own door: the send is never asked the
+    /// external admission, and its delivery is not asked again. It acts as
+    /// the member's host, so it reaches an identity entry, or a member whose
+    /// name is reserved unreadable, only for a console principal that holds
+    /// [`ControlScope::AdminHost`] (the owner holds every scope); any other
+    /// is refused [`MobError::IdentityMember`]
+    /// ([`MobHandle::admit_member_host_door`]). A key and its replays,
+    /// conflicts and statuses are as for [`Self::mob_member_send_keyed`]: one
+    /// key ledger serves both doors, so a key committed through either
+    /// replays through either.
+    ///
+    /// # Errors
+    /// As [`Self::mob_member_send_keyed`], without the external admission's
+    /// refusals.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn mob_member_send_keyed_as_host(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, &identity)
+            .await?;
+        self.commit_member_send_keyed(
+            handle,
+            KeyedMemberSendDoor::Host,
+            identity,
+            content,
+            handling_mode,
+            idempotency_key,
+        )
+        .await
+    }
+
+    /// The commit both keyed doors share, through `handle`, which the door
+    /// admitted already.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn commit_member_send_keyed(
+        &self,
+        handle: MobHandle,
+        door: KeyedMemberSendDoor,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
         use meerkat_mob::MemberSendIdempotencyRefusal as Refusal;
 
+        let mob_id = handle.mob_id().clone();
         let refuse = |refusal: Refusal| MobError::MemberSendIdempotency {
             identity: identity.clone(),
             refusal,
         };
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
-            .await?;
         meerkat_runtime::validate_canonical_key_text(
             "idempotency_key",
             idempotency_key,
@@ -7044,6 +7147,11 @@ impl MobMcpState {
                 .map_err(status_error)?,
             meerkat::ContinuationStatus::NotCommitted
         ) {
+            // A first commit of external work asks MobMachine the external
+            // admission the unkeyed send gets, and answers as it does.
+            if door == KeyedMemberSendDoor::External {
+                handle.admit_external_work(&identity).await?;
+            }
             handle.capture_member_delivery_scope(&identity).await?;
         }
         let content_bytes = serde_json::to_vec(&content).map_err(|error| {
@@ -7076,29 +7184,46 @@ impl MobMcpState {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
         self.pause_agent_call().await;
-        let receipt = service
-            .submit_for_member_incarnation(&owner, handle.incarnation(), delivery, committed_at_ms)
-            .await
-            .map_err(|error| match error {
-                meerkat::ContinuationSubmitError::Conflict { existing } => {
-                    refuse(Refusal::Conflict {
-                        delivery_id: existing.delivery_id.clone(),
-                        committed_at_ms: existing.committed_at_ms,
-                    })
-                }
-                meerkat::ContinuationSubmitError::OwnerRetired => {
-                    MobError::MemberNotFound(identity.clone())
-                }
-                meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding => {
-                    refuse(Refusal::GovernedRuntime)
-                }
-                meerkat::ContinuationSubmitError::Invalid(detail) => {
-                    refuse(Refusal::InvalidKey { detail })
-                }
-                meerkat::ContinuationSubmitError::Unavailable(detail) => {
-                    refuse(Refusal::Unavailable { detail })
-                }
-            })?;
+        let committed = match door {
+            KeyedMemberSendDoor::External => {
+                service
+                    .submit_external_work_for_member_incarnation(
+                        &owner,
+                        handle.incarnation(),
+                        delivery,
+                        committed_at_ms,
+                    )
+                    .await
+            }
+            KeyedMemberSendDoor::Host => {
+                service
+                    .submit_for_member_incarnation(
+                        &owner,
+                        handle.incarnation(),
+                        delivery,
+                        committed_at_ms,
+                    )
+                    .await
+            }
+        };
+        let receipt = committed.map_err(|error| match error {
+            meerkat::ContinuationSubmitError::Conflict { existing } => refuse(Refusal::Conflict {
+                delivery_id: existing.delivery_id.clone(),
+                committed_at_ms: existing.committed_at_ms,
+            }),
+            meerkat::ContinuationSubmitError::OwnerRetired => {
+                MobError::MemberNotFound(identity.clone())
+            }
+            meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding => {
+                refuse(Refusal::GovernedRuntime)
+            }
+            meerkat::ContinuationSubmitError::Invalid(detail) => {
+                refuse(Refusal::InvalidKey { detail })
+            }
+            meerkat::ContinuationSubmitError::Unavailable(detail) => {
+                refuse(Refusal::Unavailable { detail })
+            }
+        })?;
         let status = match service
             .continuation_status(&owner, &key)
             .await
@@ -7154,6 +7279,28 @@ impl MobMcpState {
         _idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
         self.admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        Err(MobError::MemberSendIdempotency {
+            identity,
+            refusal: meerkat_mob::MemberSendIdempotencyRefusal::NoContinuationService,
+        })
+    }
+
+    /// [`Self::mob_member_send_keyed_as_host`] on a host that binds no
+    /// continuation service (the browser runtime): refused after its host
+    /// door's admission, never dropped.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn mob_member_send_keyed_as_host(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        _content: ContentInput,
+        _handling_mode: HandlingMode,
+        _idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .admit_member_host_door(ControlScope::SendCommand, &identity)
             .await?;
         Err(MobError::MemberSendIdempotency {
             identity,
@@ -7232,6 +7379,13 @@ impl MobMcpState {
     /// mob-surface crate. Finding C4 — the work-lane Rust API
     /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
     /// this exposes it to RPC/HTTP consumers such as meta.
+    ///
+    /// Work of [`meerkat_mob::WorkOrigin::Internal`] acts as the mob's host,
+    /// which MobMachine admits to any member, an identity entry included:
+    /// the console principal needs [`ControlScope::AdminHost`] for it (the
+    /// owner holds every scope), and one without it is refused
+    /// [`MobError::ScopeDenied`] before anything is submitted. External work
+    /// needs SendCommand, as before.
     pub async fn mob_submit_work(
         &self,
         mob_id: &MobId,
@@ -7240,8 +7394,11 @@ impl MobMcpState {
         work_ref: meerkat_mob::WorkRef,
         spec: meerkat_mob::WorkSpec,
     ) -> Result<meerkat_mob::WorkDeliveryReceipt, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        if matches!(spec.origin, meerkat_mob::WorkOrigin::Internal) {
+            handle.admit_control_scope(ControlScope::AdminHost).await?;
+        }
+        handle
             .submit_work(runtime_id, fence_token, work_ref, spec)
             .await
     }
@@ -8426,7 +8583,10 @@ impl MobMcpState {
     /// [`meerkat_contracts::wire::LiveOpenResult`] carries the owning
     /// host's bootstrap (a URL + single-use token, or a WebRTC token)
     /// VERBATIM (DEC-P6B-C7/C8): never logged, Debug-formatted, or retained
-    /// here. `Live`-gated at chokepoint (a).
+    /// here. `Live`-gated at chokepoint (a). The open acts on the member's
+    /// session as its host, so an identity entry, or a member whose name is
+    /// reserved unreadable, needs `AdminHost` too
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_member_live_open(
         &self,
         mob_id: &MobId,
@@ -8434,8 +8594,11 @@ impl MobMcpState {
         turning_mode: Option<meerkat_contracts::wire::RealtimeTurningMode>,
         transport: Option<meerkat_contracts::wire::LiveOpenTransport>,
     ) -> Result<meerkat_contracts::wire::LiveOpenResult, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_open(
                 self.console_principal.clone(),
                 identity,
@@ -8451,7 +8614,8 @@ impl MobMcpState {
     /// authority. The result's pending receipt is what the surface answering
     /// the channel's WebRTC offer registers its playback owner against; like
     /// the bootstrap token it is never logged or retained here. `Live`-gated
-    /// at chokepoint (a).
+    /// at chokepoint (a), and `AdminHost` too for an identity entry, as
+    /// [`Self::mob_member_live_open`].
     pub async fn mob_member_live_open_with_execution_identity(
         &self,
         mob_id: &MobId,
@@ -8460,8 +8624,11 @@ impl MobMcpState {
         turning_mode: Option<meerkat_contracts::wire::RealtimeTurningMode>,
         transport: Option<meerkat_contracts::wire::LiveOpenTransport>,
     ) -> Result<meerkat_runtime::member_live::MemberLiveExecutionOpen, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_open_with_execution_identity(
                 self.console_principal.clone(),
                 identity,
@@ -8502,7 +8669,9 @@ impl MobMcpState {
 
     /// Drive one DL10 live control verb (commit_input / interrupt /
     /// truncate / refresh — closed vocabulary). `Live`-gated at
-    /// chokepoint (a).
+    /// chokepoint (a). The verb acts on the member's session as its host,
+    /// so an identity entry, or a member whose name is reserved unreadable,
+    /// needs `AdminHost` too ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_member_live_control(
         &self,
         mob_id: &MobId,
@@ -8511,8 +8680,11 @@ impl MobMcpState {
         verb: meerkat_contracts::wire::supervisor_bridge::BridgeLiveControlVerb,
     ) -> Result<meerkat_contracts::wire::supervisor_bridge::BridgeLiveControlOutcome, MobError>
     {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_control(self.console_principal.clone(), identity, channel_id, verb)
             .await
     }
@@ -22991,7 +23163,11 @@ mod tests {
                     "definition": {
                         "id": mob_id.as_str(),
                         "profiles": {
-                            "worker": { "model": "gpt-5.4", "tools": {"comms": true} }
+                            "worker": {
+                                "model": "gpt-5.4",
+                                "external_addressable": true,
+                                "tools": {"comms": true}
+                            }
                         }
                     }
                 }),

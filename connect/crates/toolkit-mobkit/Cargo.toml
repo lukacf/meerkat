@@ -48,7 +48,7 @@ toolkit-store.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 futures = { workspace = true, optional = true }
-nix = { version = "0.29", features = ["fs", "socket"], optional = true }
+nix = { version = "0.31", features = ["fs", "socket"], optional = true }
 
 [dev-dependencies]
 # Existing native actor gate for the isolated queued-admission race fixture.

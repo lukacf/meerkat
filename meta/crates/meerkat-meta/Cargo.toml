@@ -134,13 +134,13 @@ serde-saphyr = { version = "2.0.0", default-features = false, features = ["deser
 serde_json = "1"
 uuid = { version = "1", features = ["v5"] }
 schemars = "1.2.1"
-toml = "0.8"
-base64 = "0.22"
+toml = "0.9"
+base64 = "0.23"
 flate2 = "1"
 tar = "0.4"
 bytes = "1"
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 ring = "0.17"
 # Ed25519 keypair for cross-process gateway peering. Pulled in transitively
 # via meerkat-comms; declared directly here so meta's `auth::peer_keys`
@@ -148,17 +148,17 @@ ring = "0.17"
 # crate seam. Keep features minimal — `std` for `OsRng`, `rand_core` so
 # we can call `SigningKey::generate`.
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
-rand_core = { version = "0.6", default-features = false, features = ["std"] }
+rand_core = { version = "0.10", default-features = false, features = ["std"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "process", "io-util", "io-std", "signal", "macros", "net", "time"] }
 axum = { version = "0.8", features = ["json", "multipart"] }
 tower = { version = "0.5", features = ["limit"] }
 async-stream = "0.3"
 form_urlencoded = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 futures = "0.3"
 fs2 = "0.4"
-object_store = { version = "0.13", features = ["fs"] }
+object_store = { version = "0.14", features = ["fs"] }
 meerkat-core = { workspace = true }
 meerkat-client = { workspace = true, default-features = true }
 # The raw client wrappers carry the wrapped client's controller surface and
@@ -206,7 +206,7 @@ meerkat-skills = { workspace = true }
 meerkat-tools = { workspace = true, default-features = true }
 tempfile = "3"
 async-trait = "0.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

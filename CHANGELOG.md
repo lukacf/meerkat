@@ -473,6 +473,24 @@ them.
   same release, keeps its closed vocabulary. `mob_check_member` gives such a
   member a note of its own (see Fixed).
 
+- `meerkat-authorization`: `LocalGrantAuthority::release_custody` ends a
+  grant owner's custody at its host's close, as the generated
+  `GrantAuthorityMachine` input `ReleaseCustody` (into the terminal phase
+  `Released`). From then on every change and use of that owner is refused as
+  `GrantRefusal::Unavailable`, whoever still holds a reference to it, and
+  every earlier observation of it fails its final currentness check. A
+  durable owner hands its store's lease back after any append in flight, so
+  a successor in the same process restores the same owner at once. A second
+  call changes nothing. An append whose outcome is unknown now ends the
+  custody in the machine too (`RecordUncertainAppend`, into `Uncertain`),
+  and the owner's close then releases its lease. `reconstruct` answers
+  `RestartRequired` for an owner whose custody ended.
+  `MeerkatMachine::install_realm_grant_custody` (`meerkat-runtime`,
+  `local-authorization`) names the grant owner a governed realm's open
+  restored, and `MeerkatMachine::release_realm_custody` ends its custody;
+  `PersistentSessionService::try_shutdown` and `shutdown` call it once the
+  shutdown completes.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -832,6 +850,15 @@ them.
   session's build resolved for the model, so the helper runs on the
   session's own route. An implicit mob created before this fix is reused.
   Affects 0.7.0 through 0.9.10.
+
+- `meerkat`: a governed realm closed and reopened in one process (its
+  session service's `try_shutdown`, then a new open of the same realm) could
+  open with its governed work and configured MCP attachments unavailable
+  ("governed realm's grant owner did not restore"), and an administrative
+  restore of its grant owner could be refused, while a task of the closed
+  realm still held the realm's grant owner. The realm's terminal shutdown
+  now ends the custody of the grant owner its open restored, so the reopen
+  restores it at once.
 
 ### Security
 

@@ -13,6 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   was refused but the selection made from the earlier proposal stayed in
   force. Such an answer now withdraws the earlier proposal, as a changed
   answer already did, so a selection made from it no longer applies.
+- Setup: after a reviewed setup conversation closed, the setup that
+  continued in the same process could reopen the realm with its governed
+  work and configured MCP connections unavailable, or have the realm's
+  grant owner refused when the setup finalized, while tasks of the closed
+  conversation were still ending. The close now hands the realm's grant
+  owner back, so the finalization and the continuation restore it at once.
+  An installed host's close hands its own grant owner back the same way,
+  once the host has settled.
 
 ### Known limitations
 

@@ -10104,9 +10104,13 @@ pub trait RuntimeStore: Send + Sync {
     /// fence, or whose scope of that runtime is poisoned (a batch of it
     /// failed, or its outcome stayed unknown). Nothing a caller writes for
     /// the runtime lands before that reopen, so the store keeps the runtime's
-    /// inputs as it last committed them, for the next start. A store with no
-    /// such refusal answers `false`, the default. Decorators must forward
-    /// their inner store's answer.
+    /// inputs as it last committed them, for the next start. A store answers
+    /// `true` exactly while every call that needs the runtime's state answers
+    /// a refusal until reopen ([`RuntimeStoreError::ScopeRefused`] or
+    /// [`RuntimeStoreError::RealmRefused`]), and `false` otherwise; the
+    /// runtime then tells the waiters of the inputs the store keeps that
+    /// they stay queued. A store with no such refusal answers `false`, the
+    /// default. Decorators must forward their inner store's answer.
     fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
         let _ = runtime_id;
         false

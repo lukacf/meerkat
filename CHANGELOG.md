@@ -149,6 +149,14 @@ them.
 
 ### Fixed
 
+- `meerkat-runtime`: the waiters of a run torn down because its store refuses
+  the session's writes until the realm is reopened (a round commit whose
+  outcome stayed unknown) are told their inputs stay queued
+  (`CompletionWaitError::RequeuedAcrossStop`), as at a lost fence: the store
+  keeps those inputs for the next start. They were told
+  `AuthorityUnavailable` ("runtime session unregistered before terminal
+  failure"), as if their inputs had ended.
+
 - `meerkat-runtime`: a host store commit no longer sends its batch past its
   fence token's lease. A commit whose outcome stayed unknown or unavailable
   was retried for its whole retry budget (30 s by default), also after

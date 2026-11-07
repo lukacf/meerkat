@@ -1788,6 +1788,11 @@ pub struct ExperimentalLiveDelegationCoordinator {
     #[cfg(test)]
     deferred_close_gate_for_test:
         Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the schedule pump's next WorkGraph readiness read:
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    pump_readiness_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2462,6 +2467,8 @@ impl ExperimentalLiveDelegationCoordinator {
             awaiting_peer_replies_for_test: Arc::default(),
             #[cfg(test)]
             deferred_close_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            pump_readiness_gate_for_test: Arc::default(),
         }
     }
 
@@ -4731,6 +4738,18 @@ impl ExperimentalLiveDelegationCoordinator {
                         .and_then(|pending| pending.workgraph.clone())
                 })
             };
+            #[cfg(test)]
+            {
+                let gate = self
+                    .pump_readiness_gate_for_test
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some((entered, resume)) = gate {
+                    let _ = entered.send(());
+                    let _ = resume.await;
+                }
+            }
             let readiness = match workgraph {
                 Some(workgraph) => match workgraph.channel_readiness(&channel_key.1).await {
                     Ok(readiness) => Some(readiness),
@@ -10214,6 +10233,25 @@ mod tests {
                 meerkat::experimental_gpt_live::ExperimentalGptLiveContinuationCommit,
             >,
         >,
+        /// What `next_observation` returns, in order. An empty script is a
+        /// stream that has ended.
+        scripted_observations: Mutex<std::collections::VecDeque<ScriptedObservation>>,
+    }
+
+    /// One step of a scripted provider observation stream.
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    enum ScriptedObservation {
+        /// The control consumer receives this observation.
+        Observation(ExperimentalGptLiveControlObservation),
+        /// The stream ends once this signal fires.
+        EndAfter(oneshot::Receiver<()>),
+    }
+
+    #[cfg(feature = "experimental-gpt-live-gate0-harness")]
+    impl ExactProjectionControl {
+        async fn script_observations(&self, steps: impl IntoIterator<Item = ScriptedObservation>) {
+            self.scripted_observations.lock().await.extend(steps);
+        }
     }
 
     #[cfg(feature = "experimental-gpt-live-gate0-harness")]
@@ -10310,7 +10348,15 @@ mod tests {
             Option<ExperimentalGptLiveControlObservation>,
             meerkat_live::ProviderWebrtcBrokerError,
         > {
-            Ok(None)
+            let step = self.scripted_observations.lock().await.pop_front();
+            match step {
+                Some(ScriptedObservation::Observation(observation)) => Ok(Some(observation)),
+                Some(ScriptedObservation::EndAfter(signal)) => {
+                    let _ = signal.await;
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
         }
 
         async fn append_session_context(

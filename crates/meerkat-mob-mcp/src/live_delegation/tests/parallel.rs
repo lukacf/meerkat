@@ -391,6 +391,36 @@ impl Fixture {
     /// Drive one provider user turn that ends in a client delegation, then
     /// hand the joined delegation to the coordinator.
     async fn delegate(&self, key: &str, transcript: &str) -> OperationId {
+        let (turn, delegation, operation) = self.admit_delegation_turn(key, transcript).await;
+        let control: Arc<dyn ExperimentalGptLiveControlPlane> =
+            Arc::clone(&self.control) as Arc<dyn ExperimentalGptLiveControlPlane>;
+        self.coordinator
+            .start_client_context_delegation(
+                &self.provider_binding,
+                control,
+                turn,
+                delegation,
+                transcript.to_string(),
+                Vec::new(),
+                LiveDelegationExecutorInput {
+                    request_transcript: transcript.to_string(),
+                    assistant_context: String::new(),
+                },
+            )
+            .await
+            .expect("delegation scheduled");
+        operation
+    }
+
+    /// The lifecycle half of [`Self::delegate`]: the provider's user turn
+    /// ends in a client delegation and the lifecycle seam admits it, before
+    /// the control consumer schedules it. Returns the turn and delegation the
+    /// provider observation carries, and the admitted operation.
+    async fn admit_delegation_turn(
+        &self,
+        key: &str,
+        transcript: &str,
+    ) -> (LiveSidebandTurnRef, LiveSidebandDelegationRef, OperationId) {
         let turn = LiveSidebandTurnRef::__from_provider_observation(
             self.binding.channel_id(),
             format!("{key}-turn"),
@@ -441,24 +471,67 @@ impl Fixture {
             .operation
             .operation_id()
             .clone();
-        let control: Arc<dyn ExperimentalGptLiveControlPlane> =
-            Arc::clone(&self.control) as Arc<dyn ExperimentalGptLiveControlPlane>;
-        self.coordinator
-            .start_client_context_delegation(
-                &self.provider_binding,
-                control,
-                turn,
-                delegation,
-                transcript.to_string(),
-                Vec::new(),
-                LiveDelegationExecutorInput {
-                    request_transcript: transcript.to_string(),
-                    assistant_context: String::new(),
-                },
-            )
+        (turn, delegation, operation)
+    }
+
+    /// Wait until `operation` settles (Completed, Failed, Cancelled or
+    /// Blocked), releasing every model call that starts meanwhile. Returns
+    /// the schedule state it settled in (the last one read when nothing
+    /// settles within [`WAIT`]) and the calls released on the way.
+    async fn settle_releasing_calls(
+        &mut self,
+        operation: &OperationId,
+    ) -> (
+        Option<meerkat_runtime::live_execution::LiveDelegationScheduleState>,
+        Vec<ObservedCall>,
+    ) {
+        use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+        let started = std::time::Instant::now();
+        let mut released = Vec::new();
+        loop {
+            while let Ok(call) = self.entered.try_recv() {
+                self.client.release(call.index);
+                released.push(call);
+            }
+            let state = self.schedule_state(operation).await;
+            if matches!(
+                state,
+                Some(State::Completed | State::Failed | State::Cancelled | State::Blocked)
+            ) || started.elapsed() >= WAIT
+            {
+                return (state, released);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The source member's canonical transcript: whether it holds `request`
+    /// as a conversational user row, and the injected executor input row for
+    /// `request` with the assistant reply committed after it.
+    async fn source_committed(&self, request: &str) -> (bool, bool, bool) {
+        let session = self
+            .service
+            .export_realtime_refresh_session_snapshot(&self.session_id)
             .await
-            .expect("delegation scheduled");
-        operation
+            .expect("source session snapshot");
+        let messages = session.messages();
+        let spoken = messages.iter().any(|message| {
+            matches!(message, meerkat_core::Message::User(user)
+                if user.transcript_role.is_conversational() && user.text_content().contains(request))
+        });
+        let executor_input = messages.iter().position(|message| {
+            matches!(message, meerkat_core::Message::User(user)
+                if !user.transcript_role.is_conversational()
+                    && user.text_content().starts_with("Live delegation execution context")
+                    && user.text_content().contains(request))
+        });
+        let answered = executor_input.is_some_and(|index| {
+            messages[index + 1..].iter().any(|message| {
+                matches!(message, meerkat_core::Message::BlockAssistant(_))
+                    && serde_json::to_string(message).is_ok_and(|text| text.contains("completed:"))
+            })
+        });
+        (spoken, executor_input.is_some(), answered)
     }
 
     /// The provider marked the next finished user turn as continuing the
@@ -1383,8 +1456,15 @@ async fn an_open_item_not_yet_due_keeps_its_worker_waiting() {
     fx.close().await;
 }
 
+/// Channel close keeps every admitted delegation. Running forks keep their
+/// machine custody and finish; a delegation still queued behind the worker
+/// cap keeps its admission and starts on a fork of its own once a slot frees
+/// after the close (it used to be cancelled as work that never started, so
+/// its spoken request was neither executed nor recorded). Every result
+/// merges into the source member instead of reaching the closed provider
+/// channel.
 #[tokio::test]
-async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the_source() {
+async fn channel_close_keeps_queued_admitted_work_and_every_fork_merges_into_the_source() {
     let mut fx = fixture(true).await;
     let mut operations = Vec::new();
     for index in 0..5 {
@@ -1393,8 +1473,9 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
                 .await,
         );
     }
+    let mut running = Vec::new();
     for _ in 0..4 {
-        fx.next_call().await;
+        running.push(fx.next_call().await);
     }
     fx.expect_no_call().await;
 
@@ -1406,14 +1487,16 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
         .await
         .expect("channel closes");
 
-    // Only the queued item was cancelled, in the machine and in the WorkGraph.
+    // The queued delegation keeps its admission, in the machine and in the
+    // WorkGraph; the running ones keep theirs.
     assert_eq!(
         fx.schedule_state(&operations[4]).await,
-        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled)
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Created),
+        "an admitted delegation queued behind the worker cap survives the close"
     );
     assert_eq!(
         fx.voice_item_titled("long task 4").await.status,
-        meerkat::WorkStatus::Cancelled
+        meerkat::WorkStatus::Open
     );
     for operation in &operations[..4] {
         assert_eq!(
@@ -1423,24 +1506,45 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
     }
     fx.assert_nothing_cancelled();
 
-    // Running forks finish after the close; each result merges into the
-    // source member as injected execution context instead of being dropped.
-    for index in 0..4 {
-        fx.client.release(index);
-    }
-    // The source member runs one queued turn at a time, so each merge call
-    // is released before the next one can start.
-    for _ in 0..4 {
-        let call = fx.next_call().await;
-        assert!(
-            call.user_text
-                .contains("finished after the voice call ended"),
-            "{}",
-            call.user_text
-        );
+    // The running forks finish after the close and each result merges into
+    // the source member as injected execution context; the queued
+    // delegation then runs on its own fork and merges too. The source member
+    // runs one queued turn at a time, so every call is released as it
+    // starts.
+    for call in &running {
         fx.client.release(call.index);
     }
-    fx.wait_for_retired(4).await;
+    let mut merges = Vec::new();
+    let mut queued_fork = None;
+    while merges.len() < 5 || queued_fork.is_none() {
+        let call = fx.next_call().await;
+        if call
+            .task_text
+            .contains("finished after the voice call ended")
+        {
+            merges.push(call.task_text.clone());
+        } else {
+            assert!(
+                call.task_text.contains("long task 4"),
+                "only the queued delegation starts after the close: {}",
+                call.task_text
+            );
+            assert!(
+                queued_fork.replace(call.index).is_none(),
+                "the queued delegation starts once"
+            );
+        }
+        fx.client.release(call.index);
+    }
+    for index in 0..5 {
+        assert!(
+            merges
+                .iter()
+                .any(|merge| merge.contains(&format!("long task {index}"))),
+            "the result of long task {index} merges into the source member: {merges:?}"
+        );
+    }
+    fx.wait_for_retired(5).await;
     let snapshots = fx
         .runtime
         .live_delegation_recovery_snapshots(&fx.session_id)
@@ -1455,12 +1559,311 @@ async fn channel_close_cancels_only_queued_work_and_running_forks_merge_into_the
     );
     // Completed work whose channel closed never dispatches a result; its
     // item still settles.
-    for title in (0..4).map(|index| format!("long task {index}")) {
+    for title in (0..5).map(|index| format!("long task {index}")) {
         wait_until(WAIT, || async {
             fx.voice_item_titled(&title).await.status == meerkat::WorkStatus::Completed
         })
         .await;
     }
+    fx.assert_nothing_cancelled();
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// Turbo S S107 (stuck close convergence): the provider's delegation reached
+/// the host as the host began to close the channel. The lifecycle seam
+/// admitted it and the control consumer queued it, then the observation
+/// stream ended before the schedule pump read its WorkGraph readiness, and
+/// the close cancelled the queued item as work that never started: the
+/// spoken request was neither executed nor recorded. A delegation admitted
+/// before the close runs after it, on its operation's own retired channel:
+/// the request row and the executor input commit to the canonical session,
+/// the existing member answers, and the worker settles late, like a worker
+/// that was running at the close.
+#[tokio::test]
+async fn a_delegation_admitted_as_its_channel_closes_runs_after_the_close() {
+    let mut fx = fixture_with_policy(true, LiveDelegationExecutionPolicy::ExistingMember).await;
+    let request = "write a four line poem about lighthouses into lighthouse dot md";
+    // The schedule pump stops at its next WorkGraph readiness read.
+    let (pump_entered_tx, pump_entered) = oneshot::channel();
+    let (resume_pump, pump_resume) = oneshot::channel();
+    *fx.coordinator
+        .pump_readiness_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((pump_entered_tx, pump_resume));
+
+    // The provider ends the user's turn in a client delegation: the
+    // lifecycle seam admits it, then the control consumer receives it and
+    // the observation stream ends once the test says so.
+    let (turn, delegation, operation) = fx.admit_delegation_turn("closing", request).await;
+    let (end_stream, stream_end) = oneshot::channel();
+    fx.control
+        .script_observations([
+            ScriptedObservation::Observation(ExperimentalGptLiveControlObservation::Provider(
+                LiveSidebandObservation::new(
+                    fx.provider_binding.clone(),
+                    LiveSidebandObservationKind::DelegationRequested {
+                        turn,
+                        delegation,
+                        final_transcript: request.to_string(),
+                        request_transcript: request.to_string(),
+                        assistant_context: String::new(),
+                        represented_user_rows: Vec::new(),
+                    },
+                ),
+            )),
+            ScriptedObservation::EndAfter(stream_end),
+        ])
+        .await;
+    let consumer = {
+        let coordinator = Arc::clone(&fx.coordinator);
+        let control: Arc<dyn ExperimentalGptLiveControlPlane> =
+            Arc::clone(&fx.control) as Arc<dyn ExperimentalGptLiveControlPlane>;
+        let binding = fx.provider_binding.clone();
+        tokio::spawn(async move {
+            coordinator
+                .run_channel(binding, control, CancellationToken::new())
+                .await;
+        })
+    };
+    tokio::time::timeout(WAIT, pump_entered)
+        .await
+        .expect("the queued delegation's pump reaches its readiness read")
+        .expect("pump readiness gate");
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Created),
+        "the delegation is admitted and queued"
+    );
+
+    // The observation stream ends, so the control consumer realizes the
+    // channel close, and the machine closes the channel. Only then does the
+    // pump read the WorkGraph's readiness.
+    let _ = end_stream.send(());
+    tokio::time::timeout(WAIT, consumer)
+        .await
+        .expect("the control consumer ends with its observation stream")
+        .expect("control consumer task");
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    let _ = resume_pump.send(());
+
+    let (settled, calls) = fx.settle_releasing_calls(&operation).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed),
+        "a delegation admitted before the close runs after it"
+    );
+    assert!(
+        calls.iter().any(|call| call.task_text.contains(request)),
+        "the existing member executed the request: {calls:?}"
+    );
+    let (spoken, executor_input, answered) = fx.source_committed(request).await;
+    assert!(
+        spoken,
+        "the spoken request is committed to the canonical session"
+    );
+    assert!(
+        executor_input,
+        "the executor input is committed to the canonical session"
+    );
+    assert!(answered, "the member's answer is committed after it");
+    let snapshots = fx
+        .runtime
+        .live_delegation_recovery_snapshots(&fx.session_id)
+        .await
+        .expect("snapshots");
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.operation_id() == &operation)
+        .expect("the worker is bound to the operation");
+    assert_eq!(
+        snapshot.terminal(),
+        Some(LiveDelegationWorkerTerminalKind::Completed)
+    );
+    assert!(snapshot.late(), "it settled after its channel closed");
+    assert_eq!(
+        snapshot.worker_ownership(),
+        LiveDelegationWorkerOwnership::ExistingMember
+    );
+    wait_until(WAIT, || async {
+        fx.voice_item_titled(request).await.status == meerkat::WorkStatus::Completed
+    })
+    .await;
+    assert!(
+        fx.control.releases.lock().await.is_empty(),
+        "nothing reaches the closed provider channel"
+    );
+    fx.assert_nothing_cancelled();
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// The console voice host delegates to the existing member, which runs one
+/// delegated turn at a time, so a second spoken request waits behind the
+/// first. When the user ended the voice session while the first job ran, the
+/// second request was cancelled as work that never started. It is admitted,
+/// so it keeps its admission through the close and runs once the first job
+/// ends.
+#[tokio::test]
+async fn an_existing_member_request_queued_behind_a_running_one_runs_after_the_close() {
+    let mut fx = fixture_with_policy(true, LiveDelegationExecutionPolicy::ExistingMember).await;
+    let first_request = "draft the release notes";
+    let second_request = "book the small meeting room";
+    let first = fx.delegate("first", first_request).await;
+    let running = fx.next_call().await;
+    assert!(running.task_text.contains(first_request), "{running:?}");
+    let second = fx.delegate("second", second_request).await;
+    fx.expect_no_call().await;
+    assert_eq!(
+        fx.schedule_state(&second).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Created)
+    );
+
+    // The user ends the voice session while the first job runs.
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    assert_eq!(
+        fx.schedule_state(&second).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Created),
+        "an admitted request that has not started survives the close"
+    );
+    fx.assert_nothing_cancelled();
+
+    // The first job finishes after the close; the second then starts.
+    fx.client.release(running.index);
+    let call = fx.next_call().await;
+    assert!(
+        call.task_text.contains(second_request),
+        "the queued request starts after the close: {call:?}"
+    );
+    fx.client.release(call.index);
+    fx.wait_for_completed(&[first.clone(), second.clone()])
+        .await;
+    let snapshots = fx
+        .runtime
+        .live_delegation_recovery_snapshots(&fx.session_id)
+        .await
+        .expect("snapshots");
+    for operation in [&first, &second] {
+        let snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.operation_id() == operation)
+            .expect("each request bound the existing member");
+        assert_eq!(
+            snapshot.terminal(),
+            Some(LiveDelegationWorkerTerminalKind::Completed)
+        );
+        assert!(snapshot.late(), "it settled after its channel closed");
+    }
+    for request in [first_request, second_request] {
+        let (spoken, executor_input, answered) = fx.source_committed(request).await;
+        assert!(
+            spoken && executor_input && answered,
+            "{request:?} is committed with its executor input and answer: spoken={spoken} executor_input={executor_input} answered={answered}"
+        );
+    }
+    assert!(
+        fx.control.releases.lock().await.is_empty(),
+        "nothing reaches the closed provider channel"
+    );
+    fx.assert_nothing_cancelled();
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// A closed channel requeues nothing a worker hands back. A fork still
+/// running at the close that then hands its item back blocked behind another
+/// item is cancelled, in the machine and in the WorkGraph, as blocked work the
+/// close found is: it was left blocked with no schedule to wake it. The fork
+/// it waited on still finishes and merges, and the closed channel's schedule
+/// then drains.
+#[tokio::test]
+async fn a_fork_that_blocks_after_its_channel_closed_is_cancelled() {
+    let mut fx = fixture(true).await;
+    let first = fx.delegate("first", "collect the quarterly numbers").await;
+    let second = fx
+        .delegate("second", "write the summary from the numbers")
+        .await;
+    let first_call = fx.next_call().await;
+    let second_call = fx.next_call().await;
+    let (first_call, second_call) = if first_call.task_text.contains("quarterly") {
+        (first_call, second_call)
+    } else {
+        (second_call, first_call)
+    };
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let first_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: first_item.id.clone(),
+            to_id: second_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge");
+    let second_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: second_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: second_item.revision,
+        })
+        .await
+        .expect("release behind the blocker");
+
+    // The channel closes while both forks run; then the second hands its
+    // item back blocked behind the first.
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    fx.client.release(second_call.index);
+    let (settled, _) = fx.settle_releasing_calls(&second).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled),
+        "a fork that blocks after its channel closed is cancelled"
+    );
+    assert_eq!(
+        fx.voice_item_titled("write the summary from the numbers")
+            .await
+            .status,
+        meerkat::WorkStatus::Cancelled
+    );
+    fx.expect_no_call().await;
+
+    // The first fork finishes and its result merges into the source member.
+    fx.client.release(first_call.index);
+    let merge = fx.next_call().await;
+    assert!(
+        merge
+            .task_text
+            .contains("finished after the voice call ended"),
+        "{}",
+        merge.task_text
+    );
+    fx.client.release(merge.index);
+    fx.wait_for_completed(std::slice::from_ref(&first)).await;
+    wait_until(WAIT, || async {
+        fx.coordinator.schedules.lock().await.is_empty()
+    })
+    .await;
     fx.assert_nothing_cancelled();
     fx.handle.shutdown().await.expect("shutdown");
 }

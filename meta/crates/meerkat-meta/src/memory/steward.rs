@@ -4251,6 +4251,7 @@ mod tests {
     use crate::memory::events::CollectingEventSink;
     use crate::memory::records::{InjectionLogEntry, InjectionSurface, VerificationClaim};
     use crate::memory::sqlite_store::SqliteAgentMemoryStore;
+    use crate::memory::staged::OperatorMemoryRefusal;
     use crate::memory::staged::StagedMemoryStore;
     use crate::memory::taint::LlmWriteGate;
     use futures::stream;
@@ -7826,6 +7827,178 @@ mod tests {
             .await
             .expect("manifest");
         assert_eq!(own_records.len(), 1, "the accept commits into its own key");
+    }
+
+    async fn scope_titles(store: &SqliteAgentMemoryStore, scope: MemoryScope) -> Vec<String> {
+        store
+            .manifest(&[scope], ManifestTier::Full)
+            .await
+            .expect("manifest")
+            .into_iter()
+            .map(|meta| meta.title)
+            .collect()
+    }
+
+    fn refused_with(run: &DreamRun, refusal: OperatorMemoryRefusal) -> bool {
+        run.skips
+            .iter()
+            .any(|skip| skip.contains(&refusal.to_string()))
+    }
+
+    /// A dream never changes or copies a person's operator memory, with
+    /// operator routing on: a create in the shared identity scope derived
+    /// from a person's operator record, a supersede that would rewrite it
+    /// with another person's fact, and a tombstone or retier of an operator
+    /// record are each refused, typed, and nothing of them commits.
+    #[tokio::test]
+    async fn steward_never_copies_or_rewrites_operator_records() {
+        let person = |key: &str| MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: key.to_string(),
+        };
+        let alice = person("console-caller:v1:alice");
+        let bob = person("console-caller:v1:bob");
+        let fixture = build_operator_fixture(vec![empty_gather(), "SLOT".to_string()], vec![]);
+        for (id, scope, title) in [
+            ("op-alice", &alice, "Alice prefers terse status notes"),
+            ("op-bob", &bob, "Bob wants metric units"),
+            ("op-bob-retier", &bob, "Bob reviews on Fridays"),
+        ] {
+            seed_active(&fixture.store, id, scope, title, &format!("{title}.")).await;
+        }
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies.iter_mut().find(|r| r.as_str() == "SLOT").unwrap() =
+                json_reply(serde_json::json!({
+                    "ops": [
+                        {"op": "create", "id": "shared-copy",
+                         "scope": {"kind": "identity", "key": "identity:worker"},
+                         "kind": "preference", "title": "Alice prefers terse status notes",
+                         "description": "kept at identity scope",
+                         "body": "Alice prefers terse status notes.",
+                         "derived_from": ["op-alice"], "rationale": "keep operator facts"},
+                        {"op": "supersede", "id": "rewritten", "prior": "op-alice",
+                         "kind": "preference", "title": "Bob wants metric units",
+                         "description": "merged duplicate",
+                         "body": "Bob wants every figure in metric units.",
+                         "rationale": "merge duplicates"},
+                        {"op": "tombstone", "id": "op-bob", "rationale": "stale"},
+                        {"op": "retier", "id": "op-bob-retier", "trust": "untrusted",
+                         "rationale": "doubtful"}
+                    ],
+                    "proposal_verdicts": [], "quarantine_verdicts": [],
+                    "open_loop_escalations": [], "contradictions": [], "working_set": []
+                }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        let shared = scope_titles(&fixture.store, identity_scope("identity:worker")).await;
+        assert!(
+            !shared.iter().any(|title| title.contains("Alice prefers")),
+            "no copy of a person's operator record in shared memory: {shared:?} {:?}",
+            run.skips
+        );
+        assert_eq!(
+            scope_titles(&fixture.store, alice).await,
+            vec!["Alice prefers terse status notes".to_string()],
+            "the person's operator record is never rewritten: {:?}",
+            run.skips
+        );
+        let mut bob_titles = scope_titles(&fixture.store, bob).await;
+        bob_titles.sort();
+        assert_eq!(
+            bob_titles,
+            vec![
+                "Bob reviews on Fridays".to_string(),
+                "Bob wants metric units".to_string()
+            ],
+            "no operator record is tombstoned: {:?}",
+            run.skips
+        );
+        for refusal in [
+            OperatorMemoryRefusal::CopiesOperatorRecord,
+            OperatorMemoryRefusal::ChangesOperatorRecord,
+        ] {
+            assert!(
+                refused_with(&run, refusal),
+                "the refusal is typed ({refusal}): {:?}",
+                run.skips
+            );
+        }
+    }
+
+    /// A dream never promotes a person's operator-scope proposal to a mob
+    /// scope: the promotion is refused, typed, no gate is staged, and no
+    /// gate description ever shows the person's fact.
+    #[tokio::test]
+    async fn steward_never_promotes_an_operator_proposal() {
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let fixture =
+            build_operator_fixture(vec![empty_gather(), "SLOT".to_string()], vec!["gate-alice"]);
+        let proposal_id = fixture
+            .store
+            .propose(
+                &alice,
+                new_record(
+                    "Alice prefers terse status notes",
+                    "Alice said: keep status notes terse.",
+                ),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("propose to the person's operator scope");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies.iter_mut().find(|r| r.as_str() == "SLOT").unwrap() =
+                json_reply(serde_json::json!({
+                    "ops": [],
+                    "proposal_verdicts": [
+                        {"proposal_id": proposal_id, "verdict": "promote_pending_gate",
+                         "rationale": "an operator preference that crosses members",
+                         "target_mob": "mob:main"}
+                    ],
+                    "quarantine_verdicts": [], "open_loop_escalations": [],
+                    "contradictions": [], "working_set": []
+                }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        let calls = fixture
+            .gating
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            calls.is_empty(),
+            "no gate is staged for a person's operator memory: {calls:?} {:?}",
+            run.skips
+        );
+        assert!(
+            fixture
+                .store
+                .pending_promotions(REALM)
+                .await
+                .expect("pending promotions")
+                .is_empty(),
+            "no promotion is staged"
+        );
+        assert!(
+            refused_with(&run, OperatorMemoryRefusal::PromotesOperatorMemory),
+            "the refusal is typed: {:?}",
+            run.skips
+        );
     }
 
     /// The prompt renders the activation fact as data and never offers

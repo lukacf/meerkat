@@ -261,6 +261,57 @@ pub enum StagedBatchError {
         op_index: usize,
         content_hash: String,
     },
+    /// A person's operator memory is theirs: a steward batch never changes,
+    /// copies or writes it outside the reviewed accept of the person's own
+    /// proposal.
+    OperatorMemoryRefused {
+        op_index: usize,
+        refusal: OperatorMemoryRefusal,
+    },
+}
+
+/// Why the steward refused an op on a person's operator memory. A dream
+/// never changes an operator-scope record, never copies one into another
+/// scope, writes an operator scope only by accepting the person's own
+/// proposal into it, and never promotes a person's operator memory out of
+/// their own operator scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OperatorMemoryRefusal {
+    /// A supersede, tombstone or retier of an operator-scope record, or a
+    /// quarantine verdict that would release or tombstone one.
+    ChangesOperatorRecord,
+    /// A record outside the operator scope derived from an operator-scope
+    /// record.
+    CopiesOperatorRecord,
+    /// A write into an operator scope that is not the reviewed accept of
+    /// the person's own proposal.
+    WritesOperatorScope,
+    /// A gated promotion of an operator-scope proposal or record.
+    PromotesOperatorMemory,
+}
+
+impl std::fmt::Display for OperatorMemoryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ChangesOperatorRecord => {
+                "the steward never changes a person's operator memory (no supersede, \
+                 tombstone or retier of an operator-scope record)"
+            }
+            Self::CopiesOperatorRecord => {
+                "the steward never copies a person's operator memory into another scope (no \
+                 derived_from of an operator-scope record)"
+            }
+            Self::WritesOperatorScope => {
+                "the steward writes an operator scope only by accepting the person's own \
+                 proposal into it"
+            }
+            Self::PromotesOperatorMemory => {
+                "the steward never promotes a person's operator memory out of their own \
+                 operator scope"
+            }
+        })
+    }
 }
 
 impl std::fmt::Display for StagedBatchError {
@@ -348,6 +399,9 @@ impl std::fmt::Display for StagedBatchError {
                 "op {op_index}: content (hash {content_hash}) was tombstoned within the \
                  recreation window and cannot be re-created"
             ),
+            Self::OperatorMemoryRefused { op_index, refusal } => {
+                write!(f, "op {op_index}: {refusal}")
+            }
         }
     }
 }
@@ -890,6 +944,116 @@ mod tests {
             created_at_ms: None,
             updated_at_ms: None,
         }
+    }
+
+    /// A person's operator memory is theirs: a steward batch never
+    /// supersedes, tombstones or retiers an operator-scope record, never
+    /// derives a record in another scope from one, and writes an operator
+    /// scope only in a reviewed batch (the accept of the person's own
+    /// proposal). A host's own batch may still change it.
+    #[test]
+    fn steward_batches_never_change_operator_memory() {
+        let operator = MemoryScope::Operator {
+            realm: "family".to_string(),
+            operator: "console-caller:v1:person".to_string(),
+        };
+        let mut view = MapView::empty();
+        view.records.insert(
+            "op-record".to_string(),
+            record_view(
+                operator.clone(),
+                TrustTier::AgentObserved,
+                RecordStatus::Active,
+            ),
+        );
+        let refused = |op: StagedOp, kind: StagedBatchKind| {
+            let mut batch = steward_batch(vec![op]);
+            batch.kind = kind;
+            validate_batch(&batch, &view, DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS, 1_000).err()
+        };
+        let operator_refusal = |refusal| {
+            Some(StagedBatchError::OperatorMemoryRefused {
+                op_index: 0,
+                refusal,
+            })
+        };
+        for (label, op) in [
+            (
+                "supersede",
+                StagedOp::Supersede {
+                    id: None,
+                    prior: "op-record".to_string(),
+                    record: payload("Rewritten", "Another person's fact"),
+                    trust: TrustTier::AgentObserved,
+                    derived_from: Vec::new(),
+                    rationale: None,
+                },
+            ),
+            (
+                "tombstone",
+                StagedOp::Tombstone {
+                    id: "op-record".to_string(),
+                    rationale: None,
+                },
+            ),
+            (
+                "retier",
+                StagedOp::Retier {
+                    id: "op-record".to_string(),
+                    trust: TrustTier::Untrusted,
+                    rationale: None,
+                },
+            ),
+        ] {
+            assert_eq!(
+                refused(op, StagedBatchKind::FreshWrite),
+                operator_refusal(OperatorMemoryRefusal::ChangesOperatorRecord),
+                "{label}"
+            );
+        }
+        let copy = StagedOp::Create {
+            id: None,
+            scope: identity_scope(),
+            record: payload("Copied", "The person's fact"),
+            trust: TrustTier::AgentObserved,
+            derived_from: vec!["op-record".to_string()],
+            rationale: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+        };
+        assert_eq!(
+            refused(copy, StagedBatchKind::FreshWrite),
+            operator_refusal(OperatorMemoryRefusal::CopiesOperatorRecord)
+        );
+        assert_eq!(
+            refused(
+                create_op(operator.clone(), TrustTier::AgentObserved),
+                StagedBatchKind::FreshWrite
+            ),
+            operator_refusal(OperatorMemoryRefusal::WritesOperatorScope)
+        );
+        assert_eq!(
+            refused(
+                create_op(operator.clone(), TrustTier::AgentObserved),
+                StagedBatchKind::ReviewVerdict
+            ),
+            None,
+            "the reviewed accept of the person's own proposal writes it"
+        );
+        let host = StagedMutationBatch {
+            kind: StagedBatchKind::FreshWrite,
+            realm: "family".to_string(),
+            author: MemoryAuthor::Operator,
+            ops: vec![StagedOp::Tombstone {
+                id: "op-record".to_string(),
+                rationale: None,
+            }],
+        };
+        assert_eq!(
+            validate_batch(&host, &view, DEFAULT_TOMBSTONE_RECREATE_WINDOW_MS, 1_000).err(),
+            None,
+            "a host's own batch may still change it"
+        );
     }
 
     #[test]

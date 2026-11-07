@@ -69,8 +69,8 @@ pub use review::{
 pub use spawn_customizer::MemorySpawnCustomizer;
 pub use sqlite_store::SqliteAgentMemoryStore;
 pub use staged::{
-    CommitReceipt, StageToken, StagedBatchError, StagedBatchView, StagedMemoryStore,
-    StagedMutationBatch, StagedOp, StagedRecordView, validate_batch,
+    CommitReceipt, OperatorMemoryRefusal, StageToken, StagedBatchError, StagedBatchView,
+    StagedMemoryStore, StagedMutationBatch, StagedOp, StagedRecordView, validate_batch,
 };
 pub use steward::{
     DreamOutcome, DreamRun, FactoryStewardHandle, MemoryConflictBridge, MemoryGatingBridge,

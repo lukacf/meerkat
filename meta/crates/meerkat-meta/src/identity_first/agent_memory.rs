@@ -3521,19 +3521,34 @@ memory = false
         Ok(())
     }
 
-    /// A run without a direct person requester proposes no operator memory:
-    /// no requester, a requester carried across a peer hop, or a principal
-    /// that names no person. The person's own direct run does.
+    /// With operator memory on, a run without a direct person requester
+    /// files no `operator_said` fact anywhere: no requester, a requester
+    /// carried across a peer hop, a principal that names no person, or a
+    /// governed run (even one a person asked for). The call is refused with
+    /// a tool error that names the alternative, and neither the agent's own
+    /// memory nor any operator memory holds the fact. The person's own
+    /// direct run files it.
     #[tokio::test]
     async fn memory_tool_proposes_no_operator_memory_without_a_direct_requester()
     -> Result<(), Box<dyn Error>> {
+        use crate::tool_application_test_support::resolution;
+
         let (store, dispatcher, _dir) = operator_memory_recorder().await?;
+        let provider: Arc<dyn AgentMemoryProvider> = Arc::new(store.clone());
         let alice = console_person("alice")?;
         let service = meerkat_core::PrincipalRef::in_domain(
             meerkat_core::PrincipalKind::ServiceAccount,
             "svc:reporter",
             meerkat_core::TrustDomainId::new("service-issuer:reporting")?,
         )?;
+        let refused = |label: &str, text: &str, is_error: bool| {
+            if !is_error || !text.contains("nothing was stored") {
+                return Err(format!(
+                    "{label}: the call must be refused, naming why: {text}"
+                ));
+            }
+            Ok(())
+        };
         for (label, requester) in [
             ("no requester", None),
             (
@@ -3547,12 +3562,60 @@ memory = false
         ] {
             let (text, is_error) =
                 call_memory_tool_for(&dispatcher, operator_said(label), requester).await?;
-            assert!(!is_error, "{label}: {text}");
-            assert!(
-                proposed_operator_scopes(&store).await?.is_empty(),
-                "{label} proposes no operator memory: {text}"
-            );
+            refused(label, &text, is_error)?;
         }
+        // A governed run proposes no operator memory, even for the person
+        // who asked: its prepared authorization names only the call's own
+        // memory operation.
+        let recorder: Arc<dyn AgentToolDispatcher> = Arc::new(RecorderToolDispatcher::new(
+            None,
+            MemoryRecorder::new(
+                Arc::clone(&provider),
+                AgentMemoryConfig {
+                    operator_scope: AgentMemoryOperatorScope::Provisional,
+                    ..AgentMemoryConfig::default()
+                },
+                identity()?,
+                None,
+            ),
+        ));
+        let governed = meerkat_core::ToolDispatchContext::default()
+            .with_work_authorization(Some(meerkat_core::WorkAuthorizationContext::new(
+                Arc::new(AllowAll),
+                meerkat_core::OperationExecutionScope::Domain,
+            )))
+            .with_requester(Some(meerkat_core::TurnRequester::direct(alice.clone())));
+        let raw = memory_args(&operator_said("a governed run"))?;
+        let call = memory_call("governed-1", &raw);
+        let plan = meerkat_core::agent::resolve_tool_execution_plan_fenced(
+            &recorder,
+            call,
+            &governed,
+            &resolution(),
+        )?;
+        let outcome = meerkat_core::agent::dispatch_tool_execution_plan_fenced(
+            &recorder, call, &governed, &plan,
+        )
+        .await?;
+        let text = outcome
+            .result
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        refused("a governed run", &text, outcome.result.is_error)?;
+        assert!(
+            proposed_operator_scopes(&store).await?.is_empty(),
+            "no run without a direct person requester proposes operator memory"
+        );
+        assert!(
+            identity_records(&provider).await?.is_empty(),
+            "no refused fact lands in the agent's own memory"
+        );
         call_memory_tool_for(
             &dispatcher,
             operator_said("the person's own run"),
@@ -3564,6 +3627,176 @@ memory = false
             1,
             "the person's own direct run proposes"
         );
+        Ok(())
+    }
+
+    /// With operator memory on, an `operator_said` fact the memory tool
+    /// files in a person's run goes only to that person's operator memory:
+    /// the agent's shared identity memory holds no copy, so another
+    /// person's turn recalls none of it.
+    #[tokio::test]
+    async fn operator_said_fact_stays_in_the_persons_operator_memory() -> Result<(), Box<dyn Error>>
+    {
+        const FACT: &str = "Alice prefers terse status notes";
+        let (store, dispatcher, _dir) = operator_memory_recorder().await?;
+        let provider: Arc<dyn AgentMemoryProvider> = Arc::new(store.clone());
+        let alice = console_person("alice")?;
+        let bob = console_person("bob")?;
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            operator_said(FACT),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        assert!(
+            identity_records(&provider).await?.is_empty(),
+            "the agent's own memory holds no copy of the person's fact: {text}"
+        );
+        let alice_key =
+            crate::http_console::person_caller_scope(&alice).ok_or("a person has a key")?;
+        assert_eq!(
+            proposed_operator_scopes(&store).await?,
+            vec![MemoryScope::Operator {
+                realm: DEFAULT_REALM.to_string(),
+                operator: alice_key,
+            }],
+            "the fact is proposed to the person's own operator memory only"
+        );
+        let coordinator = crate::memory::coordinator::RecallCoordinator::new(
+            provider,
+            AgentMemoryConfig {
+                operator_scope: AgentMemoryOperatorScope::Provisional,
+                selection: AgentMemorySelection::Always,
+                ..AgentMemoryConfig::default()
+            },
+        );
+        let injected = coordinator
+            .inject_for_turn(
+                &identity()?,
+                None,
+                &meerkat_core::ContentInput::Text("What do people here prefer?".to_string()),
+            )
+            .await?;
+        let bob_section = coordinator
+            .operator_context_for_turn(
+                &identity()?,
+                None,
+                Some(&meerkat_core::TurnRequester::direct(bob)),
+            )
+            .await?;
+        assert!(
+            !format!("{injected:?}").contains(FACT)
+                && bob_section.is_none_or(|section| !section.as_str().contains(FACT)),
+            "another person's turn recalls none of the person's fact"
+        );
+        Ok(())
+    }
+
+    /// With operator memory on, `update` never turns a record of the
+    /// agent's own memory into a person's `operator_said` fact: the call is
+    /// refused and the record stays as it was.
+    #[tokio::test]
+    async fn operator_said_update_is_refused_when_operator_memory_is_on()
+    -> Result<(), Box<dyn Error>> {
+        let (store, dispatcher, _dir) = operator_memory_recorder().await?;
+        let provider: Arc<dyn AgentMemoryProvider> = Arc::new(store.clone());
+        let alice = console_person("alice")?;
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            serde_json::json!({
+                "action": "remember",
+                "title": "Deploy window",
+                "body": "Deploys run on Tuesdays.",
+            }),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let records = identity_records(&provider).await?;
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one record, got {}", records.len()).into());
+        };
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            serde_json::json!({
+                "action": "update",
+                "memory_id": record.memory_id,
+                "title": "Alice prefers Tuesday deploys",
+                "body": "Alice prefers Tuesday deploys.",
+                "epistemic": "operator_said",
+            }),
+            Some(meerkat_core::TurnRequester::direct(alice)),
+        )
+        .await?;
+        assert!(
+            is_error && text.contains("nothing was stored"),
+            "an operator_said update is refused: {text}"
+        );
+        let after = identity_records(&provider).await?;
+        assert_eq!(
+            after
+                .iter()
+                .map(|record| record.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Deploys run on Tuesdays."],
+            "the record stays as it was"
+        );
+        assert!(proposed_operator_scopes(&store).await?.is_empty());
+        Ok(())
+    }
+
+    /// With operator memory off (the default), an `operator_said` fact stays
+    /// the agent's own memory, as before: `remember` and `update` store it
+    /// in the identity scope, tagged, whoever asked, and nothing is
+    /// proposed.
+    #[tokio::test]
+    async fn operator_said_stays_the_agents_own_memory_when_operator_memory_is_off()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let provider: Arc<dyn AgentMemoryProvider> = Arc::new(store.clone());
+        let dispatcher = recorder_dispatcher(Arc::clone(&provider), AgentMemoryConfig::default())
+            .await?
+            .ok_or("recorder registered")?;
+        let alice = console_person("alice")?;
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            operator_said("Prefers terse status notes"),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let records = identity_records(&provider).await?;
+        let [record] = records.as_slice() else {
+            return Err(format!("expected one record, got {}", records.len()).into());
+        };
+        assert!(
+            record.tags.contains(&"epistemic:operator_said".to_string()),
+            "stored in the agent's own memory, tagged: {record:?}"
+        );
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            serde_json::json!({
+                "action": "update",
+                "memory_id": record.memory_id,
+                "title": "Prefers short status notes",
+                "body": "Prefers short status notes.",
+                "epistemic": "operator_said",
+            }),
+            Some(meerkat_core::TurnRequester::direct(alice)),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        assert_eq!(
+            identity_records(&provider)
+                .await?
+                .iter()
+                .map(|record| record.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Prefers short status notes."]
+        );
+        assert!(proposed_operator_scopes(&store).await?.is_empty());
         Ok(())
     }
 

@@ -3067,6 +3067,32 @@ mod tests {
             "serialized metadata cannot install request-only context"
         );
     }
+    /// A turn's request context is a person's own memory or a caller's own
+    /// context: `Debug` never prints its text, so a `{:?}` of it or of a
+    /// carrier (a tracing field, an error message) cannot write it to a log.
+    #[test]
+    fn request_only_context_debug_never_prints_its_text() {
+        let context = TurnRequestContext::new("operator section text").expect("non-empty context");
+        let metadata = RuntimeTurnMetadata {
+            transient_turn_context: Some(context.clone()),
+            request_only_context: vec![context.clone()],
+            ..Default::default()
+        };
+        for rendered in [
+            format!("{context:?}"),
+            format!("{metadata:?}"),
+            format!("{metadata:#?}"),
+        ] {
+            assert!(
+                !rendered.contains("operator section text"),
+                "Debug never prints a request context's text: {rendered}"
+            );
+        }
+        assert!(
+            format!("{context:?}").starts_with("TurnRequestContext("),
+            "Debug still names the value"
+        );
+    }
     /// A batch merge accumulates request-only context as distinct values in
     /// order, and request-only context never keeps an input from joining a
     /// running turn (it writes no row).

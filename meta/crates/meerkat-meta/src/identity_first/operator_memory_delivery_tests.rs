@@ -225,9 +225,14 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
         );
     }
     // Every door is judged, so a leak names each delivery that carries one.
+    // A request context's `Debug` never prints its text, so the request-only
+    // field is read directly.
     let leaking = deliveries
         .iter()
-        .filter(|delivery| format!("{delivery:?}").contains(OPERATOR_FACT))
+        .filter(|delivery| {
+            delivery.request_only_context.is_some()
+                || format!("{delivery:?}").contains(OPERATOR_FACT)
+        })
         .collect::<Vec<_>>();
     assert!(
         leaking.is_empty(),

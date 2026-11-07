@@ -3139,5 +3139,30 @@ mod tests {
             );
             Ok(())
         }
+
+        /// `per_turn_injection = "off"` turns off every per-turn push, the
+        /// person's operator section included: with the operator scope on,
+        /// a person's own turn recalls none of their operator facts.
+        #[tokio::test]
+        async fn per_turn_injection_off_pushes_no_operator_section() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT)]).await?;
+            member.coordinator = RecallCoordinator::new(
+                member.coordinator.provider(),
+                AgentMemoryConfig {
+                    realm: REALM.to_string(),
+                    operator_scope: AgentMemoryOperatorScope::Provisional,
+                    per_turn_injection: AgentMemoryPerTurnInjection::Off,
+                    ..AgentMemoryConfig::default()
+                },
+            );
+            member.rebuild().await?;
+            let turn = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            assert!(
+                !turn.recalls(ALICE_FACT),
+                "per-turn injection is off, so no operator section is pushed: {turn:?}"
+            );
+            Ok(())
+        }
     }
 }

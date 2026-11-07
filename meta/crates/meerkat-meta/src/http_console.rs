@@ -1405,6 +1405,35 @@ mod person_caller_scope_tests {
         assert_eq!(person_caller_scope(&other_domain), None);
         Ok(())
     }
+
+    /// Only a person has a person's caller scope: a principal of any other
+    /// kind in a verified OIDC issuer's trust domain (the domain a person
+    /// is qualified in) names no person and has none.
+    #[test]
+    fn person_caller_scope_is_only_for_humans() -> Result<(), Box<dyn std::error::Error>> {
+        let issuer_domain = || {
+            TrustDomainId::new(format!(
+                "{}https://issuer.example.test",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))
+        };
+        for kind in [
+            PrincipalKind::ServiceAccount,
+            PrincipalKind::PersonalAgent,
+            PrincipalKind::SharedAgent,
+            PrincipalKind::RuntimeHost,
+        ] {
+            let principal = PrincipalRef::in_domain(kind, "person-sub", issuer_domain()?)?;
+            assert_eq!(
+                person_caller_scope(&principal),
+                None,
+                "a {kind:?} principal in an issuer's domain names no person"
+            );
+        }
+        let person = PrincipalRef::in_domain(PrincipalKind::Human, "person-sub", issuer_domain()?)?;
+        assert!(person_caller_scope(&person).is_some(), "the person has one");
+        Ok(())
+    }
 }
 
 /// Storage keys are opaque projections of the authenticated runtime/principal.

@@ -14863,13 +14863,25 @@ impl IdentityRuntime {
         &self,
         name: &AgentIdentity,
     ) -> Result<bool, IdentityRuntimeError> {
+        Ok(self
+            .core_entry_of_name(name)
+            .await?
+            .is_some_and(|entry| entry.is_entry_or_reserved()))
+    }
+
+    /// Core's entry of `name`; `None` without a bridge. A read Core could
+    /// not serve is typed history unavailable, never a guess.
+    async fn core_entry_of_name(
+        &self,
+        name: &AgentIdentity,
+    ) -> Result<Option<super::bridge::CoreIdentityEntry>, IdentityRuntimeError> {
         let Some(bridge) = self.bridge.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         bridge
             .identity_entry(name)
             .await
-            .map(|entry| entry.is_entry_or_reserved())
+            .map(Some)
             .map_err(|error| IdentityRuntimeError::IdentityHistoryUnavailable {
                 identity: name.clone(),
                 detail: format!("reading Core's entry of the name: {error}"),
@@ -14877,23 +14889,29 @@ impl IdentityRuntime {
     }
 
     /// The refusal of a door to `identity`, which this runtime has not
-    /// registered: unknown, unless Core holds the name as an identity entry
+    /// registered. It clears on its own only for an entry a host declared
     /// (an earlier process declared it, and this one's roster pass has not
-    /// run yet), when the refusal clears on its own once the pass registers
-    /// it. A read Core could not serve refuses the same way, retryable.
+    /// run yet): the pass registers it. A read Core could not serve refuses
+    /// the same way, retryable. Any other name is unknown to this runtime,
+    /// for good: no roster pass registers a name Core holds as no entry, an
+    /// identity created at runtime (a created entry, whose record the mob's
+    /// identity store owns; this runtime registers no created identity), or
+    /// a name Core reserves (its entry unreadable, or the identity removed).
     async fn unregistered_identity_refusal(
         &self,
         identity: &AgentIdentity,
     ) -> IdentityRuntimeError {
-        match self.core_holds_identity_entry(identity).await {
-            Ok(false) => IdentityRuntimeError::UnknownIdentity(identity.clone()),
-            Ok(true) => IdentityRuntimeError::IdentityHistoryUnavailable {
-                identity: identity.clone(),
-                detail: "Core holds the identity's entry, and this runtime has not registered \
-                         the identity yet: its roster pass has not run. Nothing was delivered; \
-                         send again once the pass registers it"
-                    .to_string(),
-            },
+        match self.core_entry_of_name(identity).await {
+            Ok(Some(entry)) if entry.is_declared_entry() => {
+                IdentityRuntimeError::IdentityHistoryUnavailable {
+                    identity: identity.clone(),
+                    detail: "Core holds the identity's entry, and this runtime has not \
+                             registered the identity yet: its roster pass has not run. Nothing \
+                             was delivered; send again once the pass registers it"
+                        .to_string(),
+                }
+            }
+            Ok(_) => IdentityRuntimeError::UnknownIdentity(identity.clone()),
             Err(error) => error,
         }
     }

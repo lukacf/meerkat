@@ -166,12 +166,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `null` while Core holds no member of it, where it was the roster's
   `runtime_mode_override`. Ambient memory follows the same mode, where it
   followed the roster's override or profile table.
-- A name Core holds as an identity entry takes its identity's door (a send,
-  a member mutation, a schedule fire) even before this process's roster pass
-  registered the identity: the door refuses it `-32052`
+- A name Core holds as an identity entry, or reserves, takes its identity's
+  door even before this process's roster pass registered the identity: a
+  send, a member mutation and a schedule fire never reach the member door.
+  A send or a fire to an entry a host declared is refused `-32052`
   (`identity_history_unavailable`, retryable) until the pass registers it,
-  and nothing reaches the member door. A read of Core's entry Core could not
-  serve refuses the send the same way.
+  and so is a send whose read of Core's entry Core could not serve; a member
+  mutation of an identity this runtime has not registered is refused
+  `-32001` (unknown identity), as before. An identity created at runtime (a
+  created entry, whose record the mob's identity store owns) and a name Core
+  reserves (its entry unreadable, or the identity removed) are never
+  registered by a roster pass: a send or a fire to one is refused `-32001`
+  (unknown identity), not retryable (see Known limitations).
 - A schedule fire's refusal class reads Core's entry of the identity: a
   member Core holds Broken ends the fire typed, and a read Core could not
   serve leaves it reclaimable.
@@ -291,6 +297,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   roster pass: its outcome is typed and its own, the other identities are
   declared and unlisted as usual, and the next complete roster retires it
   again.
+
+### Known limitations
+
+- Meta does not register identities created at runtime yet (Core's created
+  entries, whose records the mob's identity store owns): no roster pass
+  lists them, so the identity runtime does not serve them. A send by name,
+  a member mutation or a schedule fire to one is refused `-32001` (unknown
+  identity), not retryable, and nothing reaches its member, until Meta's
+  verbs serve created identities.
 
 ## [0.9.10] - 2026-11-04
 

@@ -1003,6 +1003,15 @@ with a structured `kind` for a held wake, and `-32014`
 (`first_boot_row_pending`, retryable) for a reset or delete while the
 identity's first-boot manifest row is pending.
 
+A send or dispatch to a name this runtime has not registered takes the
+identity's door when Core holds the name as an identity entry or reserves
+it, and never reaches the member. An entry a host declared answers `-32052`
+until this process's roster pass registers it. An identity created at
+runtime (Core's created entry, whose record the mob's identity store owns)
+and a name Core reserves (its entry unreadable, or the identity removed)
+answer `-32001`: no roster pass registers them, and Meta does not serve
+created identities yet.
+
 ### Reset and work in flight
 
 A reset is not refused while the member has work in flight, as

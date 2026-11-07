@@ -181,9 +181,9 @@ impl LayeredHooks {
     /// refuses (judged over the bytes the layering read), unless a trusted
     /// user file states the same definition (it is then that file's entry).
     ///
-    /// `untrusted` is asked once per file: once about the user file when it
-    /// was read, and once about the project file when it contributes an
-    /// entry, however many entries each states.
+    /// `untrusted` is asked once about each file the layering read and
+    /// parsed, however many entries it states and whether or not any of them
+    /// survived the layering.
     pub(crate) fn untrusted_entries(
         &self,
         untrusted: impl Fn(crate::HookSource<'_>) -> bool,

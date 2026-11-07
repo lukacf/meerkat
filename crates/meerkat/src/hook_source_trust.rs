@@ -83,10 +83,34 @@ pub enum HookSourceDecision {
 /// The host's trust over the hook sources the factory reads.
 ///
 /// Called once per build for each convention file the factory read and
-/// parsed hooks from, with the digest of exactly those bytes. A file the
-/// factory finds absent states no hooks and is not asked about. Without a
-/// trust installed, every source is trusted (unless the host confinement
-/// says a confined process could change it).
+/// parsed, with the digest of exactly those bytes, whether or not the file
+/// states a hook and whether or not any of its hooks survives the layering
+/// (the build's own config can shadow them all). A file the factory finds
+/// absent, cannot read or cannot parse states no hooks and is not asked
+/// about. Every build asks again, so a session resumed or woken later, a
+/// fork, a helper or a member is judged on the file as that build reads it.
+/// Without a trust installed, every source is trusted (unless the host
+/// confinement says a confined process could change it).
+///
+/// The decision covers those bytes only. It does not cover:
+///
+/// - the program or script a command hook names, which is read when the
+///   hook runs: a trusted `sh .rkat/hooks/check.sh` runs whatever the script
+///   holds then. A host that needs that bounded confines command hooks
+///   ([`crate::AgentFactory::with_command_hook_confinement`]);
+/// - a run's hook overrides ([`crate::AgentBuildConfig::hooks_override`]):
+///   they are the caller's own input, which the trust does not judge, even
+///   when one repeats a convention entry's definition. A run may disable an
+///   untrusted entry and supply its own under the same id;
+/// - the hooks of the config the host passes to the build, which
+///   [`meerkat_core::Config::load`] fills from the project
+///   `.rkat/config.toml` (or else the user's). A host that gates the project
+///   file by its content does not load its config that way.
+///
+/// `decide` runs on the build's own task, inside the async build, so it
+/// must not block, wait for a person or do I/O: decide from a record kept in
+/// memory, such as the digests the host recorded when the content was
+/// approved.
 pub trait HookSourceTrust: Send + Sync {
     /// Whether the hooks of `source` may run.
     fn decide(&self, source: HookSource<'_>) -> HookSourceDecision;

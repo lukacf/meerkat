@@ -732,7 +732,17 @@ administration from out of its confined processes' reach:
   the session), and a refused definition does not fail the rest of the
   session's setup. An untrusted `mcp.toml` that does not parse, or that
   states an invalid access policy, still fails the setup, as a trusted one
-  does.
+  does. An embedding host can also judge the hook files by their content:
+  a `HookSourceTrust` installed with `AgentFactory::with_hook_source_trust`
+  is asked once per build about each convention hook file the build read
+  (the project and user `.rkat/config.toml`), with the SHA-256 of the exact
+  bytes it parsed, so a file rewritten after the host checked it is judged
+  as rewritten, and every hook of a file it refuses is refused the same
+  way. It judges those bytes only: not the program or script a command
+  hook names (read when the hook runs), not a run's hook overrides (the
+  caller's own input), and not the hooks of the config the host passes to
+  the build, which `Config::load` fills from the project `.rkat/config.toml`
+  (or else the user's).
 - Links: an input or a skills directory is judged with the symbolic links in
   it. A start whose realm state or credential store links to a path a
   confined process could change (a target that does not exist yet

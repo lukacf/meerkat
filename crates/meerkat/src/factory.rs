@@ -5309,15 +5309,18 @@ impl AgentFactory {
 
     /// Install the host's trust over the convention hook sources
     /// (`<context_root>/.rkat/config.toml`, `<user_config_root>/.rkat/config.toml`).
-    /// Each build asks it about every such file it read hooks from, with the
-    /// SHA-256 of the exact bytes it parsed ([`crate::HookSource`]), so the
-    /// decision covers the content consumed rather than a check the host made
-    /// before the build: a file changed after the host's check is judged as
-    /// changed. Every hook of an untrusted source keeps its slot and is
-    /// refused at each invocation with
+    /// Each build, of this factory or a clone of it, asks it once about every
+    /// such file it read and parsed, with the SHA-256 of the exact bytes
+    /// ([`crate::HookSource`]), so the decision covers the content consumed
+    /// rather than a check the host made before the build: a file changed
+    /// after the host's check is judged as changed. Every hook of an
+    /// untrusted source keeps its slot and is refused at each invocation with
     /// [`meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource`];
     /// none of them runs. Without one, every source is trusted (unless the
-    /// host confinement says otherwise).
+    /// host confinement says otherwise). The trust judges those files' bytes
+    /// only, not the programs their command hooks name, a run's hook
+    /// overrides or the hooks of the config passed to the build, and it must
+    /// not block: see [`crate::HookSourceTrust`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
         self.hook_source_trust = Some(trust);

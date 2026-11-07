@@ -506,6 +506,23 @@ them.
   its outcome unknown, so a caller classifies it by type. Both enums are
   `#[non_exhaustive]`.
 
+- `meerkat`: `AgentFactory::with_hook_source_trust` installs a
+  `HookSourceTrust`, the host's decision over the convention hook files a
+  build reads (`<context_root>/.rkat/config.toml` and
+  `<user_config_root>/.rkat/config.toml`). The factory asks it once per
+  build about each such file it read and parsed, with the SHA-256 of the
+  exact bytes (`HookSource`, `HookSourceDigest`), so the decision covers
+  the content the build runs, not a check the host made before the build.
+  Every hook of a file it refuses (`HookSourceDecision::Untrusted`) keeps
+  its slot and is refused at each invocation with
+  `untrusted_configuration_source`, whose text now reads "launch
+  configuration comes from a source the host does not trust". The trust
+  judges those files' bytes only: not the programs their command hooks
+  name, a run's hook overrides or the hooks of the config the host passes
+  to the build. Without a trust, nothing changes. `HookSource` and
+  `HookSourceDecision` are `#[non_exhaustive]`; none of this is built for
+  wasm32.
+
 - `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`
   (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the

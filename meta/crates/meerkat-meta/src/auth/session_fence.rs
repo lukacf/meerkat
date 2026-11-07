@@ -823,6 +823,33 @@ mod tests {
         );
     }
 
+    /// A fence an earlier release raised after this one recorded its revoker
+    /// names no revoker: the record keeps the fence its revoker set, and the
+    /// earlier release moved the fence past it, keeping the revoker as a
+    /// field it does not know.
+    #[test]
+    fn a_fence_an_earlier_release_raised_names_no_stale_revoker() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(CONSOLE_SESSION_FENCES_FILE);
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"format\":\"{RECORD_FORMAT}\",\"version\":1,\
+                 \"fences\":{{\"alice@example.test\":{{\"not_before_epoch_seconds\":2000000100,\
+                 \"revoked_by\":\"root@example.test\",\"revoked_by_not_before\":2000000000}}}}}}"
+            ),
+        )
+        .expect("write record");
+        let fences = ConsoleSessionFences::open(&path).expect("open");
+        let fence = fences
+            .fences()
+            .into_iter()
+            .next()
+            .expect("the fence is read");
+        assert_eq!(fence.not_before_epoch_seconds, 2_000_000_100);
+        assert_eq!(fence.revoked_by, None, "{fence:?}");
+    }
+
     #[test]
     fn a_record_without_a_file_refuses_to_revoke() {
         let fences = ConsoleSessionFences::detached();

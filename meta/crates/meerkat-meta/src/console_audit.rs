@@ -790,4 +790,322 @@ mod tests {
             json!({ "expected_revision": 5, "name": "ops" })
         );
     }
+
+    /// A row keeps a bounded part of whatever a caller sends: at most 16
+    /// `id` fields, no key longer than 64 bytes and no value longer than 256
+    /// bytes, in a row of at most 4 KiB, and it says when it left anything
+    /// out.
+    #[tokio::test]
+    async fn a_row_keeps_a_bounded_target_and_says_it_was_cut() {
+        let mut params = Map::new();
+        for n in 0..5_000 {
+            params.insert(format!("note{n}_id"), json!("x".repeat(1_000)));
+        }
+        params.insert(format!("{}_id", "k".repeat(65_536)), json!("free text"));
+        let store = Arc::new(InMemoryMetadataStore::new());
+        let log = audit_log(&store, ConsoleAuditLimits::default());
+        let row = log
+            .append(
+                ConsoleAuditEntry::answered(
+                    entry("meta/reset").actor,
+                    "meta/reset".to_string(),
+                    audit_target(&Value::Object(params)),
+                    &json!({ "result": { "accepted": true } }),
+                ),
+                now_ms(),
+            )
+            .await
+            .expect("append");
+        let encoded = serde_json::to_string(&row).expect("encode");
+        assert!(
+            encoded.len() <= 4096,
+            "the row takes {} bytes",
+            encoded.len()
+        );
+        let target = row.fields["target"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            target.keys().filter(|key| key.ends_with("_id")).count() <= 16,
+            "the row keeps {} fields",
+            target.len()
+        );
+        assert!(target.keys().all(|key| key.len() <= 64));
+        assert!(
+            target
+                .values()
+                .all(|value| value.as_str().is_none_or(|text| text.len() <= 256))
+        );
+        assert_eq!(row.fields["truncated"], json!(true));
+    }
+
+    fn listing_log(
+        store: &Arc<test_support::ListingStore>,
+        limits: ConsoleAuditLimits,
+    ) -> ConsoleAuditLog {
+        ConsoleAuditLog::over(
+            Arc::clone(store) as Arc<dyn PersistentMetadataStore>,
+            limits,
+        )
+        .expect("the store keeps realm documents")
+    }
+
+    /// The age bound keeps pruning on a store that still lists the pages it
+    /// removed, as a host store realm does in the process that removed them.
+    #[tokio::test]
+    async fn the_age_bound_holds_on_a_store_that_lists_removed_pages() {
+        let store = Arc::new(test_support::ListingStore::default());
+        let log = listing_log(
+            &store,
+            ConsoleAuditLimits::new(20_000, Duration::from_hours(24)),
+        );
+        let now = 100 * DAY_MS;
+        append_rows(&log, ROWS_PER_PAGE, now - 10 * DAY_MS).await;
+        // Closing the second page prunes the first.
+        append_rows(&log, ROWS_PER_PAGE, now - 5 * DAY_MS).await;
+        // Closing the third page prunes the second, past the first's key.
+        append_rows(&log, ROWS_PER_PAGE, now - 2 * DAY_MS).await;
+
+        let page = log.page(None, 500).await.expect("read");
+        assert_eq!(page.oldest_available_seq, Some(2 * ROWS_PER_PAGE + 1));
+        assert_eq!(page.latest_seq, 3 * ROWS_PER_PAGE);
+    }
+
+    /// The count bound removes each page once, on a store that still lists
+    /// the pages it removed.
+    #[tokio::test]
+    async fn a_count_prune_removes_each_page_once() {
+        let store = Arc::new(test_support::ListingStore::default());
+        let log = listing_log(
+            &store,
+            ConsoleAuditLimits::new(ROWS_PER_PAGE, Duration::from_hours(365 * 24)),
+        );
+        append_rows(&log, 6 * ROWS_PER_PAGE, now_ms()).await;
+
+        let removals = store.removals();
+        assert_eq!(
+            removals,
+            (0..5)
+                .map(|page| (page_key(page), 1))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            "pages 0 to 4 are removed, each once"
+        );
+        let page = log.page(None, 500).await.expect("read");
+        assert_eq!(page.oldest_available_seq, Some(5 * ROWS_PER_PAGE + 1));
+    }
+}
+
+/// Test support: a metadata store that keeps realm documents and lists every
+/// key it ever wrote, removed ones included, as a host store realm does in
+/// the process that removed them. It counts the removals of each key, and
+/// can hold every realm document write for a while.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Mutex, PoisonError};
+    use std::time::Duration;
+
+    use crate::runtime::{MetadataStoreError, PersistentMetadataStore, RecordRetention};
+
+    #[derive(Default)]
+    pub(crate) struct ListingStore {
+        documents: Mutex<BTreeMap<String, String>>,
+        listed: Mutex<BTreeSet<String>>,
+        removals: Mutex<BTreeMap<String, usize>>,
+        write_delay: Option<Duration>,
+    }
+
+    impl ListingStore {
+        /// A store whose every realm document write takes `delay`.
+        pub(crate) fn holding_writes_for(delay: Duration) -> Self {
+            Self {
+                write_delay: Some(delay),
+                ..Self::default()
+            }
+        }
+
+        /// How often each key was removed.
+        pub(crate) fn removals(&self) -> BTreeMap<String, usize> {
+            self.removals
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PersistentMetadataStore for ListingStore {
+        async fn get_subscription_cursor(
+            &self,
+            _mob_id: &str,
+        ) -> Result<Option<u64>, MetadataStoreError> {
+            Ok(None)
+        }
+        async fn set_subscription_cursor(
+            &self,
+            _mob_id: &str,
+            _cursor: u64,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn load_member_idle_retire_overrides(
+            &self,
+        ) -> Result<Vec<crate::MemberIdleRetireOverrideRecord>, MetadataStoreError> {
+            Ok(Vec::new())
+        }
+        async fn set_member_idle_retire_override(
+            &self,
+            _record: &crate::MemberIdleRetireOverrideRecord,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn identity_tool_record(
+            &self,
+            _mob_id: &str,
+            _identity: &str,
+        ) -> Result<Option<crate::IdentityToolRecord>, MetadataStoreError> {
+            Ok(None)
+        }
+        async fn set_identity_tool_record(
+            &self,
+            _record: &crate::IdentityToolRecord,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn load_identity_rotation_intents(
+            &self,
+            _mob_id: &str,
+        ) -> Result<Vec<crate::IdentityRotationIntent>, MetadataStoreError> {
+            Ok(Vec::new())
+        }
+        async fn set_identity_rotation_intent(
+            &self,
+            _intent: &crate::IdentityRotationIntent,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn clear_identity_rotation_intent(
+            &self,
+            _mob_id: &str,
+            _identity: &str,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn lifecycle_projection_cursor(
+            &self,
+            _mob_id: &str,
+        ) -> Result<Option<crate::LifecycleProjectionCursor>, MetadataStoreError> {
+            Ok(None)
+        }
+        async fn set_lifecycle_projection_cursor(
+            &self,
+            _cursor: &crate::LifecycleProjectionCursor,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn lifecycle_effect_intent(
+            &self,
+            _mob_id: &str,
+            _key: &crate::LifecycleIntentKey,
+        ) -> Result<Option<crate::LifecycleEffectIntent>, MetadataStoreError> {
+            Ok(None)
+        }
+        async fn set_lifecycle_effect_intent(
+            &self,
+            _intent: &crate::LifecycleEffectIntent,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn clear_lifecycle_effect_intent(
+            &self,
+            _mob_id: &str,
+            _key: &crate::LifecycleIntentKey,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn lifecycle_effect_intents(
+            &self,
+            _mob_id: &str,
+        ) -> Result<Vec<crate::LifecycleEffectIntent>, MetadataStoreError> {
+            Ok(Vec::new())
+        }
+        async fn record_lifecycle_effect_failure(
+            &self,
+            _failure: &crate::LifecycleEffectFailure,
+        ) -> Result<(), MetadataStoreError> {
+            Ok(())
+        }
+        async fn lifecycle_effect_failures(
+            &self,
+            _mob_id: &str,
+            _skip: usize,
+            _limit: usize,
+        ) -> Result<Vec<crate::LifecycleEffectFailure>, MetadataStoreError> {
+            Ok(Vec::new())
+        }
+        async fn prune_lifecycle_effect_failures(
+            &self,
+            _mob_id: &str,
+            _keep: usize,
+        ) -> Result<usize, MetadataStoreError> {
+            Ok(0)
+        }
+        fn realm_document_retention(&self) -> Option<RecordRetention> {
+            Some(RecordRetention::Durable)
+        }
+        async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+            Ok(self
+                .documents
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(key)
+                .cloned())
+        }
+        async fn set_realm_document(
+            &self,
+            key: &str,
+            document: Option<&str>,
+        ) -> Result<(), MetadataStoreError> {
+            if let Some(delay) = self.write_delay {
+                tokio::time::sleep(delay).await;
+            }
+            let mut documents = self
+                .documents
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match document {
+                Some(document) => {
+                    documents.insert(key.to_string(), document.to_string());
+                    self.listed
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(key.to_string());
+                }
+                None => {
+                    documents.remove(key);
+                    *self
+                        .removals
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .entry(key.to_string())
+                        .or_default() += 1;
+                }
+            }
+            Ok(())
+        }
+        async fn realm_document_keys(
+            &self,
+            prefix: &str,
+        ) -> Result<Vec<String>, MetadataStoreError> {
+            Ok(self
+                .listed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+    }
 }

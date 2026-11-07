@@ -1514,6 +1514,31 @@ mod tests {
         }
     }
 
+    /// While access is not enforced nobody is an access admin for the
+    /// creator label: an admin the policy lists sees no other person's
+    /// creator.
+    #[test]
+    fn a_listed_admin_sees_no_creator_while_access_is_not_enforced() {
+        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: false,
+            admins: vec!["root@example.test".to_string()],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("controller");
+        let admin = controller.view_for_subject(Some("root@example.test"));
+        let mut answer = serde_json::json!({
+            "labels": { "side_chat_of": "alpha", "side_chat_creator": "bob@example.test" }
+        });
+        clear_unseen_side_chat_creators(
+            &mut answer,
+            SideChatCreatorViewer::new(Some("root@example.test"), Some(&admin)),
+        );
+        assert_eq!(
+            answer,
+            serde_json::json!({ "labels": { "side_chat_of": "alpha" } })
+        );
+    }
+
     #[test]
     fn a_side_chat_counts_only_where_the_roster_agrees() {
         let source = fork_source("alice");

@@ -1657,6 +1657,62 @@ async fn realm_documents_survive_a_failover() {
     );
 }
 
+/// The console audit log's age bound holds on a host store realm as it does
+/// in memory: three full pages, each written a while after the last, under
+/// an age bound shorter than the gap, keep only the third. The realm still
+/// lists the first page's key after the first prune removed it.
+#[tokio::test]
+async fn host_store_audit_log_keeps_its_age_bound() {
+    async fn oldest_after_three_pages(store: Arc<dyn PersistentMetadataStore>) -> Option<u64> {
+        let log = crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::new(20_000, Duration::from_millis(40)),
+        )
+        .expect("the store keeps realm documents");
+        for _page in 0..3 {
+            for _row in 0..64 {
+                let entry = crate::console_audit::ConsoleAuditEntry::answered(
+                    crate::console_audit::ConsoleAuditActor {
+                        kind: "person",
+                        principal: Some("alice@example.test".to_string()),
+                        issuer: None,
+                        subject: None,
+                        assurance: None,
+                        login_scope_digest: None,
+                    },
+                    "meta/mob_labels/set".to_string(),
+                    crate::console_audit::audit_target(&serde_json::json!({})),
+                    &serde_json::json!({ "result": { "accepted": true } }),
+                );
+                log.record(entry).await.expect("a row is written");
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+        log.page(None, 500)
+            .await
+            .expect("read")
+            .oldest_available_seq
+    }
+
+    let in_memory =
+        oldest_after_three_pages(Arc::new(crate::runtime::InMemoryMetadataStore::new())).await;
+    let fixture = Fixture::new();
+    let provider = fixture.open(&fixture.process()).await.expect("open");
+    let host_store = oldest_after_three_pages(Arc::new(SpiMetadataStore::new(
+        provider.realm.documents().clone(),
+    )))
+    .await;
+    assert_eq!(
+        in_memory,
+        Some(129),
+        "the in-memory store prunes pages 0 and 1"
+    );
+    assert_eq!(
+        host_store, in_memory,
+        "the host store realm prunes as the in-memory store does"
+    );
+}
+
 /// The host's fence timing shows in the storage census, and a restart waits
 /// at most its lease.
 #[tokio::test]

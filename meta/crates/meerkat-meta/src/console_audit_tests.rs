@@ -446,3 +446,613 @@ model = "gpt-5.5"
     let _ = in_memory.shutdown().await;
     Ok(())
 }
+
+const ROOT: &str = "root@example.test";
+
+/// A token for `email`, a person of the console test issuer.
+fn person(email: &str) -> String {
+    token(
+        json!({ "sub": format!("sub-{email}"), "email": email, "provider": "google_oauth" }),
+        Some(now_seconds() + 3600),
+    )
+}
+
+/// Every row `runtime`'s console audit log keeps, oldest first.
+async fn stored_rows(
+    runtime: &UnifiedRuntime,
+) -> Result<Vec<crate::console_audit::ConsoleAuditRow>, Box<dyn std::error::Error + Send + Sync>> {
+    let log = runtime
+        .console_audit_log()
+        .ok_or("the runtime keeps a console audit log")?;
+    Ok(log.page(None, 500).await?.records)
+}
+
+/// A row as stored is bounded: at most 4 KiB encoded, at most 16 `id`
+/// fields in its target, and marked as cut.
+fn assert_bounded_cut_row(row: &crate::console_audit::ConsoleAuditRow) {
+    let encoded = serde_json::to_string(row).expect("encode the row");
+    assert!(
+        encoded.len() <= 4096,
+        "the row takes {} bytes",
+        encoded.len()
+    );
+    let target = row
+        .fields
+        .get("target")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        target.keys().filter(|key| key.ends_with("_id")).count() <= 16,
+        "the row keeps {} target fields",
+        target.len()
+    );
+    assert_eq!(row.fields.get("truncated"), Some(&json!(true)));
+}
+
+/// A change a caller fills with invented identifiers, in a body near the
+/// console's 2 MB JSON limit, writes one bounded row that says it left
+/// things out, so the page that holds it stays small.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_two_megabyte_change_writes_a_bounded_row() -> TestResult {
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-two-mb", None).await?;
+    let router = console_router(&runtime);
+    let mut params = serde_json::Map::new();
+    for n in 0..6_000 {
+        params.insert(format!("note{n}_id"), json!("x".repeat(300)));
+    }
+    let params = Value::Object(params);
+    let size = params.to_string().len();
+    assert!((1_500_000..2_000_000).contains(&size), "{size} bytes");
+    let _answer = console_rpc_as(&router, Some(&bob()), "meta/reset", params).await;
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(rows.len(), 1, "one row");
+    assert_bounded_cut_row(&rows[0]);
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A multipart change whose payload part carries one identifier key of
+/// 100 MiB, near the route's 101 MiB body limit, writes one bounded row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_huge_multipart_change_writes_a_bounded_row() -> TestResult {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-huge-multipart", None).await?;
+    let router = console_router(&runtime);
+    let mut params = serde_json::Map::new();
+    params.insert(format!("{}_id", "k".repeat(100 * 1024 * 1024)), json!("x"));
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": "huge",
+        "method": "meta/blob/upload",
+        "params": Value::Object(params),
+    })
+    .to_string();
+    let boundary = "console-audit-huge";
+    let mut body = Vec::with_capacity(payload.len() + 512);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"payload\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(payload.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    drop(payload);
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/rpc/multipart")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .header(header::AUTHORIZATION, format!("Bearer {}", bob()))
+                .body(axum::body::Body::from(body))?,
+        )
+        .await?;
+    let _ = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(rows.len(), 1, "one row");
+    assert_bounded_cut_row(&rows[0]);
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A memory provider whose remember commits, then waits until the test
+/// releases it.
+#[derive(Default)]
+struct HeldProvider {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl crate::identity_first::AgentMemoryProvider for HeldProvider {
+    async fn recall(
+        &self,
+        _request: crate::identity_first::AgentMemoryRecallRequest,
+    ) -> Result<
+        Vec<crate::identity_first::AgentMemoryRecord>,
+        crate::identity_first::AgentMemoryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    fn supports_remember(&self) -> bool {
+        true
+    }
+
+    async fn remember(
+        &self,
+        _realm: &str,
+        _identity: &crate::identity_first::AgentIdentity,
+        memory: crate::identity_first::NewAgentMemory,
+    ) -> Result<crate::identity_first::AgentMemoryRecord, crate::identity_first::AgentMemoryError>
+    {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(crate::identity_first::AgentMemoryRecord {
+            memory_id: "mem-held".to_string(),
+            title: memory.title,
+            body: memory.body,
+            tags: memory.tags,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        })
+    }
+}
+
+/// A change whose caller goes away still ends with its row: the change and
+/// its row run on the server, so a remember the caller abandoned is recorded
+/// with the outcome it reached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_whose_caller_went_away_writes_its_row() -> TestResult {
+    use crate::identity_first::{
+        AgentAddressability, AgentIdentity, AgentMemoryConfig, AgentMemoryRuntimeInjector,
+        DurabilityPolicy, DurableAgentSpec, IdentityRuntime, IdentityRuntimeConfig,
+        LocalContinuityStore, LocalLeaseProvider,
+    };
+    let (_temp_dir, runtime) =
+        super::tests::build_empty_console_test_runtime("console-audit-went-away").await?;
+    let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+        continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+        lease_provider: Arc::new(LocalLeaseProvider::new()),
+        runtime_instance_id: "console-audit-went-away".to_string(),
+        has_runtime_store: true,
+        durability_policy: DurabilityPolicy::SyncWriteThrough,
+        bridge: None,
+        default_timeout: None,
+    }));
+    identity_runtime
+        .register(DurableAgentSpec {
+            identity: AgentIdentity::parse("identity:went-away")?,
+            profile: ProfileName::from("default"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        })
+        .await;
+    let provider = Arc::new(HeldProvider::default());
+    identity_runtime
+        .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
+            provider.clone(),
+            AgentMemoryConfig::default(),
+        )))
+        .await;
+    let store: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    let log = Arc::new(
+        crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .ok_or("the store keeps realm documents")?,
+    );
+    let router = console_json_router_with_state(ConsoleJsonState {
+        runtime: Some(runtime.clone()),
+        identity_runtime: Some(crate::identity_first::PublicIdentityRuntime::new(
+            Arc::clone(&identity_runtime),
+            runtime.clone(),
+        )),
+        console_audit: Some(Arc::clone(&log)),
+        ..state()
+    });
+    let caller = bob();
+    let request = tokio::spawn({
+        let router = router.clone();
+        async move {
+            console_rpc_as(
+                &router,
+                Some(&caller),
+                "meta/agent_memory/remember",
+                json!({ "identity": "identity:went-away", "title": "Held", "body": "held" }),
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        provider.entered.notified(),
+    )
+    .await
+    .map_err(|_| "the remember reached the provider")?;
+    // The caller goes away while the change is under way, then the change
+    // ends.
+    request.abort();
+    let _ = request.await;
+    provider.release.notify_one();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let row = loop {
+        if let Some(row) = log.page(None, 10).await?.records.into_iter().next() {
+            break row;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no row was written for the abandoned change"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(row.fields["method"], json!("meta/agent_memory/remember"));
+    assert_eq!(row.fields["outcome"], json!("committed"), "{row:?}");
+    let _ = runtime.handle().stop().await;
+    Ok(())
+}
+
+/// A row names a person's login in the decision records' form (design
+/// answer A5): `sha256:` and the hex SHA-256 of the token's signed `sid`,
+/// else of the token's unpadded base64url digest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn audit_login_digest_is_the_decision_records_form() -> TestResult {
+    use base64::Engine as _;
+    use sha2::{Digest as _, Sha256};
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-digest", None).await?;
+    let router = console_router(&runtime);
+    let mut claims = human_claims();
+    claims["sid"] = json!("login-42");
+    let with_sid = token(claims, Some(now_seconds() + 3600));
+    let without_sid = bob();
+    for caller in [&with_sid, &without_sid] {
+        let _answer = console_rpc_as(
+            &router,
+            Some(caller),
+            "meta/mob_labels/set",
+            json!({ "labels": { "team": "ops" } }),
+        )
+        .await;
+    }
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        rows[0].fields["actor"]["login_scope_digest"],
+        json!(format!("sha256:{:x}", Sha256::digest(b"login-42")))
+    );
+    let token_digest = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(without_sid.as_bytes()));
+    assert_eq!(
+        rows[1].fields["actor"]["login_scope_digest"],
+        json!(format!(
+            "sha256:{:x}",
+            Sha256::digest(token_digest.as_bytes())
+        ))
+    );
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A log that would keep no row is refused when the runtime is built: its
+/// count limit is at least 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zero_count_limit_is_refused_at_load() -> TestResult {
+    let built = Box::pin(
+        UnifiedRuntimeBuilder::default()
+            .definition(meerkat_mob::MobDefinition::from_toml(
+                r#"
+[mob]
+id = "console-audit-zero"
+[profiles.worker]
+model = "gpt-5.5"
+"#,
+            )?)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .console_audit_limits(crate::ConsoleAuditLimits::new(
+                0,
+                std::time::Duration::from_hours(24),
+            ))
+            .build(),
+    )
+    .await;
+    let refused = match built {
+        Ok(runtime) => {
+            let _ = runtime.shutdown().await;
+            None
+        }
+        Err(error) => Some(error.to_string()),
+    };
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("console audit")),
+        "a count limit of 0 is refused: {refused:?}"
+    );
+    Ok(())
+}
+
+/// The audit read names a side chat's creator (the actor of its
+/// `meta/fork_member` row) only to that person and to admins of an enforced
+/// policy; every other reader, a listed admin of a policy not enforced
+/// included, reads the row without the actor's identity. Other rows keep
+/// their actors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_audit_read_names_a_side_chat_creator_only_to_that_person_and_enforced_admins()
+-> TestResult {
+    let store: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    let log = Arc::new(
+        crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .ok_or("the store keeps realm documents")?,
+    );
+    let actor = crate::console_audit::ConsoleAuditActor {
+        kind: "person",
+        principal: Some(BOB.to_string()),
+        issuer: Some("https://trusted.meta.localhost".to_string()),
+        subject: Some("oidc-sub-7".to_string()),
+        assurance: None,
+        login_scope_digest: Some("sha256:00".to_string()),
+    };
+    for (method, params) in [
+        (
+            "meta/fork_member",
+            json!({ "source_member_id": "alpha", "agent_identity": "alpha-side" }),
+        ),
+        ("meta/mob_labels/set", json!({})),
+    ] {
+        log.record(crate::console_audit::ConsoleAuditEntry::answered(
+            actor.clone(),
+            method.to_string(),
+            crate::console_audit::audit_target(&params),
+            &json!({ "result": {} }),
+        ))
+        .await
+        .ok_or("a row is written")?;
+    }
+    let router_with =
+        |enabled: bool| -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+            let access = AccessController::new(crate::access::AccessControlConfig {
+                enabled,
+                admins: vec![ROOT.to_string(), BOB.to_string()],
+                ..crate::access::AccessControlConfig::default()
+            })
+            .map_err(|error| format!("{error:?}"))?;
+            let mut console = state();
+            console
+                .decisions
+                .auth
+                .email_allowlist
+                .push(ROOT.to_string());
+            Ok(console_json_router_with_state(ConsoleJsonState {
+                access: Some(access),
+                console_audit: Some(Arc::clone(&log)),
+                ..console
+            }))
+        };
+    let read = |router: axum::Router, caller: String| async move {
+        let answer = console_rpc_as(&router, Some(&caller), AUDIT, json!({})).await;
+        answer["result"]["records"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| panic!("the audit log answers: {answer:#}"))
+    };
+
+    let not_enforced = router_with(false)?;
+    let own = read(not_enforced.clone(), bob()).await;
+    assert_eq!(
+        own[0]["actor"]["principal"],
+        json!(BOB),
+        "the creator reads itself"
+    );
+    for caller in [person(ROOT), robot()] {
+        let rows = read(not_enforced.clone(), caller).await;
+        let fork_actor = &rows[0]["actor"];
+        for field in ["principal", "issuer", "subject", "login_scope_digest"] {
+            assert!(fork_actor.get(field).is_none(), "{field}: {fork_actor:#}");
+        }
+        assert_eq!(
+            rows[1]["actor"]["principal"],
+            json!(BOB),
+            "other rows keep their actors"
+        );
+    }
+    let enforced = router_with(true)?;
+    let admin = read(enforced, person(ROOT)).await;
+    assert_eq!(
+        admin[0]["actor"]["principal"],
+        json!(BOB),
+        "an enforced admin reads it"
+    );
+    Ok(())
+}
+
+/// The console's capabilities list the audit read where the console keeps a
+/// log and the caller may read it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_console_capabilities_list_the_audit_read() -> TestResult {
+    let methods = |answer: &Value| -> Vec<Value> {
+        answer["result"]["methods"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let open = audited_runtime(state_dir.path(), "console-audit-capabilities", None).await?;
+    let router = console_router(&open);
+    let listed = console_rpc_as(&router, Some(&bob()), "meta/capabilities", json!({})).await;
+    assert!(methods(&listed).contains(&json!(AUDIT)), "{listed:#}");
+    let _ = open.shutdown().await;
+
+    let access = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec![BOB.to_string()],
+        ..crate::access::AccessControlConfig::default()
+    })
+    .map_err(|error| format!("{error:?}"))?;
+    let enforced_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let enforced = audited_runtime(
+        enforced_dir.path(),
+        "console-audit-capabilities-enforced",
+        Some(access),
+    )
+    .await?;
+    let router = console_router(&enforced);
+    let admin = console_rpc_as(&router, Some(&bob()), "meta/capabilities", json!({})).await;
+    assert!(methods(&admin).contains(&json!(AUDIT)), "{admin:#}");
+    let other = console_rpc_as(&router, Some(&robot()), "meta/capabilities", json!({})).await;
+    assert!(
+        !methods(&other).contains(&json!(AUDIT)),
+        "a caller without audit.view is not offered the read: {other:#}"
+    );
+    let _ = enforced.shutdown().await;
+    Ok(())
+}
+
+/// Every MCP app tool call writes a row, whatever its tool does: the console
+/// cannot tell whether a tool changes anything. A call the console refuses
+/// is recorded as refused, with its HTTP status and kind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mcp_app_tool_call_writes_an_audit_row() -> TestResult {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-call-tool", None).await?;
+    let router = console_router(&runtime);
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/console/mcp-apps/call-tool")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {}", bob()))
+                .body(axum::body::Body::from(
+                    json!({
+                        "identity": "worker-1",
+                        "sessionId": meerkat_core::types::SessionId::new().to_string(),
+                        "toolCallId": "call-1",
+                        "name": "file_ticket",
+                        "arguments": {},
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    let status = response.status();
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(rows.len(), 1, "the call writes one row ({status})");
+    let row = &rows[0].fields;
+    assert_eq!(row["method"], json!("/console/mcp-apps/call-tool"));
+    assert_eq!(row["target"]["tool"], json!("file_ticket"));
+    assert_eq!(row["target"]["identity"], json!("worker-1"));
+    assert_eq!(row["outcome"], json!("refused"));
+    assert_eq!(row["code"], json!(status.as_u16()));
+    assert_eq!(row["kind"], json!("mcp_app_unavailable"));
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A Flow Editor change (here a validation through `rkat`) writes a row
+/// naming the flow; a validation that runs nothing on the host and a read
+/// write none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flow_editor_change_writes_an_audit_row() -> TestResult {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-flow-editor", None).await?;
+    let router = runtime.build_reference_app_router(state().decisions);
+    for (method, params) in [
+        (
+            "meta/mobpacks/validate",
+            json!({ "id": "flow-1", "rkat_validate": true }),
+        ),
+        ("meta/mobpacks/validate", json!({ "id": "flow-1" })),
+        ("meta/mobpacks/list", json!({})),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/flow-editor/rpc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", bob()))
+                    .body(axum::body::Body::from(
+                        json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
+                            .to_string(),
+                    ))?,
+            )
+            .await?;
+        let _ = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+    }
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].fields["method"], json!("meta/mobpacks/validate"));
+    assert_eq!(rows[0].fields["target"]["id"], json!("flow-1"));
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A slow audit store does not hold a change's answer: the console waits
+/// for the row a bounded time, then answers and lets the row land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_audit_store_holds_an_answer_at_most_its_wait() -> TestResult {
+    let store = Arc::new(
+        crate::console_audit::test_support::ListingStore::holding_writes_for(
+            std::time::Duration::from_secs(8),
+        ),
+    );
+    let log = Arc::new(
+        crate::console_audit::ConsoleAuditLog::over(
+            store as Arc<dyn crate::runtime::PersistentMetadataStore>,
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .ok_or("the store keeps realm documents")?,
+    );
+    let router = console_json_router_with_state(ConsoleJsonState {
+        console_audit: Some(Arc::clone(&log)),
+        ..state()
+    });
+    let started = std::time::Instant::now();
+    let _answer = console_rpc_as(
+        &router,
+        Some(&bob()),
+        "meta/reset",
+        json!({ "identity": "nobody" }),
+    )
+    .await;
+    let waited = started.elapsed();
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "the answer waited {waited:?} for its row"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if !log.page(None, 10).await?.records.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the row lands");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Ok(())
+}

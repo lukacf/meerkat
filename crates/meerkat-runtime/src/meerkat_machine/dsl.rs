@@ -3705,7 +3705,7 @@ pub enum InputAbandonReason {
     /// proved had started; the input is settled instead of replayed.
     ToolProcessInterrupted,
     /// A graceful stop kept the input queued for the next start, and the next
-    /// start found it older than that stop's max age.
+    /// start came more than that stop's max age after the stop.
     RequeueExpired,
     /// The input's resume was refused: its run was left open by a restart and
     /// the host's resumed-run admission refused it, or the input was kept

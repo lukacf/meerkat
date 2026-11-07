@@ -3397,9 +3397,10 @@ A turn that has ended but whose receipt Meerkat has not finalized yet stays
 end a durable member's turn: Meerkat keeps it for the member's next start,
 and its batch is read there. A kept turn that completes there is `handled`,
 and nothing of it is redelivered. If the member's next start comes after the
-stop's requeue max age (15 minutes from the input's admission), the turn
-ends `unhandled` with the cause `requeue_expired`. A kept turn that is
-settled instead of resumed ends `unhandled` with the cause `resume_refused`.
+stop's requeue max age (15 minutes from the stop, however long before it the
+input was admitted), the turn ends `unhandled` with the cause
+`requeue_expired`. A kept turn that is settled instead of resumed ends
+`unhandled` with the cause `resume_refused`.
 
 A policy decides what happens to the items of an `unhandled` turn. For a
 source item, the policy is its source's `delivery.on_unhandled`. For a

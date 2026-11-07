@@ -68,7 +68,8 @@ pub mod agent;
 pub mod llm_client;
 pub mod tool_surface;
 pub use administration_entry::{
-    AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration,
+    AdministeredChange, AdministeringPrincipal, AdministrationEntry, AdministrationEntryRefusal,
+    AdministrationOutcome, AdministrationRecord, AdministrationRecorder, EnteredAdministration,
 };
 pub use llm_client::{
     ControllerCredentialRequirement, ControllerFactsUnavailable, ControllerModelClient,

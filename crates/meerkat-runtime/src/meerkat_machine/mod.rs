@@ -1515,8 +1515,8 @@ pub enum RuntimeSessionUnregisterAdmission {
 /// unregister always has. [`Self::Requeue`] keeps each eligible queued input
 /// (a durable prompt in the Queue lane that is neither directed nor bound to
 /// an objective) durably queued instead, marked for the runtime's next start,
-/// which runs it unless it is older than `max_age` by then. Its waiter is
-/// answered
+/// which runs it unless more than `max_age` has passed since the stop by
+/// then. Its waiter is answered
 /// [`CompletionWaitError::RequeuedAcrossStop`](crate::completion::CompletionWaitError::RequeuedAcrossStop).
 /// [`Self::Keep`] keeps every non-terminal input the registration recovered
 /// from the store exactly as the store holds it, for the next registration
@@ -1533,8 +1533,11 @@ pub enum UnregisterQueuedInputs {
     Stop,
     /// Keep eligible queued inputs durably queued for the next start.
     Requeue {
-        /// The age, measured from admission, past which the next start ends
-        /// a kept input as expired instead of running it.
+        /// How long after the stop a kept input still runs: the next start
+        /// ends an input the stop kept as expired instead of running it once
+        /// more than this has passed since the stop. The age counts from the
+        /// stop that kept the input, not from its admission, so it bounds the
+        /// outage, however long before the stop the input was admitted.
         max_age: std::time::Duration,
     },
     /// Keep every input the registration recovered from the store, exactly
@@ -4255,24 +4258,24 @@ impl PendingRuntimeExecutorAttachment {
     }
 
     /// End, before this attachment can serve, every input an earlier
-    /// graceful stop kept queued that is now older than that stop's max age
-    /// (`crate::input_state::stop_requeue_expired` at `now`). Each is
-    /// abandoned through the machine's `AbandonInput` with the typed
-    /// [`crate::input_state::InputAbandonReason::RequeueExpired`], durably
-    /// committed with its payload retired, so it never runs. The retained
-    /// mutation guard and the pending (non-serving) slot keep the input set
-    /// complete. Every attachment passes here before its serving gate, so no
-    /// path serves a kept input that has not been checked. Returns the
-    /// expired inputs.
+    /// graceful stop kept queued for which more than that stop's max age has
+    /// passed since the stop (`crate::input_state::stop_requeue_expired` at
+    /// `now`). Each is abandoned through the machine's `AbandonInput` with
+    /// the typed [`crate::input_state::InputAbandonReason::RequeueExpired`],
+    /// durably committed with its payload retired, so it never runs. The
+    /// retained mutation guard and the pending (non-serving) slot keep the
+    /// input set complete. Every attachment passes here before its serving
+    /// gate, so no path serves a kept input that has not been checked.
+    /// Returns the expired inputs.
     ///
     /// A run the same stop kept open (marked resumable again by this
     /// registration, its inputs still bound to it) is checked first, as a
-    /// whole: when any of its inputs is over the stop's max age, the run is
-    /// settled with the same reason (`DriverEntry::settle_resumable_run`)
-    /// instead of resumed, or as cancelled when its stop was asked since
-    /// this registration marked it, as every settlement of a stopped run
-    /// is. Its inputs are Staged or Applied, never queued, so the per-input
-    /// sweep would not see them.
+    /// whole: when the stop's max age has passed for any of its inputs, the
+    /// run is settled with the same reason
+    /// (`DriverEntry::settle_resumable_run`) instead of resumed, or as
+    /// cancelled when its stop was asked since this registration marked it,
+    /// as every settlement of a stopped run is. Its inputs are Staged or
+    /// Applied, never queued, so the per-input sweep would not see them.
     pub(crate) async fn settle_expired_stop_requeued_inputs(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,

@@ -437,8 +437,7 @@ fn make_prompt(text: &str) -> Input {
     make_prompt_admitted_at(text, Utc::now())
 }
 
-/// [`make_prompt`] admitted at `admitted_at`: a graceful stop's max age
-/// counts from the payload's timestamp.
+/// [`make_prompt`] admitted at `admitted_at`, the payload's timestamp.
 fn make_prompt_admitted_at(text: &str, admitted_at: chrono::DateTime<Utc>) -> Input {
     Input::Prompt(PromptInput {
         injected_context: Vec::new(),
@@ -6504,10 +6503,10 @@ async fn a_kept_directed_run_past_its_stops_max_age_fails_its_interaction_once()
 /// registered it (the resumable branch of a stop needs no executor) settles
 /// as stopped, as every settlement of a stopped run does: its input ends
 /// `Abandoned { Cancelled }` and the run ends once on the session's stream
-/// as cancelled, not as expired. Nothing runs. The prompt was admitted an
-/// hour ago, as the sibling directed row's message was: the max age counts
-/// from admission, so the attachment takes the expiry branch. RED while the
-/// expiry settlement ignored the stop: the input ended `RequeueExpired`.
+/// as cancelled, not as expired. Nothing runs. The stop kept the run an hour
+/// ago, as the sibling directed row's did, with a one-second max age, so the
+/// max age has passed and the attachment takes the expiry branch. RED while
+/// the expiry settlement ignored the stop: the input ended `RequeueExpired`.
 /// Unrun: written while Cargo is not run.
 #[tokio::test]
 async fn a_kept_run_past_its_stops_max_age_whose_stop_was_asked_settles_as_stopped() {
@@ -6687,6 +6686,169 @@ async fn a_refused_resume_of_a_kept_directed_run_fails_its_interaction_once() {
         executor.runs.applied()
     );
     assert_eq!(machine.resumable_run_id(&session_id).await, None);
+}
+
+// ---------------------------------------------------------------------------
+// A kept input's requeue age counts from the stop that kept it.
+// ---------------------------------------------------------------------------
+
+/// What a host's graceful stop, `stopped_ago` before now, leaves of a prompt
+/// queued behind the running turn that the runtime admitted
+/// `admitted_before_the_stop` before that stop: the prompt's row queued in the
+/// queue lane with its payload, marked with the stop's time and the max age a
+/// graceful shutdown requeues with when its host names none
+/// (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`, 15 minutes). Returns the
+/// session and the prompt.
+async fn a_prompt_a_graceful_stop_kept(
+    store: &InMemoryRuntimeStore,
+    admitted_before_the_stop: chrono::Duration,
+    stopped_ago: chrono::Duration,
+) -> (SessionId, Input) {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_runtime::store::PreparedRuntimeSessionCommit;
+
+    let committed = meerkat_core::Session::new();
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed)).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let stopped_at = Utc::now() - stopped_ago;
+    let admitted_at = stopped_at - admitted_before_the_stop;
+    let prompt = make_prompt_admitted_at("the prompt the stop kept", admitted_at);
+    let mut row = queued_state(&prompt, None, meerkat_core::types::HandlingMode::Queue);
+    row.state.created_at = admitted_at;
+    row.state.stop_requeue = Some(meerkat_runtime::input_state::StopRequeueMark {
+        stopped_at,
+        max_age_ms: u64::try_from(
+            meerkat_runtime::UnregisterQueuedInputs::DEFAULT_MAX_AGE.as_millis(),
+        )
+        .unwrap(),
+    });
+    store
+        .persist_input_state(&runtime_id, &persistable(row))
+        .await
+        .unwrap();
+    (session_id, prompt)
+}
+
+/// The next start over `store`: the session's runtime registers and an
+/// executor that completes every run attaches.
+async fn the_start_after_the_stop(
+    store: &Arc<InMemoryRuntimeStore>,
+    session_id: &SessionId,
+) -> (Arc<MeerkatMachine>, RecordedRuns) {
+    let machine = Arc::new(
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine"),
+    );
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the session's runtime registers");
+    let runs = RecordedRuns::default();
+    machine
+        .ensure_session_with_executor(session_id.clone(), Box::new(runs.clone()))
+        .await
+        .expect("attach the executor");
+    (machine, runs)
+}
+
+/// [`stored_terminal`] once the row is terminal, or as it stands after ten
+/// seconds.
+async fn settled_terminal(
+    store: &InMemoryRuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    input_id: &InputId,
+) -> Option<(InputLifecycleState, Option<InputTerminalOutcome>)> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let terminal = stored_terminal(store, runtime_id, input_id).await;
+        if terminal
+            .as_ref()
+            .is_some_and(|(_, outcome)| outcome.is_some())
+            || tokio::time::Instant::now() >= deadline
+        {
+            return terminal;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A prompt the runtime admitted 20 minutes before a host's graceful stop,
+/// which kept it queued with the default 15-minute max age, runs at the start
+/// 3 minutes after that stop: its requeue age counts from the stop that kept
+/// it, not from its admission. The executor runs it once and its row is
+/// consumed. RED before: the start measured the age from the prompt's
+/// admission, 23 minutes back, ended it `RequeueExpired` before serving, and
+/// nothing ran it.
+#[tokio::test]
+async fn a_prompt_admitted_long_before_its_stop_runs_at_a_start_inside_the_stops_max_age() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, prompt) = a_prompt_a_graceful_stop_kept(
+        &store,
+        chrono::Duration::minutes(20),
+        chrono::Duration::minutes(3),
+    )
+    .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    let (_machine, runs) = the_start_after_the_stop(&store, &session_id).await;
+
+    assert_eq!(
+        settled_terminal(&store, &runtime_id, prompt.id()).await,
+        CONSUMED_ROW,
+        "the start runs the prompt a stop kept 3 minutes ago, though it was admitted 23 \
+         minutes ago"
+    );
+    assert_eq!(
+        runs.applied(),
+        vec![prompt.id().clone()],
+        "the prompt runs once"
+    );
+}
+
+/// The guard beside
+/// [`a_prompt_admitted_long_before_its_stop_runs_at_a_start_inside_the_stops_max_age`]:
+/// a prompt a graceful stop kept 16 minutes before the start, longer than the
+/// stop's 15-minute max age, still ends `RequeueExpired` before the runtime
+/// serves, and nothing runs it. It was admitted a minute before that stop.
+/// Passes with the age counted from the input's admission and from the stop.
+#[tokio::test]
+async fn a_prompt_kept_longer_than_its_stops_max_age_ends_requeue_expired_at_the_start() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, prompt) = a_prompt_a_graceful_stop_kept(
+        &store,
+        chrono::Duration::minutes(1),
+        chrono::Duration::minutes(16),
+    )
+    .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    let (_machine, runs) = the_start_after_the_stop(&store, &session_id).await;
+
+    assert_eq!(
+        settled_terminal(&store, &runtime_id, prompt.id()).await,
+        Some((
+            InputLifecycleState::Abandoned,
+            Some(InputTerminalOutcome::Abandoned {
+                reason: meerkat_runtime::input_state::InputAbandonReason::RequeueExpired,
+            }),
+        )),
+        "the start ends the prompt a stop kept 16 minutes ago as expired"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        runs.applied().is_empty(),
+        "nothing runs the expired prompt: {:?}",
+        runs.applied()
+    );
 }
 
 // ---------------------------------------------------------------------------

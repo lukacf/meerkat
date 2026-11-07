@@ -7578,8 +7578,8 @@ fn retried_input_read_failure(
 /// The typed requeue answer of an admitted input's wait, if it has one: a
 /// graceful stop kept the input durably queued for the next start
 /// ([`CompletionWaitError::RequeuedAcrossStop`](meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop)),
-/// or the next start ended it as older than its requeue bound (its committed
-/// terminal abandoned with
+/// or the next start ended it as kept longer than its requeue bound (its
+/// committed terminal abandoned with
 /// [`InputAbandonReason::RequeueExpired`](meerkat_runtime::InputAbandonReason::RequeueExpired)).
 /// Neither is ever completion plumbing or an abandoned reason string.
 #[cfg(feature = "runtime-adapter")]
@@ -7609,9 +7609,9 @@ fn requeue_terminal(
 }
 
 /// Whether `input_id`'s committed terminal is an expired requeue: the next
-/// start ended an input a graceful stop had kept queued, as older than its
-/// requeue bound. Read from the input's typed terminal, never from a reason
-/// string. A read that fails or finds no terminal says no.
+/// start ended an input a graceful stop had kept queued, as kept longer than
+/// its requeue bound. Read from the input's typed terminal, never from a
+/// reason string. A read that fails or finds no terminal says no.
 #[cfg(feature = "runtime-adapter")]
 async fn replayed_input_requeue_expired(
     adapter: &MeerkatMachine,

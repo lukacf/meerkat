@@ -3593,7 +3593,7 @@ pub(crate) enum ExactTurnTerminal {
         input_id: meerkat_core::lifecycle::InputId,
     },
     /// The next start ended an input a graceful stop had kept queued, as
-    /// older than its requeue bound
+    /// kept longer than its requeue bound
     /// ([`meerkat_runtime::InputAbandonReason::RequeueExpired`]).
     RequeueExpired {
         input_id: meerkat_core::lifecycle::InputId,
@@ -4692,9 +4692,9 @@ pub enum BoundedTurnFailure {
         session_id: SessionId,
         input_id: meerkat_core::lifecycle::InputId,
     },
-    /// An input a graceful Shutdown kept queued was older than its requeue
-    /// bound when the next start recovered it, so it ended without running.
-    /// Resubmitting it is now correct.
+    /// A graceful Shutdown kept this input queued, and more than its requeue
+    /// bound had passed since that Shutdown when the next start recovered
+    /// it, so it ended without running. Resubmitting it is now correct.
     RequeueExpired {
         session_id: SessionId,
         input_id: meerkat_core::lifecycle::InputId,

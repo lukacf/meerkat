@@ -7080,6 +7080,15 @@ mod tests {
             }
         }
 
+        /// The reason of a resolution that failed because GitHub cannot
+        /// answer now (a rate limit, an outage), which clears on its own.
+        fn source_unavailable(error: ProviderAuthError) -> String {
+            match error {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable { reason }) => reason,
+                other => panic!("expected source_unavailable, got {other:?}"),
+            }
+        }
+
         /// T1: the operator's token is the Copilot API bearer for the
         /// identity lookup, the per-plan model listing and every request; the
         /// device flow's token exchange is never called.
@@ -8056,7 +8065,7 @@ mod tests {
             ]);
             let source = token_file_command(directory.path());
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8067,7 +8076,7 @@ mod tests {
 
             harness.operator.advance(60);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -8092,7 +8101,7 @@ mod tests {
         /// GitHub's secondary rate limit, a 403 whose message says so and that
         /// may carry no `Retry-After` and no rate-limit header, pauses the
         /// account's identity lookup like any rate limit, read through the
-        /// production transport: requests fail as `refresh_failed` without
+        /// production transport: requests fail as `source_unavailable` without
         /// asking GitHub again or running the token's command, for the minute
         /// GitHub asks for at least, and the lookup runs again after it. It
         /// is no refusal of the token.
@@ -8124,7 +8133,7 @@ mod tests {
             );
             let resolve = || runtime.resolve(&binding, &operator.env);
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8136,7 +8145,7 @@ mod tests {
 
             operator.advance(59);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -8186,7 +8195,7 @@ mod tests {
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
             resolve().await.expect("the token resolves");
             // A later account state's identity lookup is rate limited.
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8200,7 +8209,7 @@ mod tests {
                 .auth_lease
                 .release_lease(&lease_key())
                 .expect("log out");
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8986,8 +8995,8 @@ mod tests {
         /// after an identity lookup that did not answer the token, which
         /// pauses that token for a minute; chat disabled) is a typed
         /// `refresh_failed` that does not touch the lease, and the same token
-        /// works once that is fixed. A rate limit pauses the identity lookup
-        /// until GitHub's stated time.
+        /// works once that is fixed. A rate limit (a `source_unavailable`)
+        /// pauses the identity lookup until GitHub's stated time.
         #[tokio::test]
         async fn copilot_refusal_is_typed_and_not_sticky() {
             let harness = Harness::new([
@@ -9062,7 +9071,7 @@ mod tests {
                 env: operator.env.clone(),
                 transport: transport.clone(),
             };
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9070,7 +9079,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
             operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9104,7 +9113,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("paced"));
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9114,7 +9123,7 @@ mod tests {
             assert!(detail.contains("rate limited"), "{detail}");
 
             harness.operator.advance(60);
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::Anthropic)
                     .await
@@ -9153,7 +9162,7 @@ mod tests {
             let other_store = OperatorEnv::new();
             other_store.set("COPILOT_GITHUB_TOKEN", &token);
             *other_store.clock.lock() = *harness.operator.clock.lock();
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9162,7 +9171,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .runtime
                     .resolve(
@@ -9179,6 +9188,51 @@ mod tests {
                 1,
                 "no request before GitHub's stated time"
             );
+        }
+
+        /// GitHub unavailable: an identity lookup that answers a 5xx, times
+        /// out or cannot connect fails the resolution as `source_unavailable`,
+        /// which clears on its own: the lease stays valid, nothing pauses the
+        /// account, and the next resolution looks the account up again. A
+        /// lookup answer that refuses the token stays `refresh_failed` (T5).
+        #[tokio::test]
+        async fn an_unavailable_identity_lookup_fails_as_source_unavailable() {
+            let failures: Vec<(&str, Outcome)> = vec![
+                (
+                    "server error",
+                    Ok(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+            ];
+            for (label, failure) in failures {
+                let harness = Harness::new([failure, Ok(svc_bot()), Ok(models_response())]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("github-down"));
+                let detail = source_unavailable(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{label}: the identity lookup failed")),
+                );
+                assert!(
+                    detail.contains("identity lookup failed"),
+                    "{label}: {detail}"
+                );
+                assert_eq!(
+                    harness.operator.lease().phase,
+                    Some(AuthLeasePhase::Valid),
+                    "{label}: an outage marks nothing on the token"
+                );
+                if let Err(error) = harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    panic!("{label}: the next resolution looks the account up again: {error:?}");
+                }
+                assert_eq!(harness.transport.request_count(), 3, "{label}");
+            }
         }
 
         /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's
@@ -9761,8 +9815,8 @@ mod tests {
 
         /// A token the identity lookup does not answer never serves without
         /// its model list: a listing that fails (a server error, a timeout, a
-        /// rate limit) fails the request as `refresh_failed` and leaves the
-        /// lease valid, and a rate limit pauses the lookup until GitHub's
+        /// rate limit) fails the request as `source_unavailable` and leaves
+        /// the lease valid, and a rate limit pauses the lookup until GitHub's
         /// stated time.
         #[tokio::test]
         async fn an_unanswered_lookup_never_serves_without_a_model_list() {
@@ -9798,7 +9852,7 @@ mod tests {
                     1 + attempts,
                     "{label}: the model list was asked"
                 );
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     failed.unwrap_or_else(|| panic!("{label}: no route without the model list")),
                 );
                 assert!(detail.contains("model listing failed"), "{label}: {detail}");
@@ -9818,7 +9872,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-paced"));
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9826,7 +9880,7 @@ mod tests {
                     .expect("the model listing is rate limited"),
             );
             harness.operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -12318,11 +12372,13 @@ mod tests {
                     "a build that needs the account's limits must fail while the exchange is down"
                 );
             };
+            // The outage is typed as one that clears on its own, so a caller
+            // (a mob seat's first create) can try again later.
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -12559,8 +12615,8 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -12585,4 +12641,40 @@ fn ce_stale_refresh_remains_stale_credential() {
         auth_error_from_refresh(RefreshError::StalePreparation),
         AuthError::StaleCredential
     ));
+}
+
+/// AuthMachine's verdict on a refresh failure of the sign-in's GitHub token
+/// decides its kind: a transient verdict is a credential source that cannot
+/// answer now, which clears on its own; a permanent one needs a new sign-in.
+/// A failure the machine did not classify stays `refresh_failed`: the
+/// mapper never reads the provider's answer itself.
+#[cfg(test)]
+#[test]
+fn a_classified_source_refresh_failure_maps_by_its_verdict() {
+    let classified = |disposition| RefreshError::Classified {
+        message: "token endpoint answered 503".to_string(),
+        observation: meerkat_core::RefreshFailureObservation::http_status(503),
+        disposition,
+    };
+    let transient = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::Transient,
+    ));
+    assert!(
+        matches!(
+            &transient,
+            AuthError::SourceUnavailable { reason } if reason.contains("token endpoint answered 503")
+        ),
+        "{transient:?}"
+    );
+    let permanent = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
+    ));
+    assert_eq!(permanent, AuthError::UserReauthRequired);
+    let unclassified = auth_error_from_refresh(RefreshError::Refresh(
+        "token endpoint answered 503".to_string(),
+    ));
+    assert!(
+        matches!(&unclassified, AuthError::RefreshFailed(_)),
+        "{unclassified:?}"
+    );
 }

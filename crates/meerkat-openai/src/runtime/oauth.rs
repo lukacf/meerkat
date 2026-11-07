@@ -1083,6 +1083,62 @@ mod tests {
                 );
             }
         }
+
+        /// The refresh's failure carries the verdict AuthMachine issued on
+        /// it, read from the refreshing lease before the failure closes it:
+        /// a transient answer closes the lease to Expiring and the
+        /// resolution answers `source_unavailable`, which clears on its own;
+        /// an `invalid_grant` closes it to ReauthRequired and the resolution
+        /// answers `user_reauth_required`. Neither reads the provider's
+        /// answer outside the machine.
+        #[tokio::test]
+        async fn ce_provider_refresh_failure_carries_the_machine_verdict() {
+            use meerkat_core::auth::RefreshFailureDisposition;
+            for (reply, phase, verdict) in [
+                (
+                    Reply::Transient,
+                    AuthLeasePhase::Expiring,
+                    RefreshFailureDisposition::Transient,
+                ),
+                (
+                    Reply::InvalidGrant,
+                    AuthLeasePhase::ReauthRequired,
+                    RefreshFailureDisposition::ReauthRequired,
+                ),
+            ] {
+                let mut fixture = Fixture::start(reply).await;
+                let result = fixture.finish().await;
+                fixture.assert_one_original_exchange();
+                assert_eq!(fixture.auth.snapshot(&fixture.lease).phase, Some(phase));
+                let Err(error) = result else {
+                    panic!("{verdict:?}: the refresh fails");
+                };
+                assert!(
+                    matches!(
+                        &error,
+                        OpenAiOAuthError::Refresh(refresh)
+                            if refresh.refresh_failure_disposition() == Some(verdict)
+                    ),
+                    "{verdict:?}: {error:?}"
+                );
+                let resolution = crate::runtime::openai_oauth_refresh_error(error, String::new());
+                let expected = match verdict {
+                    RefreshFailureDisposition::Transient => matches!(
+                        &resolution,
+                        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                            meerkat_core::AuthError::SourceUnavailable { .. }
+                        )
+                    ),
+                    RefreshFailureDisposition::ReauthRequired => matches!(
+                        &resolution,
+                        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                            meerkat_core::AuthError::UserReauthRequired
+                        )
+                    ),
+                };
+                assert!(expected, "{verdict:?}: {resolution:?}");
+            }
+        }
         #[tokio::test]
         async fn ce_provider_compensated_marker_cannot_revive_released_attempt() {
             let mut fixture = Fixture::start(Reply::Success).await;
@@ -1275,10 +1331,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
             fixture.endpoint.release.add_permits(1);
-            assert!(matches!(
-                timeout,
-                Err(OpenAiOAuthError::Refresh(RefreshError::Observed { .. }))
-            ));
+            assert!(
+                matches!(
+                    timeout,
+                    Err(OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    }))
+                ),
+                "a timeout carries AuthMachine's transient verdict: {timeout:?}"
+            );
             assert_eq!(
                 fixture.auth.snapshot(&fixture.lease).phase,
                 Some(AuthLeasePhase::Expiring)
@@ -1292,10 +1354,16 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(matches!(
-                network,
-                Err(OpenAiOAuthError::Refresh(RefreshError::Observed { .. }))
-            ));
+            assert!(
+                matches!(
+                    network,
+                    Err(OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    }))
+                ),
+                "a connect error carries AuthMachine's transient verdict: {network:?}"
+            );
             assert_eq!(
                 fixture.auth.snapshot(&fixture.lease).phase,
                 Some(AuthLeasePhase::Expiring)

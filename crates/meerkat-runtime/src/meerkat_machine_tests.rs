@@ -360,6 +360,16 @@ async fn live_delegation_admitted_before_its_channel_closed_starts_after_the_clo
         delegation("provider-delegation-conflict", "provider-turn-conflict");
     let (missing_interaction, _, dsl_missing) =
         delegation("provider-delegation-missing", "provider-turn-missing");
+    // A confirmed delegation whose worker never starts: it probes the worker
+    // start under a stale fence while the channel is still bound.
+    let (ready_interaction, ready_operation, dsl_ready) =
+        delegation("provider-delegation-ready", "provider-turn-ready");
+    let ready_provisional = meerkat_core::ProvisionalLiveHandoff::new(
+        ready_operation.domain_correlation().clone(),
+        "draft the agenda",
+        meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+    )
+    .expect("provisional handoff");
 
     let authority = machine
         .session_dsl_authority(&session_id)
@@ -443,6 +453,17 @@ async fn live_delegation_admitted_before_its_channel_closed_starts_after_the_clo
             &dsl_missing,
             "provider-turn-missing",
         );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &ready_interaction,
+            &dsl_ready,
+            "provider-turn-ready",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_ready.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
         *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
             .expect("seed admitted live delegations on a bound channel");
     }
@@ -492,6 +513,29 @@ async fn live_delegation_admitted_before_its_channel_closed_starts_after_the_clo
         ))
         .is_err(),
         "a still-bound channel refuses a stale fence"
+    );
+    assert!(
+        machine
+            .authorize_live_delegation_worker_start(
+                &session_id,
+                &runtime_id,
+                fence_token + 1,
+                generation,
+                &ready_operation,
+                &ready_provisional,
+                "live-worker-stale-fence",
+            )
+            .await
+            .is_err(),
+        "a still-bound channel refuses a worker start under a stale fence"
+    );
+    assert_eq!(
+        state()
+            .live_delegation_schedule_state_by_operation
+            .get(&dsl_ready)
+            .copied(),
+        Some(mm_dsl::LiveDelegationScheduleState::Created),
+        "the refused start bound no worker"
     );
 
     // The channel closes before any worker starts: close removes the
@@ -697,6 +741,590 @@ async fn live_delegation_admitted_before_its_channel_closed_starts_after_the_clo
             .contains_key(&dsl_busy),
         "the requeued operation may bind a fresh worker"
     );
+}
+
+/// A bound live channel on `session_id` under the generated execution
+/// binding, as a context channel's open leaves it.
+fn seed_bound_live_channel(
+    state: &mut mm_dsl::MeerkatMachineState,
+    session_id: &SessionId,
+    channel: &str,
+    runtime_id: &crate::identifiers::LogicalRuntimeId,
+    fence_token: u64,
+    generation: u64,
+) {
+    state.active_runtime_id = Some(mm_dsl::AgentRuntimeId::from_domain(runtime_id));
+    state.active_fence_token = Some(mm_dsl::FenceToken::from_domain(fence_token));
+    state.active_runtime_generation = Some(mm_dsl::Generation::from_domain(generation));
+    state
+        .live_active_channel_by_session
+        .insert(session_id.to_string(), channel.to_string());
+    state
+        .live_channel_session_by_channel
+        .insert(channel.to_string(), session_id.to_string());
+    state.live_channel_identity_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::SessionLlmIdentity {
+            model: "experimental-live".to_string(),
+            provider: mm_dsl::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params_repr: None,
+            auth_binding: None,
+        },
+    );
+    state.live_execution_runtime_id_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::AgentRuntimeId::from_domain(runtime_id),
+    );
+    state.live_execution_fence_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::FenceToken::from_domain(fence_token),
+    );
+    state.live_execution_generation_by_channel.insert(
+        channel.to_string(),
+        mm_dsl::Generation::from_domain(generation),
+    );
+}
+
+/// The channel's close as the generated close leaves it: no runtime, fence,
+/// generation or session binding, and no worker count.
+fn seed_closed_live_channel(
+    state: &mut mm_dsl::MeerkatMachineState,
+    session_id: &SessionId,
+    channel: &str,
+) {
+    state.live_execution_runtime_id_by_channel.remove(channel);
+    state.live_execution_fence_by_channel.remove(channel);
+    state.live_execution_generation_by_channel.remove(channel);
+    state
+        .live_active_channel_by_session
+        .remove(&session_id.to_string());
+    state.live_channel_session_by_channel.remove(channel);
+    state
+        .live_delegation_active_worker_count_by_channel
+        .remove(channel);
+}
+
+/// One client delegation on `channel` for the kernel rows below: its
+/// interaction, exact operation and generated operation id.
+fn live_delegation_identity(
+    channel: &meerkat_core::LiveChannelId,
+    provider_delegation: &str,
+    provider_turn: &str,
+) -> (
+    String,
+    meerkat_core::exact_operation::ExactOperationIdentity<meerkat_core::LiveUserTurnCorrelation>,
+    mm_dsl::OperationId,
+) {
+    let interaction_id = meerkat_core::InteractionId::new();
+    let correlation = meerkat_core::LiveUserTurnCorrelation::new(
+        channel.clone(),
+        interaction_id,
+        meerkat_core::OpaqueProviderCorrelation::new(provider_delegation, provider_turn)
+            .expect("opaque provider correlation"),
+    )
+    .expect("live turn correlation");
+    let operation = meerkat_core::exact_operation::ExactOperationIdentity::for_domain(
+        OperationId::new(),
+        correlation,
+    );
+    let dsl_operation = mm_dsl::OperationId::from_domain(operation.operation_id());
+    (interaction_id.to_string(), operation, dsl_operation)
+}
+
+/// A continuation the user spoke while their delegation waited for a worker
+/// is held for it, and that worker starts only after the channel closed
+/// (Turbo S S107). The steer still folds into the start: it is authorized,
+/// its delivery resolves, and it reconciles (confirmed, as a conflict, or
+/// missing) on the operation's own retired channel. A still-bound channel
+/// refuses a steer under a stale fence as before, and a retired channel
+/// cannot steer an operation that belongs to another channel.
+#[tokio::test]
+async fn live_delegation_steers_a_worker_started_after_its_channel_closed() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-steer-after-close");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-steer-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    let binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token,
+        generation,
+    );
+    let stale_binding = crate::live_execution::LiveDelegationRuntimeBinding::new(
+        session_id.clone(),
+        channel.clone(),
+        runtime_id.clone(),
+        fence_token + 1,
+        generation,
+    );
+    // A worker started while the channel is bound probes the stale fence; the
+    // one that starts after the close is steered.
+    let (bound_interaction, bound_operation, dsl_bound) =
+        live_delegation_identity(&channel, "provider-delegation-bound", "provider-turn-bound");
+    let (interaction, operation, dsl_operation) =
+        live_delegation_identity(&channel, "provider-delegation", "provider-turn");
+    let provisional = |operation: &meerkat_core::exact_operation::ExactOperationIdentity<
+        meerkat_core::LiveUserTurnCorrelation,
+    >| {
+        meerkat_core::ProvisionalLiveHandoff::new(
+            operation.domain_correlation().clone(),
+            "write the brief",
+            meerkat_core::LiveHandoffInputProvenance::NormalizedHandoff,
+        )
+        .expect("provisional handoff")
+    };
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for (interaction_id, operation_id, provider_turn) in [
+            (&bound_interaction, &dsl_bound, "provider-turn-bound"),
+            (&interaction, &dsl_operation, "provider-turn"),
+        ] {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                provider_turn,
+            );
+            state.live_delegation_reconciliation_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationReconciliation::Confirmed,
+            );
+        }
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("seed confirmed live delegations on a bound channel");
+    }
+    let state = || {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .clone()
+    };
+
+    // While the channel is still bound, a steer under a stale fence is
+    // refused as before.
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &bound_operation,
+            &provisional(&bound_operation),
+            "live-worker-bound",
+        )
+        .await
+        .expect("worker start under the exact binding");
+    assert!(
+        machine
+            .authorize_live_delegation_steer(
+                &stale_binding,
+                &bound_operation,
+                "continuation-stale",
+                "digest-stale",
+            )
+            .await
+            .is_err(),
+        "a still-bound channel refuses a steer under a stale fence"
+    );
+
+    // The channel closes; the queued delegation's worker starts after it.
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed with a delegation still queued");
+    }
+    machine
+        .authorize_live_delegation_worker_start(
+            &session_id,
+            &runtime_id,
+            fence_token,
+            generation,
+            &operation,
+            &provisional(&operation),
+            "live-worker-after-close",
+        )
+        .await
+        .expect("the worker start is authorized after the close");
+
+    // A retired channel cannot steer an operation of another channel.
+    let foreign = {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(
+            &mut *authority,
+            mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationSteer {
+                channel_id: "some-other-retired-channel".to_string(),
+                runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+                generation: mm_dsl::Generation::from_domain(generation),
+                interaction_id: interaction.clone(),
+                operation_id: dsl_operation.clone(),
+                provider_turn_correlation: "provider-turn".to_string(),
+                continuation_id: "continuation-foreign".to_string(),
+                continuation_digest: "digest-foreign".to_string(),
+            },
+        )
+        .map(|_| ())
+    };
+    assert!(
+        foreign.is_err(),
+        "no aliasing through another retired channel id"
+    );
+
+    for (continuation, delivered, committed, digest_matches, expected) in [
+        (
+            "continuation-confirmed",
+            true,
+            true,
+            true,
+            meerkat_core::LiveHandoffReconciliation::Confirmed,
+        ),
+        (
+            "continuation-conflict",
+            true,
+            true,
+            false,
+            meerkat_core::LiveHandoffReconciliation::MaterialConflict,
+        ),
+        (
+            "continuation-missing",
+            false,
+            false,
+            false,
+            meerkat_core::LiveHandoffReconciliation::Missing,
+        ),
+    ] {
+        let steer = machine
+            .authorize_live_delegation_steer(
+                &binding,
+                &operation,
+                continuation,
+                &format!("digest-{continuation}"),
+            )
+            .await;
+        assert!(
+            steer.is_ok(),
+            "{continuation}: the steer is authorized after the close: {:?}",
+            steer.as_ref().err()
+        );
+        let steer = steer.expect("steer authority");
+        machine
+            .resolve_live_delegation_steer_delivery(&steer, &binding, delivered)
+            .await
+            .expect("the steer's delivery resolves after the close");
+        let reconciled = machine
+            .reconcile_live_delegation_steer(&steer, &binding, committed, digest_matches)
+            .await
+            .expect("the steer reconciles after the close");
+        assert_eq!(reconciled, expected, "{continuation}");
+        assert_eq!(
+            state()
+                .live_delegation_steer_delivered_by_continuation
+                .get(continuation)
+                .copied(),
+            Some(delivered),
+            "{continuation}"
+        );
+    }
+}
+
+/// Unregistering a session keeps its delegation custody, but a delegation of
+/// a closed channel no longer reconciles or starts once the session is gone:
+/// the post-close arms need the registered session, exactly as the bound
+/// arms need the channel's binding. The authority an in-flight runtime call
+/// still holds between the unregistration's commit and the removal of the
+/// runtime entry is refused.
+#[tokio::test]
+async fn live_delegation_post_close_arms_need_a_registered_session() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register");
+    let channel = meerkat_core::LiveChannelId::new("live-post-close-unregistered");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:post-close-unregistered");
+    let fence_token = 31;
+    let generation = 4;
+    // One delegation still to reconcile, one confirmed and ready to start.
+    let (interaction, _, dsl_operation) =
+        live_delegation_identity(&channel, "provider-delegation", "provider-turn");
+    let (ready_interaction, _, dsl_ready) =
+        live_delegation_identity(&channel, "provider-delegation-ready", "provider-turn-ready");
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        // The channel already closed: no binding, only the admitted custody.
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &interaction,
+            &dsl_operation,
+            "provider-turn",
+        );
+        seed_admitted_live_delegation(
+            &mut state,
+            &dsl_channel,
+            &ready_interaction,
+            &dsl_ready,
+            "provider-turn-ready",
+        );
+        state.live_delegation_reconciliation_by_operation.insert(
+            dsl_ready.clone(),
+            mm_dsl::LiveDelegationReconciliation::Confirmed,
+        );
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("a closed channel's admitted delegations");
+    }
+    machine
+        .unregister_session(&session_id)
+        .await
+        .expect("the session unregisters");
+    let after = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
+        .clone();
+    assert!(after.session_id.is_none(), "the session is unregistered");
+    assert_eq!(
+        after
+            .live_delegation_schedule_state_by_operation
+            .get(&dsl_operation)
+            .copied(),
+        Some(mm_dsl::LiveDelegationScheduleState::Created),
+        "unregistration keeps the admitted custody"
+    );
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let reconciled = apply(
+        mm_dsl::MeerkatMachineInput::ReconcileLiveDelegationTranscript {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: interaction.clone(),
+            operation_id: dsl_operation.clone(),
+            provider_turn_correlation: "provider-turn".to_string(),
+            final_transcript_committed: true,
+            normalized_digest_matches: true,
+        },
+    );
+    assert!(
+        reconciled.is_err(),
+        "an unregistered session's closed channel reconciles nothing"
+    );
+    let started = apply(
+        mm_dsl::MeerkatMachineInput::AuthorizeLiveDelegationWorkerStart {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: ready_interaction.clone(),
+            operation_id: dsl_ready.clone(),
+            provider_turn_correlation: "provider-turn-ready".to_string(),
+            worker_identity: "live-worker-after-unregister".to_string(),
+            worker_ownership: crate::live_execution::LiveDelegationWorkerOwnership::ExistingMember,
+        },
+    );
+    assert!(
+        started.is_err(),
+        "an unregistered session's closed channel starts no worker"
+    );
+}
+
+/// A worker of a closed channel that hands its item back blocked settles
+/// Cancelled in the machine: a requeue needs the channel's binding, so
+/// nothing could ever serve it again. That holds for a blocked terminal
+/// recorded after the close and for one recorded while the channel was still
+/// bound and reconciled after the close. A blocked hand-back recorded while
+/// the channel is bound stays Blocked, to requeue once its item is ready.
+#[tokio::test]
+async fn a_blocked_hand_back_on_a_closed_channel_settles_cancelled() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register live delegation session");
+    let channel = meerkat_core::LiveChannelId::new("live-blocked-after-close");
+    let dsl_channel = channel.to_string();
+    let runtime_id = crate::identifiers::LogicalRuntimeId::new("live:test-blocked-after-close");
+    let fence_token = 31;
+    let generation = 4;
+    // A worker that blocks after the close, and one that blocked while the
+    // channel was bound and is reconciled after the close.
+    let (late_interaction, _, dsl_late) =
+        live_delegation_identity(&channel, "provider-delegation-late", "provider-turn-late");
+    let (early_interaction, _, dsl_early) =
+        live_delegation_identity(&channel, "provider-delegation-early", "provider-turn-early");
+    let authority = machine
+        .session_dsl_authority(&session_id)
+        .await
+        .expect("session authority");
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_bound_live_channel(
+            &mut state,
+            &session_id,
+            &dsl_channel,
+            &runtime_id,
+            fence_token,
+            generation,
+        );
+        for (interaction_id, operation_id, provider_turn, worker) in [
+            (
+                &late_interaction,
+                &dsl_late,
+                "provider-turn-late",
+                "live-worker-late",
+            ),
+            (
+                &early_interaction,
+                &dsl_early,
+                "provider-turn-early",
+                "live-worker-early",
+            ),
+        ] {
+            seed_admitted_live_delegation(
+                &mut state,
+                &dsl_channel,
+                interaction_id,
+                operation_id,
+                provider_turn,
+            );
+            state.live_delegation_reconciliation_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationReconciliation::Confirmed,
+            );
+            state
+                .live_delegation_worker_identity_by_operation
+                .insert(operation_id.clone(), worker.to_string());
+            state.live_delegation_worker_phase_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationWorkerPhase::Running,
+            );
+            state.live_delegation_schedule_state_by_operation.insert(
+                operation_id.clone(),
+                mm_dsl::LiveDelegationScheduleState::Running,
+            );
+        }
+        state
+            .live_delegation_active_worker_count_by_channel
+            .insert(dsl_channel.clone(), 2);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("two running workers on a bound channel");
+    }
+    let apply = |input: mm_dsl::MeerkatMachineInput| {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mm_dsl::MeerkatMachineMutator::apply(&mut *authority, input).map(|_| ())
+    };
+    let schedule_state = |operation_id: &mm_dsl::OperationId| {
+        authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state()
+            .live_delegation_schedule_state_by_operation
+            .get(operation_id)
+            .copied()
+    };
+
+    // While the channel is bound, a blocked hand-back stays Blocked.
+    apply(
+        mm_dsl::MeerkatMachineInput::RecordLiveDelegationWorkerTerminal {
+            channel_id: dsl_channel.clone(),
+            runtime_id: mm_dsl::AgentRuntimeId::from_domain(&runtime_id),
+            fence_token: mm_dsl::FenceToken::from_domain(fence_token),
+            generation: mm_dsl::Generation::from_domain(generation),
+            interaction_id: early_interaction.clone(),
+            operation_id: dsl_early.clone(),
+            worker_identity: "live-worker-early".to_string(),
+            terminal: mm_dsl::LiveDelegationWorkerTerminalKind::Blocked,
+        },
+    )
+    .expect("a bound blocked hand-back is recorded");
+    assert_eq!(
+        schedule_state(&dsl_early),
+        Some(mm_dsl::LiveDelegationScheduleState::Blocked),
+        "a blocked hand-back on a bound channel waits to requeue"
+    );
+
+    {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = authority.state().clone();
+        seed_closed_live_channel(&mut state, &session_id, &dsl_channel);
+        *authority = mm_dsl::MeerkatMachineAuthority::recover_from_state(state)
+            .expect("the channel closed under its workers");
+    }
+    for (interaction_id, operation_id, worker) in [
+        (&late_interaction, &dsl_late, "live-worker-late"),
+        (&early_interaction, &dsl_early, "live-worker-early"),
+    ] {
+        apply(
+            mm_dsl::MeerkatMachineInput::ReconcileRevokedLiveDelegationWorkerAfterRestart {
+                session_id: session_id.to_string(),
+                channel_id: dsl_channel.clone(),
+                interaction_id: interaction_id.clone(),
+                operation_id: operation_id.clone(),
+                worker_identity: worker.to_string(),
+                terminal: mm_dsl::LiveDelegationWorkerTerminalKind::Blocked,
+            },
+        )
+        .expect("the closed channel's worker settles");
+        assert_eq!(
+            schedule_state(operation_id),
+            Some(mm_dsl::LiveDelegationScheduleState::Cancelled),
+            "{worker}: a blocked hand-back on a closed channel settles Cancelled"
+        );
+    }
 }
 
 #[cfg(feature = "live")]

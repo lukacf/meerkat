@@ -1811,6 +1811,17 @@ pub struct ExperimentalLiveDelegationCoordinator {
     #[cfg(test)]
     pump_readiness_gate_for_test:
         Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test gate on the next scheduled start, entered once the pump has taken
+    /// the item off its queue (it is running, not yet retained):
+    /// `(entered, resume)`.
+    #[cfg(test)]
+    start_gate_for_test:
+        Arc<std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
+    /// Test stand-in for a busy source member at the fork cut: this many
+    /// next worker starts end as the executor's `SourceBusy` once their
+    /// worker-start authority was granted, before anything physical starts.
+    #[cfg(test)]
+    source_busy_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2487,6 +2498,10 @@ impl ExperimentalLiveDelegationCoordinator {
             deferred_close_gate_for_test: Arc::default(),
             #[cfg(test)]
             pump_readiness_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            start_gate_for_test: Arc::default(),
+            #[cfg(test)]
+            source_busy_starts_for_test: Arc::default(),
         }
     }
 
@@ -5036,6 +5051,18 @@ impl ExperimentalLiveDelegationCoordinator {
         waited: Vec<(String, String)>,
         append_lane: Arc<Mutex<()>>,
     ) -> Result<(), ScheduledStartFailure> {
+        #[cfg(test)]
+        {
+            let gate = self
+                .start_gate_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some((entered, resume)) = gate {
+                let _ = entered.send(());
+                let _ = resume.await;
+            }
+        }
         let operation_id = pending.operation.operation_id().clone();
         if pending.blocked {
             self.runtime
@@ -5970,6 +5997,34 @@ impl ExperimentalLiveDelegationCoordinator {
         }
     }
 
+    /// Start the executor for one admitted delegation whose worker-start
+    /// authority was granted.
+    async fn start_delegation_service(
+        &self,
+        service: &DelegationExecutionService,
+        request: DelegationExecutionRequest,
+        source_identity: &AgentIdentity,
+    ) -> Result<DelegationExecutionHandle, DelegationExecutionError> {
+        #[cfg(test)]
+        if self
+            .source_busy_starts_for_test
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(DelegationExecutionError::SourceBusy {
+                source_identity: source_identity.clone(),
+                waited_ms: 0,
+            });
+        }
+        #[cfg(not(test))]
+        let _ = source_identity;
+        service.start(request).await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "this exact delegation boundary carries independent provider, runtime, fork, and operation authorities"
@@ -6135,7 +6190,10 @@ impl ExperimentalLiveDelegationCoordinator {
             operation_id = %operation.operation_id(),
             "client-context control entering durable delegation service"
         );
-        let execution = match service.start(request).await {
+        let execution = match self
+            .start_delegation_service(&service, request, &source_identity)
+            .await
+        {
             Ok(execution) => execution,
             Err(error) => {
                 let failure = LiveDelegationStartFailure::from(&error);

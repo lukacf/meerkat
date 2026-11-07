@@ -1699,12 +1699,11 @@ async fn a_delegation_admitted_as_its_channel_closes_runs_after_the_close() {
     fx.handle.shutdown().await.expect("shutdown");
 }
 
-/// The console voice host delegates to the existing member, which runs one
-/// delegated turn at a time, so a second spoken request waits behind the
-/// first. When the user ended the voice session while the first job ran, the
-/// second request was cancelled as work that never started. It is admitted,
-/// so it keeps its admission through the close and runs once the first job
-/// ends.
+/// A voice host that delegates to the existing member runs one delegated
+/// turn at a time, so a second spoken request waits behind the first. When
+/// the user ended the voice session while the first job ran, the second
+/// request was cancelled as work that never started. It is admitted, so it
+/// keeps its admission through the close and runs once the first job ends.
 #[tokio::test]
 async fn an_existing_member_request_queued_behind_a_running_one_runs_after_the_close() {
     let mut fx = fixture_with_policy(true, LiveDelegationExecutionPolicy::ExistingMember).await;
@@ -1866,6 +1865,538 @@ async fn a_fork_that_blocks_after_its_channel_closed_is_cancelled() {
     .await;
     fx.assert_nothing_cancelled();
     fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// Whether `operation` is post-close work a channel reopened on the session
+/// is told about.
+fn is_post_close_work(fx: &Fixture, operation: &OperationId) -> bool {
+    fx.coordinator
+        .running_after_close
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(operation)
+}
+
+/// A continuation the user spoke while their delegation waited for a worker
+/// is held for it. The channel then closes and the delegation starts after
+/// the close: the held continuation joins its task under steer authority,
+/// recorded delivered, so the request runs as spoken.
+#[tokio::test]
+async fn a_continuation_held_for_a_queued_delegation_joins_its_start_after_the_close() {
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("second", "continuation-q", " with three headings")
+        .await;
+    assert!(
+        !fx.steered("continuation-q").await,
+        "no worker accepts input before it starts"
+    );
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+
+    fx.client.release(head.index);
+    let (settled, calls) = fx.settle_releasing_calls(&second).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed),
+        "the queued delegation runs after the close"
+    );
+    let tail = calls
+        .iter()
+        .find(|call| call.task_text.contains("serial task two"))
+        .expect("the queued delegation's worker started after the close");
+    assert!(
+        tail.task_text.contains("with three headings"),
+        "the held continuation joined the post-close worker's task: {tail:?}"
+    );
+    assert!(fx.steered("continuation-q").await);
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+            .await
+            .expect("machine state"),
+        Some(true)
+    );
+    fx.wait_for_completed(&[first, second]).await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// A held continuation the machine refuses to join its delegation never
+/// leaves the request to run without it: the start is retired, not run, and
+/// recorded. Here the continuation's identity already steered another
+/// delegation's running worker, and each continuation steers once. The
+/// queued request ends Failed in the machine, is narrated as failed, and its
+/// worker never starts.
+#[tokio::test]
+async fn a_held_continuation_the_machine_refuses_retires_the_start_instead_of_running_it() {
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("first", "continuation-shared", " with three headings")
+        .await;
+    assert!(
+        fx.steered("continuation-shared").await,
+        "the continuation steered the running worker"
+    );
+    fx.continue_utterance("second", "continuation-shared", " with three headings")
+        .await;
+
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(
+        first_settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    );
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Failed),
+        "a start whose held continuation cannot join is retired, not run"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task two")),
+        "the queued request's worker never started: {calls:?}"
+    );
+    wait_until(WAIT, || async {
+        fx.narrations()
+            .await
+            .iter()
+            .any(|(kind, _)| *kind == LiveDelegationNarrationKind::Failed)
+    })
+    .await;
+    fx.close().await;
+}
+
+/// The lifecycle seam admitted a delegation, then a retirement cancelled the
+/// channel's run before the channel loop claimed it: the buffered request
+/// never reached the loop. The admitted operation cannot run after the close
+/// (its control payload never arrived), so the close settles it in the
+/// machine as cancelled instead of leaving it Created with no schedule and no
+/// worker.
+#[tokio::test]
+async fn a_delegation_admitted_but_unclaimed_when_a_retirement_closes_the_channel_is_cancelled() {
+    let mut fx = fixture_with_policy(true, LiveDelegationExecutionPolicy::ExistingMember).await;
+    let request = "write a four line poem about lighthouses";
+    let (turn, delegation, operation) = fx.admit_delegation_turn("forced", request).await;
+    fx.control
+        .script_observations([ScriptedObservation::Observation(
+            ExperimentalGptLiveControlObservation::Provider(LiveSidebandObservation::new(
+                fx.provider_binding.clone(),
+                LiveSidebandObservationKind::DelegationRequested {
+                    turn,
+                    delegation,
+                    final_transcript: request.to_string(),
+                    request_transcript: request.to_string(),
+                    assistant_context: String::new(),
+                    represented_user_rows: Vec::new(),
+                },
+            )),
+        )])
+        .await;
+    // The retirement cancels the run first; the loop's biased select takes
+    // the cancellation before the buffered request.
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let control: Arc<dyn ExperimentalGptLiveControlPlane> =
+        Arc::clone(&fx.control) as Arc<dyn ExperimentalGptLiveControlPlane>;
+    fx.coordinator
+        .run_channel(fx.provider_binding.clone(), control, cancellation)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    fx.expect_no_call().await;
+    assert_eq!(
+        fx.schedule_state(&operation).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled),
+        "an admitted delegation the loop never claimed is settled at the close"
+    );
+    assert!(
+        fx.coordinator.schedules.lock().await.is_empty(),
+        "nothing was scheduled for it"
+    );
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// Nothing runs and no timer is armed when the channel closes; a queued
+/// delegation waits on blocked work, and the close cancels that blocked
+/// work. Only the close's own schedule wake can start the waiting delegation
+/// after the close.
+#[tokio::test]
+async fn the_close_wakes_work_waiting_on_blocked_work_it_cancels() {
+    let mut fx = fixture(true).await;
+    let _a = fx.delegate("a", "collect the quarterly numbers").await;
+    let b = fx.delegate("b", "write the summary from the numbers").await;
+    let call_one = fx.next_call().await;
+    let call_two = fx.next_call().await;
+    let (a_call, b_call) = if call_one.task_text.contains("quarterly") {
+        (call_one, call_two)
+    } else {
+        (call_two, call_one)
+    };
+    let workgraph = fx.workgraph.clone().expect("workgraph");
+    let a_item = fx.voice_item_titled("collect the quarterly numbers").await;
+    let b_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: a_item.id.clone(),
+            to_id: b_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge a -> b");
+    let b_item = fx
+        .voice_item_titled("write the summary from the numbers")
+        .await;
+    workgraph
+        .release(meerkat::ReleaseWorkItemRequest {
+            id: b_item.id.clone(),
+            realm_id: None,
+            namespace: None,
+            expected_revision: b_item.revision,
+        })
+        .await
+        .expect("release b behind a");
+    fx.client.release(b_call.index);
+    fx.wait_for_schedule_state(
+        &b,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Blocked,
+    )
+    .await;
+    fx.expect_no_call().await;
+
+    // C arrives with the pump held at its readiness read, so C waits on B.
+    let (pump_entered_tx, pump_entered) = oneshot::channel();
+    let (resume_pump, pump_resume) = oneshot::channel();
+    *fx.coordinator
+        .pump_readiness_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((pump_entered_tx, pump_resume));
+    let c = fx
+        .delegate("c", "draft the press release from the summary")
+        .await;
+    tokio::time::timeout(WAIT, pump_entered)
+        .await
+        .expect("c's pump reaches its readiness read")
+        .expect("pump readiness gate");
+    let c_item = fx
+        .voice_item_titled("draft the press release from the summary")
+        .await;
+    workgraph
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: b_item.id.clone(),
+            to_id: c_item.id.clone(),
+        })
+        .await
+        .expect("blocks edge b -> c");
+    let _ = resume_pump.send(());
+    fx.expect_no_call().await;
+    assert_eq!(
+        fx.schedule_state(&c).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Created)
+    );
+
+    // The close cancels B (blocked); C's blocker failed, so C may start.
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    let call = tokio::time::timeout(WAIT, fx.entered.recv())
+        .await
+        .expect("the waiting delegation starts after the close")
+        .expect("client alive");
+    assert!(
+        call.task_text.contains("draft the press release"),
+        "{call:?}"
+    );
+    assert_eq!(
+        fx.schedule_state(&b).await,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled)
+    );
+    fx.client.release(call.index);
+    fx.client.release(a_call.index);
+    let (settled, _) = fx.settle_releasing_calls(&c).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    );
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// An owned delegation still waiting for its worker at the close is
+/// post-close work: a channel reopened on the session is told that work from
+/// the earlier call is still finishing, as it is for the fork running at the
+/// close.
+#[tokio::test]
+async fn an_owned_delegation_waiting_at_the_close_is_post_close_work() {
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    assert!(
+        is_post_close_work(&fx, &first),
+        "the running fork is post-close work"
+    );
+    assert!(
+        is_post_close_work(&fx, &second),
+        "the waiting fork is post-close work too"
+    );
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    fx.client.release(head.index);
+    let (settled, _) = fx.settle_releasing_calls(&second).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    );
+    wait_until(WAIT, || async {
+        !is_post_close_work(&fx, &first) && !is_post_close_work(&fx, &second)
+    })
+    .await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// An owned delegation waiting at the close is post-close work until its
+/// start after the close is retired (here a held continuation the machine
+/// refuses): then a reopened channel is no longer told that work from the
+/// earlier call is still finishing.
+#[tokio::test]
+async fn an_owned_delegation_retired_after_the_close_stops_being_post_close_work() {
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("first", "continuation-shared", " with three headings")
+        .await;
+    fx.continue_utterance("second", "continuation-shared", " with three headings")
+        .await;
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    assert!(is_post_close_work(&fx, &second));
+
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(
+        first_settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    );
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Failed),
+        "its start after the close is retired"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task two")),
+        "the retired request's worker never started: {calls:?}"
+    );
+    wait_until(WAIT, || async { !is_post_close_work(&fx, &second) }).await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// A durable fork's start after its channel closed can meet the source member
+/// mid-turn at the fork cut: the executor refuses with a busy source before
+/// anything physical exists. The machine records the start as not started,
+/// the operation requeues on its own closed channel, and the retry runs it.
+#[tokio::test]
+async fn a_start_after_the_close_that_meets_a_busy_source_requeues_and_runs() {
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    fx.coordinator
+        .source_busy_starts_for_test
+        .store(1, std::sync::atomic::Ordering::Release);
+
+    fx.client.release(head.index);
+    // The first fork finishes and its result merges into the source member;
+    // every model call is released until the second delegation's start after
+    // the close has met the busy source. That start is recorded as not
+    // started and requeued: the operation is Created again while its retry
+    // waits.
+    let started = std::time::Instant::now();
+    let mut calls = Vec::new();
+    while fx
+        .coordinator
+        .source_busy_starts_for_test
+        .load(std::sync::atomic::Ordering::Acquire)
+        != 0
+    {
+        assert!(
+            started.elapsed() < WAIT,
+            "the delegation's start after the close is attempted"
+        );
+        while let Ok(call) = fx.entered.try_recv() {
+            fx.client.release(call.index);
+            calls.push(call);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    fx.wait_for_schedule_state(
+        &second,
+        meerkat_runtime::live_execution::LiveDelegationScheduleState::Created,
+    )
+    .await;
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed),
+        "the requeued start runs after the close"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.task_text.contains("serial task two")),
+        "{calls:?}"
+    );
+    fx.wait_for_completed(&[first, second]).await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// An owned fork that is mid-start at the close (taken off its queue, its
+/// worker not yet running) starts and runs after the close like one still
+/// queued, so it is post-close work too: a channel reopened on the session
+/// meanwhile is told that work from the earlier call is still finishing.
+#[tokio::test]
+async fn an_owned_fork_mid_start_at_the_close_is_post_close_work() {
+    let mut fx = fixture(false).await;
+    let (start_entered_tx, start_entered) = oneshot::channel();
+    let (resume_start, start_resume) = oneshot::channel();
+    *fx.coordinator
+        .start_gate_for_test
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((start_entered_tx, start_resume));
+    let operation = fx.delegate("starting", "serial task one").await;
+    tokio::time::timeout(WAIT, start_entered)
+        .await
+        .expect("the start begins")
+        .expect("start gate");
+
+    fx.coordinator
+        .cancel_channel_binding(&fx.provider_binding)
+        .await;
+    fx.runtime
+        .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+        .await
+        .expect("channel closes");
+    assert!(
+        is_post_close_work(&fx, &operation),
+        "a fork mid-start at the close is post-close work"
+    );
+
+    let _ = resume_start.send(());
+    let (settled, calls) = fx.settle_releasing_calls(&operation).await;
+    assert_eq!(
+        settled,
+        Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.task_text.contains("serial task one")),
+        "{calls:?}"
+    );
+    wait_until(WAIT, || async { !is_post_close_work(&fx, &operation) }).await;
+    fx.handle.shutdown().await.expect("shutdown");
+}
+
+/// The reasoning preference a channel's open sealed reaches a delegated turn
+/// that starts after that channel closed (both execution policies): the
+/// delegation keeps the preference it was admitted under, although the close
+/// removed the channel's own.
+#[tokio::test]
+async fn a_delegation_started_after_its_channel_closed_keeps_the_channel_reasoning_preference() {
+    use meerkat_core::lifecycle::run_primitive::{ReasoningEffort, RequestReasoningPreference};
+    use meerkat_core::model_profile::capabilities::EffortLevel;
+    for policy in [
+        LiveDelegationExecutionPolicy::DurableFork,
+        LiveDelegationExecutionPolicy::ExistingMember,
+    ] {
+        let mut fx = fixture_with_reasoning(
+            false,
+            policy,
+            Some(RequestReasoningPreference::set(EffortLevel::Low).expect("low")),
+        )
+        .await;
+        let _first = fx.delegate("first", "draft the outline").await;
+        let head = fx.next_call().await;
+        assert_eq!(head.reasoning_effort, Some(ReasoningEffort::Low));
+        let second = fx.delegate("second", "draft the summary").await;
+        fx.coordinator
+            .cancel_channel_binding(&fx.provider_binding)
+            .await;
+        fx.runtime
+            .abandon_live_open_admission(&fx.session_id, fx.binding.channel_id())
+            .await
+            .expect("channel closes");
+
+        fx.client.release(head.index);
+        let (settled, calls) = fx.settle_releasing_calls(&second).await;
+        assert_eq!(
+            settled,
+            Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed),
+            "{policy:?}"
+        );
+        let call = calls
+            .iter()
+            .find(|call| call.task_text.contains("draft the summary"))
+            .expect("the delegation ran after the close");
+        assert_eq!(
+            call.reasoning_effort,
+            Some(ReasoningEffort::Low),
+            "{policy:?}: the turn started after the close keeps the sealed preference"
+        );
+        fx.handle.shutdown().await.expect("shutdown");
+    }
 }
 
 #[tokio::test]

@@ -167,6 +167,20 @@ them.
   that used `max_age` to bound how old an input may be when it runs must
   bound that itself; see the upgrading guide.
 
+- `meerkat-core`: `HttpAuthorizationContent` gains the public field
+  `initiator: HttpRequestInitiator`, a new enum (`User`, the default, and
+  `Agent`) that says who a provider request continues. Code that builds the
+  struct with a literal sets the field or adds `..Default::default()`.
+- `meerkat-copilot`: `CopilotModelPolicyState` keeps a policy state other
+  than `enabled` and `disabled` as the account states it: the variant
+  `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
+  It still serializes as the state string. New
+  `CopilotModelPolicyState::as_str`.
+- `meerkat-copilot`: `CopilotModel::supported_endpoints` and
+  `CopilotModelOffering::supported_endpoints` are
+  `Option<Vec<CopilotEndpoint>>`: `None` when the catalog entry states no
+  list, `Some(vec![])` for an explicitly empty one.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -380,6 +394,25 @@ them.
   the released claim under `break_glass`, as
   `break_glass_reassign_attention` records its move.
 
+- `meerkat-llm-core`: `LlmRequest::initiator` says who a request continues,
+  from its last message; `PreparedLlmRequest::agent_initiated` marks a
+  request-local call (a compaction summary, a tool's own model call) as the
+  agent's own work, and `PreparedLlmRequest::initiator` reads either.
+- `meerkat-openai`: `OpenAiCompatibleClient::with_copilot_chat_stream` gives
+  a Chat Completions client GitHub Copilot's stream discipline (a finish
+  reason is required, only choice 0 is read); both Copilot Chat Completions
+  routes set it.
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
+  tokens one request may carry on the client's account and model, when the
+  provider states one (default `None`; wrappers delegate). A GitHub Copilot
+  route states the account model's prompt limit (the tighter of
+  `max_prompt_tokens` and `max_context_window_tokens`).
+- `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
+  model, state }` refuses a model the account lists under a policy that is
+  not `enabled`, naming the state.
+- `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
+  refuses a model the account lists with an empty endpoint list.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -424,6 +457,59 @@ them.
   thinking and no control: the client refuses a forced tool call beside
   explicit thinking, and a forced call skips thinking on the models that
   accept one.
+
+- GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
+  request continues the agent's own work (after a tool result or the
+  assistant's own output, and for a compaction summary or a tool's own
+  model call), `user` otherwise, as other Copilot clients send it. A
+  request and its retry after a 401 carry the same value.
+- GitHub Copilot: the account's model list is refreshed off the request
+  path. A request that finds the five-minute refresh due goes out at once on
+  the current token and the list the account holds, and one refresh runs
+  beside it for the account; before, that request and every concurrent one of
+  the account waited for `GET /models` (up to 30 seconds). A refresh that
+  refuses the token has the next request authorize again (a device sign-in
+  mints a new token, whose own listing decides; a token route builds its
+  account again); any other failure keeps the last list and is tried
+  again later, as before.
+- GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
+  network failure or timeout, is tried once more at once, both attempts
+  within the listing's existing 30-second bound; any other answer is final,
+  as before.
+- GitHub Copilot: when a temporary token exchange failure leaves no valid
+  token and the exchange sent `Retry-After`, every turn until then fails
+  with the outage's retryable error without calling the exchange (for at
+  most an hour); the first turn after it tries the exchange again. Without
+  `Retry-After` the next turn tries it at once, as before.
+- GitHub Copilot: a session's default compaction threshold stays below the
+  account model's prompt limit. The model-aware default (four-fifths of the
+  model's context window or input ceiling) now also takes the selected
+  account's prompt limit when the account states a smaller one, so a long
+  session compacts before the account refuses its prompt. An explicit
+  threshold or a per-build override above the account's prompt limit is
+  lowered to the limit, with a warning, as the request-byte cap bounds a
+  configured cap; one under it keeps its value. A prompt the provider
+  measured over that limit is refused as a context-length error, the class
+  the agent compacts on, instead of an invalid request; Copilot's own answer
+  to an over-limit prompt is not known, so no error body is assumed.
+- GitHub Copilot: a model whose catalog entry states no endpoint list is
+  served on `/chat/completions` by the OpenAI and Gemini routes (before, it
+  could not be selected). An entry whose list is empty states that the model
+  has no endpoints, and the model is refused
+  (`AccountModelRefusal::NoEndpoints` for a model only the account defines,
+  "Copilot account lists no endpoints for ..." on a registry model's route).
+  A model that lists only endpoints Meerkat does not speak still has none.
+- GitHub Copilot: a model the account lists under a policy other than
+  `enabled` is refused naming the state: an account-defined model with
+  `AccountModelRefusal::PolicyNotEnabled` (before, "does not offer"), a
+  registry model's route with "Copilot account policy state for ... is
+  '<state>', not 'enabled'" (before, "does not expose").
+- `meerkat`: a fallback web-search helper resolves its binding like a build
+  whose output budget is known: during a temporary credential exchange
+  outage of its account (a GitHub Copilot route) an explicit web search is
+  provisioned, and an inherited one kept, instead of failing the build or
+  dropping the tool for the build's lifetime. The first search completes the
+  exchange.
 
 ### Deprecated
 
@@ -605,6 +691,36 @@ them.
   still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
   through 0.9.10.
 
+- `meerkat-openai`: on the GitHub Copilot Responses route, a response no
+  longer fails the turn for good when Copilot gives its output items new
+  ids. Copilot re-identifies an item on most events of its lifecycle while
+  the item's `output_index` stays, and the route matched completed and
+  terminal items by content and refused every other shape. An item is now
+  its `output_index` slot: it keeps the first id any event of the slot
+  carried, and the terminal output is taken when it lines up with the
+  slots, each item committed under its slot's id with its own reasoning
+  ciphertext. A terminal output that does not line up (an item missing,
+  extra, of another kind, or with other content than the completed one)
+  and a stream that contradicts itself fail the response with a retryable
+  incomplete-response error that names the slot, so the turn is tried
+  again, and nothing of that response is committed. A stream that ends with
+  `[DONE]` and no terminal response commits its completed items. Other
+  OpenAI routes are unchanged.
+- `meerkat-copilot`: a `/models` 403 on a device sign-in's route no longer
+  sends the account to a new sign-in unless its body asks for an action on
+  the account (`error_details.notification_id`, as the token exchange reads
+  it). Any other 403 (a policy, an integration the account does not allow)
+  is a model discovery failure: the token keeps serving, with the last model
+  list or none, and the list is asked for again later.
+- `meerkat-openai`: on GitHub Copilot's Chat Completions routes (chat-only
+  OpenAI models and the Gemini models), a stream that ends without a finish
+  reason, at the end of the body or at `[DONE]`, no longer completes the
+  turn with truncated text or a dropped tool call, and a choice other than
+  choice 0 is no longer merged into the answer: both fail the response with
+  the retryable incomplete-response error, so the turn is tried again and
+  nothing of the response is committed. A finish reason still completes a
+  turn with or without `[DONE]`. Other routes are unchanged.
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
@@ -620,6 +736,13 @@ them.
   with `RESOLVE_NO_SYMLINKS`, or, on a kernel without openat2, a walk that
   opens each directory without following a link. A grant whose path holds a
   link at that moment is refused. Affects 0.8.52 through 0.9.10.
+
+- `meerkat-gemini`: the Gemini client marks its credential header values
+  sensitive, as the other provider clients do: the values a dynamic
+  authorizer supplies (a Vertex or Code Assist bearer) and the static API
+  key's `x-goog-api-key`, so a request's `Debug` output does not print them
+  and HTTP/2 never indexes them. A value that is not a valid header value
+  fails the request as an authentication failure before it is sent.
 
 ### Upgrade notes
 

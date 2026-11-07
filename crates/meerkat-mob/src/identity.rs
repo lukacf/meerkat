@@ -556,23 +556,31 @@ impl TryFrom<meerkat_contracts::wire::WireMemberToolDeclaration> for MemberToolD
 /// its role's named profile takes the role's current gate as its own at
 /// every build, as a worker of the role does; one declared with an exact
 /// profile of its own joins the role's gate as role entries, as a member
-/// spawned with its own profile does.
+/// spawned with its own profile does; and so does one whose material
+/// records no source (it was sealed by an earlier release, and a later
+/// member tool update keeps that reading).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesiredProfileSource {
+    /// Material sealed before it recorded where its profile came from: the
+    /// reading of a material with no `profile_source`. It keeps the rule of
+    /// that release: its role's gate joins as role entries only. Never
+    /// written.
+    #[default]
+    Unrecorded,
     /// The role's named canonical profile: the declaration names no
     /// `profile_override`.
-    #[default]
     Definition,
     /// The declaration's exact portable profile (`profile_override`).
     Override,
 }
 
 impl DesiredProfileSource {
-    /// Whether the material took the role's named profile (the default).
+    /// Whether the material recorded no source (it was sealed before the
+    /// source was recorded).
     #[must_use]
-    pub fn is_definition(&self) -> bool {
-        matches!(self, Self::Definition)
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
     }
 }
 
@@ -587,11 +595,12 @@ impl DesiredProfileSource {
 pub struct DesiredMemberMaterial {
     pub profile_name: ProfileName,
     pub profile: PortableProfile,
-    /// Where `profile` came from: the role's named profile (the default,
-    /// omitted when serialized, so material sealed before this field reads
-    /// as it) or the declaration's own exact profile. It decides the tool
-    /// grant gate the identity's member builds with.
-    #[serde(default, skip_serializing_if = "DesiredProfileSource::is_definition")]
+    /// Where `profile` came from: the role's named profile or the
+    /// declaration's own exact profile, written for every material this
+    /// release seals; a material with no source reads as `Unrecorded` (it
+    /// was sealed before the source was recorded). It decides the tool grant
+    /// gate the identity's member builds with.
+    #[serde(default, skip_serializing_if = "DesiredProfileSource::is_unrecorded")]
     pub profile_source: DesiredProfileSource,
     pub definition_extract: PortableDefinitionExtract,
     pub overlay: DesiredMemberOverlay,

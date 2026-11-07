@@ -175,6 +175,21 @@ them.
   `MobError::UnsupportedForMode` unless it is host human input to a local
   runtime-backed member, so the requester is never dropped on the way.
 
+- `meerkat-jobs`, `meerkat-contracts`: host tool callbacks carry the run's
+  original requester (see Added), so two public structs gain a public field,
+  and code that builds them literally must set it (`requester: None` keeps
+  the previous behaviour): `JobSpec.requester: Option<TurnRequester>`
+  (meerkat-jobs, also reached as `meerkat::JobSpec`) and
+  `CallbackJobStartParams.requester: Option<TurnRequester>`
+  (meerkat-contracts).
+
+- Behaviour-only (not measured by the gate): `meerkat-jobs`: a detached
+  job's requester is part of its submission's replay identity. A submission
+  under an admitted job's submission key that names another requester, or
+  none where the admitted job names one (or the reverse), is refused with
+  `DetachedJobError::SubmissionConflict`, and a compare-and-swap that would
+  change a stored job's requester is refused.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -348,6 +363,31 @@ them.
   one accessor: a governed input's requester is its work association's, any
   other input's is the one its host supplied.
 
+- `meerkat-rpc`, `meerkat-jobs`, `meerkat-contracts`: host tool callbacks
+  carry the original requester of the run they serve, typed, so a host can
+  refuse a person-scoped tool (one person's mail, documents or accounts) for
+  anyone but its owner. The JSON-RPC `tool/execute` request carries
+  `requester`, the run's `TurnRequester` (its principal, and `carried` when
+  the run's work reached its agent through another actor), when the run has
+  one. A detached callback job records the requester of the run that
+  submitted it (`JobSpec::requester`, set with `JobSpec::with_requester`),
+  and every `callback/job/start` for the job names it
+  (`CallbackJobStartParams.requester`), also after a restart. Only the
+  runtime sets it, from the run's tool dispatch context; a `requester`
+  inside a call's arguments is just an argument. The Python and TypeScript
+  SDKs pass it to a tool handler (`ToolCallRequester`, its
+  `RequesterPrincipal`, and `carried`): in Python to a handler that declares
+  a `requester` parameter, in TypeScript as the handler's optional third
+  argument (`MeerkatClient.parseToolCallRequester` reads one). A malformed
+  requester reads as none, so a person-scoped tool fails closed.
+
+- `meerkat-core`: a trusted tool application ingress can name the original
+  requester of its operation (`ToolApplicationIngress::requester`, none by
+  default; `ToolApplicationControlRequest::requester` reads what it named at
+  submission). An MCP App's action then runs for that requester as a direct
+  requester, never for the requester of the model run whose result the app
+  shows, and an ingress that names an unqualified principal is refused.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -496,6 +536,10 @@ them.
   optional field. An older Core that reads them drops it, which leaves the
   input and its turn without a requester, so nothing then acts for that
   person.
+
+- A stored detached job writes its requester as one more optional field. An
+  older Core that reads the job drops it, so the job's later attempts start
+  with no requester and a person-scoped tool refuses them.
 
 ### Known limitations
 

@@ -195,6 +195,19 @@ approval; `ToolDispatchContext::direct_requester` answers only for a direct
 one, which is the only one a host should act for in that person's name. Inputs
 of different requesters, or of a requester and none, never share a run.
 
+A host tool callback names the run's requester too, typed, so a host can
+refuse a person-scoped tool (one person's mail, documents or accounts) for
+anyone else: the JSON-RPC `tool/execute` request carries it as `requester`,
+and a detached callback job records the requester of the run that submitted
+it and names it on every `callback/job/start`. Only the runtime sets it; a
+`requester` inside a call's arguments is just an argument.
+
+An MCP App's action runs for the requester its host's trusted ingress names
+(`ToolApplicationIngress::requester`), as a direct requester, and never for
+the requester of the model run whose result the app shows. An ingress that
+names no one runs the action without a requester, and one that names an
+unqualified principal is refused.
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot

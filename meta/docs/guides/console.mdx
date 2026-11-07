@@ -194,6 +194,11 @@ permits neither. A model-only launch tool can still own a view. App actions use
 fresh native authorization, pre- and post-tool hooks and normal execution
 policy, including review when required. A post-hook refusal withholds the result
 while preserving already settled effects. View-only users cannot invoke them.
+An app action runs for the Console caller who makes it: on a console that
+requires sign-in, a person's action carries that person as its original
+requester, and on an open console, or for a service or a token principal, it
+carries none. It never borrows the requester of the model run whose result
+the app shows.
 
 App resource reads and tool execution can proceed while the model turn is still
 running. A response with no session effects or hook notices does not wait for

@@ -88,6 +88,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+- The SDK host's tool callbacks carry the original requester of the run
+  they serve, typed, so a host can refuse a person-scoped tool (one
+  person's mail, documents or accounts) for anyone but its owner:
+  `callback/call_tool` names it as `requester` (the principal, and
+  `carried` when the run's work reached its agent through another actor),
+  and a detached callback job's `callback/job/start` names the requester of
+  the run that submitted it, recorded with the job. A console send from a
+  person on a console that requires sign-in is such a run. A run without a
+  requester names none. Only the runtime sets it; a `requester` inside a
+  call's arguments is just an argument. The Python and TypeScript SDKs pass
+  it to a tool handler (`ToolCallRequester`, with `RequesterPrincipal`): in
+  Python to a handler that declares a `requester` parameter, in TypeScript
+  as the handler's optional second argument (`parseToolCallRequester` reads
+  one). A detached job's runner reads it as `DetachedJobContext.requester`.
+  A malformed requester reads as none, so a person-scoped tool fails
+  closed.
+
+- An MCP App's action from the console runs for its caller: on a console
+  that requires sign-in, a person's action carries that person as its
+  original requester; on an open console, and for a service or a token
+  principal, it carries none. It never borrows the requester of the model
+  run whose result the app shows.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

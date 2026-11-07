@@ -101,6 +101,11 @@ def test_a_requester_core_refuses_is_none() -> None:
         "a blank principal kind": {**alice, "kind": "  "},
         "an unknown principal kind": {**alice, "kind": "robot"},
         "a qualified id with a control character": _wire_principal("ali\x07ce"),
+        "a qualified id with a C1 control character": _wire_principal("ali\x85ce"),
+        "a trust domain with DEL": {
+            **alice,
+            "qualification": {"kind": "qualified", "trust_domain_id": ISSUER_DOMAIN + "\x7f"},
+        },
     }
     accepted = [
         name

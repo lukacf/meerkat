@@ -1344,6 +1344,92 @@ mod tests {
             cut.target.keys().collect::<Vec<_>>()
         );
     }
+
+    /// The fields a caller sends give way before the owner's receipt. A
+    /// decide whose caller fills every named and member target field with a
+    /// long value keeps the decision the owner answered with.
+    #[test]
+    fn caller_fields_never_push_out_the_owners_receipt() {
+        let long = "x".repeat(MAX_VALUE_BYTES);
+        let mut params = Map::new();
+        for key in [
+            "realm",
+            "role",
+            "principal",
+            "name",
+            "action",
+            "operation",
+            "enabled",
+            "expected_revision",
+            "identity",
+            "agent_identity",
+            "member_id",
+            "agent_id",
+            "rule_id",
+        ] {
+            params.insert(key.to_string(), json!(long));
+        }
+        params.insert("decision".to_string(), json!("approve"));
+        params.insert(
+            "pending_id".to_string(),
+            json!("gate-pending-v2-0123456789abcdef-000001"),
+        );
+        let actor = ConsoleAuditActor {
+            kind: "person",
+            principal: Some("first.last@example-enterprise-domain.test".to_string()),
+            issuer: Some(
+                "https://login.example-identity-provider.test/0123456789abcdef/v2.0".to_string(),
+            ),
+            subject: Some("AAAAAAAAAAAAAAAAAAAAAI0123456789abcdefghijk".to_string()),
+            assurance: Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
+            login_scope_digest: Some(format!("sha256:{}", "0".repeat(64))),
+        };
+        let decided = ConsoleAuditEntry::answered(
+            actor,
+            "meta/gating/decide".to_string(),
+            audit_target(&Value::Object(params)),
+            &json!({ "result": {
+                "pending_id": "gate-pending-v2-0123456789abcdef-000001",
+                "action_id": "gate-action-v2-0123456789abcdef-000000",
+            } }),
+        );
+        assert_eq!(
+            (
+                decided.receipt.get("pending_id").cloned(),
+                decided.receipt.get("action_id").cloned(),
+            ),
+            (
+                Some(json!("gate-pending-v2-0123456789abcdef-000001")),
+                Some(json!("gate-action-v2-0123456789abcdef-000000")),
+            ),
+            "the receipt keeps {:?}; the target keeps {:?}",
+            decided.receipt.keys().collect::<Vec<_>>(),
+            decided.target.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Invented `_id` keys never push out a target id the owner's answer
+    /// does not echo (`meta/cancel_flow` answers `{"accepted": true}`).
+    #[test]
+    fn invented_ids_never_push_out_the_run_a_change_names() {
+        let mut params = Map::new();
+        for n in 0..16 {
+            params.insert(format!("a{n:02}_id"), json!("x"));
+        }
+        params.insert("run_id".to_string(), json!("run-1"));
+        let cancelled = ConsoleAuditEntry::answered(
+            entry("meta/cancel_flow").actor,
+            "meta/cancel_flow".to_string(),
+            audit_target(&Value::Object(params)),
+            &json!({ "result": { "accepted": true } }),
+        );
+        assert_eq!(
+            cancelled.target.get("run_id"),
+            Some(&json!("run-1")),
+            "the target keeps {:?}",
+            cancelled.target.keys().collect::<Vec<_>>()
+        );
+    }
 }
 
 /// Test support: a metadata store that keeps realm documents and lists every

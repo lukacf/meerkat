@@ -299,9 +299,13 @@ with the principal (the email, or the `sub` when the token carries no
 email), on the runtime's RPC surface or on the console's `/console/rpc`. On
 the console route an access admin may revoke anyone's sessions when an
 access controller is installed, enforced or not. Without an access
-controller, a console caller revokes only their own sessions: `principal`
-names them, or is left out, and naming another principal is refused
-(`-32030`, `access_denied`) and fences no one. The
+controller, a console caller revokes only their own sessions: naming
+another principal is refused (`-32030`, `access_denied`) and fences no one.
+On the console route `principal` may be left out, an access admin's
+request included: the request then revokes the caller's own sessions. A
+revocation also stops the console schedules its principal defined before
+it: their sends are refused from then on (see
+[Console schedules](/api/rpc#console-schedules-console)). The
 principal is matched exactly as the token names it, case included, as the
 allowlist compares it: a revocation for another spelling fences nothing,
 even when it answers success.

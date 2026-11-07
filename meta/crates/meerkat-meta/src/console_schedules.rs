@@ -382,6 +382,10 @@ pub(crate) struct AttachedConsoleSchedules {
     /// reads and before it writes.
     #[cfg(test)]
     pub(crate) write_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
+    /// Test hook: while set, a console schedule resume waits here after it
+    /// recorded its sender and before Core resumes the schedule.
+    #[cfg(test)]
+    pub(crate) resume_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
 }
 
 /// Test hook: holds a console schedule update between its reads and its
@@ -428,13 +432,26 @@ impl AttachedConsoleSchedules {
             .unwrap_or_else(PoisonError::into_inner) = Some(hold);
     }
 
+    /// Hold the next resume with `hold`, between its write and the resume.
+    pub(crate) fn hold_resumes(&self, hold: ScheduleWriteHold) {
+        *self
+            .resume_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold);
+    }
+
     /// Wait at the hold, when one is set.
     pub(crate) async fn wait_at_write_hold(&self) {
-        let hold = self
-            .write_hold
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        Self::wait_at(&self.write_hold).await;
+    }
+
+    /// Wait at the resume hold, when one is set.
+    pub(crate) async fn wait_at_resume_hold(&self) {
+        Self::wait_at(&self.resume_hold).await;
+    }
+
+    async fn wait_at(slot: &std::sync::Mutex<Option<ScheduleWriteHold>>) {
+        let hold = slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if let Some(hold) = hold {
             hold.reached.add_permits(1);
             if let Ok(permit) = hold.release.acquire().await {
@@ -462,6 +479,8 @@ impl ConsoleSchedules {
             firing,
             #[cfg(test)]
             write_hold: Arc::default(),
+            #[cfg(test)]
+            resume_hold: Arc::default(),
         });
     }
 

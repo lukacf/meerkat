@@ -1,7 +1,8 @@
 //! Shared console objects one caller cannot quietly take from another: an
 //! access edit is written only against the revision its editor read, and on
 //! a console without an access controller a caller revokes only their own
-//! sessions.
+//! sessions. A revoke that names no principal revokes the caller's own on
+//! every console.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -188,5 +189,43 @@ async fn revoke_other_without_controller_refused() -> TestResult {
     .await;
     assert!(revoked["error"].is_null(), "{revoked:#}");
     assert!(admin_fences.not_before(ROBOT).is_some());
+    Ok(())
+}
+
+/// A revoke that names no principal revokes the caller's own sessions on
+/// every console: on one with an access controller too, where the caller is
+/// an access admin who could have named anyone. It fences the admin alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_revoke_without_principal_revokes_own_sessions() -> TestResult {
+    let bob = bob();
+    for params in [json!({}), json!({ "principal": null })] {
+        let (_dir, fences) = durable_fences();
+        let router = console_json_router_with_state(ConsoleJsonState {
+            session_fences: fences.clone(),
+            access: Some(
+                AccessController::new(crate::access::AccessControlConfig {
+                    enabled: true,
+                    admins: vec![BOB.to_string()],
+                    ..crate::access::AccessControlConfig::default()
+                })
+                .map_err(|error| format!("{error:?}"))?,
+            ),
+            ..state()
+        });
+        let answer = console_rpc_as(
+            &router,
+            Some(&bob),
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
+            params,
+        )
+        .await;
+        assert!(answer["error"].is_null(), "{answer:#}");
+        assert_eq!(answer["result"]["principal"], json!(BOB), "{answer:#}");
+        assert!(
+            fences.not_before(BOB).is_some(),
+            "the admin's own are fenced"
+        );
+        assert_eq!(fences.not_before(ROBOT), None, "no one else is");
+    }
     Ok(())
 }

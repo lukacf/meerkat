@@ -300,6 +300,22 @@ describe("SchedulesPanel", () => {
     expect(view.getByTestId("schedules-group:support").textContent?.includes("read-only")).toBe(true);
   });
 
+  it("offers no changes to an agent the viewer may message but whose schedules they may not manage", async () => {
+    const { run } = demo();
+    const agents = DEMO_SCHEDULE_AGENTS.map((agent) => (agent.identity === "support"
+      ? { ...agent, affordances: { ...agent.affordances, can_manage_schedules: false } }
+      : agent));
+    const view = render(panel({ run, accessEnforcing: true }, agents));
+    await loaded(view);
+    fireEvent.click(view.getByTestId("schedules-view:list"));
+    expect(present(view, "schedules-pause:sch_inbox_sweep")).toBe(false);
+    expect(present(view, "schedules-pause:sch_weekday_triage")).toBe(false);
+    expect(view.getByTestId("schedules-group:support").textContent
+      ?.includes("You may message this agent but not change its schedules.")).toBe(true);
+    // An agent whose schedules the viewer manages keeps its actions.
+    expect(present(view, "schedules-pause:sch_monday_summary")).toBe(true);
+  });
+
   it("explains a console without a schedule host and reads nothing", () => {
     const { run } = demo();
     const view = render(panel({ run, offer: { list: false, write: false } }));

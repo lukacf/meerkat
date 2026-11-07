@@ -135,6 +135,15 @@ test("a viewer changes schedules on a writable console that offers the writes, f
   });
   assert.equal(internal.canChange, false);
   assert.match(internal.note ?? "", /takes no console messages/);
+
+  const notManaged = consoleScheduleEditing({
+    offer,
+    readOnly: false,
+    accessEnforcing: true,
+    agent: agent({ affordances: { can_send_message: true, can_manage_schedules: false } }),
+  });
+  assert.equal(notManaged.canChange, false);
+  assert.match(notManaged.note ?? "", /message this agent but not change its schedules/);
 });
 
 test("a list answer is read fail-closed: no schedules array lists none, and unreadable items are left out", () => {

@@ -5153,10 +5153,10 @@ fn console_rpc_access_violation(
 /// controller, enforced or not, only an access admin may revoke, anyone's
 /// sessions, as for the `meta/access/*` edits ([`handle_access_admin_rpc`]).
 /// On a console without one, a caller its token identified revokes only
-/// their own sessions (`principal` names them, or is left out: the target
-/// comes from the connection), and an anonymous caller none. A read-only
-/// console refuses it, and so does a console whose session fence record has
-/// no file.
+/// their own sessions, and an anonymous caller none. Either way a request
+/// that leaves `principal` out names the caller (the target comes from the
+/// connection). A read-only console refuses it, and so does a console whose
+/// session fence record has no file.
 fn console_revoke_sessions_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,

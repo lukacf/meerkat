@@ -1052,7 +1052,7 @@
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content, an interval under 60 seconds, or an invalid trigger (the scheduler's validation, an unknown time zone among them)."
+              "note": "-32001 data.kind unknown_identity when no agent of the console has the name; -32002 data.kind not_addressable for an agent that takes no console sends; -32004 data.kind governed_target for an agent whose input is governed (a governed send needs its Console human present, and a fire has none) or data.kind schedule_host_unavailable where no schedule firing host sends the gateway's schedules; -32602 for an invalid identity, a blank content, an interval under 60 seconds, or an invalid trigger (the scheduler's validation, an unknown time zone among them), and with data.kind unsupported_param (param) for a create that names expected_revision or take_over_sender."
             }
           ]
         },
@@ -1118,7 +1118,7 @@
               "identity",
               "schedule_id"
             ],
-            "note": "Stops the console schedule's sends until it is resumed; pausing a paused schedule answers it as it is. Gated on a writable console and agent.send for the agent; the sender stays as it is."
+            "note": "Stops the console schedule's sends until it is resumed; pausing a paused schedule answers it as it is. Gated on a writable console and agent.send and schedule.manage for the agent; the sender stays as it is. It acts on the schedule as it is: it takes no expected_revision and no take_over_sender."
           },
           "success": {
             "body": "console_schedule",
@@ -1134,7 +1134,8 @@
               "sender_hidden",
               "sender_history",
               "next_due_at_utc"
-            ]
+            ],
+            "note": "The schedule as the pause left it."
           },
           "errors": [
             {
@@ -1144,7 +1145,7 @@
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's; -32602 for an invalid identity or schedule_id."
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's; -32602 for an invalid identity or schedule_id, and with data.kind unsupported_param (param) for a pause that names expected_revision or take_over_sender: nothing is changed."
             }
           ]
         },
@@ -1179,7 +1180,8 @@
               "sender_hidden",
               "sender_history",
               "next_due_at_utc"
-            ]
+            ],
+            "note": "The schedule as Core resumed it: a change another caller made between the resume's write and the resume shows in the answer (its sender, content and revision)."
           },
           "errors": [
             {
@@ -1206,7 +1208,7 @@
               "identity",
               "schedule_id"
             ],
-            "note": "Deletes the console schedule and its planned sends. Gated on a writable console and agent.send for the agent."
+            "note": "Deletes the console schedule and its planned sends. Gated on a writable console and agent.send and schedule.manage for the agent. It acts on the schedule as it is: it takes no expected_revision and no take_over_sender."
           },
           "success": {
             "body": "console_schedule_deleted",
@@ -1225,7 +1227,7 @@
                 -32602,
                 -32000
               ],
-              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's."
+              "note": "-32001 data.kind schedule_not_found for a schedule that does not exist, was deleted, is no console schedule, or is another agent's; -32602 data.kind unsupported_param (param) for a delete that names expected_revision or take_over_sender: nothing is changed."
             }
           ]
         },

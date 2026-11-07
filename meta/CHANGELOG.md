@@ -52,8 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - On a console without an access controller, `meta/console/revoke_sessions`
   revokes only the caller's own sessions: naming another principal is
   refused with `-32030` `access_denied`, and a caller no token identified
-  revokes none. `principal` may be left out there; it is then the caller's
-  own.
+  revokes none. On the console route `principal` may be left out, an
+  access admin's request included: it then names the caller, whose own
+  sessions are revoked (such a request was refused with `-32602` before).
 
 ### Security
 
@@ -127,7 +128,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it sent as before each takeover and when it was taken over (the newest
   16), shown to callers who may send to its agent.
 - Access action `schedule.manage` restricts who changes an agent's console
-  schedules.
+  schedules. Under enforced access each agent's experience affordances
+  carry `can_manage_schedules`, and the stock Console offers schedule
+  changes only where it is true.
 
 ### Fixed
 
@@ -135,7 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/schedule/update` and `meta/schedule/resume` take
   `expected_revision`, the stock Console sends the revision it showed, and
   a change made from an older read is refused with
-  `schedule_revision_conflict`.
+  `schedule_revision_conflict`. A pause, a delete and a create take no
+  revision and make no takeover: one that names `expected_revision` or
+  `take_over_sender` is refused with `-32602` `unsupported_param` (with
+  `param`). Each write answers the schedule as it left it.
 - A Console WorkGraph action acts on the revision its card or row showed,
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.

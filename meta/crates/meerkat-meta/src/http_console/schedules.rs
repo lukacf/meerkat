@@ -17,8 +17,10 @@
 //! agent takes the Console's sends. An update and a resume are refused when
 //! the schedule moved past the revision they name (`expected_revision`),
 //! and write at the revision they read, so neither overwrites a change made
-//! meanwhile. Who a schedule sends as is shown only to a caller who may
-//! send to its agent.
+//! meanwhile. A pause, a delete and a create take no `expected_revision`
+//! and no `take_over_sender`, and refuse them rather than ignore them. Each
+//! write answers the schedule as it left it. Who a schedule sends as is
+//! shown only to a caller who may send to its agent.
 //!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
 //! Console's admission of the schedule's sender, then the very send
@@ -175,6 +177,7 @@ async fn create(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/create")?;
     let sender = sender(call)?;
     let content = required_content(call.params)?;
     let trigger = trigger_param(call.params)?.ok_or_else(|| invalid("trigger is required"))?;
@@ -249,6 +252,7 @@ async fn pause(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/pause")?;
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
     caller_current(call)?;
@@ -257,7 +261,13 @@ async fn pause(
         .pause(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
+    Ok(schedule_item(
+        &schedules.service,
+        &schedule,
+        &as_left(&schedule, send),
+        true,
+    )
+    .await)
 }
 
 /// A resume is defined again as its caller, as an update is: the sender
@@ -294,12 +304,22 @@ async fn resume(
         },
     )
     .await?;
+    #[cfg(test)]
+    schedules.wait_at_resume_hold().await;
     let schedule = schedules
         .service
         .resume(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
+    // Core resumes the schedule as it is then: a change made between the
+    // write above and the resume is the schedule's, so the answer names it.
+    Ok(schedule_item(
+        &schedules.service,
+        &schedule,
+        &as_left(&schedule, send),
+        true,
+    )
+    .await)
 }
 
 async fn delete(
@@ -307,6 +327,7 @@ async fn delete(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/delete")?;
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
     caller_current(call)?;
@@ -350,6 +371,29 @@ fn take_over_sender_param(params: &Value) -> Result<bool, JsonRpcError> {
         Some(Value::Bool(take_over)) => Ok(*take_over),
         Some(_) => Err(invalid("take_over_sender must be a boolean")),
     }
+}
+
+/// Refuse a precondition `method` would not keep: a pause and a delete act
+/// on the schedule as it is (Core's pause and delete take no revision), and
+/// neither they nor a create makes anyone the sender in another's place.
+/// Named, `expected_revision` or `take_over_sender` would read as a
+/// condition the call does not check, so it is refused, not ignored.
+fn refuse_unkept_preconditions(params: &Value, method: &str) -> Result<(), JsonRpcError> {
+    for param in ["expected_revision", "take_over_sender"] {
+        if params.get(param).is_some_and(|value| !value.is_null()) {
+            return Err(
+                JsonRpcError::new(-32602, format!("{method} takes no {param}"))
+                    .with_data(json!({ "kind": "unsupported_param", "param": param })),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The send `schedule` holds as a write left it, which is `send` unless a
+/// change made meanwhile replaced it.
+fn as_left(schedule: &Schedule, send: ConsoleScheduledSend) -> ConsoleScheduledSend {
+    ConsoleScheduledSend::of_target(&schedule.target).unwrap_or(send)
 }
 
 /// Refuse a change made against a revision the schedule moved past: its

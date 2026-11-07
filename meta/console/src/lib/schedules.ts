@@ -66,9 +66,10 @@ export interface ConsoleScheduleEditing {
  * Whether the pane offers schedule changes for `agent`: the console is
  * writable, the gateway offers the writes, and the agent takes the viewer's
  * sends. Under enforced access `can_send_message` is the viewer's
- * `agent.send` on the agent; without it, whether the agent is addressable.
- * Either way a schedule could not be sent, so the list stays read-only. The
- * gateway still judges every write.
+ * `agent.send` on the agent and `can_manage_schedules` adds
+ * `schedule.manage`; without it, whether the agent is addressable. Either
+ * way a schedule could not be sent or changed, so the list stays read-only.
+ * The gateway still judges every write.
  */
 export function consoleScheduleEditing(input: {
   offer: ConsoleScheduleOffer;
@@ -89,6 +90,9 @@ export function consoleScheduleEditing(input: {
         ? "You may view this agent but not message it, so you cannot change its schedules."
         : "This agent takes no console messages, so it cannot be scheduled.",
     };
+  }
+  if (input.agent?.affordances?.can_manage_schedules === false) {
+    return { canChange: false, note: "You may message this agent but not change its schedules." };
   }
   return { canChange: true, note: null };
 }
@@ -603,7 +607,10 @@ export function scheduleResumeParams(schedule: ConsoleSchedule): Record<string, 
 }
 
 /** `expected_revision` from the revision the console showed; none when it
- * could not read one. */
+ * could not read one. Every Meta gateway answers a schedule with its
+ * `revision`, so that does not happen today; were it to, the change would
+ * act on the schedule's current revision (the last writer wins), unlike a
+ * WorkGraph action, which the console holds until its card shows one. */
 function observedRevision(schedule: ConsoleSchedule): Record<string, unknown> {
   return schedule.revision === null ? {} : { expected_revision: schedule.revision };
 }

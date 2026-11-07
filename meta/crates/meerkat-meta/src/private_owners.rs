@@ -27,8 +27,10 @@
 //! ([`PrivateOwners::bind_private_retirements`]). The seed runs in the
 //! background from the start and is tried again until it lands
 //! ([`PrivateOwners::seed_in_background`]); until then a spawn into a mob
-//! whose owner is not known is refused as retryable, and a console with
-//! sign-in withholds a member it does not know from everyone but an admin.
+//! whose owner is not known is refused as retryable (a member already seated
+//! there is restored and woken as before: its rebuild repeats its seating),
+//! and a console with sign-in withholds a member it does not know from
+//! everyone but an admin.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock, Weak};
@@ -608,7 +610,9 @@ impl PrivateOwners {
     /// The customizer body of a mob a member created: the mob's own owner
     /// (its creator's), else the owner [`Self::requested_owner`] names. A
     /// mob this record does not know refuses the spawn as retryable: until
-    /// the seed lands, a mob restored from before a restart is not known.
+    /// the seed lands, a mob restored from before a restart is not known. A
+    /// rebuild of a member already seated there is not a spawn, and is not
+    /// asked (see the customizer's `customize_resume`).
     pub(crate) fn apply_child(
         &self,
         mob_id: &str,
@@ -702,6 +706,21 @@ impl SpawnMemberCustomizer for ChildOwnerPropagation {
     ) -> Result<(), MobError> {
         self.owners
             .apply_child(ctx.mob_id.as_str(), ctx.spawner_identity.as_ref(), spec)
+    }
+
+    /// A rebuild of a member already seated in the mob (a restart's restore,
+    /// a wake, an explicit resume) repeats its seating: the roster labels it
+    /// is rebuilt with are the ones [`PrivateOwners::apply_child`] gave its
+    /// spawn, owner included, and its seat keeps its wiring. Nothing is
+    /// decided again, so a rebuild is never refused, even before the seed
+    /// lands.
+    fn customize_resume(
+        &self,
+        _ctx: &SpawnCustomizationContext,
+        _durable: &meerkat_mob::ResumedMemberView,
+        _spec: &mut SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        Ok(())
     }
 }
 

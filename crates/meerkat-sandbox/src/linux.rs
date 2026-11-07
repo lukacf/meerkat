@@ -50,6 +50,7 @@ use nix::libc;
 use tokio::process::{ChildStderr, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::native_child::Termination;
 use crate::native_stdio::{duplicate, inherit, input, output};
 use crate::{ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunchSpec, SpawnIo};
 
@@ -115,6 +116,7 @@ enum SetupStep {
     InitDescriptors = 27,
     InitSignals = 28,
     CommandDeathSignal = 29,
+    TeardownSignal = 30,
 }
 
 impl SetupStep {
@@ -563,6 +565,23 @@ fn fork_confined() -> libc::pid_t {
 // a group SIGTERM leaves it running and the command its grace.
 const RELAY_IGNORED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
 
+// The host's request that the relay tear its launch down (`relay`), sent by
+// NativeChild (`Termination::Teardown`). A real-time signal, because no
+// terminal, job control or process lifecycle path sends one: SIGTERM and its
+// kin must stay ignored (`RELAY_IGNORED`), and SIGUSR1/2 are signals a
+// program may send to its own process group, which the relay shares. The
+// offset clears the real-time signals the C library reserves (two in glibc,
+// three in musl), which `SIGRTMIN()` already excludes, and keeps clear of
+// the first few a program is likely to pick.
+fn relay_teardown_signal() -> libc::c_int {
+    libc::SIGRTMIN() + 6
+}
+
+// How long NativeChild lets the relay tear down (kill pid 1, which takes the
+// namespace with it, and reap it) before it SIGKILLs the relay instead.
+// Tearing down takes milliseconds; the bound only guards a relay that cannot.
+const RELAY_TEARDOWN_BOUND: Duration = Duration::from_secs(5);
+
 // The asynchronous signals init ignores, so a handler inherited from the
 // host process never runs in it. The command and every process it starts
 // share the relay's process group (setpgid and setsid are refused), so a
@@ -590,12 +609,22 @@ const INIT_IGNORED: [libc::c_int; 12] = [
 // caller (the child `Command::spawn` returns, or the probe's child) becomes
 // the relay (`relay`) and never returns.
 //
-// Kill semantics: NativeChild signals SIGKILL to the relay only. Pid 1 has
-// PR_SET_PDEATHSIG(SIGKILL) on the relay, and the death of a pid namespace's
-// pid 1 kills every process in that namespace, so the whole launch dies with
-// the relay. Pid 1 is our init (`enter_init`), not the command, so the
-// command cannot clear that death signal. The process group std sets on the
-// relay is inherited.
+// Kill semantics: NativeChild sends the relay its teardown signal
+// (`relay_teardown_signal`) only. The relay SIGKILLs pid 1, whose death
+// kills every process in the namespace, and reaps it before it exits, so no
+// init is left for the host to adopt: a host that is pid 1 of its container,
+// or a child subreaper, would never wait for it. Pid 1 also has
+// PR_SET_PDEATHSIG(SIGKILL) on the relay, the backstop for a relay that dies
+// (NativeChild's last-resort SIGKILL after `RELAY_TEARDOWN_BOUND`), so the
+// whole launch dies with the relay either way. Pid 1 is our init
+// (`enter_init`), not the command, so the command cannot clear that death
+// signal. The process group std sets on the relay is inherited.
+//
+// The relay blocks SIGCHLD and the teardown signal before it forks, so a
+// teardown request is never lost: it stays pending until the relay waits for
+// it (spawn returns the relay's PID only after the command's exec, so none
+// can arrive earlier anyway). Pid 1 restores the mask it inherited before
+// anything else, so init and the command run with std's.
 //
 // Allocation-free raw syscalls only.
 fn enter_pid_namespace() -> Result<i32, SetupFailure> {
@@ -617,20 +646,48 @@ fn enter_pid_namespace() -> Result<i32, SetupFailure> {
         return Err(SetupStep::PidNamespace.failed()(errno));
     }
     let [status_read, status_write] = status;
+    let close_pipes = || {
+        for descriptor in [watch, hold, status_read, status_write] {
+            unsafe { libc::close(descriptor) };
+        }
+    };
+    // The relay waits for init with waitpid, which a SIGCHLD left at SIG_IGN
+    // (or a host handler) would defeat; then both signals it waits for are
+    // blocked, so they stay pending until it does.
+    if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+        let failure = SetupStep::TeardownSignal.failed()(errno());
+        close_pipes();
+        return Err(failure);
+    }
+    let mut awaited = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    let blocked = unsafe {
+        libc::sigemptyset(awaited.as_mut_ptr());
+        libc::sigaddset(awaited.as_mut_ptr(), libc::SIGCHLD);
+        libc::sigaddset(awaited.as_mut_ptr(), relay_teardown_signal());
+        libc::sigprocmask(libc::SIG_BLOCK, awaited.as_ptr(), previous.as_mut_ptr())
+    };
+    if let Err(errno) = raw(blocked) {
+        close_pipes();
+        return Err(SetupStep::TeardownSignal.failed()(errno));
+    }
+    // SAFETY: sigemptyset and a successful sigprocmask initialised both.
+    let (awaited, previous) = unsafe { (awaited.assume_init(), previous.assume_init()) };
     let pid = fork_confined();
     if pid == -1 {
         let failure = SetupFailure {
             step: SetupStep::PidNamespace,
             errno: errno(),
         };
-        for descriptor in [watch, hold, status_read, status_write] {
-            unsafe { libc::close(descriptor) };
-        }
+        close_pipes();
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw const previous, std::ptr::null_mut()) };
         return Err(failure);
     }
     if pid != 0 {
-        relay(pid, hold, status_read);
+        relay(pid, hold, status_read, &awaited);
     }
+    raw(unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw const previous, std::ptr::null_mut()) })
+        .map_err(SetupStep::TeardownSignal.failed())?;
     raw(unsafe { libc::close(hold) }).map_err(SetupStep::ParentDeathSignal.failed())?;
     raw(unsafe { libc::close(status_read) }).map_err(SetupStep::ParentDeathSignal.failed())?;
     raw(unsafe {
@@ -795,12 +852,15 @@ fn init(command: libc::pid_t, status: i32) -> ! {
 // (`RELAY_IGNORED`), closes every descriptor but `hold` and `status` (std's
 // exec-error pipe among them, so `Command::spawn` returns once the command
 // execs or reports its setup failure through its own copy), waits for pid 1
-// and ends the way the command ended: the wait status init wrote to
-// `status`, or pid 1's own when init wrote none (a setup failure before the
-// command, or init killed): its exit code, or its terminating signal raised
-// again on the relay. Allocation-free raw syscalls only; it never returns
-// into std's exec.
-fn relay(child: libc::pid_t, hold: i32, status: i32) -> ! {
+// or the teardown signal (`awaited`, both blocked by the caller before the
+// fork), and on the teardown signal SIGKILLs pid 1, taking the namespace
+// down with it, and waits for it. It reaps pid 1 either way and ends the way
+// the command ended: the wait status init wrote to `status`, or pid 1's own
+// when init wrote none (a setup failure before the command, or init killed,
+// as a teardown does): its exit code, or its terminating signal raised again
+// on the relay. Allocation-free raw syscalls only; it never returns into
+// std's exec.
+fn relay(child: libc::pid_t, hold: i32, status: i32, awaited: &libc::sigset_t) -> ! {
     // Nothing can signal the relay before this: `Command::spawn` returns,
     // and with it the relay's PID, only after the command's exec.
     for signal in RELAY_IGNORED {
@@ -813,13 +873,27 @@ fn relay(child: libc::pid_t, hold: i32, status: i32) -> ! {
         unsafe { libc::kill(child, libc::SIGKILL) };
     }
     let mut wait_status = 0;
+    let mut torn_down = false;
     loop {
-        if unsafe { libc::waitpid(child, &raw mut wait_status, 0) } == child {
+        let flags = if torn_down { 0 } else { libc::WNOHANG };
+        let reaped = unsafe { libc::waitpid(child, &raw mut wait_status, flags) };
+        if reaped == child {
             break;
         }
-        if errno() != libc::EINTR {
+        if reaped == -1 {
+            if errno() == libc::EINTR {
+                continue;
+            }
             // Lost the only child: nothing left to relay.
             unsafe { libc::_exit(SetupStep::PidNamespace.probe_status()) };
+        }
+        // Pid 1 runs: wait for its SIGCHLD or the teardown request.
+        let signal = unsafe { libc::sigwaitinfo(awaited, std::ptr::null_mut()) };
+        if signal == relay_teardown_signal() {
+            // Pid 1's death kills every process of the namespace; its wait
+            // status is reapable only once they are all gone.
+            unsafe { libc::kill(child, libc::SIGKILL) };
+            torn_down = true;
         }
     }
     if !closed {
@@ -1841,7 +1915,18 @@ pub(super) fn spawn(
     // std::process::Child has no drop reaper. Its configured streams were
     // prepared above, so no fallible conversion or await separates successful
     // spawn from this single native PID owner.
-    let owned = NativeChild::from_spawned_pid(child.id() as i32, sigchld, stdin, stdout, stderr);
+    // The PID is the relay's, which tears its launch down on request.
+    let owned = NativeChild::from_spawned_pid(
+        child.id() as i32,
+        Termination::Teardown {
+            signal: relay_teardown_signal(),
+            bound: RELAY_TEARDOWN_BOUND,
+        },
+        sigchld,
+        stdin,
+        stdout,
+        stderr,
+    );
     drop(child);
     Ok(owned)
 }
@@ -2992,9 +3077,9 @@ mod tests {
         assert_eq!(rest, ["Name:\tcat", "NO-NET", "TASK-FILES"], "{stdout}");
     }
 
-    /// Killing the custody PID (the relay) ends the whole launch: pid 1 of
-    /// the namespace (the init) dies by its parent-death signal and takes
-    /// the command and its descendants with it.
+    /// Killing the launch through its custody PID (the relay's teardown)
+    /// ends the whole launch: the relay kills pid 1 of the namespace (the
+    /// init), whose death takes the command and its descendants with it.
     #[test]
     fn killing_the_custody_pid_ends_every_process_of_the_launch() {
         let Some((_temp, work, policy)) = confined_workspace() else {
@@ -3035,6 +3120,104 @@ mod tests {
             assert_eq!(status.signal(), Some(libc::SIGKILL));
             assert!(poll_until(|| {
                 !running(init) && !running(command) && !running(sleeper)
+            }));
+        });
+    }
+
+    // Makes this test process a child subreaper, as a host that is pid 1 of
+    // its container is: an orphaned descendant is adopted here and stays a
+    // zombie unless something waits for it. nextest runs each test in a
+    // process of its own.
+    fn become_subreaper() {
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+            0
+        );
+    }
+
+    // Whether host process `pid` is reaped: no zombie is left of it.
+    fn reaped(pid: u32) -> bool {
+        !Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    // A confined `sleep 60` under its shell: the relay's PID (the custody
+    // PID), init's, the shell's and the sleep's, as the host sees them.
+    fn sleeping_launch(policy: Arc<LinuxPolicy>, work: &Path) -> (NativeChild, [u32; 4]) {
+        let child = spawn(policy, shell(work, "sleep 60; :"), SpawnIo::default(), None).unwrap();
+        let relay = child.id().unwrap();
+        let mut tree = vec![relay];
+        for _ in 0..3 {
+            let parent = *tree.last().unwrap();
+            let mut next = Vec::new();
+            assert!(poll_until(|| {
+                next = children(parent);
+                next.len() == 1
+            }));
+            tree.push(next[0]);
+        }
+        (child, [tree[0], tree[1], tree[2], tree[3]])
+    }
+
+    /// Killing a launch tears it down through its relay, which kills and
+    /// reaps init: a host that adopts orphans (pid 1 of a container, or a
+    /// subreaper) is never left an init zombie, and every process of the
+    /// launch is gone.
+    #[test]
+    fn killing_a_launch_leaves_no_init_for_a_reaping_host() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        become_subreaper();
+        runtime().block_on(async {
+            let (mut child, [relay, init, command, sleeper]) = sleeping_launch(policy, &work);
+            let started = Instant::now();
+            child.kill().await.unwrap();
+            assert!(started.elapsed() < RELAY_TEARDOWN_BOUND);
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+            assert!(reaped(relay));
+            assert!(poll_until(|| {
+                reaped(init) && !running(command) && !running(sleeper)
+            }));
+        });
+    }
+
+    /// A relay killed outright (NativeChild's last resort, or anyone's
+    /// SIGKILL) still ends the whole launch: init holds its parent-death
+    /// signal on the relay.
+    #[test]
+    fn a_relay_killed_outright_still_ends_every_process_of_the_launch() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        runtime().block_on(async {
+            let (mut child, [relay, init, command, sleeper]) = sleeping_launch(policy, &work);
+            assert_eq!(
+                unsafe { libc::kill(relay as libc::pid_t, libc::SIGKILL) },
+                0
+            );
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+            assert!(poll_until(|| {
+                !running(init) && !running(command) && !running(sleeper)
+            }));
+        });
+    }
+
+    /// Dropping a launch tears it down the same way: the cleanup thread
+    /// reaps the relay, which reaped init, and nothing of the launch is left
+    /// for a host that adopts orphans.
+    #[test]
+    fn dropping_a_launch_leaves_no_init_for_a_reaping_host() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        become_subreaper();
+        runtime().block_on(async {
+            let (child, [relay, init, command, sleeper]) = sleeping_launch(policy, &work);
+            drop(child);
+            assert!(poll_until(|| {
+                reaped(relay) && reaped(init) && !running(command) && !running(sleeper)
             }));
         });
     }

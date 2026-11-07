@@ -9,6 +9,8 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitStatus, Output};
 use std::ptr;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use nix::libc;
 use tokio::io::AsyncReadExt;
@@ -46,16 +48,39 @@ impl Default for SpawnIo {
     }
 }
 
+/// How a [`NativeChild`] ends its direct child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Termination {
+    /// SIGKILL the direct child. The macOS backend's launches.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Kill,
+    /// The direct child is the Linux backend's relay, which on `signal`
+    /// kills and reaps the pid namespace it launched and then exits. A relay
+    /// that has not exited `bound` after the request gets SIGKILL, the last
+    /// resort: its pid namespace then dies by init's parent-death signal,
+    /// but init is left to whoever adopts it.
+    #[cfg(target_os = "linux")]
+    Teardown {
+        signal: libc::c_int,
+        bound: Duration,
+    },
+}
+
 /// Exclusive ownership of one native child and its optional standard pipes.
 ///
 /// Do not reap this child through another process owner or install SIGCHLD
 /// auto-reaping. Its unreaped PID is the identity used for direct-child signals.
-/// Dropping a wait future keeps ownership here. Dropping the handle kills and
-/// reaps the direct child; descendant containment remains the caller's job.
+/// Dropping a wait future keeps ownership here. Dropping the handle ends
+/// (see [`Termination`]) and reaps the direct child; descendant containment
+/// remains the caller's job.
 pub struct NativeChild {
     pid: Option<libc::pid_t>,
     status: Option<ExitStatus>,
     sigchld: Signal,
+    termination: Termination,
+    // A teardown is requested at most once; its watchdog holds the bound.
+    #[cfg(target_os = "linux")]
+    teardown_requested: bool,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -67,6 +92,7 @@ impl std::fmt::Debug for NativeChild {
             .debug_struct("NativeChild")
             .field("pid", &self.pid)
             .field("status", &self.status)
+            .field("termination", &self.termination)
             .finish_non_exhaustive()
     }
 }
@@ -76,6 +102,7 @@ impl NativeChild {
     // must be the first parent action after a successful OS spawn.
     pub(super) fn from_spawned_pid(
         pid: libc::pid_t,
+        termination: Termination,
         sigchld: Signal,
         stdin: Option<ChildStdin>,
         stdout: Option<ChildStdout>,
@@ -85,6 +112,9 @@ impl NativeChild {
             pid: Some(pid),
             status: None,
             sigchld,
+            termination,
+            #[cfg(target_os = "linux")]
+            teardown_requested: false,
             stdin,
             stdout,
             stderr,
@@ -156,23 +186,34 @@ impl NativeChild {
 
     /// Request direct-child termination without reaping an exited child, so
     /// its PID, and any process group it leads, stays held until wait or drop.
+    /// A relay child gets its teardown request (see [`Termination`]), with
+    /// SIGKILL after the bound if it has not exited by then.
     pub fn start_kill_without_reap(&mut self) -> io::Result<()> {
         if self.status.is_some() {
             return Ok(());
         }
-        if let Some(pid) = self.pid {
-            // SAFETY: Only this owner reaps the child, so its PID cannot be reused.
-            if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-            }
+        match self.pid {
+            Some(pid) => self.terminate(pid),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    /// Request direct-child termination and reap it. Cancellation retains ownership.
+    // The PID must be this owner's, unreaped.
+    fn terminate(&mut self, pid: libc::pid_t) -> io::Result<()> {
+        match self.termination {
+            Termination::Kill => signal_owned(pid, libc::SIGKILL),
+            #[cfg(target_os = "linux")]
+            Termination::Teardown { signal, bound } => {
+                if std::mem::replace(&mut self.teardown_requested, true) {
+                    return Ok(());
+                }
+                request_teardown(pid, signal, bound)
+            }
+        }
+    }
+
+    /// Request direct-child termination and reap it: a relay's teardown
+    /// reaps its launch before the relay exits. Cancellation retains ownership.
     pub async fn kill(&mut self) -> io::Result<()> {
         self.start_kill()?;
         self.wait().await.map(|_| ())
@@ -210,10 +251,13 @@ impl NativeChild {
 impl Drop for NativeChild {
     fn drop(&mut self) {
         let _ = self.try_wait();
-        let Some(pid) = self.pid.take() else { return };
-        // SAFETY: The PID remains exclusively owned and unreaped until transfer
-        // to the cleanup waiter below. This signals only the direct child.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let Some(pid) = self.pid else { return };
+        // The PID remains exclusively owned and unreaped until transfer to
+        // the cleanup waiter below. This signals only the direct child: a
+        // relay is asked to tear down and reap its launch, and gets SIGKILL
+        // from the teardown's watchdog if it has not exited within the bound.
+        let _ = self.terminate(pid);
+        self.pid = None;
         // Cleanup also works during Tokio shutdown. There is exactly one reaper
         // for this PID, with no wildcard wait or process-wide child registry.
         if std::thread::Builder::new()
@@ -228,6 +272,85 @@ impl Drop for NativeChild {
     }
 }
 
+// Signals this owner's unreaped child; an exited one is not an error.
+fn signal_owned(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: Only this owner reaps the child, so its PID cannot be reused.
+    if unsafe { libc::kill(pid, signal) } == -1 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+// Sends the relay its teardown signal and arms a watchdog that SIGKILLs the
+// relay if it has not exited `bound` later. The watchdog holds a pidfd, not
+// the numeric PID, so it can never signal a reused PID after the owner
+// reaps. Without a pidfd or a watchdog thread this falls back to SIGKILL now.
+#[cfg(target_os = "linux")]
+fn request_teardown(pid: libc::pid_t, signal: libc::c_int, bound: Duration) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // SAFETY: The PID is this owner's, unreaped, so it names the relay.
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let Ok(pidfd) = i32::try_from(pidfd) else {
+        return signal_owned(pid, libc::SIGKILL);
+    };
+    if pidfd < 0 {
+        return signal_owned(pid, libc::SIGKILL);
+    }
+    // SAFETY: pidfd_open returned this new descriptor, owned only here.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd) };
+    if let Err(error) = signal_owned(pid, signal) {
+        signal_owned(pid, libc::SIGKILL)?;
+        return Err(error);
+    }
+    let deadline = std::time::Instant::now() + bound;
+    let watchdog = move || {
+        let mut exited = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            // Rounded up, so the wait never ends before the deadline.
+            let left =
+                libc::c_int::try_from(left.as_micros().div_ceil(1000)).unwrap_or(libc::c_int::MAX);
+            // SAFETY: One pollfd over the descriptor this closure owns.
+            let ready = unsafe { libc::poll(&raw mut exited, 1, left) };
+            if ready == -1 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if ready == 0 && std::time::Instant::now() < deadline {
+                continue;
+            }
+            if ready == 0 {
+                // SAFETY: A pidfd signal reaches only this process, or none
+                // once it is reaped.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        pidfd.as_raw_fd(),
+                        libc::SIGKILL,
+                        ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+            }
+            break;
+        }
+    };
+    if std::thread::Builder::new()
+        .name("meerkat-relay-teardown".to_owned())
+        .spawn(watchdog)
+        .is_err()
+    {
+        return signal_owned(pid, libc::SIGKILL);
+    }
+    Ok(())
+}
+
 fn reap(pid: libc::pid_t) {
     loop {
         // SAFETY: Drop transferred sole ownership of this unreaped child PID.
@@ -235,5 +358,103 @@ fn reap(pid: libc::pid_t) {
         if result != -1 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             break;
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use tokio::signal::unix::{SignalKind, signal};
+
+    const TEARDOWN: libc::c_int = libc::SIGUSR2;
+    const BOUND: Duration = Duration::from_millis(300);
+
+    // A host child under a teardown-owning handle, once `ready` holds of it.
+    fn owned(script: &str, ready: impl Fn(u32) -> bool) -> NativeChild {
+        let sigchld = signal(SignalKind::child()).unwrap();
+        #[allow(clippy::disallowed_methods)]
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        drop(child);
+        let owned = NativeChild::from_spawned_pid(
+            pid as libc::pid_t,
+            Termination::Teardown {
+                signal: TEARDOWN,
+                bound: BOUND,
+            },
+            sigchld,
+            None,
+            None,
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready(pid) {
+            assert!(Instant::now() < deadline, "the child never became ready");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        owned
+    }
+
+    fn comm(pid: u32) -> String {
+        std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default()
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// A relay is asked to tear down with its teardown signal, not killed:
+    /// one that handles it ends the way it chooses, before the bound.
+    #[test]
+    fn a_teardown_owner_signals_the_relay_its_teardown_request() {
+        runtime().block_on(async {
+            let mut child = owned(
+                &format!("trap 'exit 9' {TEARDOWN}; while :; do sleep 0.01; done"),
+                |pid| {
+                    comm(pid) == "sh\n"
+                        && std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+                            .is_ok_and(|children| !children.trim().is_empty())
+                },
+            );
+            child.kill().await.unwrap();
+            assert_eq!(child.wait().await.unwrap().code(), Some(9));
+        });
+    }
+
+    /// A relay that does not exit within the bound gets SIGKILL, from kill
+    /// and from drop alike.
+    #[test]
+    fn a_relay_that_ignores_its_teardown_is_killed_after_the_bound() {
+        let ignoring = format!("trap '' {TEARDOWN}; exec sleep 60");
+        let slept = |pid| comm(pid) == "sleep\n";
+        runtime().block_on(async {
+            let mut child = owned(&ignoring, slept);
+            let started = Instant::now();
+            child.kill().await.unwrap();
+            let elapsed = started.elapsed();
+            assert!(elapsed >= BOUND, "{elapsed:?}");
+            assert!(elapsed < BOUND + Duration::from_secs(2), "{elapsed:?}");
+            assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+
+            let child = owned(&ignoring, slept);
+            let pid = child.id().unwrap();
+            drop(child);
+            let deadline = Instant::now() + BOUND + Duration::from_secs(2);
+            while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the dropped relay outlived the bound"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
     }
 }

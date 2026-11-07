@@ -143,7 +143,12 @@ pub(crate) fn spawn(
         ))?;
         // No fallible operation or await may precede acquisition of this PID.
         Ok(NativeChild::from_spawned_pid(
-            pid, sigchld, stdin, stdout, stderr,
+            pid,
+            crate::native_child::Termination::Kill,
+            sigchld,
+            stdin,
+            stdout,
+            stderr,
         ))
     }
 }

@@ -244,21 +244,31 @@ fn copilot_item_kind(item_type: &str) -> &str {
     }
 }
 
-/// The kind of item a Responses stream event of `event_type` that names its
-/// item by `item_id` belongs to; `None` for events that name no item.
-fn copilot_event_kind(event_type: &str) -> Option<&'static str> {
+/// What a Responses stream event that names its item by `item_id` says
+/// about that item's kind.
+enum NamedItem {
+    /// An event of one kind of item.
+    Of(&'static str),
+    /// A content part (`response.content_part.*`): a message's and a
+    /// reasoning item's content share these events, which name the item but
+    /// not its kind.
+    Part,
+}
+
+/// What a Responses stream event of `event_type` says about the kind of the
+/// item it names by `item_id`; `None` for events that name no item.
+fn copilot_event_kind(event_type: &str) -> Option<NamedItem> {
     let event = event_type.strip_prefix("response.")?;
-    if event.starts_with("output_text.")
-        || event.starts_with("content_part.")
-        || event.starts_with("refusal.")
-    {
-        Some("message")
+    if event.starts_with("content_part.") {
+        Some(NamedItem::Part)
+    } else if event.starts_with("output_text.") || event.starts_with("refusal.") {
+        Some(NamedItem::Of("message"))
     } else if event.starts_with("reasoning") {
-        Some("reasoning")
+        Some(NamedItem::Of("reasoning"))
     } else if event.starts_with("function_call_arguments.") {
-        Some("function_call")
+        Some(NamedItem::Of("function_call"))
     } else if event.starts_with("web_search_call.") {
-        Some("web_search_call")
+        Some(NamedItem::Of("web_search_call"))
     } else {
         None
     }
@@ -379,9 +389,11 @@ impl CopilotSlots {
             .and_then(|item| item.get("type"))
             .and_then(Value::as_str)
         {
-            Some(item_type) => copilot_item_kind(item_type).to_owned(),
+            Some(item_type) => Some(copilot_item_kind(item_type).to_owned()),
             None => match copilot_event_kind(event_type) {
-                Some(kind) => kind.to_owned(),
+                Some(NamedItem::Of(kind)) => Some(kind.to_owned()),
+                // A content part names its item's slot, not its kind.
+                Some(NamedItem::Part) => None,
                 None => return Ok(()),
             },
         };
@@ -415,13 +427,13 @@ impl CopilotSlots {
             return Ok(());
         };
         for id in carried_item_id.iter().chain(named_item_id.iter()) {
-            self.place(index, id, &kind)?;
+            self.place(index, id, kind.as_deref())?;
         }
         let Some(slot) = self.slots.get_mut(&index) else {
             // An event that carries no id cannot open a slot.
             return Ok(());
         };
-        if let Some(slot_kind) = slot.kind.as_deref()
+        if let (Some(slot_kind), Some(kind)) = (slot.kind.as_deref(), kind.as_deref())
             && slot_kind != kind
         {
             return Err(copilot_mismatch(format!(
@@ -436,6 +448,10 @@ impl CopilotSlots {
         if let Some(item_id) = item_id {
             item_id.clone_from(&slot.id);
         }
+        // An added or completed item states its kind (its `type`).
+        let Some(kind) = kind else {
+            return Ok(());
+        };
         let (first, again) = match event_type {
             "response.output_item.added" => (&mut slot.added, "added"),
             "response.output_item.done" => (&mut slot.completed, "completed"),
@@ -455,9 +471,10 @@ impl CopilotSlots {
         Ok(())
     }
 
-    /// Record `id`, carried by an event of a `kind` item at `index`: the
-    /// first id a slot sees is its identity.
-    fn place(&mut self, index: u64, id: &str, kind: &str) -> Result<(), LlmError> {
+    /// Record `id`, carried by an event at `index` of a `kind` item (`None`:
+    /// an event that does not say which kind): the first id a slot sees is
+    /// its identity, and the first kind stated is its kind.
+    fn place(&mut self, index: u64, id: &str, kind: Option<&str>) -> Result<(), LlmError> {
         if let Some(&other) = self.seen.get(id)
             && other != index
         {
@@ -472,7 +489,7 @@ impl CopilotSlots {
             completed: None,
         });
         if slot.kind.is_none() {
-            slot.kind = Some(kind.to_owned());
+            slot.kind = kind.map(str::to_owned);
         }
         self.seen.entry(id.to_owned()).or_insert(index);
         Ok(())

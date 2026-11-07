@@ -4806,6 +4806,32 @@ fn no_text_probe_of_the_hosts_build_answer_remains() {
     }
 }
 
+/// Source guard: the background warm's cancellation is a typed fact of the
+/// embodiment, never read back from an error's text: nothing compares an
+/// error's message with `BACKGROUND_WARM_CANCELLED`, the text a cancelled
+/// embodiment answers with.
+///
+/// RED before the cancellation was typed: the foreground materialization
+/// and the background warm compared the internal error's text with it.
+#[test]
+fn the_warm_cancellation_is_never_read_from_an_errors_text() {
+    let production = production_code(include_str!("../runtime.rs"));
+    assert!(
+        !production.trim().is_empty(),
+        "identity_first/runtime.rs: no production code was read"
+    );
+    for probe in [
+        "== BACKGROUND_WARM_CANCELLED",
+        "BACKGROUND_WARM_CANCELLED ==",
+    ] {
+        assert!(
+            !production.contains(probe),
+            "identity_first/runtime.rs compares an error's text with the warm's \
+             cancellation (`{probe}`): the cancellation is the embodiment's typed fact"
+        );
+    }
+}
+
 /// The members Meta hands the mob as host-pending before its build name
 /// only listed identities Meta seats: a hosted identity (placed, or bound to
 /// an external runtime) is never named, since Core seats no such member and

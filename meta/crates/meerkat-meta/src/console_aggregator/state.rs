@@ -326,6 +326,33 @@ mod tests {
         );
     }
 
+    /// A hold is recorded only on a dispatch held before it
+    /// submitted anything. `MarkHeld` leaves only `Dispatching`, back to
+    /// accepted; from every state before a dispatch began, and from every
+    /// state a submission settles (delivered, failed), it is refused.
+    #[test]
+    fn mark_held_is_refused_from_every_state_but_a_dispatch_in_flight() {
+        assert_eq!(
+            SendState::Dispatching.apply(SendTransition::MarkHeld),
+            Ok((
+                SendState::AcceptedPersisted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for state in [
+            SendState::Requested,
+            SendState::AcceptedPersisted,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            assert_eq!(
+                state.apply(SendTransition::MarkHeld),
+                Err("illegal send state transition"),
+                "{state:?}"
+            );
+        }
+    }
+
     #[test]
     fn source_ingestion_reducer_models_backfill_to_live() {
         let (state, _) = SourceIngestionState::Registered

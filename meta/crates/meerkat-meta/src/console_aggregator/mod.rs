@@ -92,6 +92,10 @@ pub use types::{
     NewConsoleFrame,
 };
 
+// The admission evidence reader, for the send-evidence test seam.
+#[cfg(test)]
+pub(crate) use send_recovery::{AdmittedInput, SendAdmissionReader};
+
 const TIMELINE_CHANNEL_CAP: usize = 1024;
 const SESSION_HISTORY_PAGE_LIMIT: usize = 500;
 const SESSION_HISTORY_REFRESH_TTL_MS: u64 = 30_000;
@@ -3137,6 +3141,17 @@ impl MetaConsoleAggregator {
             .reconcile(SendEvidence::AbsentRedispatchable)
             .map_err(ConsoleSendError::State)?;
         Ok(state)
+    }
+
+    /// Test seam: every send observation reads `reader`'s admission
+    /// evidence, in place of a registered runtime's.
+    #[cfg(test)]
+    pub(crate) fn read_send_admission_from(&self, reader: Arc<dyn SendAdmissionReader>) {
+        *self
+            .inner
+            .send_admission_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reader);
     }
 
     /// What the runtime holding `frame`'s recorded session has admitted

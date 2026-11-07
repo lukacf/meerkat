@@ -750,6 +750,351 @@ async fn console_human_governed_send_held_past_its_budget_is_held_then_replayed_
     );
 }
 
+/// The binds the host's binders were handed, every send's.
+fn bind_count(host: &ReviewingHost) -> usize {
+    host.ids.lock().unwrap().len()
+}
+
+/// Admission evidence the store does not give: every read fails, as a
+/// store read error does (a read past its bound answers the same).
+struct UnreadableEvidence;
+
+#[async_trait::async_trait]
+impl crate::console_aggregator::SendAdmissionReader for UnreadableEvidence {
+    async fn admitted_input(
+        &self,
+        _session_id: &SessionId,
+        _idempotency_key: &str,
+    ) -> Result<Option<crate::console_aggregator::AdmittedInput>, String> {
+        Err("the console store did not answer".to_string())
+    }
+}
+
+/// A held governed send to `key`: sent while the source is held, its
+/// dispatch answered held. Answers its acceptance and its held frame.
+async fn held_send(
+    aggregator: &MetaConsoleAggregator,
+    runtime: &Arc<IdentityRuntime>,
+    host: &Arc<ReviewingHost>,
+    key: &str,
+) -> (
+    ConsoleInteractionAccepted,
+    crate::console_aggregator::ConsoleFrame,
+) {
+    host.hold(HOLD_BUDGET);
+    let accepted = send(aggregator, runtime, host, request(key, HUMAN))
+        .await
+        .expect("accepted for the verified human");
+    let held = answered_frame(aggregator, &accepted).await;
+    assert_eq!(held.status, ConsoleFrameStatus::Accepted, "{held:?}");
+    assert!(held.payload.get("delivery_hold").is_some(), "{held:?}");
+    (accepted, held)
+}
+
+fn reviewed(fixture: &Fixture, key: &'static str) -> [(&'static str, Review); 1] {
+    [(
+        key,
+        Review {
+            content: HUMAN.to_string(),
+            session_id: fixture.session_id.clone(),
+        },
+    )]
+}
+
+/// A held send whose frame recorded no session, as the held
+/// first send of an identity with no Core binding yet leaves it (the
+/// Console records the identity's session at acceptance; a lazily created
+/// identity's member is seated inside the dispatch). Its replay can read no
+/// admission evidence: the send names no session to read. Its hold still
+/// records that nothing was submitted, so the replay dispatches the same
+/// input again: the member's one session binds it, it is admitted once and
+/// delivered, and the identity stays on that session. The held frame is
+/// built through the Console's own reservation (no session) and hold mark,
+/// as the held dispatch leaves it; the replay runs the real send path, with
+/// the runtime's admission evidence readable.
+///
+/// RED before the fix: the replay returns the acceptance and dispatches
+/// nothing; the send stays accepted with its hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_that_recorded_no_session_is_dispatched_again_on_replay() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unbound-original"));
+    let scope = super::ConsoleSendGovernance::default().scope;
+    let accepted = match aggregator
+        .reserve_identity_first_interaction_scoped(request("unbound-original", HUMAN), None, &scope)
+        .await
+        .expect("the Console reserves the send")
+    {
+        crate::console_aggregator::ScopedReservation::Fresh(accepted, claim) => {
+            // The held dispatch ended: its owner is gone.
+            drop(claim);
+            accepted
+        }
+        other => panic!("a fresh reservation: {other:?}"),
+    };
+    assert_eq!(accepted.session_id, None, "the send recorded no session");
+    aggregator
+        .mark_interaction_delivery_held(
+            &accepted.input_frame_id,
+            &crate::identity_first::GovernedHold {
+                condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                waited: HOLD_BUDGET,
+                binds: 1,
+                input_id: meerkat_core::lifecycle::InputId::new(),
+                idempotency_key: None,
+            },
+        )
+        .await
+        .expect("the hold is recorded");
+
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unbound-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered,
+        "the replay of the held send settles"
+    );
+    let admitted = host.admitted.lock().unwrap().clone();
+    assert_eq!(admitted.len(), 1, "admitted once: {admitted:?}");
+    let seen = host.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one dispatch bound it: {seen:?}");
+    assert_eq!(seen[0].session_id, fixture.session_id);
+    assert_eq!(seen[0].input_key, stock_key(&accepted));
+    let status = runtime.status(&identity).await.expect("status");
+    assert_eq!(
+        status.session_id.as_ref(),
+        Some(&fixture.session_id),
+        "the member was seated once: its one session"
+    );
+}
+
+/// A held send whose replay cannot read the runtime's
+/// admission evidence (a store read error; a read past its bound answers
+/// the same) is dispatched again: its hold records that nothing was
+/// submitted since its held dispatch, and Core admits its keyed input at
+/// most once. It is delivered and admitted once, and a replay of the
+/// delivered send dispatches nothing.
+///
+/// RED before the fix: the replay dispatches nothing and the send stays
+/// accepted with its hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_whose_evidence_cannot_be_read_is_dispatched_again_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(Arc::new(UnreadableEvidence));
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unread-original"));
+    let (accepted, _held) = held_send(&aggregator, &runtime, &host, "unread-original").await;
+
+    host.release();
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unread-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered
+    );
+    assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+    let binds = bind_count(&host);
+    send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unread-original", HUMAN),
+    )
+    .await
+    .expect("a replay of the delivered send");
+    tokio::time::sleep(HOLD_BUDGET).await;
+    assert_eq!(
+        bind_count(&host),
+        binds,
+        "a replay of the delivered send dispatches nothing"
+    );
+    assert_eq!(
+        host.admitted.lock().unwrap().len(),
+        1,
+        "still admitted once"
+    );
+}
+
+/// A held send replayed while no registered runtime serves
+/// its frame (no admission evidence at all) and its source is still held is
+/// dispatched again once: that dispatch's binds answer "not now" until its
+/// budget ends, so the send is held again, its new hold recorded, and
+/// nothing is submitted. Nothing dispatches it after that without another
+/// replay: no loop.
+///
+/// RED before the fix: the replay dispatches nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_replayed_without_evidence_while_still_held_is_held_again_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "still-held-original"));
+    let (accepted, first) = held_send(&aggregator, &runtime, &host, "still-held-original").await;
+    let before = bind_count(&host);
+
+    // The source is still held; the human sends the same key again.
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("still-held-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    let again = answered_frame(&aggregator, &replayed).await;
+    let after = bind_count(&host);
+    assert!(
+        after > before,
+        "the replay dispatched the send once more: {before} -> {after} binds"
+    );
+    assert_eq!(
+        again.status,
+        ConsoleFrameStatus::Accepted,
+        "held again, not failed: {again:?}"
+    );
+    assert_eq!(again.payload["delivery_hold"]["condition"], "source_held");
+    assert!(
+        again.frame_version > first.frame_version,
+        "the new hold is recorded: {first:?} then {again:?}"
+    );
+    assert!(host.admitted.lock().unwrap().is_empty(), "nothing admitted");
+    assert!(host.bound.lock().unwrap().is_none(), "nothing bound");
+
+    tokio::time::sleep(HOLD_BUDGET * 3).await;
+    assert_eq!(
+        bind_count(&host),
+        after,
+        "nothing dispatches the held send without a replay"
+    );
+    host.release();
+}
+
+/// Two replays of the same held send at the same moment
+/// dispatch it once: one becomes the frame's dispatch owner and takes its
+/// hold, the other answers the acceptance and dispatches nothing. One bind,
+/// one admission, delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_replays_of_a_held_send_dispatch_it_once() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "raced-original"));
+    let (accepted, _held) = held_send(&aggregator, &runtime, &host, "raced-original").await;
+
+    host.release();
+    let seen_before = host.seen.lock().unwrap().len();
+    let (first, second) = tokio::join!(
+        send(
+            &aggregator,
+            &runtime,
+            &host,
+            request("raced-original", HUMAN)
+        ),
+        send(
+            &aggregator,
+            &runtime,
+            &host,
+            request("raced-original", HUMAN)
+        ),
+    );
+    let first = first.expect("the first replay is accepted");
+    let second = second.expect("the second replay is accepted");
+    assert_eq!(first.input_frame_id, accepted.input_frame_id);
+    assert_eq!(second.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &first).await,
+        ConsoleFrameStatus::Delivered
+    );
+    tokio::time::sleep(HOLD_BUDGET).await;
+    let admitted = host.admitted.lock().unwrap().clone();
+    assert_eq!(admitted.len(), 1, "admitted once: {admitted:?}");
+    let seen = host.seen.lock().unwrap()[seen_before..].to_vec();
+    assert_eq!(seen.len(), 1, "one dispatch bound it: {seen:?}");
+}
+
+/// A held send replayed after its identity was reset binds
+/// the member's new session: exactly one dispatch, on that session, and
+/// nothing under the send's key on the old session, where nothing was ever
+/// submitted. Core qualifies a governed key by its association, which names
+/// the bound session, so a dispatch on the new session is not deduplicated
+/// against the old one: the hold is the one record that nothing was
+/// submitted. The host reviewed the send for the old session, so it refuses
+/// the new one with its typed refusal and the send fails, admitted nowhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_replayed_after_a_reset_dispatches_once_on_the_new_session() {
+    use meerkat_runtime::SessionServiceRuntimeExt;
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "reset-original"));
+    let (accepted, _held) = held_send(&aggregator, &runtime, &host, "reset-original").await;
+    assert_eq!(
+        accepted.session_id,
+        Some(fixture.session_id.to_string()),
+        "the held send recorded the member's session"
+    );
+    let fresh = runtime
+        .reset(&identity)
+        .await
+        .expect("the reset rotates the member");
+    let new_session = fresh.session_id().cloned().expect("the new session");
+    assert_ne!(new_session, fixture.session_id);
+
+    host.release();
+    let seen_before = host.seen.lock().unwrap().len();
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("reset-original", HUMAN),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::DeliveryFailed,
+        "the host refuses the session it did not review"
+    );
+    let seen = host.seen.lock().unwrap()[seen_before..].to_vec();
+    assert_eq!(seen.len(), 1, "one dispatch: {seen:?}");
+    assert_eq!(seen[0].session_id, new_session, "bound on the new session");
+    assert!(host.admitted.lock().unwrap().is_empty(), "admitted nowhere");
+    let key = stock_key(&accepted).expect("the send's key");
+    for session in [&fixture.session_id, &new_session] {
+        assert!(
+            fixture
+                .machine
+                .durable_input_state_by_idempotency_key(session, &key)
+                .await
+                .expect("the admission index reads")
+                .is_none(),
+            "nothing under the send's key on {session}"
+        );
+    }
+}
+
 /// A governed Console steer the host refuses answers its typed
 /// refusal: the Console's error keeps the governed kind, HTTP 409
 /// `governed_input_refused` with the refusal's kind (`denied`) and nothing

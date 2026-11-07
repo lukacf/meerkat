@@ -1761,9 +1761,11 @@ args = {args:?}
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        // The caller signs every session out (a console without an access
+        // controller lets a caller revoke their own sessions only).
         let revoked = console_rpc_as(
             &member.router,
-            Some(&robot()),
+            Some(&bob),
             crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
             json!({ "principal": BOB }),
         )

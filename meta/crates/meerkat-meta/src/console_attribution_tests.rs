@@ -168,12 +168,21 @@ async fn console_memory_write_records_person() -> TestResult {
 }
 
 /// A session revocation names who revoked, in its answer and in the fence
-/// record, which keeps it across a reopen.
+/// record, which keeps it across a reopen. The revoker is an access admin,
+/// who may revoke another principal's sessions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoke_records_the_revoker() -> TestResult {
     let (dir, fences) = durable_fences();
     let router = console_json_router_with_state(ConsoleJsonState {
         session_fences: fences,
+        access: Some(
+            AccessController::new(crate::access::AccessControlConfig {
+                enabled: true,
+                admins: vec![BOB.to_string()],
+                ..crate::access::AccessControlConfig::default()
+            })
+            .map_err(|error| format!("{error:?}"))?,
+        ),
         ..state()
     });
     let revoked = console_rpc_as(
@@ -211,20 +220,28 @@ async fn access_edit_records_author_and_time() -> TestResult {
     })
     .map_err(|error| format!("{error:?}"))?;
     let router = console_json_router_with_state(ConsoleJsonState {
-        access: Some(access),
+        access: Some(access.clone()),
         ..state()
     });
     let bob = bob();
     let before = now_seconds() * 1000;
+    let owner = access
+        .edit_identity()
+        .ok_or("the access owner has an edit identity")?
+        .to_string();
     let edited = console_rpc_as(
         &router,
         Some(&bob),
         "meta/access/rules/upsert",
         json!({
-            "rule": {
-                "id": "ops-view",
-                "subjects": [ROBOT],
-                "actions": ["agent.view"],
+            "checked_v1": {
+                "owner_instance": owner,
+                "expected_revision": access.snapshot().1,
+                "rule": {
+                    "id": "ops-view",
+                    "subjects": [ROBOT],
+                    "actions": ["agent.view"],
+                },
             }
         }),
     )

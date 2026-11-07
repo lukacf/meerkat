@@ -7058,6 +7058,9 @@ impl ResumedMemberView {
 ///   its seat named: [`customize_resume`](Self::customize_resume) too, with
 ///   the build inputs of the seat's spec already on the request, as a
 ///   spawn's caller sets them before `customize_spawn`.
+/// - Every spawn and rebuild placed on another host, once it resolved its
+///   profile: [`check_placed_profile`](Self::check_placed_profile), whatever
+///   its source.
 ///
 /// # Which spawns never ask it
 ///
@@ -7100,6 +7103,23 @@ pub trait SpawnMemberCustomizer: Send + Sync {
     ) -> Result<(), MobError> {
         let _ = durable;
         self.customize_spawn(ctx, spec)
+    }
+
+    /// Check the profile a spawn placed on another host resolved, before the
+    /// spawn compiles it into the member's portable spec: the definition's
+    /// inline profile, the realm profile its role names, or the spawn's own
+    /// override profile, with the spawn's model and tool category overrides
+    /// applied. Every placed spawn and rebuild asks it, whatever its source,
+    /// and before the spawn reaches the member host. An error refuses the
+    /// spawn and reaches its caller unchanged; nothing is compiled or sent.
+    /// The default admits every profile.
+    fn check_placed_profile(
+        &self,
+        ctx: &SpawnCustomizationContext,
+        profile: &crate::profile::Profile,
+    ) -> Result<(), MobError> {
+        let _ = (ctx, profile);
+        Ok(())
     }
 }
 

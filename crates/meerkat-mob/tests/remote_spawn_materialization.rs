@@ -39,8 +39,10 @@ use meerkat_mob::runtime::bridge_protocol::{
     PortableSystemPrompt, portable_member_spec_digest,
 };
 use support::{
-    REAL_COMMS_TEST_LOCK, create_controlling_mob, member_identity_of, placed_spawn_spec,
-    spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
+    REAL_COMMS_TEST_LOCK, create_controlling_mob,
+    create_controlling_mob_with_customizer_definition_and_storage, member_identity_of,
+    placed_spawn_spec, spawn_peer_comms_endpoint, spawn_scripted_host_peer,
+    spawn_scripted_member_turn_responder,
 };
 
 const SETTLE: Duration = Duration::from_secs(10);
@@ -1415,6 +1417,205 @@ async fn a_placed_resume_whose_host_feature_probe_fails_records_nothing() {
             .expect("list placed carriers")
             .is_empty(),
         "nothing was recorded"
+    );
+
+    scripted.shutdown();
+}
+
+// ===========================================================================
+// Placed profile check: a placed spawn shows the profile it resolved (the
+// definition's inline profile, the realm profile its role names, or the
+// spawn's own override) to its spawn customizer before it compiles; a
+// refusal there reaches the caller unchanged, with nothing compiled, recorded
+// or sent to the host
+// ===========================================================================
+
+/// A customizer that records every placed profile it is shown, by the
+/// requested role and the profile's peer description, and refuses each one
+/// whose description is marked `judged:`.
+#[derive(Default)]
+struct PlacedProfileJudge {
+    seen: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl PlacedProfileJudge {
+    fn seen(&self) -> Vec<(String, String)> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl meerkat_mob::runtime::SpawnMemberCustomizer for PlacedProfileJudge {
+    fn customize_spawn(
+        &self,
+        _ctx: &meerkat_mob::runtime::SpawnCustomizationContext,
+        _spec: &mut meerkat_mob::runtime::SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
+    fn check_placed_profile(
+        &self,
+        ctx: &meerkat_mob::runtime::SpawnCustomizationContext,
+        profile: &meerkat_mob::Profile,
+    ) -> Result<(), MobError> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                ctx.requested_profile.as_str().to_string(),
+                profile.peer_description.clone(),
+            ));
+        if profile.peer_description.starts_with("judged:") {
+            return Err(MobError::WiringError(format!(
+                "refused by the judge: {}",
+                profile.peer_description
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `base` described as `description`, declaring one MCP server whose OAuth
+/// account selection a portable profile cannot carry: compiling it fails, so
+/// a refusal that arrives instead was made before the compile.
+fn judged_profile(base: &meerkat_mob::Profile, description: &str) -> meerkat_mob::Profile {
+    let mut profile = base.clone();
+    profile.peer_description = description.to_string();
+    let mut server = meerkat_core::mcp_config::McpServerConfig::streamable_http(
+        "selected",
+        "https://selected.example.invalid/mcp",
+        std::collections::HashMap::new(),
+    );
+    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut server.transport {
+        http.oauth_account_selection =
+            Some(meerkat_core::mcp_config::McpOAuthAccountSelection::Discover);
+    }
+    profile.tools.mcp_servers = vec![server];
+    profile
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_spawn_shows_its_resolved_profile_to_the_customizer_before_compile() {
+    use meerkat_mob::store::RealmProfileStore as _;
+
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let base = match support::controlling_mob_definition(meerkat_mob::MobId::from(
+        "placed-profile-source",
+    ))
+    .profiles
+    .get(&meerkat_mob::ProfileName::from("worker"))
+    {
+        Some(meerkat_mob::ProfileBinding::Inline(profile)) => (**profile).clone(),
+        other => panic!("the fixture's worker profile is inline, got {other:?}"),
+    };
+    let realm = std::sync::Arc::new(meerkat_mob::store::InMemoryRealmProfileStore::new());
+    realm
+        .create("judged-realm", &judged_profile(&base, "judged: realm"))
+        .await
+        .expect("seed the realm profile");
+    let realm_store: std::sync::Arc<dyn meerkat_mob::store::RealmProfileStore> = realm;
+    let inline = judged_profile(&base, "judged: inline");
+    let judge = std::sync::Arc::new(PlacedProfileJudge::default());
+    let scripted = spawn_scripted_host_peer("placed-profile-host").await;
+    let controlling = create_controlling_mob_with_customizer_definition_and_storage(
+        "placed-profile",
+        Some(std::sync::Arc::clone(&judge)
+            as std::sync::Arc<
+                dyn meerkat_mob::runtime::SpawnMemberCustomizer,
+            >),
+        move |definition| {
+            definition.profiles.insert(
+                meerkat_mob::ProfileName::from("inline-judged"),
+                meerkat_mob::ProfileBinding::Inline(Box::new(inline)),
+            );
+            definition.profiles.insert(
+                meerkat_mob::ProfileName::from("realm-judged"),
+                meerkat_mob::ProfileBinding::RealmRef {
+                    realm_profile: "judged-realm".into(),
+                },
+            );
+        },
+        move |_events, storage, identity| {
+            (
+                storage.with_realm_profile_store(Some(realm_store)),
+                identity,
+            )
+        },
+    )
+    .await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    // An admitted profile is shown too, and its spawn goes on to the host.
+    controlling
+        .spawn_placed("worker", "admitted", &report.host_id)
+        .await
+        .expect("an admitted placed spawn commits from the scripted ack");
+
+    let refused_unchanged = |error: &MobError, description: &str| {
+        matches!(error, MobError::WiringError(message)
+            if *message == format!("refused by the judge: {description}"))
+    };
+    let inline_error = controlling
+        .spawn_placed("inline-judged", "from-inline", &report.host_id)
+        .await
+        .expect_err("the definition's inline profile is refused");
+    assert!(
+        refused_unchanged(&inline_error, "judged: inline"),
+        "the inline profile's refusal, before the compile: got {inline_error:?}"
+    );
+    let realm_error = controlling
+        .spawn_placed("realm-judged", "from-realm", &report.host_id)
+        .await
+        .expect_err("the realm profile is refused");
+    assert!(
+        refused_unchanged(&realm_error, "judged: realm"),
+        "the realm profile's refusal, before the compile: got {realm_error:?}"
+    );
+    let mut overridden = placed_spawn_spec("worker", "from-override", &report.host_id);
+    overridden.override_profile = Some(judged_profile(&base, "judged: override"));
+    let override_error = controlling
+        .handle
+        .spawn_spec(overridden)
+        .await
+        .expect_err("the spawn's own profile is refused");
+    assert!(
+        refused_unchanged(&override_error, "judged: override"),
+        "the override profile's refusal, before the compile: got {override_error:?}"
+    );
+
+    assert_eq!(
+        judge.seen(),
+        vec![
+            ("worker".to_string(), base.peer_description.clone()),
+            ("inline-judged".to_string(), "judged: inline".to_string()),
+            ("realm-judged".to_string(), "judged: realm".to_string()),
+            ("worker".to_string(), "judged: override".to_string()),
+        ],
+        "every source path shows the profile it resolved"
+    );
+    assert_eq!(
+        scripted.materialize_count(),
+        1,
+        "only the admitted spawn reached the host"
+    );
+    let members = controlling.handle.list_members().await;
+    assert!(
+        members.len() == 1 && members[0].agent_identity == "admitted",
+        "refused spawns leave no roster entry, got {members:?}"
+    );
+    let recorded = controlling
+        .storage_metadata
+        .list_placed_spawns(&controlling.mob_id)
+        .await
+        .expect("list placed carriers");
+    assert!(
+        recorded
+            .iter()
+            .all(|carrier| carrier.agent_identity == "admitted"),
+        "refused spawns record nothing, got {recorded:?}"
     );
 
     scripted.shutdown();

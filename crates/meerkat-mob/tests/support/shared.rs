@@ -4706,6 +4706,36 @@ pub async fn create_controlling_mob_with_storage(
     .await
 }
 
+/// [`create_controlling_mob_with_customizer_and_definition`] over the
+/// storage `compose_storage` composes (see
+/// [`create_controlling_mob_with_storage`]).
+pub async fn create_controlling_mob_with_customizer_definition_and_storage(
+    label: &str,
+    customizer: Option<Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer>>,
+    mutate_definition: impl FnOnce(&mut meerkat_mob::MobDefinition),
+    compose_storage: impl FnOnce(
+        &meerkat_mob::store::InMemoryMobEventStore,
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ) -> (
+        meerkat_mob::MobStorage,
+        Arc<dyn meerkat_mob::store::MobIdentityStore>,
+    ),
+) -> ControllingMob {
+    create_controlling_mob_composed_with_client(
+        label,
+        customizer,
+        None,
+        mutate_definition,
+        |builder| builder,
+        Arc::new(meerkat_client::TestClient::for_provider(
+            meerkat_core::Provider::Anthropic,
+        )),
+        compose_storage,
+    )
+    .await
+}
+
 /// The storage a controlling mob runs on as the fixture composes it.
 fn keep_storage(
     _events: &meerkat_mob::store::InMemoryMobEventStore,

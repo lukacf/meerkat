@@ -586,7 +586,12 @@ NAMED_CONSOLE = b'{"authentication":"local-accounts"}\n'
 
 @pytest.fixture
 def built_with_one_shared_account(monkeypatch):
-    """The installation's original source declares one shared console account."""
+    """An installation built and set up before named accounts.
+
+    Its source declares one shared console account, and its Builds kept that
+    declaration, as Forge did then. The returned function stands for this
+    Forge: its later Builds declare named accounts over the pinned source.
+    """
     from launchkit import local_application_source
     original = local_application_source._json_bytes
 
@@ -594,6 +599,12 @@ def built_with_one_shared_account(monkeypatch):
         return original({"authentication": "local-password"} if value == {"authentication": "local-accounts"}
                         else value)
     monkeypatch.setattr(local_application_source, "_json_bytes", earlier)
+    current = getattr(updates, "named_console_accounts_source", None)
+    monkeypatch.setattr(updates, "named_console_accounts_source", lambda pinned: None, raising=False)
+
+    def this_forge():
+        monkeypatch.setattr(updates, "named_console_accounts_source", current, raising=False)
+    return this_forge
 
 
 def installed_console(f):
@@ -629,6 +640,7 @@ async def test_a_set_up_shared_account_moves_to_named_accounts_on_its_next_updat
     assert installed_console(f) == ((SHARED_CONSOLE, 0o644), SHARED_CONSOLE)
     private = (f.destination / ".env").read_bytes()
     access = (f.destination / "config/access.toml").read_bytes()
+    built_with_one_shared_account()
     second = await continuation(f)
     files = await candidate_files(f, second["build_id"])
     # The follow-up Build writes named accounts over the pinned shared account.
@@ -666,6 +678,7 @@ async def test_a_set_up_shared_account_moves_to_named_accounts_on_its_next_updat
 async def test_the_setup_owner_accepts_the_one_console_move_however_it_is_written(
         built_with_one_shared_account, set_up, monkeypatch, console):
     f = set_up
+    built_with_one_shared_account()
     second = await continuation(f)
     edited_candidate(f, monkeypatch, second["build_id"], {"application/console.json": console})
     assert forge_application_host.owner_choices_match(f.host, await candidate_files(f, second["build_id"]))
@@ -677,6 +690,7 @@ async def test_the_setup_owner_accepts_the_one_console_move_however_it_is_writte
 async def test_the_setup_owner_refuses_every_other_console_or_protected_change(
         built_with_one_shared_account, set_up, monkeypatch, variant):
     f = set_up
+    built_with_one_shared_account()
     second = await continuation(f)
     files = await candidate_files(f, second["build_id"])
     access = files["config/access.toml"][0]

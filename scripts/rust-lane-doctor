@@ -333,10 +333,11 @@ fi
 
 # The local affected-test selection (scripts/affected-tests.mjs) runs an edit
 # confined to integration test targets as just those targets, the modules
-# they declare included, and names a live-provider target instead of running
-# it. Print-only: these read cargo metadata and the CI planner, no build.
+# they declare included, with the package's test features (no dev-dependency
+# turns them on), and names a live-provider target instead of running it.
+# Print-only: these read cargo metadata and the CI planner, no build.
 exact_test_probe="$(node scripts/affected-tests.mjs -- crates/meerkat-runtime/tests/meerkat_machine.rs 2>&1 || true)"
-if [[ "${exact_test_probe}" == *"nextest run -p meerkat-runtime --test meerkat_machine --profile"* &&
+if [[ "${exact_test_probe}" == *"nextest run -p meerkat-runtime --features live,local-authorization,sqlite-store,test-support --test meerkat_machine --profile"* &&
   "${exact_test_probe}" == *"meerkat-runtime: only test targets changed (meerkat_machine)"* ]]; then
   pass "affected tests narrow a direct integration test edit to its test binary"
 else
@@ -345,7 +346,7 @@ else
 fi
 
 support_test_probe="$(node scripts/affected-tests.mjs -- crates/meerkat/tests/support/test_session_store.rs 2>&1 || true)"
-if [[ "${support_test_probe}" == *"nextest run -p meerkat --test "*"--test sdk_agentfactory --test sdk_structured_output --profile"* ]]; then
+if [[ "${support_test_probe}" == *"nextest run -p meerkat --features "*",workspace-tests --test "*"--test sdk_agentfactory --test sdk_structured_output --profile"* ]]; then
   pass "affected tests narrow an integration support edit to the importing test binaries"
 else
   bad "affected tests did not narrow an integration support edit to the importing test binaries"

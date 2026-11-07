@@ -8,8 +8,10 @@ use super::model::{AccessControlConfig, AccessEffect, AccessRule, action_pattern
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccessPrincipal {
     /// Authenticated subject (email or token `sub`). `None` means the
-    /// request was admitted without app auth (open console); such callers
-    /// only match rules with no subject/group constraints.
+    /// request was admitted without app auth (open console). Such a caller
+    /// may be any person: it matches every rule without subject or group
+    /// constraints and every deny rule that has them, and no allow rule
+    /// that has them.
     pub subject: Option<String>,
     /// Resolved group memberships for the subject.
     pub groups: BTreeSet<String>,
@@ -82,17 +84,19 @@ fn subject_matches(rule: &AccessRule, principal: &AccessPrincipal) -> bool {
     if rule.subjects.is_empty() && rule.groups.is_empty() {
         return true;
     }
-    // `subjects: ["*"]` matches any *authenticated* subject. It does NOT
-    // match the anonymous principal: an anonymous caller only matches rules
-    // with no subject/group constraints at all (see `AccessPrincipal.subject`
-    // and the resource selectors, where `"*"` likewise never matches an
-    // absent attribute). This keeps `subjects:["*"]` from silently granting
-    // unauthenticated callers on an open console.
-    if let Some(subject) = principal.subject.as_deref()
-        && rule
-            .subjects
-            .iter()
-            .any(|candidate| candidate == "*" || candidate == subject)
+    // An anonymous caller of an open console may be any person, including
+    // one a rule names. A deny rule with subject or group constraints binds
+    // it, so leaving out a token never escapes a deny. An allow rule with
+    // them never grants it, `subjects: ["*"]` included: `"*"` matches any
+    // *authenticated* subject, as `"*"` in the resource selectors never
+    // matches an absent attribute.
+    let Some(subject) = principal.subject.as_deref() else {
+        return matches!(rule.effect, AccessEffect::Deny);
+    };
+    if rule
+        .subjects
+        .iter()
+        .any(|candidate| candidate == "*" || candidate == subject)
     {
         return true;
     }
@@ -813,6 +817,68 @@ mod tests {
                 "worker",
             ),
             None
+        );
+    }
+
+    /// An open Console admits callers without a token, and an anonymous
+    /// caller may be any person: a deny rule that names a subject or a group
+    /// binds it too, so leaving out a token never escapes a deny. An allow
+    /// rule that names people still never matches it.
+    #[test]
+    fn an_anonymous_caller_is_bound_by_deny_rules_that_name_people() {
+        let deny = |id: &str, subjects: &[&str], groups: &[&str], action: &str| AccessRule {
+            id: id.to_string(),
+            effect: AccessEffect::Deny,
+            subjects: subjects.iter().map(ToString::to_string).collect(),
+            groups: groups.iter().map(ToString::to_string).collect(),
+            actions: vec![action.to_string()],
+            ..AccessRule::default()
+        };
+        let allow = |id: &str, subjects: &[&str], action: &str| AccessRule {
+            id: id.to_string(),
+            subjects: subjects.iter().map(ToString::to_string).collect(),
+            actions: vec![action.to_string()],
+            ..AccessRule::default()
+        };
+        let config = config_with_rules(vec![
+            allow("everyone-retires", &[], "agent.retire"),
+            deny(
+                "alice-never-retires",
+                &["alice@example.test"],
+                &[],
+                "agent.retire",
+            ),
+            allow("everyone-resets", &[], "agent.reset"),
+            deny("ops-never-resets", &[], &["ops"], "agent.reset"),
+            deny("no-signed-in-spawn", &["*"], &[], "agent.respawn"),
+            allow("everyone-respawns", &[], "agent.respawn"),
+            allow("bob-spawns", &["bob@example.test"], "agent.spawn"),
+        ]);
+        let allows = |principal: &AccessPrincipal, action: &str| {
+            evaluate_access(&config, principal, action, &AccessResource::none()).is_allow()
+        };
+        let anonymous = AccessPrincipal::anonymous();
+        let carol = principal("carol@example.test", &[]);
+        assert_eq!(
+            [
+                allows(&anonymous, "agent.retire"),
+                allows(&anonymous, "agent.reset"),
+                allows(&anonymous, "agent.respawn"),
+                allows(&anonymous, "agent.spawn"),
+            ],
+            [false; 4],
+            "every deny that names people binds an anonymous caller, and an allow that \
+             names people never matches it"
+        );
+        assert_eq!(
+            [
+                allows(&carol, "agent.retire"),
+                allows(&carol, "agent.reset"),
+                allows(&principal("alice@example.test", &[]), "agent.retire"),
+                allows(&principal("dave@example.test", &["ops"]), "agent.reset"),
+            ],
+            [true, true, false, false],
+            "named callers are decided as before"
         );
     }
 }

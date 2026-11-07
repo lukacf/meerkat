@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Tokens minted with an `auth_config` shared secret (`provider: "jwt"`)
+  are shared-account tokens unless the configuration declares
+  `accounts: "personal"`: such a token identifies a principal and never
+  counts as a person.
+- Rust: `TrustedOidcRuntimeConfig` gains `shared_account_tokens`
+  (`#[serde(default)]`, so a serialized state keeps today's behaviour). A
+  host that builds the struct literally adds `shared_account_tokens: false`
+  to keep today's behaviour.
+- On an open console with an access controller, an anonymous caller is
+  bound by every deny rule that names a subject or a group.
+
+- The console no longer accepts a bearer token in the query string of a
+  POST: `/console/rpc`, `/console/rpc/multipart`, `/console/send`,
+  `/console/send/recover`, the MCP Apps routes and the Flow Editor RPC
+  (`/flow-editor/rpc`) refuse a request whose only token is in the query
+  string with 401, on an open console too. Every GET still takes the
+  `auth_token` query parameter (an `EventSource` stream or an image load
+  cannot set headers).
+- An open console refuses a request whose `Host` names a host its listener
+  does not serve (403 `host_not_served`), on its own routes and on the host
+  composition's routes under `/host`. Plain `/healthz` answers any host.
+- New refusal code `-32056` with the kinds `caller_changed` and
+  `caller_not_current`; `POST /console/send` and `/console/send/recover`
+  answer `409` and `401`. `/console/mcp-apps/call-tool` answers `409`
+  `caller_changed`, and a call whose caller's login ended while it ran gets
+  the route's `403` `mcp_app_unavailable`.
+
+### Security
+
+- Tokens minted with an `auth_config` shared secret no longer count as a
+  person unless the configuration declares `accounts: "personal"`.
+- On a console without sign-in, a deny rule that names a person or a group
+  also applies to callers who send no token, so leaving out a token never
+  escapes it.
+
+- A console change re-checks, right before it is made, that its caller's
+  login is still current (token not expired, console sessions not
+  revoked), and is refused with `caller_not_current` otherwise; a send
+  checks again right before it is reserved or sent.
+- An open console refuses requests addressed to a host it does not serve,
+  so a page that rebinds its own name to the console's address cannot
+  drive it.
+
+### Upgrade
+
+- A front that mints one token per person with a shared secret adds
+  `"accounts": "personal"` to its `auth_config`.
+- On an open console with an access controller, grant anonymous callers
+  explicitly, or sign people in.
+
+- Clients send console writes with the token in the `Authorization`
+  header.
+- Host check (open consoles only):
+  - set the gateway's public base URL (`http_public_base_url`) when a proxy
+    or another name fronts the console; one public name only;
+  - a wildcard bind (`0.0.0.0`, `::`) admits only loopback names and the
+    public base URL's host, so LAN clients that reach the console by its
+    address need that address declared as the public base URL;
+  - `UnifiedRuntime::run` and `serve` admit loopback names and the bound
+    address only, so a library host behind a proxy that keeps the client's
+    `Host` serves the router on its own server instead;
+  - a probe that asks `/healthz` for JSON by a pod or service name now gets
+    403; the plain `/healthz` answer is unchanged.
+
+### Added
+
+- `meta/console/whoami` reports who the console acts as: the actor
+  (`person`, `service`, `token_principal` or `anonymous`), the posture, the
+  login expiry, whether the caller may administer access, the approver ids
+  it holds, and an opaque `caller_scope`.
+- `auth_config.accounts` (`"personal"` or `"shared"`) states whether an
+  issuer's tokens name persons; the Python and TypeScript auth config
+  builders carry it. The TypeScript `JwtAuthConfig.accounts` member is
+  optional, so a config built by hand without it still type-checks.
+
+- Console changes accept `expected_caller_scope` (the `caller_scope` read
+  from `meta/console/whoami`), and a change made for another caller is
+  refused with `caller_changed`.
+
 ### Changed
 
 - A member whose session the host store refuses until its realm is reopened

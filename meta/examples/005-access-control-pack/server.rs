@@ -79,6 +79,7 @@ fn trusted_oidc() -> TrustedOidcRuntimeConfig {
             .to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }
 

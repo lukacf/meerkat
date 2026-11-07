@@ -273,6 +273,7 @@ fn trusted_oidc() -> TrustedOidcRuntimeConfig {
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"},{"kid":"kid-next","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtbmV4dC1zZWNyZXQ"}]}"#.to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }
 

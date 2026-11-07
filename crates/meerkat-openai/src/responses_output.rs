@@ -1625,6 +1625,43 @@ mod tests {
         assert!(error.is_retryable());
     }
 
+    /// A reasoning item may carry its text in content parts
+    /// (`response.content_part.added/done` with a `reasoning_text` part), as
+    /// the Responses event schema allows: on the Copilot route such a part
+    /// names no other kind of item at its slot, and the response completes.
+    /// (Fails-old: every content part was taken as a message's, so the
+    /// response failed as a slot mismatch.)
+    #[tokio::test]
+    async fn copilot_reasoning_content_parts_complete_the_response() {
+        let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Plan"}],"encrypted_content":"cipher"});
+        let part = json!({"type":"reasoning_text","text":"Plan"});
+        let answer = message("msg_1", "final_answer", "Done.");
+        let events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":reasoning}),
+            json!({"type":"response.content_part.added","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.content_part.done","item_id":"rs_1","output_index":0,"content_index":0,"part":part}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            json!({"type":"response.output_item.added","output_index":1,"item":answer}),
+            json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"Done."}),
+            json!({"type":"response.output_item.done","output_index":1,"item":answer}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":[reasoning, answer],
+                "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}),
+        ];
+        let events = copilot_events(events, false).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. }
+                }))
+            ),
+            "{:?}",
+            events.last()
+        );
+    }
+
     /// Copilot rotates a function call's item id on every event while its
     /// call_id stays: the call keeps its call_id, and its argument deltas,
     /// whose item ids are those of the call's slot, stream live.
@@ -1846,6 +1883,16 @@ mod tests {
                     completed(json!([message("message-g", "final_answer", "Done.")])),
                 ],
                 "omitted streamed assistant message 'stray'",
+            ),
+            (
+                "an argument delta at a message's slot",
+                vec![
+                    added_at(0, &message("A", "final_answer", "Done.")),
+                    json!({"type":"response.function_call_arguments.delta","item_id":"X","output_index":0,"delta":"{}"}),
+                    done_at(0, &message("F", "final_answer", "Done.")),
+                    completed(json!([message("G", "final_answer", "Done.")])),
+                ],
+                "a function_call at output_index 0, which holds a message",
             ),
             (
                 "two terminal items at one output_index",

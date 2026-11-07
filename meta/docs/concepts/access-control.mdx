@@ -386,7 +386,7 @@ Label- and role-based rules resolve against an attribute cache the runtime refre
 </Note>
 
 <Note>
-**Migration - `schedule.manage`.** Console schedule changes used to need only `agent.send`. A configuration that names no schedule action (no `schedule.*` action in any rule) keeps working the same way: every rule matching `agent.send` is extended to also cover `schedule.manage`, allow and deny rules alike, with a logged recommendation to write explicit rules. As with the memory actions, the extension is made in memory on load and reaches the TOML file with the next saved change, and a configuration that names a schedule action anywhere is taken literally. A Meta release before `schedule.manage` refuses a configuration that names it, so remove those entries before you go back to one.
+**Migration - `schedule.manage`.** Console schedule changes used to need only `agent.send`. A configuration that names no schedule action (no `schedule.*` action in any rule) keeps working the same way: every rule matching `agent.send` is extended to also cover `schedule.manage`, allow and deny rules alike, with a logged recommendation to write explicit rules. As with the memory actions, the extension is made in memory on load and reaches the TOML file with the next saved change, and a configuration that names a schedule action anywhere is taken literally. A Meta release before `schedule.manage` refuses a configuration that names it: to roll back, remove `schedule.manage` from the rules, or restore the configuration saved before the upgrade.
 </Note>
 
 ### `mob.observe` and per-agent filtering

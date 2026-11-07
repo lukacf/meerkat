@@ -2897,14 +2897,16 @@ as a live send by the sender is, so a redelivered occurrence sends once. It
 reaches the agent with origin `console:schedule` and the scheduler turn
 origin.
 
-**Changes made meanwhile.** An update and a resume that name
-`expected_revision` are refused when the schedule moved past it (`-32009`,
-`schedule_revision_conflict`), so a change made from an older read never
-overwrites a change made meanwhile; the stock Console always sends the
-revision it showed. Either way they write at the revision they read: one
-that raced another change answers the same refusal and changes nothing, so
-it never puts back what the other change replaced. Read the schedule again
-and repeat it. A pause and a delete take no revision.
+**Changes made meanwhile.** `expected_revision` is optional, on an update
+and a resume only. One that names it is refused when the schedule moved
+past it (`-32009`, `schedule_revision_conflict`), so a change made from an
+older read never overwrites a change made meanwhile; the stock Console
+always sends the revision it showed. One that leaves it out acts on the
+schedule's current revision: the last writer wins. Either way they write at
+the revision they read: one that raced another change answers the same
+refusal and changes nothing, so it never puts back what the other change
+replaced. Read the schedule again and repeat it. A pause and a delete take
+no revision: they act on the schedule as it is.
 
 A refused or failed send fails that occurrence (`delivery_failed` in the
 schedule store), and the schedule keeps its later times. That covers a

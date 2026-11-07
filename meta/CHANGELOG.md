@@ -98,9 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     403; the plain `/healthz` answer is unchanged.
 
 - An access configuration saved by this release names `schedule.manage`
-  wherever it grants `agent.send`; an earlier Meta refuses to load a
-  configuration that names it, so remove those entries before going back to
-  one.
+  wherever it grants `agent.send`, and an earlier Meta refuses to load a
+  configuration that names it. To roll back, remove `schedule.manage` from
+  the rules, or restore the configuration saved before the upgrade.
 - A client that writes the access policy over `/console/rpc` without
   `checked_v1` reads `owner_instance` and `revision` from `meta/access/get`
   and sends the edit inside `checked_v1`; the stock Console already does.

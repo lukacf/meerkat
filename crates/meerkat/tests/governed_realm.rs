@@ -518,6 +518,83 @@ async fn a_closed_realm_reopens_with_its_owner_while_its_machine_is_still_held()
     drop(held);
 }
 
+/// The warnings a test records, as `tracing` formats them.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A stock realm opened from its existing grant store and closed through
+/// its session service's terminal `try_shutdown`, while a task of the closed
+/// realm still holds the realm's machine: an immediate reopen in the same
+/// process restores the grant owner and has the stock governance, with no
+/// "did not restore" warning, rather than opening with its governed work and
+/// configured MCP attachments unavailable.
+#[tokio::test]
+async fn a_closed_stock_realm_reopens_governed_while_its_machine_is_still_held() {
+    use meerkat::governed_realm::stock::{StockGovernance, StockPrincipals, govern_stock_realm};
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let tmp = tempfile::tempdir().unwrap();
+    drop(open(tmp.path(), RealmGovernance::Ungoverned).await);
+    let realm = meerkat_core::connection::RealmId::parse("governed").unwrap();
+    let principals = StockPrincipals::for_user(&realm, 4242).unwrap();
+    govern_stock_realm(tmp.path(), "governed", &principals)
+        .await
+        .expect("governed, with its grant owner on disk");
+
+    let first = open(
+        tmp.path(),
+        RealmGovernance::Stock(StockGovernance::new(realm.clone(), principals.clone())),
+    )
+    .await;
+    assert!(first.stock_governance().is_some());
+    let (service, machine) = realm_service(tmp.path(), first);
+    let held = Arc::clone(&machine);
+    service
+        .try_shutdown()
+        .await
+        .expect("the realm's terminal close");
+    drop(service);
+    drop(machine);
+
+    let reopened = open(
+        tmp.path(),
+        RealmGovernance::Stock(StockGovernance::new(realm, principals)),
+    )
+    .await;
+    assert!(reopened.stock_governance().is_some());
+    let warnings = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !warnings.contains("did not restore"),
+        "the reopened realm restores its grant owner: {warnings}"
+    );
+    drop(held);
+}
+
 /// The installation is no authority of its own: a governed realm without
 /// its owners, or with an unrestorable grant owner, still refuses it.
 #[tokio::test]

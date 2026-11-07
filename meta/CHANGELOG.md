@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A host store realm whose store reports a conflicted scope (two batches
+  at one of its versions, Core 0.9.11) opens with that scope quarantined,
+  where the open failed: the scope's document or member refuses typed,
+  every other one serves, and the readiness probe stays ready and names the
+  scope with its cause in `HostStoreReadiness::quarantined_scopes` (new).
+  Repair the scope in the store, then restart: a restart alone quarantines
+  it again.
+
 - A member whose session the host store refuses until its realm is reopened
   reports `preview_unavailable: "store_refused"` (Core 0.9.11) in
   `meta/member_status`, `meta/inspect_identity` and the console's per-member

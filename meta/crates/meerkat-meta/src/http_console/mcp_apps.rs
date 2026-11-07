@@ -43,9 +43,21 @@ pub struct ConsoleToolApplicationIngress {
     registration: Option<crate::console_aggregator::ConsoleApplicationRuntime>,
     operation: Operation,
     principal: Option<String>,
+    /// The requester the caller's app actions run for, by the console send
+    /// rule; `None` when the caller names none.
+    requester: Option<meerkat_core::PrincipalRef>,
 }
 
 type Ingress = ConsoleToolApplicationIngress;
+
+/// A request [`route`] admitted: the state of the runtime that owns its
+/// session, the request naming that runtime's identity, and the aggregate
+/// registration it was routed through.
+type Routed = (
+    ConsoleJsonState,
+    Request,
+    Option<crate::console_aggregator::ConsoleApplicationRuntime>,
+);
 
 fn apps_enabled(state: &ConsoleJsonState) -> bool {
     state
@@ -58,6 +70,30 @@ fn apps_enabled(state: &ConsoleJsonState) -> bool {
 }
 
 impl ConsoleToolApplicationIngress {
+    /// The ingress of a request [`route`] admitted, bound to the caller the
+    /// Console authenticated for it: its principal and the requester its app
+    /// actions run for ([`ToolApplicationIngress::requester`]).
+    fn for_caller(
+        (state, request, registration): Routed,
+        headers: HeaderMap,
+        uri: Uri,
+        public_identity: String,
+        operation: Operation,
+        auth: ConsoleHttpAuthContext,
+    ) -> Option<Self> {
+        Some(Self {
+            state,
+            headers,
+            uri,
+            request,
+            public_identity,
+            registration,
+            operation,
+            principal: auth.principal,
+            requester: None,
+        })
+    }
+
     /// Actual authenticated Console principal. `None` denotes a host-protected
     /// open Console; it is never an inferred user or member identity.
     pub fn principal(&self) -> Option<&str> {
@@ -121,6 +157,10 @@ impl ToolApplicationIngress for Ingress {
             .map_err(|()| meerkat_core::OperationAuthorizationError::Unavailable)?;
             self.revalidate()
         })
+    }
+
+    fn requester(&self) -> Option<meerkat_core::PrincipalRef> {
+        self.requester.clone()
     }
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
@@ -261,14 +301,7 @@ async fn route(
     state: ConsoleJsonState,
     request: Request,
     operation: Operation,
-) -> Result<
-    (
-        ConsoleJsonState,
-        Request,
-        Option<crate::console_aggregator::ConsoleApplicationRuntime>,
-    ),
-    (),
-> {
+) -> Result<Routed, ()> {
     if state.runtime.is_some() {
         authorize_session(&state, &request, operation).await?;
         return Ok((state, request, None));
@@ -444,16 +477,17 @@ async fn handle(
     let Ok((state, request, registration)) = route(state, request, lookup_operation).await else {
         return unavailable();
     };
-    let mut ingress = Arc::new(Ingress {
-        state: state.clone(),
+    let Some(ingress) = Ingress::for_caller(
+        (state.clone(), request.clone(), registration),
         headers,
         uri,
-        request: request.clone(),
         public_identity,
-        registration,
-        operation: lookup_operation,
-        principal: auth.principal,
-    });
+        lookup_operation,
+        auth,
+    ) else {
+        return unavailable();
+    };
+    let mut ingress = Arc::new(ingress);
     let Some(runtime) = state.runtime.as_ref() else {
         return unavailable();
     };
@@ -641,6 +675,7 @@ mod tests {
             headers: HeaderMap::new(),
             uri: Uri::from_static("/console/mcp-apps/call-tool"),
             principal: None,
+            requester: None,
         }
     }
 
@@ -786,6 +821,119 @@ mcp_apps_sandbox_url = " "
                 .revalidate()
                 .is_err()
         );
+    }
+
+    /// An app call runs for its caller by the console send rule. On a console
+    /// that requires sign-in a person's call names that person (the issuer's
+    /// `sub`, qualified by the issuer), and Core's control request takes it;
+    /// a service and a token principal name no one. On an open console no
+    /// call names anyone, a person who volunteers a token included.
+    #[test]
+    fn mcp_app_call_bound_to_caller() -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::console_human_admission_tests::{BOB, state as signed_in};
+        use super::super::console_token_lapse_tests::{human_claims, now_seconds, token};
+
+        let bearer = |claims: Value| -> Result<HeaderMap, Box<dyn std::error::Error>> {
+            let mut headers = HeaderMap::new();
+            let token = token(claims, Some(now_seconds() + 300));
+            headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse()?);
+            Ok(headers)
+        };
+        let uri = Uri::from_static("/console/mcp-apps/call-tool");
+        let session = meerkat_core::SessionId::new();
+        let ingress_for = |state: &ConsoleJsonState,
+                           headers: HeaderMap|
+         -> Result<Ingress, Box<dyn std::error::Error>> {
+            let auth = console_write_auth_context(state, &headers, &uri)
+                .ok_or("the console admits the caller")?;
+            let request = request(&session);
+            let public_identity = request.identity.clone();
+            Ingress::for_caller(
+                (state.clone(), request, None),
+                headers,
+                uri.clone(),
+                public_identity,
+                Operation::CallTool,
+                auth,
+            )
+            .ok_or_else(|| "the caller's ingress".into())
+        };
+
+        let mut enforced = signed_in();
+        enforced.decisions.console.ui.mcp_apps_sandbox_url =
+            Some("https://apps.example.test/sandbox.html".into());
+        let mut open = enforced.clone();
+        open.decisions.console.require_app_auth = false;
+        // An open console identifies a volunteered token for its access
+        // policy only.
+        open.access = Some(AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec![BOB.into()],
+            ..Default::default()
+        })?);
+        let person = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "oidc-sub-7",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://trusted.meta.localhost")?,
+        )?;
+        let service = json!({ "sub": "svc:robot", "email": "svc:robot", "actor_type": "service" });
+        let token_principal = json!({ "email": BOB, "provider": "google_oauth" });
+        for (caller, state, headers, expected) in [
+            (
+                "a person on a console that requires sign-in",
+                &enforced,
+                bearer(human_claims())?,
+                Some(person.clone()),
+            ),
+            ("a service", &enforced, bearer(service)?, None),
+            (
+                "a token principal",
+                &enforced,
+                bearer(token_principal)?,
+                None,
+            ),
+            (
+                "a person who volunteers a token on an open console",
+                &open,
+                bearer(human_claims())?,
+                None,
+            ),
+            (
+                "an anonymous caller of an open console",
+                &open,
+                HeaderMap::new(),
+                None,
+            ),
+        ] {
+            let ingress = ingress_for(state, headers)?;
+            assert_eq!(
+                ToolApplicationIngress::requester(&ingress),
+                expected,
+                "{caller}"
+            );
+        }
+
+        let ingress = ingress_for(&enforced, bearer(human_claims())?)?;
+        assert_eq!(ingress.principal(), Some(BOB), "access keeps the email");
+        let control = ToolApplicationControlRequest::from_trusted_ingress(
+            session.clone(),
+            ToolApplicationRequest {
+                tool_call_id: "call-1".into(),
+                extension: MCP_APPS_EXTENSION.into(),
+                operation: ToolApplicationOperation::CallTool {
+                    name: "action".into(),
+                    arguments: json!({}),
+                },
+            },
+            Arc::new(ingress),
+        )
+        .map_err(|_| "a current caller's call submits")?;
+        assert_eq!(
+            control.requester(),
+            Some(&person),
+            "Core runs the call for the person"
+        );
+        Ok(())
     }
 
     #[tokio::test]

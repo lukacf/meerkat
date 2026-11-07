@@ -641,6 +641,15 @@ pub trait ToolApplicationIngress: Any + Send + Sync {
     > {
         Box::pin(async move { self.revalidate() })
     }
+    /// The original requester of this operation: the caller the trusted
+    /// ingress authenticated, as an opaque qualified principal, when the host
+    /// names one. Core dispatches the operation for it as a direct requester
+    /// ([`crate::ToolDispatchContext::requester`]), never for the requester
+    /// of an earlier model run, and refuses an unqualified one at submission.
+    /// The default names none.
+    fn requester(&self) -> Option<crate::PrincipalRef> {
+        None
+    }
     fn as_any(&self) -> &(dyn Any + Send + Sync);
 }
 
@@ -649,6 +658,8 @@ pub struct ToolApplicationControlRequest {
     session_id: SessionId,
     request: ToolApplicationRequest,
     ingress: Arc<dyn ToolApplicationIngress>,
+    /// The requester its ingress named at submission.
+    requester: Option<crate::PrincipalRef>,
     claimed: AtomicBool,
     execution_claimed: AtomicBool,
     execution_guard: OnceLock<Arc<dyn ToolApplicationIngress>>,
@@ -672,10 +683,12 @@ impl ToolApplicationControlRequest {
     ) -> Result<Arc<Self>, OperationAuthorizationError> {
         request.validate()?;
         ingress.revalidate()?;
+        let requester = ingress.requester();
         Ok(Arc::new(Self {
             session_id,
             request,
             ingress,
+            requester,
             claimed: AtomicBool::new(false),
             execution_claimed: AtomicBool::new(false),
             execution_guard: OnceLock::new(),
@@ -690,6 +703,11 @@ impl ToolApplicationControlRequest {
     }
     pub fn ingress(&self) -> &dyn ToolApplicationIngress {
         self.ingress.as_ref()
+    }
+    /// The original requester its ingress named at submission
+    /// ([`ToolApplicationIngress::requester`]).
+    pub fn requester(&self) -> Option<&crate::PrincipalRef> {
+        self.requester.as_ref()
     }
 
     pub fn revalidate(&self) -> Result<(), OperationAuthorizationError> {

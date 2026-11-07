@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
 
+- Rust: the identity-keyed operator resolver is removed:
+  `OperatorResolver`, `ConsolePrincipalOperatorResolver`,
+  `AgentMemoryRuntimeInjector::with_operator_resolver`,
+  `AgentMemoryCustomizer::with_operator_resolver`,
+  `RecallCoordinator::with_operator_resolver`, and
+  `UnifiedRuntime::set_console_operator_resolver` and
+  `console_operator_resolver`. The operator memory of a turn comes from the
+  turn's requester instead (`RecallCoordinator::operator_context_for_turn`
+  and `AgentMemoryRuntimeInjector::operator_context_for_turn`).
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -73,6 +83,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
+- Operator-scope memory is keyed by the person's caller scope (the
+  `caller_scope` that `meta/console/whoami` reports to them). Records
+  written under the provisional keying (the console access subject) are no
+  longer recalled; a host that writes operator records keys them by the
+  person's caller scope. To find the old records, list the console Memory
+  panel's operator scopes (`meta/memory/panel/overview`, or
+  `meta/memory/panel/records` with an operator scope filter) as a caller
+  who holds `operator.memory.read` and `operator.memory.read_any`: a scope
+  whose key does not start with `console-caller:v1:` is an old key. Nothing
+  reads those records any more; a Rust host deletes one with
+  `AgentMemoryProvider::forget_authored` on its operator scope, as
+  `MemoryAuthor::Operator`.
+- A rule that grants `operator.memory.read` now reads only the caller's own
+  operator memory; grant `operator.memory.read_any` too where a role reads
+  every person's.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -87,6 +113,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
+### Changed
+
+- Operator memory reaches only the turns of the person who asked: a turn
+  recalls the operator memory of its direct requester (the person whose
+  own console message started it) in a request-only section that every
+  model request of the turn sees and that never enters the agent's
+  transcript, a stored message, a session read or a retry. A turn without a
+  direct person requester recalls none, and a member's build-time memory no
+  longer carries operator memory.
+- Reading another person's operator memory needs `operator.memory.read_any`
+  (admins hold it; a rule that grants `operator.memory.*` or `*` grants it
+  too). `operator.memory.read` reads the caller's own operator memory.
+- The `memory` tool proposes an `operator_said` fact to the operator memory
+  of the person whose message started the run (and records it in the
+  agent's own memory, as before); a run without such a person proposes
+  none. The steward accepts such a proposal into that person's operator
+  memory only, and drops a dream op that names an operator key.
+
+### Fixed
+
+- Memory delivered with a turn (its injected context) and context a host
+  attaches to a send are no longer evidence for the Distiller, so recalled
+  memory is not distilled back into memory.
+- A member's build-time memory, which every run of the member shares, no
+  longer carries the operator memory of whoever spoke to it last.
 
 ## [0.9.10] - 2026-11-04
 

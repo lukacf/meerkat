@@ -400,6 +400,26 @@ that the steward commits (§8.5). Realm scope is application/SDK-only.
 > already in evidence (e.g. named by a held operator-scope proposal) —
 > never invent one.
 
+> **0.9.11 as-built (per-person operator scope).** The keying is settled
+> for console persons: an operator scope belongs to one person, and its key
+> is that person's caller scope (`console-caller:v1:...`, the value
+> `meta/console/whoami` reports, a digest of the verified issuer and
+> subject). The sticky last-speaker resolver and the identity-keyed
+> `OperatorResolver` seam are gone. A turn recalls the operator scope of its
+> direct requester only, as index rows in a request-only section of that
+> turn (Core's `RuntimeTurnMetadata.request_only_context`: projected into
+> every model request of the turn, never a transcript row, a stored input or
+> a replay); the build-time index never composes it, because a build serves
+> every run of its member. A turn without a direct person requester (none,
+> one carried across a peer hop, or a principal that names no person)
+> recalls none. The Recorder proposes an `operator_said` fact to the
+> operator scope of the run's direct requester; the steward accepts it into
+> that key only and drops dream ops that name an operator key. Memory
+> delivered with a turn is not Distiller evidence. The console Memory panel
+> shows a person their own operator scope with `operator.memory.read`;
+> another person's needs `operator.memory.read_any` too. The note above
+> describes the provisional keying this replaced.
+
 ### 7.3 Provider trait v2 and the bundled store
 
 `AgentMemoryProvider` keeps its optional-capability philosophy (`supports_*`
@@ -1309,6 +1329,9 @@ Selector.
   Steward proposal-routing activates independently on the config knob because
   proposals carry their operator key. The Hygienist remains parked, not
   publicly activated; see §7.2 and §8.6 for the precise boundaries.*
+  *0.9.11: the operator scope is per person, keyed by the person's caller
+  scope and recalled per turn, request-only, for the turn's direct
+  requester; the console resolver is gone (see the 0.9.11 note in §7.2).*
 
 Definition of done for the initiative: an identity in a mob accumulates,
 consolidates, and recalls memory across respawns with zero external services;

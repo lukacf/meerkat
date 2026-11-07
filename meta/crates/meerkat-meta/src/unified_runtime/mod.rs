@@ -2292,7 +2292,8 @@ impl UnifiedRuntime {
     /// ([`crate::console_replies::ConsoleReplies`]): what a host's reply route
     /// calls for a request made on the console. `None` until the runtime's
     /// console projection exists (its first console router is built).
-    // The requester reply route for console requests is its first caller.
+    // No caller outside tests yet: the console's requester reply route, its
+    // first caller, removes this allow.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn console_replies(&self) -> Option<crate::console_replies::ConsoleReplies> {
         self.console_projection.get().map(|projection| {

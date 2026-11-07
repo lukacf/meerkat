@@ -30,9 +30,9 @@ pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
 pub mod console_governed_ingress;
-// Person-addressed delivery: its caller, the console's requester reply
-// route, is not in this crate yet, so outside tests the delivery chain is
-// unused.
+// Person-addressed delivery has no caller in this crate yet: outside tests
+// the delivery chain is unused. The console's requester reply route, its
+// first caller, removes this allow.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod console_replies;
 pub(crate) mod console_schedules;

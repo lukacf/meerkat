@@ -253,6 +253,16 @@ fn catalog_beta_value(
 /// uncatalogued id gets nothing: no catalog row says what its default is (the
 /// alias may serve an `enabled`-only model that refuses `adaptive`), and a
 /// replayed block from an earlier turn is not evidence of one.
+///
+/// Sending the control to an uncatalogued id that serves a model without
+/// the prefix check is safe: the control is documented to work across
+/// models ("Models that don't run the prefix check accept the object and
+/// report only blocks dropped because the model can't read them, so one
+/// request body works across models"). The documented refusals are the
+/// object without its beta header, and the object beside `between_tools` on
+/// Claude Sonnet 5.5 or `disabled` on Claude Haiku 5.5, which
+/// [`thinking_block_binding`] never places it beside.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
 fn thinking_binding_beta_value(request: &LlmRequest, body: &Value) -> Option<&'static str> {
     use meerkat_core::model_profile::capabilities::BetaFeature;
     if meerkat_models::capabilities_for(Provider::Anthropic, &request.model).is_some() {

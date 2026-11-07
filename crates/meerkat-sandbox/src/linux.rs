@@ -17,14 +17,20 @@
 //! rules and pinned in its place (`Mount::bind`); any other change refuses
 //! the launch. Setup reopens the target only while it is the object the
 //! launch validated.
+//!
+//! Every granted path, the baseline included, is opened by its canonical name
+//! with no symbolic link in any component (`open_no_symlinks`): when the
+//! requirement compiles, when a final link's target is captured again, and at
+//! setup. A writer of a directory partway down cannot swap a link in and get
+//! another object pinned or bound.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, OsStr};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -120,6 +126,11 @@ struct Mount {
     canonical: PathBuf,
     // The canonical name, opened again in the new mount namespace at setup.
     source: CString,
+    // The canonical name's components, prebuilt for the symlink-free walk
+    // setup falls back to on a kernel without openat2 (`open_no_symlinks`).
+    // `components` holds the granted path's, which differ for a final link
+    // and a baseline alias.
+    source_components: Vec<CString>,
     components: Vec<CString>,
     destination: CString,
     directory: bool,
@@ -603,11 +614,22 @@ impl Mount {
         } else {
             None
         };
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&canonical)
-            .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
+        // The canonical name and its components, for the symlink-free opens
+        // here, at every re-capture and at setup.
+        let source = CString::new(canonical.as_os_str().as_bytes())
+            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
+        let source_components =
+            normal_components(&canonical).ok_or(ConfinementRefusal::UnsupportedRequirement)?;
+        // No symbolic link in any component: a writer of a directory partway
+        // down cannot swap a link in after canonicalize and get another
+        // object pinned.
+        let file = open_no_symlinks(
+            &source,
+            &source_components,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+        .map(|descriptor| unsafe { File::from_raw_fd(descriptor) })
+        .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         let metadata = file
             .metadata()
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
@@ -654,8 +676,6 @@ impl Mount {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         let noexec = (unsafe { mount_flags.assume_init() }.f_flag & libc::ST_NOEXEC) != 0;
-        let source = CString::new(canonical.as_os_str().as_bytes())
-            .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
         let mut ancestors = Vec::new();
         for ancestor in canonical.ancestors().skip(1) {
             let value = std::fs::symlink_metadata(ancestor)
@@ -689,6 +709,7 @@ impl Mount {
             link,
             canonical,
             source,
+            source_components,
             components,
             destination,
             directory: metadata.is_dir(),
@@ -786,16 +807,16 @@ impl Mount {
     }
 
     // Between fork and exec, in the new mount namespace: opens this mount's
-    // object again by its canonical name and returns it only while it is
-    // still `pinned`, the object the launch validated.
+    // object again by its canonical name, following no symbolic link in any
+    // component, and returns it only while it is still `pinned`, the object
+    // the launch validated.
     fn reopen(&self, pinned: (libc::dev_t, libc::ino_t, libc::dev_t)) -> Result<i32, SetupFailure> {
         let kind = if self.directory { libc::O_DIRECTORY } else { 0 };
-        let source = raw(unsafe {
-            libc::open(
-                self.source.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | kind,
-            )
-        })
+        let source = open_no_symlinks(
+            &self.source,
+            &self.source_components,
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | kind,
+        )
         .map_err(SetupStep::MountSource.failed())?;
         match stat_identity(source) {
             Ok(identity) if identity == pinned => Ok(source),
@@ -904,6 +925,95 @@ fn stat_identity(descriptor: i32) -> Result<(libc::dev_t, libc::ino_t, libc::dev
     raw(unsafe { libc::fstat(descriptor, status.as_mut_ptr()) })?;
     let status = unsafe { status.assume_init() };
     Ok((status.st_dev, status.st_ino, status.st_rdev))
+}
+
+/// The normal components of the absolute `path`; `None` for a relative
+/// path, a `.` or `..` component, or a NUL byte.
+fn normal_components(path: &Path) -> Option<Vec<CString>> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.components()
+        .filter(|component| !matches!(component, Component::RootDir))
+        .map(|component| match component {
+            Component::Normal(name) => CString::new(name.as_bytes()).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Opens the absolute canonical name `path`, whose normal `components` are
+/// prebuilt, with `flags`, following no symbolic link in any component, so
+/// a writer of a directory partway down cannot get another object opened by
+/// swapping a link in. It uses openat2 with RESOLVE_NO_SYMLINKS, and on a
+/// kernel without openat2 (ENOSYS only) the same walk by hand
+/// ([`walk_no_symlinks`]); any other error refuses. A final component that
+/// is a symbolic link opens as the link itself under O_PATH | O_NOFOLLOW,
+/// both ways, for the caller's type or identity check to refuse. It
+/// allocates nothing, so setup calls it between fork and exec. Returns the
+/// descriptor or the errno.
+fn open_no_symlinks(path: &CStr, components: &[CString], flags: libc::c_int) -> Result<i32, i32> {
+    match openat2_no_symlinks(path, flags) {
+        Err(libc::ENOSYS) => walk_no_symlinks(components, flags),
+        outcome => outcome,
+    }
+}
+
+/// [`open_no_symlinks`] by openat2 with RESOLVE_NO_SYMLINKS.
+fn openat2_no_symlinks(path: &CStr, flags: libc::c_int) -> Result<i32, i32> {
+    // `open_how` is non-exhaustive: zeroed, then its fields set.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = flags as u64;
+    how.resolve = libc::RESOLVE_NO_SYMLINKS;
+    let descriptor = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            std::ptr::addr_of!(how),
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if descriptor == -1 {
+        Err(errno())
+    } else {
+        Ok(descriptor as i32)
+    }
+}
+
+/// [`open_no_symlinks`] by a walk from `/`: every directory above the last
+/// component is opened O_PATH | O_DIRECTORY | O_NOFOLLOW from its parent's
+/// descriptor, so a symbolic link there fails (ENOTDIR), and every
+/// intermediate descriptor is closed.
+fn walk_no_symlinks(components: &[CString], flags: libc::c_int) -> Result<i32, i32> {
+    let Some((last, directories)) = components.split_last() else {
+        return Err(libc::EINVAL);
+    };
+    let mut directory = raw(unsafe {
+        libc::open(
+            c"/".as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    })?;
+    for name in directories {
+        let next = unsafe {
+            libc::openat(
+                directory,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        let error = errno();
+        unsafe { libc::close(directory) };
+        if next == -1 {
+            return Err(error);
+        }
+        directory = next;
+    }
+    let opened = unsafe { libc::openat(directory, last.as_ptr(), flags | libc::O_NOFOLLOW) };
+    let error = errno();
+    unsafe { libc::close(directory) };
+    if opened == -1 { Err(error) } else { Ok(opened) }
 }
 
 fn fd_path(descriptor: i32, bytes: &mut [u8; 32]) -> *const libc::c_char {
@@ -1459,6 +1569,19 @@ mod tests {
         let source = mount.reopen(pinned).unwrap();
         assert_eq!(stat_identity(source), Ok(pinned));
         unsafe { libc::close(source) };
+        // Setup's fallback walk follows the resolved target's components,
+        // not the granted path's.
+        assert_eq!(
+            Some(mount.source_components.clone()),
+            normal_components(&target)
+        );
+        let walked = walk_no_symlinks(
+            &mount.source_components,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+        .unwrap();
+        assert_eq!(stat_identity(walked), Ok(pinned));
+        unsafe { libc::close(walked) };
 
         let refused = Some(ConfinementRefusal::UnsupportedRequirement);
         // The second hop sits in a directory anyone may write, so its owner
@@ -1745,6 +1868,241 @@ mod tests {
             fixture.validate_launch(),
             Err(ConfinementRefusal::BackendUnavailable)
         );
+    }
+
+    /// What one race phase of
+    /// `a_racing_intermediate_directory_never_gets_another_object_pinned`
+    /// saw.
+    #[derive(Debug, Default)]
+    struct RaceTally {
+        attempts: u64,
+        captured: u64,
+        wrong_pins: u64,
+        exchanges: u64,
+    }
+
+    /// Runs `attempt` for `duration` while another thread exchanges the
+    /// directory `real` with `flip`, a symbolic link to another directory
+    /// (renameat2 RENAME_EXCHANGE), as a writer of their parent could; then
+    /// leaves `real` the directory again. `attempt` answers `None` when
+    /// nothing was pinned, else whether the other directory's object was.
+    fn race(
+        real: &Path,
+        flip: &Path,
+        duration: Duration,
+        mut attempt: impl FnMut() -> Option<bool>,
+    ) -> RaceTally {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let names = [real, flip].map(|path| CString::new(path.as_os_str().as_bytes()).unwrap());
+        let exchange = |names: &[CString; 2]| unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                names[0].as_ptr(),
+                libc::AT_FDCWD,
+                names[1].as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let exchanger = {
+            let (names, stop) = (names.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut exchanges = 0_u64;
+                while !stop.load(Ordering::Relaxed) {
+                    if exchange(&names) == 0 {
+                        exchanges += 1;
+                    }
+                }
+                exchanges
+            })
+        };
+        let mut tally = RaceTally::default();
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            tally.attempts += 1;
+            if let Some(wrong) = attempt() {
+                tally.captured += 1;
+                tally.wrong_pins += u64::from(wrong);
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        tally.exchanges = exchanger.join().unwrap();
+        if std::fs::symlink_metadata(real)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+        {
+            assert_eq!(exchange(&names), 0);
+        }
+        tally
+    }
+
+    /// Replaces `name` in the directory open as `directory`: a new file
+    /// written beside it and renamed over it, through that descriptor, so
+    /// whatever the directory's own name points at meanwhile.
+    fn replace_in(directory: &File, name: &CStr, contents: &[u8]) {
+        let stage = c".stage";
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                stage.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        assert!(descriptor >= 0, "{}", io::Error::last_os_error());
+        let written = unsafe { libc::write(descriptor, contents.as_ptr().cast(), contents.len()) };
+        assert_eq!(written, contents.len() as isize);
+        unsafe { libc::close(descriptor) };
+        let renamed = unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                stage.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+            )
+        };
+        assert_eq!(renamed, 0, "{}", io::Error::last_os_error());
+    }
+
+    // The (st_dev, st_ino) a mount pins.
+    fn pinned_identity(mount: &Mount) -> (u64, u64) {
+        let pin = mount.pin.lock().unwrap();
+        (pin.pinned.0, pin.pinned.1)
+    }
+
+    /// A writer of a directory partway down a granted path exchanges that
+    /// directory, again and again, with a symbolic link to another directory
+    /// of the host's user while the grant is captured: a direct file grant,
+    /// a writable subtree grant, a final link, and a final link captured
+    /// again at launch after its target was replaced. No capture ever pins
+    /// the other directory's object. Bounded: a little over a second a
+    /// phase.
+    #[test]
+    fn a_racing_intermediate_directory_never_gets_another_object_pinned() {
+        const PHASE: Duration = Duration::from_millis(1200);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let run = directory(&root, "run", 0o755);
+        let real = directory(&run, "real", 0o755);
+        directory(&real, "work", 0o755);
+        std::fs::write(real.join("app.conf"), b"granted").unwrap();
+        let secret = directory(&root, "secret", 0o700);
+        directory(&secret, "work", 0o700);
+        std::fs::write(secret.join("app.conf"), b"never granted").unwrap();
+        let identity = |path: &Path| {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            (metadata.dev(), metadata.ino())
+        };
+        let secret_file = identity(&secret.join("app.conf"));
+        let secret_work = identity(&secret.join("work"));
+        let flip = run.join("flip");
+        std::os::unix::fs::symlink(&secret, &flip).unwrap();
+        let link = etc.join("app.conf");
+        std::os::unix::fs::symlink("../run/real/app.conf", &link).unwrap();
+        let capture = |grant: &Path, writable: bool, secret: (u64, u64)| {
+            Mount::capture(grant, false, writable)
+                .ok()
+                .map(|mount| pinned_identity(&mount) == secret)
+        };
+
+        let mut tallies = Vec::new();
+        let file = real.join("app.conf");
+        tallies.push((
+            "direct file grant",
+            race(&real, &flip, PHASE, || capture(&file, false, secret_file)),
+        ));
+        let work = real.join("work");
+        tallies.push((
+            "writable subtree grant",
+            race(&real, &flip, PHASE, || capture(&work, true, secret_work)),
+        ));
+        tallies.push((
+            "final link",
+            race(&real, &flip, PHASE, || capture(&link, false, secret_file)),
+        ));
+        let mount = Mount::capture(&link, false, false).unwrap();
+        let real_directory = File::open(&real).unwrap();
+        let mut round = 0_u64;
+        tallies.push((
+            "final link captured again at launch",
+            race(&real, &flip, PHASE, || {
+                round += 1;
+                replace_in(&real_directory, c"app.conf", &round.to_le_bytes());
+                mount
+                    .bind()
+                    .ok()
+                    .map(|bound| (bound.pinned.0, bound.pinned.1) == secret_file)
+            }),
+        ));
+
+        for (phase, tally) in &tallies {
+            eprintln!("RACE {phase}: {tally:?}");
+        }
+        for (phase, tally) in &tallies {
+            assert!(
+                tally.exchanges > 0 && tally.captured > 0,
+                "{phase}: the race ran and grants were captured: {tally:?}"
+            );
+            assert_eq!(
+                tally.wrong_pins, 0,
+                "{phase}: a capture pinned the other directory's object: {tallies:?}"
+            );
+        }
+    }
+
+    /// The symlink-free open refuses a name with a symbolic link in a
+    /// directory partway down, by openat2 and by the fallback walk alike,
+    /// and opens a symlink-free name to the same object both ways. A final
+    /// component that is a link opens as the link itself both ways
+    /// (O_PATH | O_NOFOLLOW), for the caller's type or identity check to
+    /// refuse. The walk is called directly: no supported kernel lacks
+    /// openat2.
+    #[test]
+    fn the_symlink_free_open_refuses_an_intermediate_link_both_ways() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let real = root.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let file = real.join("app.conf");
+        std::fs::write(&file, b"granted").unwrap();
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let trailing = root.join("trailing");
+        std::os::unix::fs::symlink(&file, &trailing).unwrap();
+        let identity = |metadata: std::fs::Metadata| (metadata.dev(), metadata.ino());
+        let flags = libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        let openat2 = |path: &Path| {
+            openat2_no_symlinks(&CString::new(path.as_os_str().as_bytes()).unwrap(), flags)
+        };
+        let walk = |path: &Path| walk_no_symlinks(&normal_components(path).unwrap(), flags);
+        let ways: [(&str, &dyn Fn(&Path) -> Result<i32, i32>); 2] =
+            [("openat2", &openat2), ("walk", &walk)];
+        for (way, open) in ways {
+            let descriptor = open(&file).expect(way);
+            assert_eq!(
+                stat_identity(descriptor).map(|status| (status.0, status.1)),
+                Ok(identity(std::fs::metadata(&file).unwrap())),
+                "{way}: a symlink-free name opens its object"
+            );
+            unsafe { libc::close(descriptor) };
+
+            let through_link = open(&alias.join("app.conf"));
+            assert!(
+                through_link.is_err(),
+                "{way}: a link partway down is refused, got {through_link:?}"
+            );
+
+            let descriptor = open(&trailing).unwrap();
+            assert_eq!(
+                stat_identity(descriptor).map(|status| (status.0, status.1)),
+                Ok(identity(std::fs::symlink_metadata(&trailing).unwrap())),
+                "{way}: a final link opens as the link itself"
+            );
+            unsafe { libc::close(descriptor) };
+        }
     }
 
     /// A bind remount may not clear a flag of the host mount in the

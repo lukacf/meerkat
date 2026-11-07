@@ -241,6 +241,22 @@ them.
   still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
   through 0.9.10.
 
+### Security
+
+- `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
+  each granted path by name and followed a symbolic link in any directory
+  on the way. Someone who could write a directory partway down a granted
+  path could exchange that directory with a link while the requirement
+  compiled, and get another file or directory of the host's user pinned and
+  bound in its place: read-only, or writable for a writable grant. This
+  held for every grant kind, file and subtree grants and the platform
+  baseline alike. Every granted path is now opened with no symbolic link in
+  any component, when the requirement compiles, when a final link's
+  replaced target is captured again, and at each launch's setup: openat2
+  with `RESOLVE_NO_SYMLINKS`, or, on a kernel without openat2, a walk that
+  opens each directory without following a link. A grant whose path holds a
+  link at that moment is refused. Affects 0.8.52 through 0.9.10.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

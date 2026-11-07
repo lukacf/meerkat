@@ -217,8 +217,8 @@ impl OwnerCredentialSource {
     /// once the plan was dropped untaken. A build no owner check composes
     /// waits here until its connection's own deadline ends the attempt.
     async fn composed(&self) -> bool {
-        let _ = &self.armed;
-        true
+        let mut armed = self.armed.clone();
+        armed.wait_for(|composed| *composed).await.is_ok()
     }
 }
 

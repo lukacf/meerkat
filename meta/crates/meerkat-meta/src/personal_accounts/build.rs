@@ -138,12 +138,14 @@ impl PersonalAccountOwnerCheck {
         // serves the owner's credential once this check's composition of the
         // build's MCP adapter takes the build's plan.
         let (arm, armed) = tokio::sync::watch::channel(false);
-        let served = build_owner(&labels, build).and_then(|(session, owner)| {
-            let source =
-                self.credentials()?
-                    .owner_source(Arc::clone(&config), &owner.key, armed)?;
-            Some((session, owner, source))
-        });
+        let served = build_owner(&labels, build)
+            .filter(|_| self.installed())
+            .and_then(|(session, owner)| {
+                let source =
+                    self.credentials()?
+                        .owner_source(Arc::clone(&config), &owner.key, armed)?;
+                Some((session, owner, source))
+            });
         let mut kept = false;
         build.mcp_servers.retain(|server| {
             if !config.is_personal(&server.name) {

@@ -1209,9 +1209,9 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
         self.sync_client().output_token_limit()
     }
 
-    /// The current route's account prompt limit.
-    fn prompt_token_limit(&self) -> Option<u32> {
-        self.sync_client().prompt_token_limit()
+    /// The current route's account prompt limit for `output_budget`.
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        self.sync_client().prompt_token_limit(output_budget)
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1529,10 +1529,10 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     /// The account model's own prompt limit ([`account_prompt_limit`]) for
     /// the most output its account lets a request ask: never above the limit
     /// the gate enforces on a request it admits.
-    fn prompt_token_limit(&self) -> Option<u32> {
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
         let limits = &self.capabilities.limits;
         account_prompt_limit(limits, limits.max_output_tokens.unwrap_or(0))
-            .or_else(|| self.inner.prompt_token_limit())
+            .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
     fn project_replay_messages(
@@ -5444,7 +5444,7 @@ mod tests {
             factory,
         )
         .expect("routed client");
-        assert_eq!(client.prompt_token_limit(), Some(64_000));
+        assert_eq!(client.prompt_token_limit(16_000), Some(64_000));
         assert_eq!(client.output_token_limit(), Some(16_000));
     }
 
@@ -5810,21 +5810,24 @@ mod tests {
             )
         };
         assert_eq!(
-            gated(Some(64_000), Some(128_000)).prompt_token_limit(),
+            gated(Some(64_000), Some(128_000)).prompt_token_limit(0),
             Some(64_000)
         );
         assert_eq!(
-            gated(Some(200_000), Some(128_000)).prompt_token_limit(),
+            gated(Some(200_000), Some(128_000)).prompt_token_limit(0),
             Some(128_000)
         );
-        assert_eq!(gated(Some(64_000), None).prompt_token_limit(), Some(64_000));
         assert_eq!(
-            gated(None, Some(128_000)).prompt_token_limit(),
+            gated(Some(64_000), None).prompt_token_limit(0),
+            Some(64_000)
+        );
+        assert_eq!(
+            gated(None, Some(128_000)).prompt_token_limit(0),
             Some(128_000)
         );
-        assert_eq!(gated(None, None).prompt_token_limit(), None);
+        assert_eq!(gated(None, None).prompt_token_limit(0), None);
         assert_eq!(
-            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(),
+            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(0),
             None
         );
     }
@@ -5930,7 +5933,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            gated(0, window_only.clone()).prompt_token_limit(),
+            gated(0, window_only.clone()).prompt_token_limit(32_000),
             Some(96_000),
             "the window less the most output a request may ask"
         );

@@ -137,8 +137,8 @@ impl LlmClient for SelectedTargetClient {
         self.inner.output_token_limit()
     }
 
-    fn prompt_token_limit(&self) -> Option<u32> {
-        self.inner.prompt_token_limit()
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        self.inner.prompt_token_limit(output_budget)
     }
 
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
@@ -353,15 +353,16 @@ mod tests {
         );
     }
 
-    /// A client whose account states its limits.
+    /// A client whose account states its limits: its prompt limit is a
+    /// 64_000-token window less the request's output budget.
     struct AccountLimitedClient;
     #[async_trait]
     impl LlmClient for AccountLimitedClient {
         fn output_token_limit(&self) -> Option<u32> {
             Some(16_000)
         }
-        fn prompt_token_limit(&self) -> Option<u32> {
-            Some(64_000)
+        fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+            Some(64_000 - output_budget)
         }
         fn stream<'a>(&'a self, _: &'a LlmRequest) -> LlmStream<'a> {
             Box::pin(futures::stream::empty())
@@ -403,7 +404,11 @@ mod tests {
                 credential_requirement: meerkat_core::ControllerCredentialRequirement::Required,
             },
         );
-        assert_eq!(client.prompt_token_limit(), Some(64_000));
+        assert_eq!(
+            client.prompt_token_limit(4_000),
+            Some(60_000),
+            "the output budget reaches the wrapped client"
+        );
         assert_eq!(client.output_token_limit(), Some(16_000));
     }
 }

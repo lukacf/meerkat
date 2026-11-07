@@ -1344,11 +1344,10 @@ impl ProviderRuntime for ManagedLeaseRuntime {
 }
 
 /// Whether the second turn of a `gpt-5.5` session built through a prepared
-/// controller, on a client whose account allows prompts of at most 128_000
-/// tokens, starts by compacting after a first turn whose prompt measured
-/// `input_tokens`.
+/// controller on `client`, with the output budget `max_tokens`, starts by
+/// compacting.
 #[cfg(feature = "session-compaction")]
-async fn prepared_second_turn_compacts(input_tokens: u64) -> bool {
+async fn prepared_second_turn_compacts(client: Arc<dyn LlmClient>, max_tokens: u32) -> bool {
     const LIMITED_REALM: &str = "prepared_controller_prompt_limit";
     let temp = tempfile::tempdir().unwrap();
     let mut factory = AgentFactory::new(temp.path().join("sessions"))
@@ -1357,10 +1356,7 @@ async fn prepared_second_turn_compacts(input_tokens: u64) -> bool {
     factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(Arc::new(
         CountingRuntime {
             provider: Provider::OpenAI,
-            client: Arc::new(AccountPromptLimitedClient {
-                prompt_limit: 128_000,
-                input_tokens,
-            }),
+            client,
             record: Arc::new(RouteRecord::default()),
         },
     )));
@@ -1371,7 +1367,7 @@ async fn prepared_second_turn_compacts(input_tokens: u64) -> bool {
     );
     let request = || {
         let mut build = AgentBuildConfig::new("gpt-5.5");
-        build.max_tokens = Some(1024);
+        build.max_tokens = Some(max_tokens);
         build.provider = Some(Provider::OpenAI);
         build.realm_id = Some(RealmId::parse(LIMITED_REALM).unwrap());
         build.auth_binding = Some(configured_auth_binding(LIMITED_REALM, "default_openai"));
@@ -1435,6 +1431,31 @@ async fn prepared_second_turn_compacts(input_tokens: u64) -> bool {
 #[cfg(feature = "session-compaction")]
 #[tokio::test]
 async fn a_prepared_controller_carries_the_account_prompt_limit_to_the_compactor() {
-    assert!(prepared_second_turn_compacts(110_000).await);
-    assert!(!prepared_second_turn_compacts(100_000).await);
+    let limited = |input_tokens| -> Arc<dyn LlmClient> {
+        Arc::new(AccountPromptLimitedClient {
+            prompt_limit: 128_000,
+            input_tokens,
+            less_the_budget: false,
+        })
+    };
+    assert!(prepared_second_turn_compacts(limited(110_000), 1024).await);
+    assert!(!prepared_second_turn_compacts(limited(100_000), 1024).await);
+}
+
+/// Through a prepared controller the limit is read for the consuming
+/// build's own output budget: an account stating a 128_000-token window and
+/// no output limit lets a session with a 32_000-token budget send prompts of
+/// 96_000 tokens, so it compacts from 76_800.
+#[cfg(feature = "session-compaction")]
+#[tokio::test]
+async fn a_prepared_controller_reads_the_account_prompt_limit_for_the_session_budget() {
+    let window = |input_tokens| -> Arc<dyn LlmClient> {
+        Arc::new(AccountPromptLimitedClient {
+            prompt_limit: 128_000,
+            input_tokens,
+            less_the_budget: true,
+        })
+    };
+    assert!(prepared_second_turn_compacts(window(80_000), 32_000).await);
+    assert!(!prepared_second_turn_compacts(window(70_000), 32_000).await);
 }

@@ -2900,6 +2900,25 @@ impl IdentityRuntime {
                     let Some(identity) = meta_identity(member) else {
                         continue;
                     };
+                    // A rotation's terminal seat (the successor, or the
+                    // fresh life after the incarnation it retired): the
+                    // identity's rotation record, the rollback mirror, is at
+                    // rest, removed, as 0.9.10's next roster pass leaves it
+                    // once Core finished the rotation, whether this process
+                    // asked for it or Core finished it on its own. A blind
+                    // removal, never a read. A record a later rotation of the
+                    // identity wrote before this page ran goes with it: Core
+                    // finishes that rotation from its own record, as it does
+                    // after a crash before the record's write.
+                    if matches!(
+                        rotation,
+                        Some(
+                            meerkat_mob::SeatRotation::Successor { .. }
+                                | meerkat_mob::SeatRotation::FreshLifeAfter { .. }
+                        )
+                    ) {
+                        self.clear_rotation_intent(&identity).await;
+                    }
                     match rotation {
                         // A rotation's terminal step seated it: the
                         // retirement the same step journaled names the link

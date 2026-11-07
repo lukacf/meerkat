@@ -11825,6 +11825,53 @@ impl MeerkatMachine {
             .copied())
     }
 
+    /// Every live delegation the session's machine holds, with its generated
+    /// schedule state and whether a worker is bound to it. Unlike
+    /// [`Self::live_delegation_recovery_snapshots`], this includes operations
+    /// that never bound a worker (an admitted delegation still queued, or one
+    /// cancelled before its worker started), so a live harness can tell a
+    /// delegation that ended without a worker from one still running.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn __test_live_delegation_schedule_states(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Vec<(
+            meerkat_core::OperationId,
+            crate::live_execution::LiveDelegationScheduleState,
+            bool,
+        )>,
+        RuntimeDriverError,
+    > {
+        let state = self.session_dsl_state(session_id).await.map_err(|reason| {
+            RuntimeDriverError::ValidationFailed {
+                reason: reason.to_string(),
+            }
+        })?;
+        state
+            .live_delegation_schedule_state_by_operation
+            .iter()
+            .map(|(dsl_operation_id, schedule_state)| {
+                let operation_id: meerkat_core::OperationId =
+                    serde_json::from_str(&dsl_operation_id.0).map_err(|error| {
+                        RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "live delegation operation identity is corrupt: {error}"
+                            ),
+                        }
+                    })?;
+                Ok((
+                    operation_id,
+                    *schedule_state,
+                    state
+                        .live_delegation_worker_identity_by_operation
+                        .contains_key(dsl_operation_id),
+                ))
+            })
+            .collect()
+    }
+
     /// Return a blocked live delegation, or one whose worker start failed
     /// before anything physical existed, to `Created` so the same exact
     /// operation may bind a fresh worker.

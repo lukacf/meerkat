@@ -67,7 +67,7 @@ use tokio::time::{Duration, Instant, sleep, timeout};
 
 use support::evidence::{self, Journal, Record as EvidenceRecord, Stage as EvidenceStage};
 use support::{
-    Anchor, AssistantQuiet, BrowserPeer, BrowserPeerProtocol, DisconnectMode,
+    Anchor, AssistantQuiet, BrowserPeer, BrowserPeerProtocol, DelegatedWorker, DisconnectMode,
     ExplicitScenarioBindingAuthority, FixedConfigSource, JsonlRpcClient, PlayAt,
     PlaybackAudioPolicy, PlaybackHintRelay, QuestionOnset, QuietObservation, QuietPoll,
     QuietReport, TimelineEntry, TimelineKind, delegated_executor_diagnostic, execution_identity,
@@ -6409,8 +6409,90 @@ struct DelegatedRequest {
     barge_in: Option<u64>,
 }
 
+/// The member that executes the harness channel's delegated turns.
+fn delegated_worker(policy: LiveDelegationExecutionPolicy) -> DelegatedWorker<'static> {
+    match policy {
+        LiveDelegationExecutionPolicy::ExistingMember => {
+            DelegatedWorker::ExistingMember("voice-executor")
+        }
+        LiveDelegationExecutionPolicy::DurableFork => DelegatedWorker::Fork,
+    }
+}
+
+/// The session's live delegations with no worker bound that ended (Cancelled
+/// or Failed) and are not in `seen`, as `(operation, state)`: work that ended
+/// without a worker ever starting it.
+async fn ended_without_worker(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+    seen: &std::collections::BTreeSet<String>,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState;
+    Ok(runtime
+        .__test_live_delegation_schedule_states(session_id)
+        .await?
+        .into_iter()
+        .filter(|(operation_id, state, worker_bound)| {
+            !worker_bound
+                && !seen.contains(&operation_id.to_string())
+                && matches!(
+                    state,
+                    LiveDelegationScheduleState::Cancelled | LiveDelegationScheduleState::Failed
+                )
+        })
+        .map(|(operation_id, state, _)| (operation_id.to_string(), format!("{state:?}")))
+        .collect())
+}
+
+/// Wait until the host has started the worker of a delegation not yet in
+/// `seen` (its start is authorized, or it already runs or ended), and return
+/// that operation and its phase. A delegation that ends without a worker
+/// fails the wait at once.
+async fn wait_delegated_worker_started(
+    live: &mut PublicLiveHarness,
+    seen: &std::collections::BTreeSet<String>,
+    bound: Duration,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let runtime = live.shared()?.0.runtime.clone();
+    let deadline = Instant::now() + bound;
+    loop {
+        let snapshots = runtime
+            .live_delegation_recovery_snapshots(&live.session_id)
+            .await?;
+        if let Some(snapshot) = snapshots
+            .iter()
+            .find(|snapshot| !seen.contains(&snapshot.operation_id().to_string()))
+        {
+            return Ok((
+                snapshot.operation_id().to_string(),
+                format!("{:?}", snapshot.phase()),
+            ));
+        }
+        let ended = ended_without_worker(runtime.as_ref(), &live.session_id, seen).await?;
+        if !ended.is_empty() || Instant::now() >= deadline {
+            let timeline = live.peer.timeline().await?;
+            return Err(format!(
+                "no delegated worker started within {} s; ended without a worker: {ended:?}; {}; timeline:\n{}",
+                bound.as_secs(),
+                delegated_executor_diagnostic(
+                    &mut live.rpc,
+                    &live.mob_id,
+                    delegated_worker(live.execution_policy)
+                )
+                .await,
+                format_timeline(&timeline)
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Wait until a delegated executor turn not yet in `seen` reaches realized
-/// terminality on the existing member, and record it.
+/// terminality on the existing member, and record it. A delegation that ended
+/// without a worker (cancelled or failed before any worker started) fails the
+/// wait at once instead of waiting out the bound for a worker that cannot
+/// exist.
 async fn wait_executor_turn(
     live: &mut PublicLiveHarness,
     seen: &mut std::collections::BTreeSet<String>,
@@ -6465,11 +6547,22 @@ async fn wait_executor_turn(
             }
             return Ok(started.elapsed().as_millis());
         }
-        if Instant::now() >= deadline {
+        let ended = ended_without_worker(runtime.as_ref(), &live.session_id, seen).await?;
+        if !ended.is_empty() || Instant::now() >= deadline {
             let timeline = live.peer.timeline().await?;
+            let reason = if ended.is_empty() {
+                "delegated executor did not reach terminality within 180 s".to_string()
+            } else {
+                format!("delegation ended without a worker: {ended:?}")
+            };
             return Err(format!(
-                "delegated executor did not reach terminality within 180 s; {}; timeline:\n{}",
-                delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await,
+                "{reason}; {}; timeline:\n{}",
+                delegated_executor_diagnostic(
+                    &mut live.rpc,
+                    &live.mob_id,
+                    delegated_worker(live.execution_policy)
+                )
+                .await,
                 format_timeline(&timeline)
             )
             .into());
@@ -9301,15 +9394,17 @@ const S107_REOPEN_BOUND: Duration = Duration::from_secs(10);
 
 /// Scenario 107: the user starts a job, then the peer's transport is cut
 /// hard while the client delegation is running and the host closes the
-/// channel at once.
+/// channel at once. The cut waits until the host has started the job's
+/// worker, so it lands while the job runs.
 ///
 /// Deterministic: the single host close returns Closed (or custody is
 /// Closed) within the 20 s retirement bound; the job still reaches realized
 /// terminality and its executor input and answer are committed to the
-/// canonical session; a subsequent open on the same session connects within
-/// 10 s and answers a spoken question natively; the second channel closes
-/// gracefully. Measured (never judged): the committed answer; open request
-/// -> connected on both channels.
+/// canonical session (a delegation that ends without a worker fails at once,
+/// naming its schedule state); a subsequent open on the same session connects
+/// within 10 s and answers a spoken question natively; the second channel
+/// closes gracefully. Measured (never judged): the committed answer; open
+/// request -> connected on both channels.
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_107_gpt_live_public_stuck_close_convergence()
@@ -9404,6 +9499,19 @@ async fn run_s107_stuck_close_convergence(
         println!(
             "GPT_LIVE_S107_JOB fixture_start_ms={request_start_ms} delegation_created_ms={delegation_created_ms} heard={:?}",
             request_timing.as_ref().map(|t| t.input_text.as_str())
+        );
+
+        // The cut lands while the job runs on the host: wait until the
+        // delegation's worker has started there. The browser's
+        // DelegationCreated alone does not say the host has the job: Live
+        // gate run 42332080717 (attempt 1) cut 63 ms after it, before the
+        // delegation had reached the host at all.
+        let (job_operation, job_phase) =
+            wait_delegated_worker_started(&mut live, &seen_executor_turns, Duration::from_secs(60))
+                .await?;
+        println!(
+            "GPT_LIVE_S107_JOB_STARTED operation={job_operation} phase={job_phase} at_ms={}",
+            started.elapsed().as_millis()
         );
 
         // Cut the transport hard while the delegation runs, then a single
@@ -11575,7 +11683,12 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                     "not every executor turn reached terminality within 180 s: snapshots={} terminal={:?}; {}",
                     snapshots.len(),
                     terminal_at,
-                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                    delegated_executor_diagnostic(
+                        &mut live.rpc,
+                        &live.mob_id,
+                        delegated_worker(live.execution_policy)
+                    )
+                    .await
                 )
                 .into());
             }
@@ -12011,7 +12124,12 @@ async fn run_s105_fork_and_merge_parallel(
             if Instant::now() >= deadline {
                 return Err(format!(
                     "the two forked turns did not both reach terminality within 180 s: {terminal_at:?}; {}",
-                    delegated_executor_diagnostic(&mut live.rpc, &live.mob_id).await
+                    delegated_executor_diagnostic(
+                        &mut live.rpc,
+                        &live.mob_id,
+                        delegated_worker(live.execution_policy)
+                    )
+                    .await
                 )
                 .into());
             }

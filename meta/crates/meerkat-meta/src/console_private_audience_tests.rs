@@ -469,7 +469,7 @@ async fn members_a_private_side_chat_creates_in_child_mobs_are_private() -> Test
     let implicit_handle = tools.handle_for(&implicit).await?;
     Box::pin(
         implicit_handle.spawn_spec_with_generated_owner_context(
-            SpawnMemberSpec::new("worker", AgentIdentity::from("delegate-helper"))
+            SpawnMemberSpec::new("delegate", AgentIdentity::from("delegate-helper"))
                 .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
             side_session.clone(),
         ),
@@ -1219,9 +1219,8 @@ async fn reserved_labels_are_refused_by_host_and_sdk_member_creation() -> TestRe
     Ok(())
 }
 
-/// A unified runtime with persistent sessions and mob announcements, one
-/// worker `alpha` that has had a turn, and its reference app with sign-in
-/// for Alice, Bob and root.
+/// A unified runtime with persistent sessions, one worker `alpha` that has
+/// had a turn, and its reference app with sign-in for Alice, Bob and root.
 async fn signed_in_unified_runtime(
     mob_id: &str,
 ) -> Result<
@@ -1236,7 +1235,6 @@ async fn signed_in_unified_runtime(
                  [profiles.worker.tools]\ncomms = true\n"
             ))?)
             .persistent_state(state_dir.path())
-            .mob_announcements(crate::mob_announcements::AnnouncementConfig::default())
             .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
             .build()
             .await?,
@@ -1389,9 +1387,9 @@ fn announcement_listings_name_no_hidden_member() {
     }
 }
 
-/// A WorkGraph goal another person aims at a member hidden from them aims at
-/// no member: the request is answered as one aimed at a name no member holds,
-/// and no goal targets the hidden member.
+/// A WorkGraph goal records the member it aims at, so another person may not
+/// aim one at a member hidden from them: the request is refused as one
+/// naming an unknown member, and no goal targets the hidden member.
 #[tokio::test]
 async fn a_workgraph_goal_aimed_at_a_hidden_member_targets_no_one() -> TestResult {
     let (_state, runtime, app) = signed_in_unified_runtime("private-workgraph-goal").await?;
@@ -1400,30 +1398,21 @@ async fn a_workgraph_goal_aimed_at_a_hidden_member_targets_no_one() -> TestResul
     let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
     assert!(forked["error"].is_null(), "{forked:#}");
 
-    let goal = |name: &str| {
+    let refused = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/goal/create",
         json!({
-            "title": format!("Bob's goal for {name}"),
-            "target": { "kind": "identity", "identity": name },
-        })
-    };
-    let hidden = console_rpc_as(
-        &app,
-        Some(&bob),
-        "meta/workgraph/goal/create",
-        goal("alpha-side"),
+            "title": "Bob's goal for alpha-side",
+            "target": { "kind": "identity", "identity": "alpha-side" },
+        }),
     )
     .await;
-    let absent = console_rpc_as(
-        &app,
-        Some(&bob),
-        "meta/workgraph/goal/create",
-        goal("alpha-gone"),
-    )
-    .await;
+    assert_eq!(refused["error"]["code"], json!(-32001), "{refused:#}");
     assert_eq!(
-        masked(&hidden, "alpha-side"),
-        masked(&absent, "alpha-gone"),
-        "a goal aimed at the hidden member is answered as one aimed at an absent name"
+        refused["error"]["message"],
+        json!("unknown identity: alpha-side"),
+        "{refused:#}"
     );
     let items = runtime
         .workgraph_service()

@@ -11,10 +11,11 @@
 //! session layer answers that write (the teardown class: the live actor to be
 //! reloaded from what the store holds). The process ends as a crash ends it. The restart,
 //! once the store answers again and the old lease ran out, marks the run
-//! resumable at its registration, and the attachment settles it as a refused
-//! resume before it serves: the prompt's controller client did not survive
-//! the store, and the host contract can supply it again only with a fresh
-//! authentication of its caller. Nothing of the run runs again.
+//! resumable at its registration. Its prompt's controller client did not
+//! survive the store, so the runtime asks the host for it again with the
+//! prompt's stored association: a host that supplies it resumes the run
+//! from its tail once, and a host that has no client for it settles the run
+//! as a refused resume before it serves, nothing of it running again.
 
 use super::*;
 use crate::store::spi::test_host::TestHost;
@@ -197,6 +198,85 @@ impl CoreExecutor for UnsettledRoundExecutor {
     }
 }
 
+/// The session layer's stand-in for the restart's resumed run: a resumed
+/// dispatch continues the run's provisional tail, as the session service's
+/// does, so its boundary promotes that tail with the receipt the store
+/// derives for it, and the store's authority for the boundary is
+/// acknowledged. Each run it is asked for is reported with its inputs and
+/// whether its work authorization carries a controller client.
+struct ResumingExecutor {
+    session: SessionId,
+    store: Arc<dyn RuntimeStore>,
+    entered: tokio::sync::mpsc::UnboundedSender<(RunId, Vec<InputId>, bool)>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for ResumingExecutor {
+    fn supports_work_authorization(&self) -> bool {
+        true
+    }
+
+    async fn apply(
+        &mut self,
+        run: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        let inputs = primitive.contributing_input_ids().to_vec();
+        let metadata = primitive.turn_metadata();
+        let on_client = metadata
+            .and_then(|metadata| metadata.work_authorization.as_ref())
+            .and_then(|context| context.controller_client())
+            .is_some();
+        let _ = self.entered.send((run.clone(), inputs.clone(), on_client));
+        if metadata.and_then(|metadata| metadata.execution_kind)
+            != Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun)
+        {
+            return Err(CoreExecutorError::apply_failed_runtime_turn(
+                "only the kept run resumes on this executor",
+            ));
+        }
+        let continuation =
+            crate::recovery::observe_open_run_continuation(self.store.as_ref(), &self.session)
+                .await
+                .ok()
+                .flatten()
+                .filter(|continuation| continuation.run_id == run)
+                .ok_or_else(|| {
+                    CoreExecutorError::apply_failed_runtime_turn(format!(
+                        "resumed run {run} has no provisional tail to continue from"
+                    ))
+                })?;
+        let receipt = continuation.receipt;
+        Ok(CoreApplyOutput::new(
+            RunBoundaryReceiptDraft {
+                run_id: run,
+                boundary: primitive.apply_boundary(),
+                contributing_input_ids: inputs,
+                conversation_digest: Some(receipt.conversation_digest().to_string()),
+                message_count: usize::try_from(receipt.message_count())
+                    .expect("a receipt's message count"),
+            },
+            None,
+        )
+        .with_bound_session(BoundSessionCommit::provisional_promotion(receipt)))
+    }
+
+    async fn acknowledge_committed_session_boundary(
+        &mut self,
+        _: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cancel_after_boundary(&mut self, _: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
 /// A governed persistent machine over `store`, with the host's `owners`,
 /// once the owners of a machine the crash dropped are released.
 async fn governed_machine(
@@ -324,9 +404,20 @@ async fn first_process(
     std::future::pending::<()>().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_governed_run_whose_round_commit_was_unsettled_settles_as_a_refused_resume_at_the_restart()
- {
+/// What the restart starts from: the first process ran the governed prompt,
+/// failed on its unsettled round commit and crashed; then the store answers
+/// again and the crashed process's lease ran out, and the restart's realm and
+/// runtime store are open over it.
+struct Restart {
+    owners: HostOwners,
+    template: Input,
+    blobs: Arc<MemoryBlobStore>,
+    session: SessionId,
+    first: FirstProcess,
+    store: Arc<dyn RuntimeStore>,
+}
+
+async fn restart_after_an_unsettled_round_commit() -> Restart {
     let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
     let owners = owners_of(&configuration, &template);
     drop(configuration);
@@ -405,7 +496,31 @@ async fn a_governed_run_whose_round_commit_was_unsettled_settles_as_a_refused_re
         "the store holds the prompt pending: {:?}",
         kept.seed.phase
     );
+    Restart {
+        owners,
+        template,
+        blobs,
+        session,
+        first,
+        store,
+    }
+}
 
+/// The restart's host has no client for the prompt's selection any more:
+/// the attachment settles the run as a refused resume before it serves, and
+/// nothing of it runs again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_run_whose_round_commit_was_unsettled_settles_as_a_refused_resume_at_the_restart()
+ {
+    let Restart {
+        owners,
+        blobs,
+        session,
+        first,
+        store,
+        ..
+    } = restart_after_an_unsettled_round_commit().await;
+    owners.controllers.withdraw_clients();
     let machine = governed_machine(&store, &blobs, &owners).await;
     machine
         .register_session(session.clone())
@@ -443,5 +558,85 @@ async fn a_governed_run_whose_round_commit_was_unsettled_settles_as_a_refused_re
     assert!(
         applied.try_recv().is_err(),
         "the executor was never entered"
+    );
+}
+
+/// The acceptance check of a kept governed prompt's controller: the
+/// restart's host supplies the prompt's client again (its controller owner
+/// has one for the stored selection, and the custody of the original, the
+/// invocation and the controller admission all hold under the current
+/// grants). The governed run resumes from its tail under its own id, on
+/// that client, and completes once; its prompt is consumed and the run is
+/// no longer marked. RED before: the attachment settled the run as a
+/// refused resume, and nothing ran.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_run_whose_round_commit_was_unsettled_resumes_once_when_its_host_supplies_the_client()
+ {
+    let Restart {
+        owners,
+        template,
+        blobs,
+        session,
+        first,
+        store,
+    } = restart_after_an_unsettled_round_commit().await;
+    let runtime = LogicalRuntimeId::for_session(&session);
+    let machine = governed_machine(&store, &blobs, &owners).await;
+    machine
+        .register_session(session.clone())
+        .await
+        .expect("the restart's registration");
+    machine
+        .prepare_bindings(session.clone())
+        .await
+        .expect("actual runtime binding");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        Some(first.run.clone()),
+        "the registration marks the run resumable"
+    );
+    // A resumed run does not stage again: its destination is bound before
+    // anything is attached.
+    let destination = original_prompt(&template, &runtime)
+        .header()
+        .authority_association
+        .as_ref()
+        .expect("claims")
+        .candidate()
+        .target
+        .clone();
+    bind_when_settled(&machine, &session, &destination).await;
+    let (entered, mut applied) = tokio::sync::mpsc::unbounded_channel();
+    machine
+        .register_session_with_executor(
+            session.clone(),
+            Box::new(ResumingExecutor {
+                session: session.clone(),
+                store: Arc::clone(&store),
+                entered,
+            }),
+        )
+        .await
+        .expect("actual executor attachment");
+
+    let (run, inputs, on_client) = tokio::time::timeout(BOUND, applied.recv())
+        .await
+        .expect("the run resumes within bound")
+        .expect("the executor reports the run");
+    assert_eq!(run, first.run, "the run resumes under its own id");
+    assert_eq!(inputs, vec![first.prompt.clone()], "with its prompt");
+    assert!(on_client, "on the controller client its host supplied");
+    let row = terminal_row(&machine, &session, &first.prompt).await;
+    assert_eq!(
+        row.seed.terminal_outcome,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+        "the resumed run completes, and its prompt is consumed"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(applied.try_recv().is_err(), "the run resumed once");
+    assert_eq!(
+        machine.resumable_run_id(&session).await,
+        None,
+        "the run is no longer marked"
     );
 }

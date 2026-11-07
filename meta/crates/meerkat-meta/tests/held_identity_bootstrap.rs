@@ -939,7 +939,7 @@ async fn an_aborted_held_member_stays_owed_to_a_restart_whose_bootstrap_holds_it
 
     let mut runtime =
         installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
-    let mob_handle = runtime.mob_handle().clone();
+    let mob_handle = runtime.mob_handle();
     let held = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = Arc::clone(&held);
     let unbound_while_held = Arc::new(std::sync::atomic::AtomicBool::new(false));

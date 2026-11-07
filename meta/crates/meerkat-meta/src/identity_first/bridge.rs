@@ -1037,7 +1037,7 @@ pub enum BridgeError {
     },
     /// The member's host refused its build: the gateway's session builder
     /// answered the host's own refusal typed, with structured data of
-    /// Meta's kind ([`HOST_REJECTED_BUILD_KIND`]), read off the mob error
+    /// Meta's kind (`meta_host_rejected_build`), read off the mob error
     /// through Meerkat's shared failure wrappers, never from its text.
     /// Raised where a build is refused (a spawn, a create, the resume
     /// door); a member Core holds Broken for it is the resume refusal of
@@ -1863,7 +1863,7 @@ pub enum ResumeRejectionKind {
     SourceUnanswered { authority: &'static str },
     /// meerkat's typed restore failure whose cause is the member's host
     /// refusing its build (the restore failure's cause data is of Meta's
-    /// kind, [`HOST_REJECTED_BUILD_KIND`]): Core holds the member Broken, as
+    /// kind, `meta_host_rejected_build`): Core holds the member Broken, as
     /// for [`Self::MemberRestoreFailed`], and the refusal is the host's.
     /// Final for every wake.
     HostRejectedBuild,

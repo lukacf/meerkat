@@ -30,7 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Console setup: a host that composes the gateway in Rust can pass a recorder
   for the administrative changes the Console admits
   (`PreparedGatewayAcquisition::with_administration_recorder`, with Core's
-  `AdministrationRecorder`); the `toolkit_gateway` binary cannot pass one yet.
+  `AdministrationRecorder`); the `toolkit_gateway` binary and the application
+  driver path (a gateway that prepares an application) cannot pass one yet.
   Each credential change a person makes by answering a setup prompt (the
   service's installation into the realm's configuration, and each credential
   stored for it) reaches the recorder as one record once it settles, naming

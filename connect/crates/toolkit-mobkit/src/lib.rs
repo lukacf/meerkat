@@ -959,6 +959,10 @@ pub mod source_hold_probe {
         /// control's hold answer here is ignored: its probe acts on a thread
         /// of its own.
         OriginalStaged,
+        /// A service setup child's observation, its grant issued; not keyed.
+        /// A control's hold answer here refuses the observation, as a
+        /// refused observation does.
+        ServiceSetupObservation,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

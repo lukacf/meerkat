@@ -517,13 +517,14 @@ mod file_lock {
     }
 
     /// Take the cross-process lock without parking a thread: poll the
-    /// non-blocking lock until `wait` has passed.
+    /// non-blocking lock until `wait` has passed. A lock directory this
+    /// creates is owner-only, since its lock files name secret slots.
     async fn acquire_lock_file(
         lock_dir: &Path,
         lock_path: &Path,
         wait: Duration,
     ) -> Result<HeldLock, LockAdmission> {
-        tokio::fs::create_dir_all(lock_dir)
+        crate::auth_store::file::create_owner_only_dir(lock_dir)
             .await
             .map_err(LockAdmission::Failed)?;
         let file = OpenOptions::new()

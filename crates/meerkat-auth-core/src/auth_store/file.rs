@@ -193,13 +193,14 @@ impl TokenStore for FileTokenStore {
 
 /// Create the credential directory `dir`, and the directories above it that
 /// are missing. A credential directory's listing names secret slots (a realm
-/// directory lists which slots of the realm hold a value), so on Unix `dir`
-/// is owner-only when this call creates it: 0o700, set explicitly after the
-/// creation so the process umask does not decide it. A `dir` that already
-/// exists keeps its mode, and the directories above it get the mode the
-/// umask gives them, as before.
+/// directory lists which slots of the realm hold a value, and the refresh
+/// lock directory keeps a lock file named after every slot that took a
+/// lock), so on Unix `dir` is owner-only when this call creates it: 0o700,
+/// set explicitly after the creation so the process umask does not decide
+/// it. A `dir` that already exists keeps its mode, and the directories above
+/// it get the mode the umask gives them, as before.
 #[cfg(unix)]
-async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     if let Some(parent) = dir.parent() {
@@ -223,7 +224,7 @@ async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
     tokio::fs::create_dir_all(dir).await
 }
 

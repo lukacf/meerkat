@@ -112,7 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `execute`, validations with `rkat_validate`) and refuses a change made for
   another caller with `caller_changed`. Its `meta/capabilities` reports the
   caller's scope as `auth.caller_scope`, and the stock Flow Editor sends it
-  back with every request.
+  back with every request; after a 401 or a refusal of its caller it reads
+  the capabilities again before it sends another request. The changes are
+  the ones a candidate launch refuses, read from one list as each handler
+  parses its request, so a candidate now serves a validation whose
+  `rkat_validate` is `false` (it runs no `rkat`) whatever `rkatValidate`
+  says.
 
 ## [0.9.10] - 2026-11-04
 

@@ -97,6 +97,18 @@ them.
   `AuthorityUnavailable` ("runtime session unregistered before terminal
   failure").
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a store that
+  answers a grant at or below the installed token now loses the realm (fail
+  closed). The contract already required every grant to answer a token
+  above every earlier grant of the realm; Core now holds a re-acquire's
+  grant to it, the takeover of the writer's own recorded lease included. A
+  grant that breaks the store's token order poisons the realm with a cause
+  that names the store, not another writer. Before, the writer installed the
+  token again and resumed, so two writers could carry one token. A store
+  that answers its own-lease takeover with its current token is outside the
+  contract and now loses its realm at its next re-acquire (see Upgrade
+  notes).
+
 ### Added
 
 - `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
@@ -131,12 +143,27 @@ them.
   commits with, the grant it has not installed, the acquires it gave up on,
   the holder it waits out, and why it stopped or lost the realm. The realm
   drives it; the rules it keeps are unchanged except the token order (see
-  Changed).
+  Breaking).
 
 - `meerkat-store-conformance`: the host store chapter's token order row:
   every grant must answer a token above every earlier grant of the realm, a
   takeover of the holder's own lease through the handle that holds it
   included.
+
+- `meerkat-store-conformance`: three more host store chapter rows, each with
+  a canary store in the crate's tests that fails it.
+  `an_acquire_decides_the_cut`: what a new writer lists and loads right
+  after its acquire returned is what every later load shows once the
+  superseded writer's commit in flight settled; a batch the store ordered
+  before the acquire shows from that first listing on, and one ordered
+  after it never does. `reacquire_lists_another_writers_commits`: a process
+  that acquires again on its own handle, as Core's writer does after a
+  failed renew, lists every batch another process committed meanwhile, the
+  four kinds listed at once. `a_superseded_token_is_refused_at_commit`, the
+  chapter's last row: a commit under a superseded token answers `FencedOut`
+  naming the current token, every time, never `Ok`, and shows nowhere. Every
+  listing of the chapter also checks that names strictly increase across
+  pages.
 
 ### Changed
 
@@ -146,13 +173,6 @@ them.
   writer stopped on a slow store resumes sooner; the retry budget and the
   fencing are unchanged. A store now sees up to four `list_heads` calls of
   one realm at once, never two of one kind.
-
-- `meerkat-runtime`: a store that answers a grant at or below the installed
-  token now loses the realm (fail closed). A re-acquire's grant must answer a
-  token above the one the writer holds; one that does not breaks the store's
-  token order, and the realm is poisoned with a cause that names the store,
-  not another writer. Before, the writer installed the token again and
-  resumed, so two writers could carry one token.
 
 ### Fixed
 
@@ -242,6 +262,18 @@ them.
   grant at or below the token Core holds loses the realm. Run the
   conformance chapter (its new token order row) against your store before
   you upgrade.
+
+- Host store implementers: the host store chapter is stricter. Its new rows
+  fail a store that serves a listing it kept from an earlier acquire, a
+  store whose loads right after an acquire miss a batch it ordered before
+  the acquire, and a store that answers `Ok` to a commit under a superseded
+  token and only hides the batch at load (outside the contract, which the
+  chapter used to accept). `acquire_fence` returns only once every batch the
+  store orders before it is visible to every later load; a store that waits
+  only until its own fence row is visible meets this only when its
+  visibility follows its commit order. From this release Core also lists the
+  four scope kinds at once, so up to four `list_heads` calls of one realm
+  run concurrently. Run the chapter against your store before you upgrade.
 
 ### Known limitations
 

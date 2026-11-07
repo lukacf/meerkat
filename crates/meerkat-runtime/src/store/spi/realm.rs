@@ -807,8 +807,8 @@ impl SelfFence for SpiRealm {
             match (reacquired, last_error) {
                 (_, Some(error @ SpiError::RealmPoisoned(_))) => tracing::warn!(
                     %error,
-                    "host store writer's fence window is closed and another writer holds the \
-                     realm; the dispatch does not proceed"
+                    "host store writer's fence window is closed and the realm is lost; the \
+                     dispatch does not proceed"
                 ),
                 (Ok(()), _) => tracing::warn!(
                     "host store writer's fence window closed again right after its re-acquire; \
@@ -1304,8 +1304,9 @@ impl SpiRealm {
     /// [`SpiError::LeaseLapsed`] when the acquire fails or times out, or
     /// while the writer waits out a holder that may be its own acquire that
     /// timed out (nothing is poisoned: the caller has not mutated anything
-    /// yet), and [`SpiError::RealmPoisoned`] when another writer holds the
-    /// realm or committed while this one was stopped.
+    /// yet), and [`SpiError::RealmPoisoned`] when the realm is lost: another
+    /// writer holds it or committed while this one was stopped, or the store
+    /// broke its token order.
     pub async fn ensure_lease(&self) -> Result<(), SpiError> {
         self.check_realm()?;
         if self.lease_is_live() {

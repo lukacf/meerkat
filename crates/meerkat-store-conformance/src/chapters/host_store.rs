@@ -3,9 +3,11 @@
 //!
 //! Every [`HostStoreFactory::open`] handle stands for one process. A row
 //! kills a process by dropping its handle, with any commit it has in flight,
-//! and opens another over the same realm. Where the contract lets a store
-//! meet an obligation either by refusing at commit or by resolving at load,
-//! the rows accept both.
+//! and opens another over the same realm. A process that stopped acquires
+//! the fence again on its own handle, as Core's writer does after a failed
+//! renew. Where the contract lets a store meet an obligation either by
+//! refusing at commit or by resolving at load, the rows accept both; a
+//! commit under a superseded token must be refused at commit (obligation 5).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -49,14 +51,16 @@ pub async fn host_store(factory: &dyn HostStoreFactory) -> Result<(), Conformanc
     let writer = kill(&mut chapter, writer).await?;
     let writer = stale_fence(&mut chapter, writer).await?;
     let writer = takeover_unknown_commit(&mut chapter, writer).await?;
+    let writer = an_acquire_decides_the_cut(&mut chapter, writer).await?;
     same_version_twice(&mut chapter, &writer).await?;
     retry(&mut chapter, &writer).await?;
     rows_removal_listing(&mut chapter, &writer).await?;
+    let writer = reacquire_lists_another_writers_commits(&mut chapter, writer).await?;
     #[cfg(not(target_arch = "wasm32"))]
     independence(&mut chapter, &writer).await?;
     #[cfg(not(target_arch = "wasm32"))]
     stalled_commit_does_not_block(&mut chapter, &writer).await?;
-    Ok(())
+    a_superseded_token_is_refused_at_commit(&mut chapter, writer).await
 }
 
 /// One writer process: a handle and the fence token it acquired.
@@ -885,6 +889,141 @@ async fn takeover_unknown_commit(
     Ok(writer)
 }
 
+/// What a writer lists and loads of some scopes: the head the listing of
+/// each scope's kind names for it, and what each load shows.
+#[derive(Debug, PartialEq, Eq)]
+struct CutView {
+    listed: Vec<Option<VersionedHead>>,
+    loaded: Vec<Shown>,
+}
+
+/// The full listing of each scope's kind, and a load of each scope.
+async fn cut_view(
+    steps: &Steps,
+    step: &'static str,
+    store: &dyn HostStore,
+    scopes: &[&ScopeRef],
+) -> Result<CutView, ConformanceFailure> {
+    let mut listed = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        let heads = list_all(steps, step, store, scope.kind, ALL_ROWS).await?;
+        listed.push(
+            heads
+                .into_iter()
+                .find(|entry| entry.name == scope.name)
+                .map(|entry| entry.head),
+        );
+    }
+    let mut loaded = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        loaded.push(load_shown(steps, step, store, scope).await?);
+    }
+    Ok(CutView { listed, loaded })
+}
+
+/// An acquire decides which of the superseded writer's batches its holder
+/// sees: what the new writer lists and loads right after its acquire
+/// returned is what every later load shows, once the old writer's commit in
+/// flight settled. A batch the store ordered before the acquire shows from
+/// that first listing on, in both its scopes; one ordered after it never
+/// shows. The old writer's commit is polled 0 to 8 times before the
+/// takeover, so a store that takes a batch's place in its order before it
+/// makes the batch visible is met between the two.
+async fn an_acquire_decides_the_cut(
+    chapter: &mut Chapter<'_>,
+    mut writer: Writer,
+) -> Result<Writer, ConformanceFailure> {
+    const STEP: &str = "an_acquire_decides_the_cut";
+    let steps = chapter.steps;
+    for polls in [0_usize, 1, 2, 3, 5, 8] {
+        // Two scopes of two kinds; no record, since the listing row reads
+        // the record kind exactly.
+        let u = scope_ref(&steps, STEP, ScopeKind::Session, &format!("cut-{polls}-u"))?;
+        let v = scope_ref(&steps, STEP, ScopeKind::Mob, &format!("cut-{polls}-v"))?;
+        let base_id = chapter.mint(STEP)?;
+        chapter
+            .commit(
+                STEP,
+                &writer,
+                base_id.clone(),
+                vec![
+                    create(&u, "base", Vec::new()),
+                    create(&v, "base", Vec::new()),
+                ],
+            )
+            .await?;
+        let k_id = chapter.mint(STEP)?;
+        let k = batch(
+            &steps,
+            STEP,
+            k_id.clone(),
+            &writer,
+            vec![
+                update(&u, ScopeVersion::FIRST, Some("k"), Vec::new()),
+                update(&v, ScopeVersion::FIRST, Some("k"), Vec::new()),
+            ],
+        )?;
+        let base = shown(ScopeVersion::FIRST, &base_id, "base", Vec::new());
+        let landed = shown(V2, &k_id, "k", Vec::new());
+
+        let mut pending = writer.store.commit(&k);
+        let early = poll_up_to(&mut pending, polls).await;
+        let acknowledged_early = matches!(early, Some(Ok(())));
+        let next = chapter.takeover(STEP, writer.token).await?;
+        let scopes = [&u, &v];
+        let first = cut_view(&steps, STEP, next.store.as_ref(), &scopes).await?;
+        let answered = if let Some(answered) = early {
+            drop(pending);
+            answered
+        } else {
+            pending.await
+        };
+        drop(writer);
+        let second = cut_view(&steps, STEP, next.store.as_ref(), &scopes).await?;
+        let witness = chapter.factory.open().await?;
+        let witnessed = [
+            load_shown(&steps, STEP, witness.as_ref(), &u).await?,
+            load_shown(&steps, STEP, witness.as_ref(), &v).await?,
+        ];
+        steps.ensure(
+            STEP,
+            first == second && witnessed[..] == first.loaded[..],
+            format!(
+                "{polls} polls: what the new writer lists and loads right after its acquire must not change once the old writer's commit settled: right after {first:?}, after {second:?}, a new handle {witnessed:?}"
+            ),
+        )?;
+        steps.ensure(
+            STEP,
+            first
+                .listed
+                .iter()
+                .zip(&first.loaded)
+                .all(|(listed, loaded)| *listed == loaded.head),
+            format!(
+                "{polls} polls: right after the acquire, each listing names the head its load shows: {first:?}"
+            ),
+        )?;
+        let shows_k = first.loaded.iter().all(|view| *view == landed);
+        steps.ensure(
+            STEP,
+            shows_k || first.loaded.iter().all(|view| *view == base),
+            format!("{polls} polls: the batch shows in both its scopes or in neither: {first:?}"),
+        )?;
+        steps.ensure(
+            STEP,
+            shows_k || !acknowledged_early,
+            format!("{polls} polls: a batch acknowledged before the acquire shows right after it"),
+        )?;
+        steps.ensure(
+            STEP,
+            !(shows_k && matches!(answered, Err(HostStoreError::FencedOut { .. }))),
+            format!("{polls} polls: a batch answered FencedOut never shows"),
+        )?;
+        writer = next;
+    }
+    Ok(writer)
+}
+
 type Loaded = Result<Option<VersionedHead>, HostStoreError>;
 
 fn written_by(load: &Loaded) -> Option<&CommitId> {
@@ -1119,7 +1258,19 @@ async fn list_all(
             )?;
             return Ok(listed);
         }
-        listed.extend(page.heads);
+        for entry in page.heads {
+            if let Some(last) = listed.last() {
+                steps.ensure(
+                    step,
+                    entry.name > last.name,
+                    format!(
+                        "a {kind} listing names every scope once, in name order: {} came after {}",
+                        entry.name, last.name
+                    ),
+                )?;
+            }
+            listed.push(entry);
+        }
         match page.next {
             None => return Ok(listed),
             Some(next) => after = Some(next),
@@ -1501,6 +1652,303 @@ async fn limits(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Confor
     )
 }
 
+/// A listing of the four scope kinds, by kind and name.
+type Listing = BTreeMap<(ScopeKind, ScopeName), VersionedHead>;
+
+/// The kinds the relisting row lists, as Core lists them.
+const KINDS: [ScopeKind; 4] = [
+    ScopeKind::Session,
+    ScopeKind::Identity,
+    ScopeKind::Mob,
+    ScopeKind::Record,
+];
+
+/// The page limit the relisting row asks for: four sessions a page, so that
+/// kind takes several pages, and 16 of every other kind.
+fn relist_limit(kind: ScopeKind) -> usize {
+    if kind == ScopeKind::Session { 4 } else { 16 }
+}
+
+fn add_listed(listing: &mut Listing, kind: ScopeKind, heads: Vec<ScopeHead>) {
+    for entry in heads {
+        listing.insert((kind, entry.name), entry.head);
+    }
+}
+
+/// Every head of the four kinds, one kind after another.
+async fn list_kinds_in_turn(
+    steps: &Steps,
+    step: &'static str,
+    store: &dyn HostStore,
+) -> Result<Listing, ConformanceFailure> {
+    let mut listing = Listing::new();
+    for kind in KINDS {
+        let heads = list_all(steps, step, store, kind, relist_limit(kind)).await?;
+        add_listed(&mut listing, kind, heads);
+    }
+    Ok(listing)
+}
+
+/// Every head of the four kinds, the kinds at once on tasks of their own (as
+/// Core lists them), each kind's pages in order.
+#[cfg(not(target_arch = "wasm32"))]
+async fn list_kinds_at_once(
+    steps: &Steps,
+    step: &'static str,
+    store: &Arc<dyn HostStore>,
+) -> Result<Listing, ConformanceFailure> {
+    let tasks: Vec<_> = KINDS
+        .into_iter()
+        .map(|kind| {
+            let store = Arc::clone(store);
+            let steps = *steps;
+            tokio::spawn(async move {
+                let heads =
+                    list_all(&steps, step, store.as_ref(), kind, relist_limit(kind)).await?;
+                Ok::<_, ConformanceFailure>((kind, heads))
+            })
+        })
+        .collect();
+    let mut listing = Listing::new();
+    for task in tasks {
+        match task.await {
+            Ok(listed) => {
+                let (kind, heads) = listed?;
+                add_listed(&mut listing, kind, heads);
+            }
+            Err(error) => {
+                return Err(steps.fail(step, format!("a listing task ended abnormally: {error}")));
+            }
+        }
+    }
+    Ok(listing)
+}
+
+/// Every head of the four kinds; one kind after another where the chapter
+/// spawns no tasks.
+#[cfg(target_arch = "wasm32")]
+async fn list_kinds_at_once(
+    steps: &Steps,
+    step: &'static str,
+    store: &Arc<dyn HostStore>,
+) -> Result<Listing, ConformanceFailure> {
+    list_kinds_in_turn(steps, step, store.as_ref()).await
+}
+
+/// Where two listings differ, for a failure's message.
+fn listing_diff(expected: &Listing, listed: &Listing) -> String {
+    let mut diff = Vec::new();
+    for (key, head) in expected {
+        match listed.get(key) {
+            Some(seen) if seen == head => {}
+            seen => diff.push(format!(
+                "{} {}: expected {head:?}, listed {seen:?}",
+                key.0, key.1
+            )),
+        }
+    }
+    for (key, seen) in listed {
+        if !expected.contains_key(key) {
+            diff.push(format!(
+                "{} {}: not expected, listed {seen:?}",
+                key.0, key.1
+            ));
+        }
+    }
+    diff.join("; ")
+}
+
+/// A process that stopped acquires the fence again on its own handle, as
+/// Core's writer does after a failed renew, and lists the four kinds at
+/// once, as Core does: the listing shows every batch another process
+/// committed meanwhile (creates, updates and deletes, over several kinds and
+/// a kind of several pages), whatever this handle listed or wrote before. A
+/// first acquire's listing shows the previous holder's batches the same way
+/// (the open's case), and once the writer commits again, its next listing
+/// shows that commit.
+async fn reacquire_lists_another_writers_commits(
+    chapter: &mut Chapter<'_>,
+    writer: Writer,
+) -> Result<Writer, ConformanceFailure> {
+    const STEP: &str = "reacquire_lists_another_writers_commits";
+    let steps = chapter.steps;
+    let s1 = scope_ref(&steps, STEP, ScopeKind::Session, "relist-s1")?;
+    let s2 = scope_ref(&steps, STEP, ScopeKind::Session, "relist-s2")?;
+    let s3 = scope_ref(&steps, STEP, ScopeKind::Session, "relist-s3")?;
+    let s4 = scope_ref(&steps, STEP, ScopeKind::Session, "relist-s4")?;
+    let record = scope_ref(&steps, STEP, ScopeKind::Record, "relist-r")?;
+    let doomed = scope_ref(&steps, STEP, ScopeKind::Record, "relist-d")?;
+    let mob = scope_ref(&steps, STEP, ScopeKind::Mob, "relist-m")?;
+
+    // The writer commits, then lists every kind.
+    let c1 = chapter.mint(STEP)?;
+    let created = [&s1, &s2, &s3, &record, &doomed]
+        .into_iter()
+        .map(|scope| create(scope, "a1", Vec::new()))
+        .collect();
+    chapter.commit(STEP, &writer, c1, created).await?;
+    let before = list_kinds_in_turn(&steps, STEP, writer.store.as_ref()).await?;
+
+    // Another process acquires once the writer's lease ran out, lists what
+    // the writer committed, and commits over three kinds.
+    steps.wrap(STEP, writer.store.renew_fence(writer.token).await)?;
+    let other_store = chapter.factory.open().await?;
+    let held = other_store.acquire_fence(AcquireMode::Exclusive).await;
+    steps.ensure(
+        STEP,
+        matches!(held, Err(HostStoreError::Held { holder, remaining }) if holder == writer.token && !remaining.is_zero()),
+        format!(
+            "an exclusive acquire beside the live holder {} must answer Held by it with lease left, got {held:?}",
+            writer.token
+        ),
+    )?;
+    chapter.factory.lapse_fence_leases().await?;
+    let grant = steps.wrap(
+        STEP,
+        other_store.acquire_fence(AcquireMode::Exclusive).await,
+    )?;
+    steps.ensure(
+        STEP,
+        grant.token > writer.token && grant.superseded_lease.is_zero(),
+        format!(
+            "an exclusive acquire after every lease lapsed must answer a token above {} and supersede no lease, got {grant:?}",
+            writer.token
+        ),
+    )?;
+    let other = Writer {
+        store: other_store,
+        token: grant.token,
+    };
+    let first = list_kinds_in_turn(&steps, STEP, other.store.as_ref()).await?;
+    steps.ensure(
+        STEP,
+        first == before,
+        format!(
+            "a first acquire's listing shows every batch of the holder before it: {}",
+            listing_diff(&before, &first)
+        ),
+    )?;
+    let c2 = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            &other,
+            c2.clone(),
+            vec![
+                update(&s2, ScopeVersion::FIRST, Some("b2"), Vec::new()),
+                update(&record, ScopeVersion::FIRST, Some("b2"), Vec::new()),
+                ScopeUpdate {
+                    delete: true,
+                    ..change(&doomed, ScopeVersion::FIRST)
+                },
+                create(&s4, "b1", Vec::new()),
+                create(&mob, "b1", Vec::new()),
+            ],
+        )
+        .await?;
+    let other_token = other.token;
+    drop(other);
+    chapter.factory.lapse_fence_leases().await?;
+
+    // The writer acquires again on its own handle and lists every kind.
+    let grant = steps.wrap(
+        STEP,
+        writer.store.acquire_fence(AcquireMode::Exclusive).await,
+    )?;
+    steps.ensure(
+        STEP,
+        grant.token > other_token && grant.superseded_lease.is_zero(),
+        format!(
+            "the stopped writer's second acquire on its own handle must answer a token above {other_token} and supersede no lease, got {grant:?}"
+        ),
+    )?;
+    let writer = Writer {
+        store: writer.store,
+        token: grant.token,
+    };
+    let relisted = list_kinds_at_once(&steps, STEP, &writer.store).await?;
+    let by_other = |version: ScopeVersion, head: &str| VersionedHead {
+        version,
+        commit_id: c2.clone(),
+        head: head.as_bytes().to_vec(),
+    };
+    let mut expected = before.clone();
+    expected.insert((ScopeKind::Session, s2.name.clone()), by_other(V2, "b2"));
+    expected.insert((ScopeKind::Record, record.name.clone()), by_other(V2, "b2"));
+    expected.remove(&(ScopeKind::Record, doomed.name.clone()));
+    expected.insert(
+        (ScopeKind::Session, s4.name.clone()),
+        by_other(ScopeVersion::FIRST, "b1"),
+    );
+    expected.insert(
+        (ScopeKind::Mob, mob.name.clone()),
+        by_other(ScopeVersion::FIRST, "b1"),
+    );
+    steps.ensure(
+        STEP,
+        relisted == expected,
+        format!(
+            "after a second acquire on the same handle, the listing shows what it showed before with the other writer's batch applied: {}",
+            listing_diff(&expected, &relisted)
+        ),
+    )?;
+    for scope in [&s1, &s2, &s3, &s4, &record, &doomed, &mob] {
+        let loaded = steps.wrap(STEP, writer.store.load_head(scope).await)?;
+        let listed = relisted.get(&(scope.kind, scope.name.clone()));
+        steps.ensure(
+            STEP,
+            loaded.as_ref() == listed,
+            format!(
+                "{scope} loads as the listing after the second acquire names it: loaded {loaded:?}, listed {listed:?}"
+            ),
+        )?;
+    }
+
+    // The writer renews and commits under its new token; its next listing
+    // shows that commit.
+    steps.wrap(STEP, writer.store.renew_fence(writer.token).await)?;
+    let c3 = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            &writer,
+            c3.clone(),
+            vec![update(&s2, V2, Some("a3"), Vec::new())],
+        )
+        .await?;
+    let mut sessions = Listing::new();
+    let heads = list_all(
+        &steps,
+        STEP,
+        writer.store.as_ref(),
+        ScopeKind::Session,
+        relist_limit(ScopeKind::Session),
+    )
+    .await?;
+    add_listed(&mut sessions, ScopeKind::Session, heads);
+    let mut expected: Listing = relisted
+        .into_iter()
+        .filter(|((kind, _), _)| *kind == ScopeKind::Session)
+        .collect();
+    expected.insert(
+        (ScopeKind::Session, s2.name.clone()),
+        VersionedHead {
+            version: V3,
+            commit_id: c3,
+            head: b"a3".to_vec(),
+        },
+    );
+    steps.ensure(
+        STEP,
+        sessions == expected,
+        format!(
+            "the listing after the writer committed again shows that commit: {}",
+            listing_diff(&expected, &sessions)
+        ),
+    )?;
+    Ok(writer)
+}
+
 /// Scopes commit concurrently: no realm-wide lock or sequence serializes them
 /// into failure or a stall.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1632,4 +2080,106 @@ async fn stalled_commit_does_not_block(
     ensure_shows(&steps, STEP, writer.store.as_ref(), &a, &a_shows, what).await?;
     let b_shows = shown(ScopeVersion::FIRST, &b_id, "b", Vec::new());
     ensure_shows(&steps, STEP, writer.store.as_ref(), &b, &b_shows, what).await
+}
+
+/// A commit under a superseded token is refused at commit, typed: the store
+/// answers `FencedOut` naming the token that superseded it, the first time
+/// and again, never acknowledges it, and the batch shows nowhere.
+/// Obligation 5 asks the commit itself to refuse it: a store that answers
+/// `Ok` and only hides the batch at load tells a stopped writer that its
+/// write landed. The chapter's last row, so a store that fails only this
+/// one has passed every other.
+async fn a_superseded_token_is_refused_at_commit(
+    chapter: &mut Chapter<'_>,
+    old: Writer,
+) -> Result<(), ConformanceFailure> {
+    const STEP: &str = "a_superseded_token_is_refused_at_commit";
+    let steps = chapter.steps;
+    let s = scope_ref(&steps, STEP, ScopeKind::Session, "refused-s")?;
+    let t = scope_ref(&steps, STEP, ScopeKind::Mob, "refused-t")?;
+    let base_id = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            &old,
+            base_id.clone(),
+            vec![create(&s, "base", Vec::new())],
+        )
+        .await?;
+    let base = shown(ScopeVersion::FIRST, &base_id, "base", Vec::new());
+    let next = chapter.takeover(STEP, old.token).await?;
+    let stale_id = chapter.mint(STEP)?;
+    let stale = batch(
+        &steps,
+        STEP,
+        stale_id,
+        &old,
+        vec![
+            update(
+                &s,
+                ScopeVersion::FIRST,
+                Some("stale"),
+                rows(&steps, STEP, &["x0"])?,
+            ),
+            create(&t, "stale", Vec::new()),
+        ],
+    )?;
+    let refused = Err(HostStoreError::FencedOut {
+        current: next.token,
+    });
+    for attempt in ["first", "repeated"] {
+        let answered = old.store.commit(&stale).await;
+        steps.ensure(
+            STEP,
+            answered == refused,
+            format!(
+                "the {attempt} commit under the superseded token {} must answer FencedOut with token {}, got {answered:?}",
+                old.token, next.token
+            ),
+        )?;
+    }
+    drop(old);
+    let witness = chapter.factory.open().await?;
+    let nothing = Shown {
+        head: None,
+        rows: Vec::new(),
+    };
+    for store in [next.store.as_ref(), witness.as_ref()] {
+        ensure_shows(
+            &steps,
+            STEP,
+            store,
+            &s,
+            &base,
+            "a refused batch changes nothing",
+        )
+        .await?;
+        ensure_shows(
+            &steps,
+            STEP,
+            store,
+            &t,
+            &nothing,
+            "a refused batch creates nothing",
+        )
+        .await?;
+    }
+    let next_id = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            &next,
+            next_id.clone(),
+            vec![update(&s, ScopeVersion::FIRST, Some("next"), Vec::new())],
+        )
+        .await?;
+    ensure_shows(
+        &steps,
+        STEP,
+        next.store.as_ref(),
+        &s,
+        &shown(V2, &next_id, "next", Vec::new()),
+        "the new writer commits the version the refused batch did not take",
+    )
+    .await
 }

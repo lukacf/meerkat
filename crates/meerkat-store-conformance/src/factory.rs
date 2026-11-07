@@ -62,7 +62,10 @@ pub trait ArtifactStoreFactory: Send + Sync {
 /// chapter kills a "process" by dropping its handle (and any commit it has in
 /// flight) and opens another; the realm outlives every handle. For a remote
 /// backend that is a new client over the same dataset; for the in-memory
-/// reference store it is another handle on one shared instance.
+/// reference store it is another handle on one shared instance. A process
+/// that stopped also acquires the fence again on its own handle, as Core's
+/// writer does after a failed renew, and must then load and list what other
+/// handles committed meanwhile.
 ///
 /// The realm starts empty: no scopes and no fence token acquired.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

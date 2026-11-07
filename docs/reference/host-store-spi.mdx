@@ -700,10 +700,13 @@ realm, which starts empty:
 - `lapse_fence_leases` lets every recorded lease run out, by advancing the
   store's clock or by waiting.
 
-The chapter kills a process by dropping its handle, with any commit it has in
-flight. Where an obligation can be met at commit or at load, it accepts both;
-for obligation 5, a store that fences only at load passes the chapter but is
-outside the contract.
+A process that stopped also acquires the fence again on its own handle, as
+Core's writer does after a failed renew: a handle keeps nothing it listed
+under one grant for the next. The chapter kills a process by dropping its
+handle, with any commit it has in flight. Where an obligation can be met at
+commit or at load, it accepts both, except obligation 5: a commit under a
+superseded token must answer `FencedOut`, so a store that fences only at load
+fails the chapter.
 Its rows run in order:
 
 | Row | What it checks |
@@ -714,11 +717,14 @@ Its rows run in order:
 | Kill | A writer dies before, during or after a batch over two scopes; the next writer sees it in both or neither, and settles an unknown batch the way Core does |
 | Stale fence | The current holder's first renew succeeds, even if its lease lapsed during the rows before; a superseded writer can neither keep the fence nor make a batch visible; an exclusive acquire waits out a live holder's lease and no longer |
 | Takeover with a commit in flight | The old writer's in-flight commit shows wholly or never, the same to every load |
+| An acquire decides the cut | What a new writer lists and loads right after its acquire returned is what every later load shows once the old writer's commit in flight settled: a batch ordered before the acquire shows from that first listing on, one ordered after it never does |
 | Same version twice | Every load resolves two batches for one version the same way, and the loser is invisible in all its scopes |
 | Retry | A commit id sent again acts once, from the same handle or a new one |
 | Rows, removal and listing | Rows keep stable indices through truncation and drops, removal takes effect with its batch, listings page every visible scope once in name order, and a batch at the size limits lands byte-exact |
+| Relisting after a re-acquire | A process that acquires again on its own handle lists every batch another process committed meanwhile (creates, updates and deletes over several kinds, a kind of several pages, the four kinds listed at once), and its next listing shows its own next commit |
 | Independence | Over 200 scopes commit concurrently without a stall |
 | Stalled commit | A commit held in flight on one scope does not hold up a commit on another |
+| Superseded token refused at commit | A commit under a superseded token answers `FencedOut` naming the current token, every time, never `Ok`, and shows nowhere |
 
 The crate's long-run and durable-worker chapters run scripted runs over a
 store, kill them at chosen points of a round, and check that each restart

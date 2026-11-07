@@ -1854,12 +1854,6 @@ pub enum ResumeRejectionKind {
     /// Broken-in-roster upstream with restore diagnostics preserved, until an
     /// explicit repair. Final for every wake.
     MemberRestoreFailed,
-    /// meerkat's typed restore failure whose cause is the member's host
-    /// refusing its build (the restore failure's cause data is of Meta's
-    /// kind, [`HOST_REJECTED_BUILD_KIND`]): Core holds the member Broken, as
-    /// for [`Self::MemberRestoreFailed`], and the refusal is the host's.
-    /// Final for every wake.
-    HostRejectedBuild,
     /// Any other resume-time failure.
     Other,
     /// The probe a repair runs before it retires the member could not tell
@@ -1867,6 +1861,12 @@ pub enum ResumeRejectionKind {
     /// failed to answer. Nothing was disposed or retired; retryable once the
     /// authority answers.
     SourceUnanswered { authority: &'static str },
+    /// meerkat's typed restore failure whose cause is the member's host
+    /// refusing its build (the restore failure's cause data is of Meta's
+    /// kind, [`HOST_REJECTED_BUILD_KIND`]): Core holds the member Broken, as
+    /// for [`Self::MemberRestoreFailed`], and the refusal is the host's.
+    /// Final for every wake.
+    HostRejectedBuild,
 }
 
 /// meerkat's typed resume hold carried by a mob error, when it carries one.

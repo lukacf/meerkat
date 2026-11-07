@@ -4,7 +4,7 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-*Mirrored from Meerkat Meta main at [cd9c2ea5f07b](https://github.com/lukacf/meerkat/commit/cd9c2ea5f07b5056f580427033a3b07198a1b2b5) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [44b3b12ffa44](https://github.com/lukacf/meerkat/commit/44b3b12ffa4413073241894c1e70111e27d0a6ff) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Meta authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
 requests with JWTs. Signature and claim validation establishes a principal;
@@ -299,12 +299,18 @@ lists it, by the principal and a non-expiring flag only, in `meta/status`
 To revoke every session of a principal, call `meta/console/revoke_sessions`
 with the principal (the email, or the `sub` when the token carries no
 email), on the runtime's RPC surface or on the console's `/console/rpc`. On
-the console route an access admin may revoke when an access controller is
-installed, enforced or not; without an access controller, any authenticated
-console caller may revoke sessions, as with other console actions. The
+the console route an access admin may revoke anyone's sessions when an
+access controller is installed, enforced or not. Without an access
+controller, a console caller revokes only their own sessions: naming
+another principal is refused (`-32030`, `access_denied`) and fences no one.
+On the console route `principal` may be left out, an access admin's
+request included: the request then revokes the caller's own sessions. A
+revocation also stops the console schedules its principal defined before
+it: their sends are refused from then on (see
+[Console schedules](/meta/api/rpc#console-schedules-console)). The
 principal is matched exactly as the token names it, case included, as the
-allowlist compares it: a revocation for another spelling answers success and
-fences nothing.
+allowlist compares it: a revocation for another spelling fences nothing,
+even when it answers success.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"meta/console/revoke_sessions","params":{"principal":"alice@example.com"}}

@@ -602,12 +602,14 @@ impl RecallCoordinator {
     /// turn's model requests and never its transcript, so another person's
     /// later turn, a session read and a rebuilt member see none of it.
     ///
-    /// `None` when the operator scope is off, when the turn has no direct
-    /// person requester (a requester carried across a peer hop, a schedule
-    /// without a person, a peer, a service principal), when the provider
-    /// keeps no manifest, or when the person has no operator records. Every
-    /// turn of the person gets the section again (request-only context does
-    /// not persist, so there is no per-session dedup).
+    /// `None` when the operator scope is off, when per-turn injection is off
+    /// (`per_turn_injection = "off"` turns off every per-turn push, this
+    /// section included), when the turn has no direct person requester (a
+    /// requester carried across a peer hop, a schedule without a person, a
+    /// peer, a service principal), when the provider keeps no manifest, or
+    /// when the person has no operator records. Every turn of the person
+    /// gets the section again (request-only context does not persist, so
+    /// there is no per-session dedup).
     pub async fn operator_context_for_turn(
         &self,
         identity: &AgentIdentity,
@@ -615,6 +617,7 @@ impl RecallCoordinator {
         requester: Option<&meerkat_core::TurnRequester>,
     ) -> Result<Option<meerkat_core::lifecycle::TurnRequestContext>, AgentMemoryError> {
         if self.config.operator_scope == AgentMemoryOperatorScope::Off
+            || self.config.per_turn_injection == AgentMemoryPerTurnInjection::Off
             || !self.provider.supports_manifest()
         {
             return Ok(None);

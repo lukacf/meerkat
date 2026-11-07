@@ -12806,7 +12806,11 @@ impl IdentityRuntime {
     /// person's operator memory, as request-only context: it reaches the
     /// turn's model requests and never a transcript row. No other delivery
     /// names a requester, so none carries one (a placed or externally bound
-    /// member, a dispatch, a peer).
+    /// member, a dispatch, a peer). A person's steer gets it too (it skips
+    /// only defang and ambient recall): a steer that starts a turn carries
+    /// the person's section, and one that joins the person's running turn
+    /// adds it only where it differs from what that turn holds (request-only
+    /// context merges as distinct values).
     async fn prepare_member_delivery(
         &self,
         identity: &AgentIdentity,
@@ -12821,10 +12825,21 @@ impl IdentityRuntime {
             injected_context: Vec::new(),
             request_only_context: None,
         };
+        let injector = self.agent_memory.read().await.clone();
         if steer {
-            return Ok(unprepared(content.clone()));
+            let request_only_context = match &injector {
+                Some(injector) => {
+                    Self::operator_section(injector, identity, memory_session_key, &preparation)
+                        .await?
+                }
+                None => None,
+            };
+            return Ok(PreparedMemberDelivery {
+                request_only_context,
+                ..unprepared(content.clone())
+            });
         }
-        match self.agent_memory.read().await.clone() {
+        match injector {
             Some(injector) => {
                 if let Some(session_key) = memory_session_key {
                     injector.note_current_session(identity, session_key);
@@ -12864,25 +12879,9 @@ impl IdentityRuntime {
                     .map_err(|err| {
                         IdentityRuntimeError::Internal(format!("agent memory recall: {err}"))
                     })?;
-                let request_only_context = match preparation {
-                    DeliveryPreparation::ConsoleHuman {
-                        requester: Some(person),
-                    } => injector
-                        .operator_context_for_turn(
-                            identity,
-                            memory_session_key,
-                            Some(&meerkat_core::TurnRequester::direct(person.clone())),
-                        )
-                        .await
-                        .map_err(|err| {
-                            IdentityRuntimeError::Internal(format!(
-                                "agent memory operator recall: {err}"
-                            ))
-                        })?,
-                    DeliveryPreparation::ConsoleHuman { requester: None }
-                    | DeliveryPreparation::Work(_)
-                    | DeliveryPreparation::KeyedContinuation => None,
-                };
+                let request_only_context =
+                    Self::operator_section(&injector, identity, memory_session_key, &preparation)
+                        .await?;
                 Ok(PreparedMemberDelivery {
                     content: defanged,
                     injected_context,
@@ -12891,6 +12890,33 @@ impl IdentityRuntime {
             }
             None => Ok(unprepared(content.clone())),
         }
+    }
+
+    /// The operator memory section of a local host-human turn whose send
+    /// names its requester (the person's own operator memory, request-only);
+    /// `None` for every other delivery.
+    async fn operator_section(
+        injector: &AgentMemoryRuntimeInjector,
+        identity: &AgentIdentity,
+        memory_session_key: Option<&str>,
+        preparation: &DeliveryPreparation<'_>,
+    ) -> Result<Option<meerkat_core::lifecycle::TurnRequestContext>, IdentityRuntimeError> {
+        let DeliveryPreparation::ConsoleHuman {
+            requester: Some(person),
+        } = preparation
+        else {
+            return Ok(None);
+        };
+        injector
+            .operator_context_for_turn(
+                identity,
+                memory_session_key,
+                Some(&meerkat_core::TurnRequester::direct((*person).clone())),
+            )
+            .await
+            .map_err(|err| {
+                IdentityRuntimeError::Internal(format!("agent memory operator recall: {err}"))
+            })
     }
 
     async fn dispatch_with_expected_member_alias(

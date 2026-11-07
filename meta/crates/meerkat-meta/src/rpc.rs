@@ -8266,6 +8266,57 @@ mod tests {
         }
     }
 
+    /// An operator instruction write changes the mob's journal, which the
+    /// authoritative launch delivers to its members: a candidate refuses
+    /// both writes typed, with the candidate refusal, and still answers the
+    /// status read; an authoritative launch serves all three.
+    #[test]
+    fn candidate_launch_refuses_instruction_writes() {
+        let refusal = |method: &str, params: &Value| {
+            super::candidate_launch_refusal(false, None, method, params, json!(7))
+                .and_then(|refusal| refusal.error)
+                .map(|error| (error.code, error.data))
+        };
+        let candidate_launch = Some((
+            crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+            Some(json!({ "kind": "candidate_launch" })),
+        ));
+        let write = json!({
+            "namespace": "host",
+            "key": "persona",
+            "revision": 1,
+            "body": "Answer as the release reviewer.",
+            "target": { "kind": "member", "identity": "review:singleton" },
+        });
+        let revoke = json!({ "namespace": "host", "key": "persona", "revision": 2 });
+        let read = json!({ "identity": "review:singleton" });
+        assert_eq!(
+            refusal("meta/set_instruction", &write),
+            candidate_launch,
+            "a candidate refuses meta/set_instruction"
+        );
+        assert_eq!(
+            refusal("meta/revoke_instruction", &revoke),
+            candidate_launch,
+            "a candidate refuses meta/revoke_instruction"
+        );
+        assert_eq!(
+            refusal("meta/instruction_status", &read),
+            None,
+            "a candidate still answers meta/instruction_status"
+        );
+        for (method, params) in [
+            ("meta/set_instruction", &write),
+            ("meta/revoke_instruction", &revoke),
+            ("meta/instruction_status", &read),
+        ] {
+            assert!(
+                super::candidate_launch_refusal(true, None, method, params, json!(7)).is_none(),
+                "an authoritative launch serves {method}"
+            );
+        }
+    }
+
     /// A candidate launch acts nowhere: it refuses the operator verbs that
     /// write a member's session transcript, typed, as it refuses member
     /// input, and an authoritative launch serves them.

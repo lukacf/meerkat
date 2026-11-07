@@ -1156,8 +1156,8 @@ pub enum IdentityRuntimeError {
         detail: String,
     },
     /// The build of the identity's member was refused DETERMINISTICALLY: the
-    /// host answered the app-side `callback/build_agent` round trip with an
-    /// error (the candidate-mode effect gate class), provider authentication
+    /// host answered the app-side build callback with an error, typed (the
+    /// candidate-mode effect gate class), provider authentication
     /// refused it with a credential kind no unattended retry can change,
     /// the placement host's realm backend is not persistent while the
     /// identity needs durable sessions, its profile declares
@@ -1579,16 +1579,6 @@ impl std::fmt::Display for IdentityRuntimeError {
     }
 }
 
-/// A build failure whose root cause is the HOST's own answer: the
-/// `callback/build_agent` round trip COMPLETED and the app returned an error
-/// (rpc_gateway mints `callback/build_agent failed: callback error: <host
-/// message>` for exactly this case; see `StdioCallbackBridge::call`).
-/// Transport-tier callback failures ("callback transport closed", timeouts,
-/// dropped channels) deliberately do NOT match: those are retryable.
-pub(crate) fn is_host_rejected_build_error(detail: &str) -> bool {
-    detail.contains("callback/build_agent failed: callback error:")
-}
-
 /// Whether a typed provider-auth kind is a DETERMINISTIC build wall: a fact
 /// about configuration that no unattended retry can change, so the wake
 /// refuses with the reason instead of reporting a retryable fault. The
@@ -1635,9 +1625,9 @@ pub(crate) const fn is_deterministic_provider_auth_kind(kind: meerkat_core::Auth
 /// sessions ([`BridgeError::NonDurableService`]; the reason names the
 /// remedy), the launch's member auth binding refusing the member's build
 /// ([`BridgeError::MemberRouteRefused`]; the reason names the remedy), and
-/// the host's own `callback/build_agent` answer
-/// ([`is_host_rejected_build_error`], the one place a string probe remains
-/// because `rpc_gateway` mints that text).
+/// the host's own typed refusal of the build ([`BridgeError::HostRejectedBuild`],
+/// and the resume refusal of kind [`ResumeRejectionKind::HostRejectedBuild`]
+/// for a member Core holds Broken for it), read typed, never from text.
 pub(crate) fn deterministic_build_rejection_reason(error: &BridgeError) -> Option<String> {
     match error {
         BridgeError::ProviderAuthRejected { failure, detail } => {
@@ -1655,10 +1645,12 @@ pub(crate) fn deterministic_build_rejection_reason(error: &BridgeError) -> Optio
              durable from the profile"
         )),
         BridgeError::MemberRouteRefused { detail, .. } => Some(member_route_refusal_reason(detail)),
-        other => {
-            let detail = other.to_string();
-            is_host_rejected_build_error(&detail).then_some(detail)
-        }
+        refused @ (BridgeError::HostRejectedBuild { .. }
+        | BridgeError::ResumeRejected {
+            kind: ResumeRejectionKind::HostRejectedBuild,
+            ..
+        }) => Some(refused.to_string()),
+        _ => None,
     }
 }
 
@@ -16651,9 +16643,9 @@ mod reset_reprofile_tests {
             "the reason names the remedy: {durable}"
         );
         assert!(durable.contains("'durable-worker'"), "{durable}");
-        let host_gate = BridgeError::Mob(
-            "spawn_member: callback/build_agent failed: callback error: gate refused".to_string(),
-        );
+        let host_gate = BridgeError::HostRejectedBuild {
+            detail: "spawn_member: the host's build gate refused the member".to_string(),
+        };
         assert!(deterministic_build_rejection_reason(&host_gate).is_some());
         let transport = BridgeError::Mob("callback transport closed".to_string());
         assert!(deterministic_build_rejection_reason(&transport).is_none());
@@ -20564,10 +20556,9 @@ mod wake_refusal_classifier_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let classified = classify(
             Some(&SessionId::new()),
-            BridgeError::Mob(
-                "spawn_member: callback/build_agent failed: callback error: gate refused"
-                    .to_string(),
-            ),
+            BridgeError::HostRejectedBuild {
+                detail: "resume: the host's build gate refused the member".to_string(),
+            },
         )?;
         assert!(
             matches!(
@@ -20584,10 +20575,8 @@ mod wake_refusal_classifier_tests {
     /// The bridge's form of a member Core holds Broken because its host
     /// refused the build its wake restored it with.
     fn host_refused_wake(session_id: &SessionId) -> BridgeError {
-        // RED: the bridge had no typed form of the host's refusal; it
-        // answered the Broken member's final restore failure.
         BridgeError::ResumeRejected {
-            kind: ResumeRejectionKind::MemberRestoreFailed,
+            kind: ResumeRejectionKind::HostRejectedBuild,
             session_id: session_id.clone(),
             detail: format!(
                 "ensure_member_live: member agent-alpha failed to restore session {session_id}: \
@@ -20598,8 +20587,9 @@ mod wake_refusal_classifier_tests {
 
     /// The bridge's form of a create its host refused.
     fn host_refused_create() -> BridgeError {
-        // RED: the bridge had no typed form of the host's refusal.
-        BridgeError::Mob("create_session: the host's build gate refused the member".to_string())
+        BridgeError::HostRejectedBuild {
+            detail: "create_session: the host's build gate refused the member".to_string(),
+        }
     }
 
     /// The host's typed build refusal is the identity's `HostRejectedBuild`

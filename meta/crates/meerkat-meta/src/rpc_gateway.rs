@@ -12324,6 +12324,26 @@ fn gateway_shutdown_response_at_exit(
     })
 }
 
+/// How a callback round trip failed: the host answered it with an error, or
+/// it never completed (its transport closed, its response channel dropped,
+/// it timed out).
+#[derive(Debug)]
+enum CallbackFailure {
+    /// The host's own error answer, with its message.
+    HostAnswered(String),
+    /// The round trip did not complete.
+    Transport(String),
+}
+
+impl std::fmt::Display for CallbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostAnswered(message) => write!(f, "callback error: {message}"),
+            Self::Transport(detail) => f.write_str(detail),
+        }
+    }
+}
+
 impl StdioCallbackBridge {
     fn new(stdout_tx: mpsc::Sender<GatewayStdoutLine>) -> Self {
         Self {
@@ -12391,6 +12411,14 @@ impl StdioCallbackBridge {
 
     /// Send a callback request to Python and wait for the response.
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_typed(method, params)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::call`], telling the host's own error answer apart from a
+    /// callback that never completed.
+    async fn call_typed(&self, method: &str, params: Value) -> Result<Value, CallbackFailure> {
         // Admission and response share the existing provider callback window.
         let deadline = tokio::time::Instant::now() + PROVIDER_CALLBACK_TIMEOUT;
         let id = self
@@ -12402,7 +12430,9 @@ impl StdioCallbackBridge {
         {
             let mut state = self.state.lock().await;
             if state.closed {
-                return Err("callback transport closed".to_string());
+                return Err(CallbackFailure::Transport(
+                    "callback transport closed".to_string(),
+                ));
             }
             state.pending.insert(id_str.clone(), tx);
         }
@@ -12417,7 +12447,7 @@ impl StdioCallbackBridge {
             Ok(l) => l,
             Err(e) => {
                 self.state.lock().await.pending.remove(&id_str);
-                return Err(e.to_string());
+                return Err(CallbackFailure::Transport(e.to_string()));
             }
         };
         if let Err(error) = self
@@ -12425,31 +12455,33 @@ impl StdioCallbackBridge {
             .await
         {
             self.state.lock().await.pending.remove(&id_str);
-            return Err(error);
+            return Err(CallbackFailure::Transport(error));
         }
 
         // Wait for Python to respond (routed by the stdin multiplexer)
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(value)) => {
                 if let Some(error) = value.get("error") {
-                    Err(format!(
-                        "callback error: {}",
+                    Err(CallbackFailure::HostAnswered(
                         error
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown")
+                            .to_string(),
                     ))
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 }
             }
-            Ok(Err(_)) => Err("callback response channel dropped".to_string()),
+            Ok(Err(_)) => Err(CallbackFailure::Transport(
+                "callback response channel dropped".to_string(),
+            )),
             Err(_) => {
                 self.state.lock().await.pending.remove(&id_str);
-                Err(format!(
+                Err(CallbackFailure::Transport(format!(
                     "callback timed out after {}s; execution outcome unknown",
                     PROVIDER_CALLBACK_TIMEOUT.as_secs()
-                ))
+                )))
             }
         }
     }
@@ -15411,7 +15443,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         // app_context flows from SpawnMemberSpec.context → build.app_context.
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        let callback_result = self.bridge.call("callback/build_agent", params).await;
+        let callback_result = self.bridge.call_typed("callback/build_agent", params).await;
 
         match callback_result {
             Ok(result) => {
@@ -15424,13 +15456,11 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .await?;
                 self.inner.build_agent(&modified_req, event_tx).await
             }
-            Err(err) => {
+            Err(failure) => {
                 // Propagate the error — before_create failure aborts session creation.
                 // This is an intentional breaking change from v0.5.x where failures
                 // were silently swallowed with a fallback to default build.
-                Err(SessionError::Agent(agent_tool_error(format!(
-                    "callback/build_agent failed: {err}"
-                ))))
+                Err(build_callback_failure(failure))
             }
         }
     }
@@ -15468,7 +15498,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .and_then(|build| build.external_tools.take());
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        match self.bridge.call("callback/build_agent", params).await {
+        match self.bridge.call_typed("callback/build_agent", params).await {
             Ok(result) => {
                 let mut modified_req = self
                     .answered_build_request(req, owned_tools, &result, &scope_id)
@@ -15477,10 +15507,30 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .build_agent_taking_tools(&mut modified_req, event_tx)
                     .await
             }
-            Err(err) => Err(SessionError::Agent(agent_tool_error(format!(
-                "callback/build_agent failed: {err}"
-            )))),
+            Err(failure) => Err(build_callback_failure(failure)),
         }
+    }
+}
+
+/// The session error a failed `callback/build_agent` round trip refuses the
+/// build with. The host's own error answer is its typed refusal of the
+/// build: structured data of Meta's kind
+/// ([`crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND`]) with the
+/// host's reason, beside the message operators read, which every surface
+/// classifies by the kind. A round trip that never completed stays the
+/// retryable tool failure.
+fn build_callback_failure(failure: CallbackFailure) -> SessionError {
+    match failure {
+        CallbackFailure::HostAnswered(reason) => SessionError::FailedWithData {
+            message: format!("callback/build_agent failed: callback error: {reason}"),
+            data: json!({
+                "kind": crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND,
+                "reason": reason,
+            }),
+        },
+        transport @ CallbackFailure::Transport(_) => SessionError::Agent(agent_tool_error(
+            format!("callback/build_agent failed: {transport}"),
+        )),
     }
 }
 

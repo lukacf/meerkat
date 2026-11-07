@@ -1035,6 +1035,19 @@ pub enum BridgeError {
         kind: &'static str,
         detail: String,
     },
+    /// The member's host refused its build: the gateway's session builder
+    /// answered the host's own refusal typed, with structured data of
+    /// Meta's kind ([`HOST_REJECTED_BUILD_KIND`]), read off the mob error
+    /// through Meerkat's shared failure wrappers, never from its text.
+    /// Raised where a build is refused (a spawn, a create, the resume
+    /// door); a member Core holds Broken for it is the resume refusal of
+    /// kind [`ResumeRejectionKind::HostRejectedBuild`]. Deterministic: the
+    /// host answers the same build the same way until it changes, so
+    /// nothing retries it. `detail` is the bridge step plus Meerkat's
+    /// message.
+    HostRejectedBuild {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for BridgeError {
@@ -1215,6 +1228,12 @@ impl std::fmt::Display for BridgeError {
                  ({kind}); nothing was built, and the same build is refused until the member's \
                  spec or the launch's binding changes: {detail}"
             ),
+            Self::HostRejectedBuild { detail } => {
+                write!(
+                    f,
+                    "session bridge member build refused by its host: {detail}"
+                )
+            }
         }
     }
 }
@@ -1463,6 +1482,10 @@ impl From<BridgeError> for BridgeAdmissionError {
             error @ BridgeError::RealmBackendUnavailable { .. } => Self::Mob(error.to_string()),
             // A durable profile's spawn refusal; admission keeps its text.
             error @ BridgeError::NonDurableService { .. } => Self::Mob(error.to_string()),
+            // A build its host refused (a spawn, a create, the resume door);
+            // a member Core holds Broken for it crosses as its resume
+            // refusal. Admission keeps its text.
+            error @ BridgeError::HostRejectedBuild { .. } => Self::Mob(error.to_string()),
             // The heal seam's hosting holds; admission keeps their text.
             error @ (BridgeError::ServedElsewhere { .. }
             | BridgeError::HostingUnavailable { .. }) => Self::Mob(error.to_string()),
@@ -1831,6 +1854,12 @@ pub enum ResumeRejectionKind {
     /// Broken-in-roster upstream with restore diagnostics preserved, until an
     /// explicit repair. Final for every wake.
     MemberRestoreFailed,
+    /// meerkat's typed restore failure whose cause is the member's host
+    /// refusing its build (the restore failure's cause data is of Meta's
+    /// kind, [`HOST_REJECTED_BUILD_KIND`]): Core holds the member Broken, as
+    /// for [`Self::MemberRestoreFailed`], and the refusal is the host's.
+    /// Final for every wake.
+    HostRejectedBuild,
     /// Any other resume-time failure.
     Other,
     /// The probe a repair runs before it retires the member could not tell
@@ -1947,6 +1976,19 @@ fn resume_rejected(
             detail: format!("{step}: {error}"),
         };
     }
+    if host_rejected_build(error) && broken_member_session(error).is_none() {
+        tracing::error!(
+            identity = %identity,
+            session_id = %session_id,
+            step,
+            error = %error,
+            "resume refused by the member's host, typed; durable session preserved, refused \
+             on every attempt until the host builds the member"
+        );
+        return BridgeError::HostRejectedBuild {
+            detail: format!("{step}: {error}"),
+        };
+    }
     if let Some((_, profile)) = non_durable_service_refusal(error) {
         tracing::error!(
             identity = %identity,
@@ -2010,6 +2052,39 @@ fn resume_rejected(
         kind,
         session_id: session_id.clone(),
         detail: format!("{step}: {error}"),
+    }
+}
+
+/// The `kind` of the structured data the gateway's session builder refuses
+/// a member's build with when the host answered its build callback with an
+/// error. Meta owns it; Meerkat carries it as opaque data (a failed build's
+/// session error, a Broken member's restore failure).
+pub(crate) const HOST_REJECTED_BUILD_KIND: &str = "meta_host_rejected_build";
+
+/// Whether `data` is the structured data of the host's refusal of a
+/// member's build ([`HOST_REJECTED_BUILD_KIND`]).
+fn is_host_rejected_build_data(data: &serde_json::Value) -> bool {
+    data.get("kind").and_then(serde_json::Value::as_str) == Some(HOST_REJECTED_BUILD_KIND)
+}
+
+/// Whether the build a mob error reports was refused by its host, read
+/// typed from the data Meerkat carries, never from text: a failed build
+/// carries it as its session error's structured data, and a member Core
+/// holds Broken keeps it as its restore failure's cause data. Read through
+/// meerkat-mob's shared failure wrappers.
+pub(crate) fn host_rejected_build(error: &meerkat_mob::MobError) -> bool {
+    match error {
+        meerkat_mob::MobError::SessionError(session_error) => session_error
+            .structured_data()
+            .as_ref()
+            .is_some_and(is_host_rejected_build_data),
+        meerkat_mob::MobError::MemberRestoreFailed {
+            cause_data: Some(data),
+            ..
+        } => is_host_rejected_build_data(data),
+        meerkat_mob::MobError::SharedRetirementFailure(inner)
+        | meerkat_mob::MobError::SharedLifecycleFailure(inner) => host_rejected_build(inner),
+        _ => false,
     }
 }
 
@@ -2078,13 +2153,18 @@ pub(crate) fn non_durable_service_refusal(
 }
 
 /// Map a member spawn failure onto the bridge vocabulary: the typed
-/// provider-auth, non-persistent-realm, durable-profile or member route
-/// refusal when meerkat carried one, otherwise the display text exactly as
-/// before.
+/// provider-auth refusal, the host's refusal of the build, or the
+/// non-persistent-realm, durable-profile or member route refusal when
+/// meerkat carried one, otherwise the display text exactly as before.
 fn spawn_bridge_error(step: &str, error: &meerkat_mob::MobError) -> BridgeError {
     if let Some(failure) = provider_auth_rejection(error) {
         return BridgeError::ProviderAuthRejected {
             failure,
+            detail: format!("{step}: {error}"),
+        };
+    }
+    if host_rejected_build(error) {
+        return BridgeError::HostRejectedBuild {
             detail: format!("{step}: {error}"),
         };
     }
@@ -2138,6 +2218,13 @@ fn classify_resume_error(error: &meerkat_mob::MobError) -> ResumeRejectionKind {
             | meerkat_mob::MobError::MemberRoleMigrationRejected { .. }
     ) {
         return ResumeRejectionKind::RoleMigrationNotApplied;
+    }
+    // A restore failure whose cause is the host's refusal of the member's
+    // build is the host's, read from its cause data's kind.
+    if matches!(error, meerkat_mob::MobError::MemberRestoreFailed { .. })
+        && host_rejected_build(error)
+    {
+        return ResumeRejectionKind::HostRejectedBuild;
     }
     if matches!(
         error,

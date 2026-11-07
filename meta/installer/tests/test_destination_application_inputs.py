@@ -380,7 +380,7 @@ async def test_destination_supplier_refuses_changed_accepted_source_before_proje
 @pytest.mark.parametrize("inputs_destination", ["duplicate-admins", "nested-access"], indirect=True)
 async def test_original_ambiguous_or_nonshipping_operator_choice_refuses_before_effects(inputs_destination):
     f = inputs_destination
-    with pytest.raises(CustodyError, match="single protected Console operator"):
+    with pytest.raises(CustodyError, match="protected Console operator first"):
         await create(f)
     assert not (f.root / SOURCE_DIRECTORY).exists() and not f.directory.exists()
     assert not (f.root / ".env").exists() and f.service.application_host_selection is None

@@ -379,6 +379,10 @@ async def test_original_review_selection_waits_for_same_login_ack_and_never_ente
         return review
     # Only a person's login starts the review: an account people share decides nothing.
     async with boundary(tmp_path, monkeypatch, review_factory=review_factory, named=True) as (client, front, owners, contexts, forwarded, minted, tasks):
+        # The console names this person an administrator, who alone starts the review.
+        async def administrator(_login):
+            return True
+        monkeypatch.setattr(front, "_console_administrator", administrator)
         await login(client, front)
         actual, owner = front._logins[client.cookies[front.cookie]], owners[0]
         await entered(owner.ready_entered)

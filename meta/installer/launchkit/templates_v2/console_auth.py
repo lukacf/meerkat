@@ -28,10 +28,10 @@ from types import MappingProxyType
 from urllib.parse import parse_qsl, urlsplit
 
 try:
-    from .console_configuration import (console_account_issue, console_configuration,
+    from .console_configuration import (CONSOLE_ACCESS_FILE, console_account_issue, console_configuration,
         console_password_issue, validate_console_credentials)
 except ImportError:
-    from console_configuration import (console_account_issue, console_configuration,
+    from console_configuration import (CONSOLE_ACCESS_FILE, console_account_issue, console_configuration,
         console_password_issue, validate_console_credentials)
 
 ISSUER = "http://127.0.0.1/mobkit-gateway"
@@ -84,20 +84,31 @@ ACCOUNTS_FILE = "console-accounts.json"
 ACCOUNTS_FORMAT = "console-accounts-v1"
 MAX_ACCOUNTS = 100
 MAX_ACCOUNTS_BYTES = 256 * 1024
-_SCRYPT = MappingProxyType({"n": 2**14, "r": 8, "p": 1})
-_PASSWORD_HASH = re.compile(r"scrypt:16384:8:1:([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})")
+# New hashes use scrypt at the OWASP floor (N=2^14, r=8, p=5: 16 MiB each).
+# A stored hash names its parameters, which must be one of the floor's
+# equivalent choices, so the cost can rise without a new format.
+_SCRYPT = MappingProxyType({"n": 2**14, "r": 8, "p": 5})
+_SCRYPT_CHOICES = frozenset({(2**14, 8, 5), (2**15, 8, 3), (2**16, 8, 2), (2**17, 8, 1)})
+_PASSWORD_HASH = re.compile(r"scrypt:([0-9]{1,7}):([0-9]{1,2}):([0-9]{1,2}):([A-Za-z0-9_-]{22}):([A-Za-z0-9_-]{43})")
 # Sign-in limits are per account and per client address, so one person's
 # mistakes, or one client's guesses, do not lock everyone else out. Behind a
 # shared ingress every client has the ingress's address, so the address
-# limit sits above the account limit.
+# limit sits above the account limit. The address is the connection's peer,
+# never a header the client sets.
 FAILURE_WINDOW_SECONDS = 60
 FAILURES_PER_ACCOUNT = 10
 FAILURES_PER_CLIENT = 30
 FAILURE_NAMES = 1024
+FAILURE_CLIENTS = 4096
 LOGIN_FORMS_PER_CLIENT = 100
 LOGIN_FORMS = 1000
 SESSIONS_PER_ACCOUNT = 100
 SESSIONS = 1000
+# Password checks running at once, across every account. A check beyond it
+# is refused before any hashing, so guesses cannot queue up memory or CPU.
+PASSWORD_CHECKS = 4
+# Every name that cannot be an account shares this one limiter key.
+_INVALID_ACCOUNT = "\x00"
 
 
 def _console_assets(value):
@@ -294,14 +305,64 @@ def _base64(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+def console_access_file(root):
+    """The console's live access file, outside the package; None without one.
+
+    The console's Access panel writes its edits here and never to the
+    package's `config/access.toml`, which Forge keeps checking byte for byte.
+    The first start copies that file once (exclusive create, 0600, synced);
+    later starts and updates leave the live copy as the console wrote it.
+    """
+    root = Path(root)
+    source = root / "config/access.toml"
+    if source.is_symlink() or not source.is_file():
+        return None
+    directory = root / ".mobkit"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022):
+        raise ValueError("The console's state directory must be owned by this user and writable by no one else.")
+    live = root / CONSOLE_ACCESS_FILE
+    try:
+        descriptor = os.open(live, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        info = live.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("The console's live access file must be an owned ordinary file.") from None
+        return live
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(source.read_bytes())
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        live.unlink(missing_ok=True)
+        raise
+    handle = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+    return live
+
+
 def _stored_password(stored):
     match = _PASSWORD_HASH.fullmatch(stored) if isinstance(stored, str) else None
     if match is None:
         raise ValueError("A named account's password hash is invalid.")
-    salt, digest = (base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)) for part in match.groups())
+    n, r, p = (int(part) for part in match.groups()[:3])
+    if (n, r, p) not in _SCRYPT_CHOICES:
+        raise ValueError("A named account's password hash uses scrypt parameters below the floor.")
+    salt, digest = (base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)) for part in match.groups()[3:])
     if len(salt) != 16 or len(digest) != 32:
         raise ValueError("A named account's password hash is invalid.")
-    return salt, digest
+    return (n, r, p), salt, digest
+
+
+def _scrypt(password, salt, n, r, p):
+    # OpenSSL's scrypt needs about 128 * r * (n + p + 2) bytes; allow twice that.
+    return hashlib.scrypt(password, salt=salt, n=n, r=r, p=p, dklen=32, maxmem=256 * r * (n + p + 2))
 
 
 def hash_console_password(password):
@@ -310,19 +371,19 @@ def hash_console_password(password):
     if issue is not None:
         raise ValueError(issue)
     salt = secrets.token_bytes(16)
-    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, dklen=32, **_SCRYPT)
+    digest = _scrypt(password.encode("utf-8"), salt, **_SCRYPT)
     return "scrypt:{n}:{r}:{p}:".format(**_SCRYPT) + _base64(salt) + ":" + _base64(digest)
 
 
 def verify_console_password(stored, password):
     """Whether a password opens the account this stored hash belongs to."""
-    salt, expected = _stored_password(stored)
+    (n, r, p), salt, expected = _stored_password(stored)
     try:
         offered, valid = password.encode("utf-8"), True
     except (AttributeError, UnicodeError):
         # Refuse with the same work as a wrong password.
         offered, valid = b"", False
-    digest = hashlib.scrypt(offered, salt=salt, dklen=32, **_SCRYPT)
+    digest = _scrypt(offered, salt, n, r, p)
     return hmac.compare_digest(digest, expected) and valid
 
 
@@ -562,11 +623,14 @@ class ConsoleFront:
         self._mcp_original_targets = {key: copy.deepcopy(target) for key, target in self._mcp_targets.items()}
         self._mcp_routes = {}
         self.key = _private_key(root, create=True)
-        self.password_digest = hashlib.sha256(password.encode()).digest()
-        # An unknown account name costs one scrypt too, so the answer time does
-        # not tell a named account from a name nobody has.
-        self._decoy_password = (None if self.accounts is None
-                                else hash_console_password(secrets.token_urlsafe(24)))
+        # Every account, the installation's own included, costs one scrypt per
+        # check, and an unknown name costs one against a decoy, so the answer
+        # time names no account. Both hashes are made at the first check.
+        self._installation_secret = password
+        self._installation_password = self._decoy_password = None
+        self._password_checks = 0
+        # Console sign-outs of logins a new sign-in replaced, still running.
+        self._replaced_sign_outs = set()
         self.cookie = "mobkit_console_" + hashlib.sha256((str(self.root.resolve()) + str(port)).encode()).hexdigest()[:16]
         if self._secure_cookie:
             self.cookie = "__Host-" + self.cookie
@@ -635,7 +699,10 @@ class ConsoleFront:
             self.listener.bind(("127.0.0.1", self.port))
             self.listener.listen(128)
             self.listener.setblocking(False)
-            self.server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_level="error", lifespan="off"))
+            # The listener is loopback only, so a forwarded-for header is
+            # whatever the client chose: the client is the connection's peer.
+            self.server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_level="error", lifespan="off",
+                                                        proxy_headers=False))
             # The generated app owns signals and shutdown, including its native process.
             self.server.capture_signals = _no_signals
             self.task = asyncio.create_task(self.server.serve(sockets=[self.listener]))
@@ -672,6 +739,17 @@ class ConsoleFront:
             login.retirement_task.add_done_callback(
                 lambda task: task.exception() if not task.cancelled() else None)
         return login.retirement_task
+
+    def _replace_login(self, login):
+        """End a login that a new sign-in on its browser replaces.
+
+        The front's login ends at once; the console's sign-out of it runs on,
+        and the front's close waits for it.
+        """
+        self._retire_login(login.session, "logout")
+        task = asyncio.create_task(self._console_sign_out(login))
+        self._replaced_sign_outs.add(task)
+        task.add_done_callback(self._replaced_sign_outs.discard)
 
     async def _console_sign_out(self, login):
         """End one login in the Meta console (`meta/console/sign_out`).
@@ -889,22 +967,22 @@ class ConsoleFront:
             raise RuntimeError("MCP sign-in cleanup is unconfirmed.")
 
     def _queue_controller_review(self, login):
-        """Start the host lifetime's one review at the first ready person's login.
+        """Start the host lifetime's one review at an administrator's first login.
 
-        An account people share decides nothing, so it starts no review.
-        While a person's login waits for its enrollment, no other login
-        starts one; if that login ends first, the next person's login may.
+        An account people share decides nothing, and only an administrator
+        answers the review, so the review starts at the first ready login of a
+        person the console names an administrator. While one login is checked,
+        no other starts one; if it is not an administrator's, the next may.
         """
         if (self.controller_review_factory is None or not login.person
                 or self._controller_review_created or self._controller_review_pending is not None):
             return
-        if not login.console_login_required:
-            self._reserve_controller_review(login)
-            return
         self._controller_review_pending = login
         async def start():
             try:
-                if await self._ready_console_login(login) and self._login_current(login):
+                if login.console_login_required and not await self._ready_console_login(login):
+                    return
+                if await self._console_administrator(login) is True and self._login_current(login):
                     self._reserve_controller_review(login)
             finally:
                 if self._controller_review_pending is login:
@@ -973,6 +1051,8 @@ class ConsoleFront:
         finally:
             if self.listener:
                 self.listener.close()
+            # A replaced login's console sign-out still uses the client.
+            await asyncio.gather(*list(self._replaced_sign_outs), return_exceptions=True)
             if self.client:
                 await self.client.aclose()
             self.sessions.clear()
@@ -1011,12 +1091,24 @@ class ConsoleFront:
     def _record_failure(self, account, client, now):
         for key in (("account", account), ("client", client)):
             self.failures.setdefault(key, []).append(now)
-        # A name nobody has is counted like an account, in a bounded table:
-        # the oldest such name is forgotten first.
+        # A name nobody has is counted like an account, and every client
+        # address too, in bounded tables: the oldest key is forgotten first.
         unknown = [key for key in self.failures if key[0] == "account" and key[1] != self.principal
                    and (self.accounts is None or key[1] not in self.accounts)]
         if len(unknown) > FAILURE_NAMES:
             del self.failures[min(unknown, key=lambda key: self.failures[key][-1])]
+        clients = [key for key in self.failures if key[0] == "client"]
+        if len(clients) > FAILURE_CLIENTS:
+            del self.failures[min(clients, key=lambda key: self.failures[key][-1])]
+
+    def _forget_failure(self, account, client, now):
+        """A password that opened takes back the attempt counted for it."""
+        for key in (("account", account), ("client", client)):
+            times = self.failures.get(key)
+            if times and now in times:
+                times.remove(now)
+                if not times:
+                    del self.failures[key]
 
     def _sessions_full(self, account):
         live = [login for login in self._logins.values()
@@ -1038,9 +1130,16 @@ class ConsoleFront:
                 "installation's own account.")
 
     async def _password_opens(self, account, password):
+        """One scrypt check, whichever account the name selects."""
         if account == self.principal:
-            return hmac.compare_digest(hashlib.sha256(password.encode()).digest(), self.password_digest)
+            if self._installation_password is None:
+                stored = await asyncio.to_thread(hash_console_password, self._installation_secret)
+                self._installation_password = self._installation_password or stored
+            return await asyncio.to_thread(verify_console_password, self._installation_password, password)
         stored = None if self.accounts is None else self.accounts.get(account)
+        if stored is None and self._decoy_password is None:
+            decoy = await asyncio.to_thread(hash_console_password, secrets.token_urlsafe(24))
+            self._decoy_password = self._decoy_password or decoy
         opened = await asyncio.to_thread(verify_console_password, stored or self._decoy_password, password)
         return opened and stored is not None
 
@@ -1061,6 +1160,11 @@ class ConsoleFront:
                         and request.headers.get("host") == urlsplit(self.local_origin).netloc)
         if (request.headers.get("host") != self._browser_host and not local_health
                 or not (toolkit_callback_landing or mcp_landing) and any(key == "auth_token" for key, _ in parse_qsl(request.url.query))):
+            return Response("Invalid Console address.", status_code=400, headers=availability_headers)
+        # Routing reads the path as sent and the upstream client normalizes it,
+        # so a path with dot or empty segments is refused before either.
+        segments = path.split("/")[1:]
+        if any(part in (".", "..") for part in segments) or "" in segments[:-1]:
             return Response("Invalid Console address.", status_code=400, headers=availability_headers)
         if request.headers.get("origin") not in (None, self.origin) and not (toolkit_callback_landing or mcp_landing):
             return Response("Cross-origin Console requests are refused.", status_code=403, headers=availability_headers)
@@ -1117,18 +1221,39 @@ class ConsoleFront:
                 return self._login_response(now, client, error="This sign-in form expired. Enter your Console password again.", status_code=403)
             self._login_token_clients.pop(nonce, None)
             account = self._login_account(form)
-            if self._sign_in_held(account, client, now):
+            # A name that cannot be an account costs no password hash and
+            # shares one limit with every other such name.
+            possible = account == self.principal or console_account_issue(account, None) is None
+            key = account if possible else _INVALID_ACCOUNT
+            if self._sign_in_held(key, client, now):
                 return Response("Too many login attempts. Try again in one minute.", status_code=429)
-            if not await self._password_opens(account, form.get("password", "")):
-                self._record_failure(account, client, now)
+            if self._password_checks >= PASSWORD_CHECKS:
+                return Response("Try again shortly.", status_code=429)
+            # The attempt counts before the password work, so attempts made at
+            # once cannot pass the hold together; a password that opens takes
+            # it back.
+            self._record_failure(key, client, now)
+            self._password_checks += 1
+            try:
+                opened = possible and await self._password_opens(account, form.get("password", ""))
+            finally:
+                self._password_checks -= 1
+            if not opened:
                 return self._login_response(now, client, error=self._login_refusal(), status_code=401)
+            self._forget_failure(key, client, now)
             if self._closing:
                 return Response("The Console is stopping.", status_code=503)
             if self._sessions_full(account):
                 return Response("Too many active sessions. Sign out of another one, or restart the application "
                                 "to clear them.", status_code=429)
+            # A sign-in over this browser's live login ends that login, here
+            # and in the console, rather than leaving it running unseen.
+            earlier = self._live_login(request)
+            if earlier is not None:
+                self._replace_login(earlier)
             session = secrets.token_urlsafe(32)
-            self.sessions[session] = now + SESSION_SECONDS
+            # The session's time starts now, after the password work.
+            self.sessions[session] = time.time() + SESSION_SECONDS
             login = _ConsoleLogin(session, self.sessions[session], principal=account,
                                   person=self.accounts is not None)
             self._logins[session] = login
@@ -1172,16 +1297,19 @@ class ConsoleFront:
             # The console then ends it too, so a token this front already
             # issued for the login stops working there.
             signed_out = await self._console_sign_out(login)
-            problem = None
+            problems = []
             if retirement is not None:
                 try:
                     await asyncio.shield(retirement)
                 except Exception:
-                    problem = "Console access was revoked but cleanup is unconfirmed."
-            if problem is None and not signed_out:
-                problem = ("You are signed out here, but the Console did not confirm ending this login. "
-                           "Tokens it already holds for this login expire within two minutes.")
-            response = RedirectResponse("/login", status_code=303) if problem is None else _signed_out_page(problem)
+                    problems.append("Console access was revoked but cleanup is unconfirmed.")
+            if not signed_out:
+                # A token lives two minutes and the console allows it half a
+                # minute more, so say three.
+                problems.append("You are signed out here, but the Console did not confirm ending this login. "
+                                "Tokens it already holds for this login expire within three minutes.")
+            response = (RedirectResponse("/login", status_code=303) if not problems
+                        else _signed_out_page(" ".join(problems)))
             response.delete_cookie(self.cookie, secure=self._secure_cookie, httponly=True,
                                    samesite="strict", path="/")
             return response
@@ -1714,6 +1842,10 @@ class ConsoleFront:
                     return refused
                 value = await owner.observe()
                 status = 202 if value["status"] == "starting" else 200
+                # The read awaited: show it only to a person who still administers.
+                refused = await administrator()
+                if refused is not None:
+                    return refused
             if not self._disclosure_current(request, login):
                 return refusal("invalid_binding", 401)
             return JSONResponse(value, status_code=status, headers=headers)
@@ -1958,8 +2090,10 @@ class ConsoleFront:
                 result.update(status="unknown", change_id=change_id)
             return JSONResponse(result, status_code=code, headers={"Cache-Control": "no-store"})
 
-        # Every command names the login's own account; a proof binds it too.
+        # Every command names the login's own account; a proof binds it and
+        # the login itself.
         principal = self.principal if login is None else login.principal
+        scope = None if login is None else login.login_scope_id
         path = request.url.path
         if path == FRONTEND_PATH:
             operation, method = "inventory", "GET"
@@ -2018,7 +2152,7 @@ class ConsoleFront:
                             or approval["approved"] is not True or type(approval["expires_at"]) is not int
                             or not time.time() < approval["expires_at"] <= time.time() + FRONTEND_APPROVAL_SECONDS
                             or not isinstance(approval["proof"], str)
-                            or not hmac.compare_digest(approval["proof"], self._frontend_proof(host, payload["proposal"], approval["expires_at"], principal))):
+                            or not hmac.compare_digest(approval["proof"], self._frontend_proof(host, payload["proposal"], approval["expires_at"], principal, scope))):
                         return error(403, "Explicit approval of this exact current proposal is required.")
                     approved = True
                     payload = {"proposal": payload["proposal"],
@@ -2074,7 +2208,7 @@ class ConsoleFront:
                 self._frontend_proposal(proposal)
                 expires_at = int(time.time()) + FRONTEND_APPROVAL_SECONDS
                 envelope.update(proposal=proposal, approval={"expires_at": expires_at,
-                    "proof": self._frontend_proof(host, proposal, expires_at, principal)})
+                    "proof": self._frontend_proof(host, proposal, expires_at, principal, scope)})
             else:
                 envelope["observation"] = result
                 if (operation == "submit" and submission_outcome is not None
@@ -2099,10 +2233,13 @@ class ConsoleFront:
         _frontend_json(proposal)
         self._frontend_no_private_literals(proposal)
 
-    def _frontend_proof(self, host, proposal, expires_at, principal=None):
-        binding = {"scope": "forge-frontend-proposal-v1", "host": host,
+    def _frontend_proof(self, host, proposal, expires_at, principal=None, login_scope_id=None):
+        # The proof is the login's that prepared the proposal: another login,
+        # the same account's included, cannot submit it, nor can anyone once
+        # that login has ended.
+        binding = {"scope": "forge-frontend-proposal-v2", "host": host,
                    "principal": self.principal if principal is None else principal,
-                   "proposal": proposal, "expires_at": expires_at}
+                   "login": login_scope_id, "proposal": proposal, "expires_at": expires_at}
         return hmac.new(self.key.encode(), _frontend_json(binding), hashlib.sha256).hexdigest()
 
     def _frontend_no_private_literals(self, value):

@@ -69,7 +69,7 @@ def _source_contents(files, runtime_target):
         operator = None
     if (authentication not in ("local-password", "local-accounts") or operator is None
             or not any(row["key"] == "CONSOLE_USER_ID" and row.get("required") is True for row in fields)):
-        raise CustodyError("Destination defaults need the original single protected Console operator choice.")
+        raise CustodyError("Destination defaults need the original protected Console operator first among the access admins.")
     contents = {"blueprint.json": files["blueprint.json"][0], "mob.toml": definition,
         "application-inventory-input.json": inventory_bytes, "tool-policy.json": policy,
         "configuration.json": files["application/configuration.json"][0],

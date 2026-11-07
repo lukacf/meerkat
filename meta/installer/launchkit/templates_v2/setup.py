@@ -128,6 +128,11 @@ def main():
     generated_keys = {spec["knowledge"]["token_env"], spec["knowledge"]["space_env"]} if local_knowledge else set()
     fields = [*spec["environment"], *application_fields(ROOT, (field["key"] for field in spec["environment"]))]
     authenticated_console = console_configuration(ROOT, fields)
+    named = authenticated_console and console_authentication_choice(ROOT, fields) == "local-accounts"
+    if named:
+        from console_auth import load_console_accounts
+        # The installation's own account cannot take a named account's name.
+        existing_accounts = set(load_console_accounts(ROOT, None))
     for field in fields:
         key = field["key"]
         if key in generated_keys:
@@ -158,6 +163,9 @@ def main():
                 issue = console_credential_issue(field, value) if authenticated_console else None
                 if issue is not None:
                     raise ValueError(f"{issue['label']} ({issue['key']}): {issue['message']}")
+                if named and key == "CONSOLE_USER_ID" and value in existing_accounts:
+                    raise ValueError("That name is a named account. Choose another name for the installation's "
+                                     "own account, or remove that named account first.")
             except ValueError as error:
                 print(str(error))
                 continue
@@ -168,7 +176,7 @@ def main():
     if authenticated_console:
         validate_console_configuration_values(fields, values)
     save_values(path, values, original)
-    if authenticated_console and console_authentication_choice(ROOT, fields) == "local-accounts":
+    if named:
         manage_named_accounts(values["CONSOLE_USER_ID"])
     if local_knowledge:
         print("Preparing the local knowledge service credentials and project space...")

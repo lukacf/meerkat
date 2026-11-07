@@ -26,8 +26,8 @@ from application_configuration import application_fields, configuration_issue, v
 from console_configuration import (console_authentication, console_authentication_choice,
     console_credential_issue, validate_console_configuration_values)
 from console_auth import (ConsoleFront, ConsoleConnectLogin, FrontendManagementRequest,
-    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_configuration,
-    load_console_accounts)
+    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_access_file,
+    console_configuration, load_console_accounts)
 from native_definition_continuity import (continuity_query, registry_role_continuity,
     verify_continuity_runtime)
 
@@ -1682,11 +1682,16 @@ async def run(spec, args, *, application_startup=None):
         )
         # Preserve the builder's conventional policy files, rooted in this package.
         for field, relative in (("gating_config_path", "config/gating.toml"),
-                                ("access_config_path", "config/access.toml"),
                                 ("routing_config_path", "deployment/routing.toml")):
             path = ROOT / relative
             if path.is_file():
                 setattr(config, field, str(path))
+        # The console's Access panel writes its live copy in private state,
+        # seeded once from the package's config/access.toml, which stays the
+        # accepted bytes Forge checks.
+        access = console_access_file(ROOT)
+        if access is not None:
+            config.access_config_path = str(access)
         if shell_meta:
             return await connect_application_runtime(config, application, meta=True)
         return await connect_application_runtime(config, application, application_startup=application_startup)

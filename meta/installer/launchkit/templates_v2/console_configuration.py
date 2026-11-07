@@ -15,6 +15,9 @@ CONSOLE_FIELDS = (
 # account through the same two private fields.
 CONSOLE_AUTHENTICATIONS = ("local-password", "local-accounts")
 CONSOLE_ACCOUNT = re.compile(r"[A-Za-z0-9_.@+-]{1,200}")
+# The console's live access file: its Access panel writes here, in private
+# state, never to the package's config/access.toml.
+CONSOLE_ACCESS_FILE = ".mobkit/console-access.toml"
 
 
 def console_authentication(value, fields):

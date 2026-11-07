@@ -412,13 +412,17 @@ that the steward commits (§8.5). Realm scope is application/SDK-only.
 > a replay); the build-time index never composes it, because a build serves
 > every run of its member. A turn without a direct person requester (none,
 > one carried across a peer hop, or a principal that names no person)
-> recalls none. The Recorder proposes an `operator_said` fact to the
-> operator scope of the run's direct requester; the steward accepts it into
-> that key only and drops dream ops that name an operator key. Memory
-> delivered with a turn is not Distiller evidence. The console Memory panel
-> shows a person their own operator scope with `operator.memory.read`;
-> another person's needs `operator.memory.read_any` too. The note above
-> describes the provisional keying this replaced.
+> recalls none. With the operator scope on, the Recorder files an
+> `operator_said` fact only as a proposal to the operator scope of the run's
+> direct requester (no identity-scope copy; a run without such a person
+> gets a typed tool error); with it off, the fact stays identity memory. The
+> steward accepts such a proposal into that key only, never changes, copies
+> or promotes an operator-scope record (the staged validator refuses a
+> steward batch that would, typed), and a dream does not see operator
+> records. Memory delivered with a turn is not Distiller evidence. The
+> console Memory panel shows a person their own operator scope with
+> `operator.memory.read`; another person's needs `operator.memory.read_any`
+> too. The note above describes the provisional keying this replaced.
 
 ### 7.3 Provider trait v2 and the bundled store
 

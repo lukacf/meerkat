@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`None` keeps the previous behaviour): the operator memory a local
   host-human turn carries as request-only context. Every other lane refuses
   one.
+- Rust: `StagedBatchError` gains the variant `OperatorMemoryRefused`, which
+  carries the new `OperatorMemoryRefusal`: a steward batch that would
+  change, copy or write a person's operator memory outside the accept of
+  their own proposal is refused.
 
 - The console send routes refuse the `origin_kind` values reserved for
   Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
@@ -146,26 +150,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Operator memory reaches only the turns of the person who asked: a turn
   recalls the operator memory of its direct requester (the person whose
   own console message, or whose schedule, started it, on a console that
-  requires sign-in) in a request-only section that every model request of
-  the turn sees and that never enters the agent's transcript, a stored
-  message, a session read or a retry. A turn without a direct person
-  requester recalls none, nor does a turn of a member placed on another
-  host or of an externally bound member, and a member's build-time memory
-  no longer carries operator memory.
+  requires sign-in; a person's steer that starts a turn too) in a
+  request-only section that every model request of the turn sees and that
+  never enters the agent's transcript, a stored message, a session read or
+  a retry. A turn without a direct person requester recalls none, nor does
+  a turn of a member placed on another host or of an externally bound
+  member, and a member's build-time memory no longer carries operator
+  memory. `per_turn_injection = "off"` turns the section off too.
 - Reading another person's operator memory needs `operator.memory.read_any`
   (admins hold it; a rule that grants `operator.memory.*` or `*` grants it
   too). `operator.memory.read` reads the caller's own operator memory.
-- The `memory` tool proposes an `operator_said` fact to the operator memory
-  of the person whose message started the run (and records it in the
-  agent's own memory, as before); a run without such a person proposes
-  none. The steward accepts such a proposal into that person's operator
-  memory only, and drops a dream op that names an operator key.
+- With the operator scope on, the `memory` tool files an `operator_said`
+  fact only as a proposal to the operator memory of the person whose own
+  message started the run, never in the agent's own memory, so other
+  people's turns do not recall it. A run without such a person (no
+  requester, a carried request, a service, a governed run) files nothing
+  and gets a typed tool error that names the alternative (`data.kind`
+  `operator_fact_without_a_person`); an `operator_said` update is refused
+  (`operator_fact_update_refused`), and so is such a fact on a memory store
+  that keeps no proposals (`operator_memory_unavailable`). With the
+  operator scope off (the default), an `operator_said` fact stays the
+  agent's own memory, as before.
+- The steward never changes a person's operator memory: it accepts a
+  person's proposal into that person's operator memory only, refuses
+  (typed) every dream op that would supersede, tombstone, retier or copy an
+  operator record, or name an operator key, refuses to promote a person's
+  proposal or record to a mob scope, and no longer sees a person's
+  operator records in a dream, so no promotion gate shows them.
+- The Distiller is unchanged: it distills the agent's own transcript,
+  which everyone who views the agent reads, and cannot tell which person
+  said a fact, so a fact it tags `operator_said` stays the agent's own
+  memory.
+- `TurnRequestContext`'s `Debug` (Core) prints no text, so a request-only
+  section never reaches a log through `{:?}`.
 
 ### Fixed
 
-- Memory delivered with a turn (its injected context) and context a host
-  attaches to a send are no longer evidence for the Distiller, so recalled
-  memory is not distilled back into memory.
+- Memory delivered with a turn as injected context, and context a host
+  attaches to a send, are no longer themselves evidence for the Distiller
+  (a turn's request-only section never enters the transcript it reads).
 - A member's build-time memory, which every run of the member shares, no
   longer carries the operator memory of whoever spoke to it last.
 

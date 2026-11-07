@@ -62172,6 +62172,9 @@ function consoleScheduleEditing(input) {
       note: input.accessEnforcing ? "You may view this agent but not message it, so you cannot change its schedules." : "This agent takes no console messages, so it cannot be scheduled."
     };
   }
+  if (input.agent?.affordances?.can_manage_schedules === false) {
+    return { canChange: false, note: "You may message this agent but not change its schedules." };
+  }
   return { canChange: true, note: null };
 }
 function record7(value) {

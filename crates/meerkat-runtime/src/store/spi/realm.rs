@@ -1028,7 +1028,13 @@ impl SpiRealm {
             // lease is over.
             tokio::time::sleep(grant.superseded_lease).await;
         }
-        realm.list_all().await?;
+        if let Err(error) = realm.list_all().await {
+            // The realm is never served. The writer fence hears so before
+            // the gate drops, and refuses any re-acquire: there is no
+            // baseline to compare a fresh listing with.
+            realm.apply_fence(FenceInput::OpenListingFailed, |_| String::new());
+            return Err(error);
+        }
         drop(listing);
         realm.sweep_ownerless_chunks().await;
         Ok(realm)
@@ -1383,13 +1389,10 @@ impl SpiRealm {
         }
         // No batch with the old token may be in flight, and the open's
         // listing is over: the open holds the gate until it installed the
-        // baseline.
+        // baseline, or until the writer fence heard that its listing failed
+        // (then the fence refuses the re-acquire below: the realm is never
+        // served, and there is nothing to compare a listing with).
         let _no_commits = self.fence_gate.write().await;
-        // Without that baseline the open failed, and its realm is never
-        // served: nothing to compare a listing with, so no acquire either.
-        if lock(&self.known_heads).is_none() {
-            return Err(no_baseline());
-        }
         let started = Instant::now();
         let Some(mut step) = self.begin_reacquire()? else {
             return Ok(());
@@ -1513,7 +1516,9 @@ impl SpiRealm {
     }
 
     /// Ask the writer fence for a re-acquire of a stopped writer: the
-    /// acquire to send first, or `None` when the writer is live again.
+    /// acquire to send first, or `None` when the writer is live again. A
+    /// realm whose open failed its listing is refused, typed as a missing
+    /// baseline.
     fn begin_reacquire(&self) -> Result<Option<WriterFenceAcquireStep>, SpiError> {
         for effect in self.apply_fence(FenceInput::BeginReacquire, |_| String::new()) {
             match effect {
@@ -1521,6 +1526,9 @@ impl SpiRealm {
                 FenceEffect::RequestRefused {
                     reason: WriterFenceRefusal::AlreadyLive,
                 } => return Ok(None),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::OpenListingFailed,
+                } => return Err(no_baseline()),
                 _ => {}
             }
         }

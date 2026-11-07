@@ -27,6 +27,80 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ScopePoisonCause {
+    #[default]
+    #[serde(rename = "PlanFailed")]
+    PlanFailed,
+    #[serde(rename = "Unsettled")]
+    Unsettled,
+    #[serde(rename = "Refused")]
+    Refused,
+    #[serde(rename = "Dropped")]
+    Dropped,
+    #[serde(rename = "PrepareFailed")]
+    PrepareFailed,
+    #[serde(rename = "ImportFailed")]
+    ImportFailed,
+    #[serde(rename = "StrayTouch")]
+    StrayTouch,
+    #[serde(rename = "Adapter")]
+    Adapter,
+}
+impl ScopePoisonCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PlanFailed => "PlanFailed",
+            Self::Unsettled => "Unsettled",
+            Self::Refused => "Refused",
+            Self::Dropped => "Dropped",
+            Self::PrepareFailed => "PrepareFailed",
+            Self::ImportFailed => "ImportFailed",
+            Self::StrayTouch => "StrayTouch",
+            Self::Adapter => "Adapter",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ScopePoisonCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PlanFailed" => Ok(Self::PlanFailed),
+            "Unsettled" => Ok(Self::Unsettled),
+            "Refused" => Ok(Self::Refused),
+            "Dropped" => Ok(Self::Dropped),
+            "PrepareFailed" => Ok(Self::PrepareFailed),
+            "ImportFailed" => Ok(Self::ImportFailed),
+            "StrayTouch" => Ok(Self::StrayTouch),
+            "Adapter" => Ok(Self::Adapter),
+            other => Err(format!("invalid ScopePoisonCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ScopePoisonCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ScopePoisonCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum WriterFenceAcquireOutcome {
     #[default]
     #[serde(rename = "Granted")]
@@ -285,6 +359,12 @@ pub enum WriterFenceRefusal {
     NoRenewInFlight,
     #[serde(rename = "Lost")]
     Lost,
+    #[serde(rename = "OpenListingFailed")]
+    OpenListingFailed,
+    #[serde(rename = "Quarantined")]
+    Quarantined,
+    #[serde(rename = "Poisoned")]
+    Poisoned,
 }
 impl WriterFenceRefusal {
     pub fn as_str(&self) -> &'static str {
@@ -299,6 +379,9 @@ impl WriterFenceRefusal {
             Self::NotProving => "NotProving",
             Self::NoRenewInFlight => "NoRenewInFlight",
             Self::Lost => "Lost",
+            Self::OpenListingFailed => "OpenListingFailed",
+            Self::Quarantined => "Quarantined",
+            Self::Poisoned => "Poisoned",
         }
     }
 }
@@ -316,6 +399,9 @@ impl std::convert::TryFrom<&str> for WriterFenceRefusal {
             "NotProving" => Ok(Self::NotProving),
             "NoRenewInFlight" => Ok(Self::NoRenewInFlight),
             "Lost" => Ok(Self::Lost),
+            "OpenListingFailed" => Ok(Self::OpenListingFailed),
+            "Quarantined" => Ok(Self::Quarantined),
+            "Poisoned" => Ok(Self::Poisoned),
             other => Err(format!("invalid WriterFenceRefusal value `{other}`")),
         }
     }
@@ -497,6 +583,12 @@ pub struct State {
     pub stop_cause: WriterFenceStopCause,
     pub lost_cause: WriterFenceLostCause,
     pub writer_stopped: bool,
+    pub open_listing_failed: bool,
+    pub quarantined_keys: std::collections::BTreeSet<String>,
+    pub quarantine_versions: std::collections::BTreeMap<String, u64>,
+    pub quarantine_commit_ids:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    pub poisoned_scopes: std::collections::BTreeMap<String, ScopePoisonCause>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -541,6 +633,18 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OpenListingFailed {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScopeQuarantined {
+        pub key: String,
+        pub name: String,
+        pub version: u64,
+        pub commit_ids: std::collections::BTreeSet<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScopePoisoned {
+        pub scope: String,
+        pub cause: ScopePoisonCause,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -554,6 +658,8 @@ pub enum Input {
     ListingChecked(inputs::ListingChecked),
     Poison(inputs::Poison),
     OpenListingFailed(inputs::OpenListingFailed),
+    ScopeQuarantined(inputs::ScopeQuarantined),
+    ScopePoisoned(inputs::ScopePoisoned),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -567,6 +673,8 @@ impl Input {
             Self::ListingChecked(_) => InputKind::ListingChecked,
             Self::Poison(_) => InputKind::Poison,
             Self::OpenListingFailed(_) => InputKind::OpenListingFailed,
+            Self::ScopeQuarantined(_) => InputKind::ScopeQuarantined,
+            Self::ScopePoisoned(_) => InputKind::ScopePoisoned,
         }
     }
 }
@@ -581,6 +689,8 @@ pub enum InputKind {
     ListingChecked,
     Poison,
     OpenListingFailed,
+    ScopeQuarantined,
+    ScopePoisoned,
 }
 
 pub mod effects {
@@ -628,6 +738,16 @@ pub mod effects {
     pub struct RequestRefused {
         pub reason: WriterFenceRefusal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScopeQuarantineRecorded {
+        pub key: String,
+        pub name: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScopePoisonRecorded {
+        pub scope: String,
+        pub cause: ScopePoisonCause,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -643,6 +763,8 @@ pub enum Effect {
     RealmLost(effects::RealmLost),
     RenewIgnored(effects::RenewIgnored),
     RequestRefused(effects::RequestRefused),
+    ScopeQuarantineRecorded(effects::ScopeQuarantineRecorded),
+    ScopePoisonRecorded(effects::ScopePoisonRecorded),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -657,6 +779,8 @@ pub enum EffectKind {
     RealmLost,
     RenewIgnored,
     RequestRefused,
+    ScopeQuarantineRecorded,
+    ScopePoisonRecorded,
 }
 
 #[allow(non_camel_case_types)]
@@ -697,6 +821,7 @@ pub enum TransitionId {
     RenewAnsweredNoRenewWaitingOut,
     RenewAnsweredLost,
     BeginReacquire,
+    BeginReacquireAfterFailedOpen,
     BeginReacquireLive,
     BeginReacquireInFlightAcquiring,
     BeginReacquireInFlightProving,
@@ -751,6 +876,46 @@ pub enum TransitionId {
     OpenListingFailedWaitingOut,
     OpenListingFailedUnopened,
     OpenListingFailedLost,
+    ScopeQuarantinedLive,
+    ScopeQuarantinedStopped,
+    ScopeQuarantinedAcquiring,
+    ScopeQuarantinedProving,
+    ScopeQuarantinedResuming,
+    ScopeQuarantinedWaitingOut,
+    ScopeQuarantinedAgainLive,
+    ScopeQuarantinedAgainStopped,
+    ScopeQuarantinedAgainAcquiring,
+    ScopeQuarantinedAgainProving,
+    ScopeQuarantinedAgainResuming,
+    ScopeQuarantinedAgainWaitingOut,
+    ScopeQuarantinedPoisonedLive,
+    ScopeQuarantinedPoisonedStopped,
+    ScopeQuarantinedPoisonedAcquiring,
+    ScopeQuarantinedPoisonedProving,
+    ScopeQuarantinedPoisonedResuming,
+    ScopeQuarantinedPoisonedWaitingOut,
+    ScopeQuarantinedUnopened,
+    ScopeQuarantinedLost,
+    ScopePoisonedLive,
+    ScopePoisonedStopped,
+    ScopePoisonedAcquiring,
+    ScopePoisonedProving,
+    ScopePoisonedResuming,
+    ScopePoisonedWaitingOut,
+    ScopePoisonedAgainLive,
+    ScopePoisonedAgainStopped,
+    ScopePoisonedAgainAcquiring,
+    ScopePoisonedAgainProving,
+    ScopePoisonedAgainResuming,
+    ScopePoisonedAgainWaitingOut,
+    ScopePoisonedQuarantinedLive,
+    ScopePoisonedQuarantinedStopped,
+    ScopePoisonedQuarantinedAcquiring,
+    ScopePoisonedQuarantinedProving,
+    ScopePoisonedQuarantinedResuming,
+    ScopePoisonedQuarantinedWaitingOut,
+    ScopePoisonedUnopened,
+    ScopePoisonedLost,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -832,5 +997,10 @@ pub fn initial_state() -> State {
         stop_cause: WriterFenceStopCause::RenewFailed,
         lost_cause: WriterFenceLostCause::FencedOutRenew,
         writer_stopped: false,
+        open_listing_failed: false,
+        quarantined_keys: Default::default(),
+        quarantine_versions: Default::default(),
+        quarantine_commit_ids: Default::default(),
+        poisoned_scopes: Default::default(),
     }
 }

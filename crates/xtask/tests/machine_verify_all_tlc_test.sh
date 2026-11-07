@@ -652,17 +652,21 @@ fi
 
 # A host store realm's writer fence (the HostStoreWriterFenceMachine) is
 # driven by a store and by other writers, which the machine's own ci sweep
-# cannot see. A hand-written audit over the same generated model adds a store
-# that grants tokens in order and records one holder's lease, acquires the
-# writer gave up on that the store still decides later, a second writer that
-# takes the fence over once, renews, commits and stops, and a waited-out end
-# that comes before the store's own (a store that answers the remaining lease
-# rounded down). Under every generated invariant it checks five invariants
-# (the realm is lost only to another writer or to the documented residual; a
-# live writer resumed through a clean listing; no grant installed over an
-# unseen foreign batch; no holder that renews is waited out again; the token
-# never above the store's), requires its seven witnesses reached and refuses
-# five seeded defects (--mutants). 15 machine steps reach every witness.
+# cannot see. A hand-written audit over the same generated model runs in two
+# parts. Its fence part adds a store that grants tokens in order and records
+# one holder's lease, acquires the writer gave up on that the store still
+# decides later, a second writer that takes the fence over once, renews,
+# commits and stops, and a waited-out end that comes before the store's own
+# (a store that answers the remaining lease rounded down). Its scopes part
+# drives the scope classifications instead (the quarantine set, the poison
+# map) and an open whose listing may fail. Under every generated invariant it
+# checks six invariants (the realm is lost only to another writer or to the
+# documented residual; a live writer resumed through a clean listing; no
+# grant installed over an unseen foreign batch; no holder that renews is
+# waited out again; the token never above the store's; no re-acquire after a
+# failed open listing) and an action property (the classifications only
+# grow), requires its ten witnesses reached and refuses ten seeded defects
+# (--mutants). 15 machine steps reach every witness.
 writer_fence_audit="${workspace_root}/specs/machines/host_store_writer_fence/writer_fence_audit.sh"
 if [[ ! -x "${writer_fence_audit}" ]]; then
   echo "error: writer fence audit runner is missing from workspace runfiles: ${writer_fence_audit}" >&2

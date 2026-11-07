@@ -54,7 +54,11 @@
 \*   specs/machines/host_store_writer_fence/writer_fence_audit.sh 15 --mutants
 EXTENDS model
 
-CONSTANT AuditMaxSteps
+CONSTANTS AuditMaxSteps, AuditPart
+
+\* AuditPart "fence": a second writer and acquires the writer gave up on,
+\* no scope classification. AuditPart "scopes": scope classification
+\* and the open's listing, no second writer and no abandoned acquire.
 
 \* The highest token any grant may answer, and the most acquires the writer
 \* may have given up on at once.
@@ -90,17 +94,25 @@ VARIABLES
     w_waited_own,          \* the writer waited out a late grant of its own
     w_listing_failed,      \* a listing failed after a grant
     renew_open,            \* a renew sent while the writer was live may still answer
-    commit_open            \* a commit sent while the writer was live may still answer
+    commit_open,           \* a commit sent while the writer was live may still answer
+    open_listed,           \* the open's listing ended, listed or failed
+    w_failed_open,         \* the open's listing failed
+    w_refused_after_failed_open, \* a re-acquire was refused after it
+    w_q_early,             \* a scope was quarantined before the first re-acquire grant
+    w_p_early              \* a scope was poisoned before the first re-acquire grant
 
 storeVars == << st_high, st_holder, st_live >>
 otherVars == << other, other_alive, ever_other, foreign_unseen >>
 lateVars == << pending, grants, late_after_grant, own_late >>
 proofVars == << stopped_since_proof, resumed_over_foreign >>
 waitVars == << waited, waited_renewed_twice, w_waited_again, w_waited_own, w_listing_failed >>
+scopeVars == << open_listed, w_failed_open, w_refused_after_failed_open, w_q_early, w_p_early >>
 auditVars == << st_high, st_holder, st_live, other, other_alive, ever_other,
                 foreign_unseen, pending, grants, late_after_grant, own_late,
                 stopped_since_proof, resumed_over_foreign, waited, waited_renewed_twice,
-                w_waited_again, w_waited_own, w_listing_failed, renew_open, commit_open >>
+                w_waited_again, w_waited_own, w_listing_failed, renew_open, commit_open,
+                open_listed, w_failed_open, w_refused_after_failed_open, w_q_early,
+                w_p_early >>
 
 AuditInit ==
     /\ Init
@@ -124,20 +136,29 @@ AuditInit ==
     /\ w_listing_failed = FALSE
     /\ renew_open = FALSE
     /\ commit_open = FALSE
+    /\ open_listed = FALSE
+    /\ w_failed_open = FALSE
+    /\ w_refused_after_failed_open = FALSE
+    /\ w_q_early = FALSE
+    /\ w_p_early = FALSE
 
 \* Whether the machine stops the writer in this step.
 Stops == phase = "Live" /\ phase' = "Stopped"
 
 \* --- the open ------------------------------------------------------------
 
-\* The open's exclusive acquire on an empty realm grants token 1.
+\* The open's exclusive acquire on an empty realm grants token 1. In the
+\* fence part its listing passes at once; in the scopes part it ends later
+\* (AuditOpenListed, AuditOpenListingFails).
 AuditOpen ==
     /\ st_high = 0
     /\ Open(1)
     /\ st_high' = 1
     /\ st_holder' = 1
     /\ st_live' = TRUE
-    /\ UNCHANGED << otherVars, lateVars, proofVars, waitVars >>
+    /\ open_listed' = (AuditPart = "fence")
+    /\ UNCHANGED << otherVars, lateVars, proofVars, waitVars,
+                    w_failed_open, w_refused_after_failed_open, w_q_early, w_p_early >>
 
 \* --- the renewal tick -----------------------------------------------------
 
@@ -207,12 +228,18 @@ AuditLeaseLapses ==
 
 \* --- the re-acquire ---------------------------------------------------------
 
-\* A re-acquire begins only once no renew and no commit is in flight.
+\* A re-acquire begins only once no renew and no commit is in flight and the
+\* open's listing ended; after a failed open listing it is refused.
 AuditBeginReacquire ==
     /\ ~renew_open
     /\ ~commit_open
-    /\ BeginReacquire
-    /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars >>
+    /\ open_listed
+    /\ \/ BeginReacquire
+       \/ BeginReacquireAfterFailedOpen
+    /\ w_refused_after_failed_open' =
+           (w_refused_after_failed_open \/ (open_listing_failed /\ phase' = "Stopped"))
+    /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars,
+                    open_listed, w_failed_open, w_q_early, w_p_early >>
 
 \* The acquire in flight is granted: an exclusive acquire on a fence no live
 \* lease holds, or the takeover of the writer's own lease.
@@ -250,6 +277,7 @@ AuditAcquireHeld ==
 
 \* The acquire in flight times out: the store may still decide it later.
 AuditAcquireTimedOut ==
+    /\ AuditPart = "fence"
     /\ phase = "Acquiring"
     /\ Cardinality(pending) < AuditMaxPending
     /\ pending' = pending \cup {<< step, grants >>}
@@ -338,6 +366,7 @@ AuditCommitSettles ==
 
 \* It takes the fence over once, whoever holds it.
 AuditOtherAcquires ==
+    /\ AuditPart = "fence"
     /\ ~ever_other
     /\ st_high > 0
     /\ st_high < AuditMaxToken
@@ -363,28 +392,128 @@ AuditOtherStops ==
     /\ other_alive' = FALSE
     /\ UNCHANGED << vars, storeVars, other, ever_other, foreign_unseen, lateVars, proofVars, waitVars >>
 
+\* --- the scopes part: classification and the open's listing ----------------
+
+\* The conflicted incarnations the store may report (both of key "k1"), and
+\* the scopes a decision site may poison.
+AuditNames == {"k1~a", "k1~b"}
+AuditKeyOf(name) == "k1"
+AuditScopeKeys == {"k1", "k2"}
+
+\* Every generated arm of a conflicted incarnation's report.
+QuarantineArms(key, name, version, commit_ids) ==
+    \/ ScopeQuarantinedLive(key, name, version, commit_ids)
+    \/ ScopeQuarantinedStopped(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAcquiring(key, name, version, commit_ids)
+    \/ ScopeQuarantinedProving(key, name, version, commit_ids)
+    \/ ScopeQuarantinedResuming(key, name, version, commit_ids)
+    \/ ScopeQuarantinedWaitingOut(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainLive(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainStopped(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainProving(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainResuming(key, name, version, commit_ids)
+    \/ ScopeQuarantinedAgainWaitingOut(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedLive(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedStopped(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedAcquiring(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedProving(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedResuming(key, name, version, commit_ids)
+    \/ ScopeQuarantinedPoisonedWaitingOut(key, name, version, commit_ids)
+    \/ ScopeQuarantinedUnopened(key, name, version, commit_ids)
+    \/ ScopeQuarantinedLost(key, name, version, commit_ids)
+
+\* Every generated arm of a scope's poison.
+PoisonArms(scope, cause) ==
+    \/ ScopePoisonedLive(scope, cause)
+    \/ ScopePoisonedStopped(scope, cause)
+    \/ ScopePoisonedAcquiring(scope, cause)
+    \/ ScopePoisonedProving(scope, cause)
+    \/ ScopePoisonedResuming(scope, cause)
+    \/ ScopePoisonedWaitingOut(scope, cause)
+    \/ ScopePoisonedAgainLive(scope, cause)
+    \/ ScopePoisonedAgainStopped(scope, cause)
+    \/ ScopePoisonedAgainAcquiring(scope, cause)
+    \/ ScopePoisonedAgainProving(scope, cause)
+    \/ ScopePoisonedAgainResuming(scope, cause)
+    \/ ScopePoisonedAgainWaitingOut(scope, cause)
+    \/ ScopePoisonedQuarantinedLive(scope, cause)
+    \/ ScopePoisonedQuarantinedStopped(scope, cause)
+    \/ ScopePoisonedQuarantinedAcquiring(scope, cause)
+    \/ ScopePoisonedQuarantinedProving(scope, cause)
+    \/ ScopePoisonedQuarantinedResuming(scope, cause)
+    \/ ScopePoisonedQuarantinedWaitingOut(scope, cause)
+    \/ ScopePoisonedUnopened(scope, cause)
+    \/ ScopePoisonedLost(scope, cause)
+
+\* The open's listing ends: it listed, and nothing is reported.
+AuditOpenListed ==
+    /\ AuditPart = "scopes"
+    /\ phase # "Unopened"
+    /\ ~open_listed
+    /\ open_listed' = TRUE
+    /\ UNCHANGED << vars, storeVars, otherVars, lateVars, proofVars, waitVars,
+                    w_failed_open, w_refused_after_failed_open, w_q_early, w_p_early >>
+
+\* The open's listing failed: the realm reports it before any re-acquire may
+\* begin (the open holds the gate a re-acquire takes).
+AuditOpenListingFails ==
+    /\ AuditPart = "scopes"
+    /\ ~open_listed
+    /\ \/ OpenListingFailedLive
+       \/ OpenListingFailedStopped
+    /\ open_listed' = TRUE
+    /\ w_failed_open' = TRUE
+    /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars,
+                    w_refused_after_failed_open, w_q_early, w_p_early >>
+
+\* A conflicted incarnation is reported: by the open's listing, a load that
+\* meets the conflict, or the runtime store's open.
+AuditQuarantine ==
+    /\ AuditPart = "scopes"
+    /\ \E name \in AuditNames, version \in 1..2, commit_ids \in {{}, {"c1"}} :
+          QuarantineArms(AuditKeyOf(name), name, version, commit_ids)
+    /\ w_q_early' = (w_q_early \/ (grants = 0 /\ quarantined_keys' # {}))
+    /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars,
+                    open_listed, w_failed_open, w_refused_after_failed_open, w_p_early >>
+
+\* A decision site poisons a scope.
+AuditPoison ==
+    /\ AuditPart = "scopes"
+    /\ \E scope \in AuditScopeKeys, cause \in {"Unsettled", "Dropped"} :
+          PoisonArms(scope, cause)
+    /\ w_p_early' = (w_p_early \/ (grants = 0 /\ DOMAIN poisoned_scopes' # {}))
+    /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars,
+                    open_listed, w_failed_open, w_refused_after_failed_open, w_q_early >>
+
 AuditNext ==
-    \/ AuditRenewAnswersStopped
-    \/ AuditWindowCloses
-    \/ AuditRenewCurrent
-    \/ AuditCommitFencedOut
-    \/ AuditCommitSettles
     \/ /\ \/ AuditOpen
-          \/ AuditRenewSuperseded
-          \/ AuditLeaseLapses
           \/ AuditBeginReacquire
-          \/ AuditAcquireGranted
-          \/ AuditAcquireHeld
-          \/ AuditAcquireTimedOut
-          \/ AuditAcquireFailed
-          \/ AuditLateDecision
-          \/ AuditLeaseEnded
-          \/ AuditListing
-          \/ AuditResumeRenew
-          \/ AuditOtherAcquires
-          \/ AuditOtherCommits
-          \/ AuditOtherStops
+          \/ AuditOpenListed
+          \/ AuditOpenListingFails
+          \/ AuditQuarantine
+          \/ AuditPoison
        /\ UNCHANGED << renew_open, commit_open >>
+    \/ /\ \/ AuditRenewAnswersStopped
+          \/ AuditWindowCloses
+          \/ AuditRenewCurrent
+          \/ AuditCommitFencedOut
+          \/ AuditCommitSettles
+          \/ /\ \/ AuditRenewSuperseded
+                \/ AuditLeaseLapses
+                \/ AuditAcquireGranted
+                \/ AuditAcquireHeld
+                \/ AuditAcquireTimedOut
+                \/ AuditAcquireFailed
+                \/ AuditLateDecision
+                \/ AuditLeaseEnded
+                \/ AuditListing
+                \/ AuditResumeRenew
+                \/ AuditOtherAcquires
+                \/ AuditOtherCommits
+                \/ AuditOtherStops
+             /\ UNCHANGED << renew_open, commit_open >>
+       /\ UNCHANGED scopeVars
 
 AuditSpec == AuditInit /\ [][AuditNext]_<< vars, auditVars >>
 
@@ -406,6 +535,22 @@ AuditWaitsAgainOnlyUnrenewed ==
 
 AuditTokenNeverAboveTheStore ==
     token <= st_high
+
+\* A realm whose open failed its listing never acquires again.
+AuditNoReacquireAfterFailedOpen ==
+    w_failed_open => phase \notin {"Acquiring", "Proving", "Resuming"}
+
+\* The classifications only grow: no key, record or poison is removed, and
+\* no record or cause changes, before a reopen.
+AuditClassificationsMonotone ==
+    [][ /\ quarantined_keys \subseteq quarantined_keys'
+        /\ DOMAIN quarantine_versions \subseteq DOMAIN quarantine_versions'
+        /\ \A name \in DOMAIN quarantine_versions :
+              /\ quarantine_versions'[name] = quarantine_versions[name]
+              /\ quarantine_commit_ids'[name] = quarantine_commit_ids[name]
+        /\ DOMAIN poisoned_scopes \subseteq DOMAIN poisoned_scopes'
+        /\ \A scope \in DOMAIN poisoned_scopes : poisoned_scopes'[scope] = poisoned_scopes[scope]
+      ]_<< vars, auditVars >>
 
 \* --- witnesses (the runner requires each negation violated) ----------------
 
@@ -429,5 +574,17 @@ NotAuditWitnessResidual == ~AuditWitnessResidual
 
 AuditWitnessWaitedOutAgainResumed == w_waited_again /\ phase = "Live"
 NotAuditWitnessWaitedOutAgainResumed == ~AuditWitnessWaitedOutAgainResumed
+
+\* The scopes part's witnesses.
+AuditWitnessQuarantineKeptAcrossReacquire ==
+    w_q_early /\ grants >= 1 /\ phase = "Live" /\ quarantined_keys # {}
+NotAuditWitnessQuarantineKeptAcrossReacquire == ~AuditWitnessQuarantineKeptAcrossReacquire
+
+AuditWitnessPoisonKeptAcrossReacquire ==
+    w_p_early /\ grants >= 1 /\ phase = "Live" /\ DOMAIN poisoned_scopes # {}
+NotAuditWitnessPoisonKeptAcrossReacquire == ~AuditWitnessPoisonKeptAcrossReacquire
+
+AuditWitnessFailedOpenRefusesReacquire == w_refused_after_failed_open
+NotAuditWitnessFailedOpenRefusesReacquire == ~AuditWitnessFailedOpenRefusesReacquire
 
 =============================================================================

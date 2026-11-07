@@ -13,7 +13,7 @@
 use meerkat_machine_schema::catalog::dsl::host_store_writer_fence::{
     HostStoreWriterFenceEffect, HostStoreWriterFenceInput, HostStoreWriterFenceMachineAuthority,
     HostStoreWriterFenceMachineMutator, HostStoreWriterFenceMachineTransition,
-    HostStoreWriterFencePhase, WriterFenceAcquireOutcome, WriterFenceAcquireStep,
+    HostStoreWriterFencePhase, ScopePoisonCause, WriterFenceAcquireOutcome, WriterFenceAcquireStep,
     WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal, WriterFenceRenewOutcome,
     WriterFenceStopCause,
 };
@@ -79,6 +79,24 @@ fn held_again(holder: u64, lease_moved: bool) -> Input {
         outcome: WriterFenceAcquireOutcome::Held,
         token: holder,
         lease_moved,
+    }
+}
+
+/// A conflicted incarnation `name` of the scope `key`, at `version`, with
+/// `commit_ids`.
+fn quarantined(key: &str, name: &str, version: u64, commit_ids: &[&str]) -> Input {
+    Input::ScopeQuarantined {
+        key: key.to_string(),
+        name: name.to_string(),
+        version,
+        commit_ids: commit_ids.iter().map(|id| (*id).to_string()).collect(),
+    }
+}
+
+fn poisoned(scope: &str, cause: ScopePoisonCause) -> Input {
+    Input::ScopePoisoned {
+        scope: scope.to_string(),
+        cause,
     }
 }
 
@@ -808,9 +826,174 @@ fn a_realm_whose_open_listing_failed_never_reacquires() {
     );
 }
 
+// [P3-H] A quarantine has two parts that only grow: the key set and one
+// record per conflicted incarnation. A new name for a recorded key adds its
+// record and leaves the key set unchanged; a repeated name changes nothing,
+// even with another version or other ids.
+#[test]
+fn a_quarantine_records_each_conflicted_incarnation_under_its_key() {
+    for phase in [
+        Phase::Live,
+        Phase::Stopped,
+        Phase::Acquiring,
+        Phase::Proving,
+        Phase::Resuming,
+        Phase::WaitingOut,
+    ] {
+        let mut authority = authority_in(phase);
+        let first = apply(
+            &mut authority,
+            quarantined("mhb:rmob", "mhb:rmob~one", 3, &["a", "b"]),
+        );
+        assert!(
+            matches!(
+                only_effect(&first),
+                Effect::ScopeQuarantineRecorded { ref key, ref name }
+                    if key == "mhb:rmob" && name == "mhb:rmob~one"
+            ),
+            "{phase:?}"
+        );
+        assert_eq!(authority.state().lifecycle_phase, phase);
+        let state = authority.state();
+        assert!(state.quarantined_keys.contains("mhb:rmob"));
+        assert_eq!(state.quarantine_versions.get("mhb:rmob~one"), Some(&3));
+        assert_eq!(
+            state.quarantine_commit_ids.get("mhb:rmob~one"),
+            Some(&["a".to_string(), "b".to_string()].into_iter().collect())
+        );
+
+        let second = apply(
+            &mut authority,
+            quarantined("mhb:rmob", "mhb:rmob~two", 5, &[]),
+        );
+        assert!(matches!(
+            only_effect(&second),
+            Effect::ScopeQuarantineRecorded { .. }
+        ));
+        let state = authority.state();
+        assert_eq!(state.quarantined_keys.len(), 1, "the key set is unchanged");
+        assert_eq!(state.quarantine_versions.get("mhb:rmob~two"), Some(&5));
+        assert_eq!(
+            state
+                .quarantine_commit_ids
+                .get("mhb:rmob~two")
+                .map(|ids| ids.len()),
+            Some(0)
+        );
+
+        let before = authority.state().clone();
+        let repeated = apply(
+            &mut authority,
+            quarantined("mhb:rmob", "mhb:rmob~one", 9, &["c"]),
+        );
+        assert!(effects(&repeated).is_empty());
+        assert_eq!(authority.state(), &before, "a record is never overwritten");
+    }
+}
+
+// The first poison cause stands; a repeat changes nothing.
+#[test]
+fn a_scope_poison_keeps_its_first_cause() {
+    let mut authority = authority_in(Phase::Live);
+    let recorded = apply(
+        &mut authority,
+        poisoned("rt:x", ScopePoisonCause::Unsettled),
+    );
+    assert!(matches!(
+        only_effect(&recorded),
+        Effect::ScopePoisonRecorded {
+            ref scope,
+            cause: ScopePoisonCause::Unsettled,
+        } if scope == "rt:x"
+    ));
+    let before = authority.state().clone();
+    let repeated = apply(&mut authority, poisoned("rt:x", ScopePoisonCause::Dropped));
+    assert!(effects(&repeated).is_empty());
+    assert_eq!(authority.state(), &before);
+    assert_eq!(
+        authority.state().poisoned_scopes.get("rt:x"),
+        Some(&ScopePoisonCause::Unsettled)
+    );
+}
+
+// One classification per scope: a poisoned scope refuses a quarantine, and
+// a quarantined one refuses a poison, each changing nothing.
+#[test]
+fn a_scope_is_quarantined_or_poisoned_never_both() {
+    let mut authority = authority_in(Phase::Live);
+    apply(&mut authority, poisoned("rt:x", ScopePoisonCause::Refused));
+    let before = authority.state().clone();
+    assert_refused(
+        &apply(&mut authority, quarantined("rt:x", "rt:x~one", 2, &[])),
+        WriterFenceRefusal::Poisoned,
+    );
+    assert_eq!(authority.state(), &before);
+
+    apply(&mut authority, quarantined("rt:y", "rt:y~one", 2, &[]));
+    let before = authority.state().clone();
+    assert_refused(
+        &apply(&mut authority, poisoned("rt:y", ScopePoisonCause::Adapter)),
+        WriterFenceRefusal::Quarantined,
+    );
+    assert_eq!(authority.state(), &before);
+}
+
+// The classifications survive a stop, a re-acquire and a resume: nothing
+// removes an entry before a reopen.
+#[test]
+fn scope_classifications_survive_a_stop_a_reacquire_and_a_resume() {
+    let mut authority = authority_in(Phase::Live);
+    apply(&mut authority, quarantined("rt:q", "rt:q~one", 4, &["a"]));
+    apply(
+        &mut authority,
+        poisoned("rt:p", ScopePoisonCause::Unsettled),
+    );
+    let recorded = authority.state().clone();
+    apply(
+        &mut authority,
+        renew(WriterFenceRenewOutcome::Failed, OPENED, OPENED, true),
+    );
+    apply(&mut authority, Input::BeginReacquire);
+    apply(
+        &mut authority,
+        acquire(WriterFenceAcquireOutcome::Granted, GRANT),
+    );
+    apply(
+        &mut authority,
+        listing(WriterFenceListingOutcome::Clean, GRANT),
+    );
+    apply(&mut authority, renewed_in_window(GRANT));
+    let state = authority.state();
+    assert_eq!(state.lifecycle_phase, Phase::Live, "the writer resumed");
+    assert_eq!(state.quarantined_keys, recorded.quarantined_keys);
+    assert_eq!(state.quarantine_versions, recorded.quarantine_versions);
+    assert_eq!(state.quarantine_commit_ids, recorded.quarantine_commit_ids);
+    assert_eq!(state.poisoned_scopes, recorded.poisoned_scopes);
+}
+
+#[test]
+fn scope_classifications_are_refused_unopened_or_lost() {
+    for (phase, reason) in [
+        (Phase::Unopened, WriterFenceRefusal::NotOpened),
+        (Phase::Lost, WriterFenceRefusal::Lost),
+    ] {
+        let mut authority = authority_in(phase);
+        let before = authority.state().clone();
+        assert_refused(
+            &apply(&mut authority, quarantined("rt:q", "rt:q~one", 1, &[])),
+            reason,
+        );
+        assert_refused(
+            &apply(&mut authority, poisoned("rt:p", ScopePoisonCause::Dropped)),
+            reason,
+        );
+        assert_eq!(authority.state(), &before, "{phase:?}");
+    }
+}
+
 #[test]
 fn every_input_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let inputs: [(&str, fn() -> Input); 11] = [
+    let inputs: [(&str, fn() -> Input); 14] = [
         ("Open", || Input::Open { token: 9 }),
         ("WindowClosed", || Input::WindowClosed),
         ("Renewed", || renewed_in_window(OPENED)),
@@ -832,22 +1015,35 @@ fn every_input_in_every_phase_is_total_and_only_mutates_where_intended() {
         ("Poison", || Input::Poison {
             cause: WriterFenceLostCause::AdapterRule,
         }),
+        ("OpenListingFailed", || Input::OpenListingFailed),
+        ("ScopeQuarantined", || {
+            quarantined("rt:q", "rt:q~one", 1, &[])
+        }),
+        ("ScopePoisoned", || {
+            poisoned("rt:p", ScopePoisonCause::Unsettled)
+        }),
     ];
     for phase in ALL_PHASES {
         for (name, input) in inputs {
             let mut authority = authority_in(phase);
             let before = authority.state().clone();
             let transition = apply(&mut authority, input());
-            let mutates = matches!(
-                (phase, name),
-                (Phase::Unopened, "Open")
-                    | (Phase::Live, "WindowClosed" | "RenewFailed" | "Poison")
-                    | (Phase::Stopped, "BeginReacquire" | "Poison")
-                    | (Phase::Acquiring, "Granted" | "TimedOut" | "Poison")
-                    | (Phase::Proving, "ListingClean" | "ListingFailed" | "Poison")
-                    | (Phase::Resuming, "Renewed" | "RenewFailed" | "Poison")
-                    | (Phase::WaitingOut, "LeaseEnded" | "Poison")
-            );
+            let classifies = matches!(
+                name,
+                "OpenListingFailed" | "ScopeQuarantined" | "ScopePoisoned"
+            ) && phase != Phase::Unopened
+                && phase != Phase::Lost;
+            let mutates = classifies
+                || matches!(
+                    (phase, name),
+                    (Phase::Unopened, "Open")
+                        | (Phase::Live, "WindowClosed" | "RenewFailed" | "Poison")
+                        | (Phase::Stopped, "BeginReacquire" | "Poison")
+                        | (Phase::Acquiring, "Granted" | "TimedOut" | "Poison")
+                        | (Phase::Proving, "ListingClean" | "ListingFailed" | "Poison")
+                        | (Phase::Resuming, "Renewed" | "RenewFailed" | "Poison")
+                        | (Phase::WaitingOut, "LeaseEnded" | "Poison")
+                );
             if mutates {
                 assert_ne!(
                     authority.state(),

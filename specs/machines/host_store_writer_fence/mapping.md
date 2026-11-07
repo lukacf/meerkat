@@ -16,7 +16,8 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `writer_fence_renew_answers` — host_store_writer_fence_machine.rs::renew_answers_never_resume_a_stopped_writer ignores a renew that answers once the writer stopped and a fenced-out answer naming the writer's own newer token, loses the realm to any other fenced-out answer, and refuses a renew answer where no renew can be in flight
 - `writer_fence_resume` — host_store_writer_fence_machine.rs::a_stopped_writer_resumes_only_through_a_proved_grant re-acquires from Stopped alone, takes its own recorded lease over, proves the grant with a clean listing, installs its token and resumes on its first renew, and refuses a re-acquire while live, in flight, unopened or lost
 - `writer_fence_failed_attempts` — host_store_writer_fence_machine.rs::a_failed_attempt_leaves_the_writer_stopped returns a failed, timed-out or held takeover acquire, a failed listing and a failed resume renew to Stopped, counts a timed-out acquire, and keeps a grant whose listing failed as the writer's own lease, which the next attempt takes over
-- `writer_fence_open_listing_failed` — host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire
+- `writer_fence_open_listing_failed` — host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire of the stopped writer, changing nothing
+- `writer_fence_scope_classification` — host_store_writer_fence_machine.rs::a_quarantine_records_each_conflicted_incarnation_under_its_key, a_scope_poison_keeps_its_first_cause, a_scope_is_quarantined_or_poisoned_never_both, scope_classifications_survive_a_stop_a_reacquire_and_a_resume and scope_classifications_are_refused_unopened_or_lost record a key and each conflicted incarnation once, keep the first poison cause, refuse a second classification, keep both through a stop, a re-acquire and a resume, and refuse both unopened or lost, in every opened phase
 - `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move
 - `writer_fence_loss` — host_store_writer_fence_machine.rs::the_realm_is_lost_once_and_for_good loses the realm to a foreign batch, a fenced-out resume renew, a grant at or below the installed token and a poison, keeps the first cause, and refuses every later input and every answer the writer did not ask for
 
@@ -126,6 +127,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BeginReacquire`
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_resume`
+- `BeginReacquireAfterFailedOpen`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_open_listing_failed`
 - `BeginReacquireLive`
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_resume`
@@ -288,6 +292,126 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `OpenListingFailedLost`
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_open_listing_failed`
+- `ScopeQuarantinedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedAgainWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedPoisonedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopeQuarantinedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedAgainWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedLive`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedStopped`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedAcquiring`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedProving`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedResuming`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedQuarantinedWaitingOut`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedUnopened`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonedLost`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
 
 ### Effects
 - `WriterOpened`
@@ -322,12 +446,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `writer_fence_renew_answers`
 - `RequestRefused`
   - anchors: `host_store_writer_fence`
-  - scenarios: `writer_fence_open`, `writer_fence_stop`, `writer_fence_renew_answers`, `writer_fence_resume`, `writer_fence_open_listing_failed`, `writer_fence_unknown_holders`, `writer_fence_loss`
+  - scenarios: `writer_fence_open`, `writer_fence_stop`, `writer_fence_renew_answers`, `writer_fence_resume`, `writer_fence_open_listing_failed`, `writer_fence_scope_classification`, `writer_fence_unknown_holders`, `writer_fence_loss`
+- `ScopeQuarantineRecorded`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `ScopePoisonRecorded`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
 
 ### Invariants
 - `unopened_holds_nothing`
   - anchors: `host_store_writer_fence`
-  - scenarios: `writer_fence_open`
+  - scenarios: `writer_fence_open`, `writer_fence_scope_classification`
+- `no_scope_is_quarantined_and_poisoned`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
+- `quarantine_records_are_whole`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_scope_classification`
 - `live_writer_is_not_stopped`
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_stop`

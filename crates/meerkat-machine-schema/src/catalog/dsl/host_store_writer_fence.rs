@@ -29,8 +29,12 @@
 //! - **The listing comparison.** The versions the realm last saw or wrote are
 //!   data; the realm compares a fresh listing with them and reports it clean,
 //!   foreign or failed.
-//! - **Scope poison.** A scope whose batch did not settle is poisoned in the
-//!   realm's scope registry; this machine owns only the loss of the realm.
+//! - **When to report, and the texts.** The realm decides when a scope is
+//!   quarantined or poisoned and keeps the cause texts; the machine owns
+//!   which scopes are quarantined (for a conflict the store reports, with
+//!   each conflicted incarnation's version and commit ids) or poisoned
+//!   (with the first cause), and the realm caches each scope's
+//!   classification on its cell.
 //!
 //! # Totality discipline
 //!
@@ -228,6 +232,43 @@ pub enum WriterFenceLostCause {
     AdapterRule,
 }
 
+/// Why a scope of the realm was poisoned: the decision site. Every one
+/// leaves the scope's memory possibly ahead of the store, so the scope
+/// refuses every call until the realm is reopened.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopePoisonCause {
+    /// A commit's plan failed after memory changed.
+    #[default]
+    PlanFailed,
+    /// A batch's outcome stayed unknown.
+    Unsettled,
+    /// The store refused a batch after memory changed.
+    Refused,
+    /// A call was dropped while its change was armed.
+    Dropped,
+    /// A commit could not be prepared after memory changed.
+    PrepareFailed,
+    /// A scope's body did not import after its load.
+    ImportFailed,
+    /// A call changed memory outside the scopes it locked.
+    StrayTouch,
+    /// An adapter reported a broken rule for one scope.
+    Adapter,
+}
+
 /// Why an input was refused.
 #[derive(
     Debug,
@@ -269,6 +310,10 @@ pub enum WriterFenceRefusal {
     /// The open's listing failed: the realm is never served, and no
     /// re-acquire lists against a baseline the open never installed.
     OpenListingFailed,
+    /// The scope is quarantined: a poison report changes nothing.
+    Quarantined,
+    /// The scope is poisoned: a quarantine changes nothing.
+    Poisoned,
 }
 
 machine! {
@@ -303,6 +348,22 @@ machine! {
             // unstopped). The realm's self-fence window reads it as its
             // failed renew.
             writer_stopped: bool,
+            // The open's listing failed: no re-acquire is made.
+            open_listing_failed: bool,
+            // Scopes quarantined for a conflict the store reports, by the
+            // store name without its incarnation (a chunk by its full
+            // name). Only grows until a reopen.
+            quarantined_keys: Set<String>,
+            // Each conflicted incarnation of a quarantined key, by its full
+            // store name: the version that holds two batches. Only grows,
+            // and a record is never overwritten.
+            quarantine_versions: Map<String, u64>,
+            // The same incarnations' conflicting commit ids (none when the
+            // store did not name them).
+            quarantine_commit_ids: Map<String, Set<String>>,
+            // Scopes poisoned, keyed as the quarantined keys, each with
+            // the first cause. Only grows until a reopen.
+            poisoned_scopes: Map<String, Enum<ScopePoisonCause>>,
         }
 
         init(Unopened) {
@@ -315,6 +376,11 @@ machine! {
             stop_cause = WriterFenceStopCause::RenewFailed,
             lost_cause = WriterFenceLostCause::FencedOutRenew,
             writer_stopped = false,
+            open_listing_failed = false,
+            quarantined_keys = EmptySet,
+            quarantine_versions = EmptyMap,
+            quarantine_commit_ids = EmptyMap,
+            poisoned_scopes = EmptyMap,
         }
 
         terminal [Lost]
@@ -368,6 +434,12 @@ machine! {
             Poison { cause: Enum<WriterFenceLostCause> },
             // The open's listing failed.
             OpenListingFailed,
+            // The conflicted incarnation `name` of the scope `key`, listed
+            // or met at a load, holds two batches at `version`, with their
+            // commit ids (possibly none).
+            ScopeQuarantined { key: String, name: String, version: u64, commit_ids: Set<String> },
+            // A decision site poisoned `scope`.
+            ScopePoisoned { scope: String, cause: Enum<ScopePoisonCause> },
         }
 
         effect HostStoreWriterFenceEffect {
@@ -395,6 +467,12 @@ machine! {
             // itself.
             RenewIgnored,
             RequestRefused { reason: Enum<WriterFenceRefusal> },
+            // A conflicted incarnation was recorded: the realm caches the
+            // key's quarantine on its cell.
+            ScopeQuarantineRecorded { key: String, name: String },
+            // A scope's poison was recorded: the realm caches it, with its
+            // cause text, on the scope's cell.
+            ScopePoisonRecorded { scope: String, cause: Enum<ScopePoisonCause> },
         }
 
         // An unopened writer holds no token and no attempt.
@@ -407,7 +485,21 @@ machine! {
                     && self.timed_out == 0
                     && self.waited_holder == None
                     && !self.writer_stopped
+                    && !self.open_listing_failed
+                    && self.quarantined_keys.len() == 0
+                    && self.quarantine_versions.keys().len() == 0
+                    && self.poisoned_scopes.keys().len() == 0
                 )
+        }
+
+        // One classification per scope: never quarantined and poisoned.
+        invariant no_scope_is_quarantined_and_poisoned {
+            for_all(key in self.quarantined_keys, !self.poisoned_scopes.contains_key(key))
+        }
+
+        // A conflicted incarnation's record has both parts.
+        invariant quarantine_records_are_whole {
+            self.quarantine_versions.keys() == self.quarantine_commit_ids.keys()
         }
 
         // A live writer has not stopped since it last resumed.
@@ -476,6 +568,9 @@ machine! {
         disposition RealmLost => local seam SurfaceResultAlignment,
         disposition RenewIgnored => local seam SurfaceResultAlignment,
         disposition RequestRefused => local seam SurfaceResultAlignment,
+        // Classifications: the realm caches them on the scope's cell.
+        disposition ScopeQuarantineRecorded => local seam SurfaceResultAlignment,
+        disposition ScopePoisonRecorded => local seam SurfaceResultAlignment,
 
         // ------------------------------------------------------------------
         // Open
@@ -732,11 +827,23 @@ machine! {
         transition BeginReacquire {
             on input BeginReacquire
             guard "stopped" { self.lifecycle_phase == Phase::Stopped }
+            guard "the_open_listed" { !self.open_listing_failed }
             update {
                 self.step = WriterFenceAcquireStep::Exclusive;
             }
             to Acquiring
             emit AcquireRequested { step: self.step }
+        }
+
+        // A realm whose open failed its listing has no baseline to compare
+        // a fresh listing with, and is never served: no re-acquire.
+        transition BeginReacquireAfterFailedOpen {
+            on input BeginReacquire
+            guard "stopped" { self.lifecycle_phase == Phase::Stopped }
+            guard "the_open_listing_failed" { self.open_listing_failed }
+            update {}
+            to Stopped
+            emit RequestRefused { reason: WriterFenceRefusal::OpenListingFailed }
         }
 
         transition BeginReacquireLive {
@@ -1093,7 +1200,9 @@ machine! {
         transition OpenListingFailed {
             per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
             on input OpenListingFailed
-            update {}
+            update {
+                self.open_listing_failed = true;
+            }
             to Live
         }
 
@@ -1107,6 +1216,121 @@ machine! {
 
         transition OpenListingFailedLost {
             on input OpenListingFailed
+            guard "lost" { self.lifecycle_phase == Phase::Lost }
+            update {}
+            to Lost
+            emit RequestRefused { reason: WriterFenceRefusal::Lost }
+        }
+
+        // ------------------------------------------------------------------
+        // ScopeQuarantined
+        // In every opened phase: the open's listing, a load meeting a
+        // conflict, and the runtime store's open may each record one. A
+        // re-acquire records nothing (the realm compares its listing with
+        // the records). Nothing removes a key or a record.
+        // ------------------------------------------------------------------
+
+        // A conflicted incarnation not recorded yet, on a scope not
+        // poisoned: the key joins the set (if absent) and the record is
+        // added.
+        transition ScopeQuarantined {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "a_new_incarnation" { !self.quarantine_versions.contains_key(name) }
+            guard "not_poisoned" { !self.poisoned_scopes.contains_key(key) }
+            update {
+                self.quarantined_keys.insert(key);
+                self.quarantine_versions.insert(name, version);
+                self.quarantine_commit_ids.insert(name, commit_ids);
+            }
+            to Live
+            emit ScopeQuarantineRecorded { key: key, name: name }
+        }
+
+        // A recorded incarnation again: its record stands.
+        transition ScopeQuarantinedAgain {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "a_recorded_incarnation" { self.quarantine_versions.contains_key(name) }
+            update {}
+            to Live
+        }
+
+        // A poisoned scope stays poisoned: one classification per scope.
+        transition ScopeQuarantinedPoisoned {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "a_new_incarnation" { !self.quarantine_versions.contains_key(name) }
+            guard "poisoned" { self.poisoned_scopes.contains_key(key) }
+            update {}
+            to Live
+            emit RequestRefused { reason: WriterFenceRefusal::Poisoned }
+        }
+
+        transition ScopeQuarantinedUnopened {
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "unopened" { self.lifecycle_phase == Phase::Unopened }
+            update {}
+            to Unopened
+            emit RequestRefused { reason: WriterFenceRefusal::NotOpened }
+        }
+
+        transition ScopeQuarantinedLost {
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "lost" { self.lifecycle_phase == Phase::Lost }
+            update {}
+            to Lost
+            emit RequestRefused { reason: WriterFenceRefusal::Lost }
+        }
+
+        // ------------------------------------------------------------------
+        // ScopePoisoned
+        // The first cause stands, and nothing removes an entry before a
+        // reopen.
+        // ------------------------------------------------------------------
+
+        transition ScopePoisoned {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopePoisoned { scope, cause }
+            guard "not_poisoned" { !self.poisoned_scopes.contains_key(scope) }
+            guard "not_quarantined" { !self.quarantined_keys.contains(scope) }
+            update {
+                self.poisoned_scopes.insert(scope, cause);
+            }
+            to Live
+            emit ScopePoisonRecorded { scope: scope, cause: cause }
+        }
+
+        transition ScopePoisonedAgain {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopePoisoned { scope, cause }
+            guard "poisoned" { self.poisoned_scopes.contains_key(scope) }
+            update {}
+            to Live
+        }
+
+        // A quarantined scope keeps its quarantine, which already refuses
+        // everything a poison refuses.
+        transition ScopePoisonedQuarantined {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopePoisoned { scope, cause }
+            guard "not_poisoned" { !self.poisoned_scopes.contains_key(scope) }
+            guard "quarantined" { self.quarantined_keys.contains(scope) }
+            update {}
+            to Live
+            emit RequestRefused { reason: WriterFenceRefusal::Quarantined }
+        }
+
+        transition ScopePoisonedUnopened {
+            on input ScopePoisoned { scope, cause }
+            guard "unopened" { self.lifecycle_phase == Phase::Unopened }
+            update {}
+            to Unopened
+            emit RequestRefused { reason: WriterFenceRefusal::NotOpened }
+        }
+
+        transition ScopePoisonedLost {
+            on input ScopePoisoned { scope, cause }
             guard "lost" { self.lifecycle_phase == Phase::Lost }
             update {}
             to Lost

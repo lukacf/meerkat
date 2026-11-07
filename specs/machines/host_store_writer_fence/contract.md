@@ -16,6 +16,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `stop_cause`: `WriterFenceStopCause`
 - `lost_cause`: `WriterFenceLostCause`
 - `writer_stopped`: `Bool`
+- `open_listing_failed`: `Bool`
+- `quarantined_keys`: `Set<String>`
+- `quarantine_versions`: `Map<String, u64>`
+- `quarantine_commit_ids`: `Map<String, Set<String>>`
+- `poisoned_scopes`: `Map<String, ScopePoisonCause>`
 
 ## Inputs
 - `Open`(token: u64)
@@ -27,6 +32,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListingChecked`(outcome: WriterFenceListingOutcome, token: u64)
 - `Poison`(cause: WriterFenceLostCause)
 - `OpenListingFailed`
+- `ScopeQuarantined`(key: String, name: String, version: u64, commit_ids: Set<String>)
+- `ScopePoisoned`(scope: String, cause: ScopePoisonCause)
 
 ## Signals
 
@@ -42,9 +49,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RealmLost`(cause: WriterFenceLostCause)
 - `RenewIgnored`
 - `RequestRefused`(reason: WriterFenceRefusal)
+- `ScopeQuarantineRecorded`(key: String, name: String)
+- `ScopePoisonRecorded`(scope: String, cause: ScopePoisonCause)
 
 ## Invariants
 - `unopened_holds_nothing`
+- `no_scope_is_quarantined_and_poisoned`
+- `quarantine_records_are_whole`
 - `live_writer_is_not_stopped`
 - `stopped_and_attempting_writer_is_stopped`
 - `proving_and_resuming_carry_their_grant`
@@ -288,8 +299,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `BeginReacquire`
 - From: `Stopped`
 - On: `BeginReacquire`()
+- Guards:
+  - `the_open_listed`
 - Emits: `AcquireRequested`
 - To: `Acquiring`
+
+### `BeginReacquireAfterFailedOpen`
+- From: `Stopped`
+- On: `BeginReacquire`()
+- Guards:
+  - `the_open_listing_failed`
+- Emits: `RequestRefused`
+- To: `Stopped`
 
 ### `BeginReacquireLive`
 - From: `Live`
@@ -661,6 +682,330 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRefused`
 - To: `Lost`
 
+### `ScopeQuarantinedLive`
+- From: `Live`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `Live`
+
+### `ScopeQuarantinedStopped`
+- From: `Stopped`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `Stopped`
+
+### `ScopeQuarantinedAcquiring`
+- From: `Acquiring`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `Acquiring`
+
+### `ScopeQuarantinedProving`
+- From: `Proving`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `Proving`
+
+### `ScopeQuarantinedResuming`
+- From: `Resuming`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `Resuming`
+
+### `ScopeQuarantinedWaitingOut`
+- From: `WaitingOut`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `not_poisoned`
+- Emits: `ScopeQuarantineRecorded`
+- To: `WaitingOut`
+
+### `ScopeQuarantinedAgainLive`
+- From: `Live`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `Live`
+
+### `ScopeQuarantinedAgainStopped`
+- From: `Stopped`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `Stopped`
+
+### `ScopeQuarantinedAgainAcquiring`
+- From: `Acquiring`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `Acquiring`
+
+### `ScopeQuarantinedAgainProving`
+- From: `Proving`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `Proving`
+
+### `ScopeQuarantinedAgainResuming`
+- From: `Resuming`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `Resuming`
+
+### `ScopeQuarantinedAgainWaitingOut`
+- From: `WaitingOut`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_recorded_incarnation`
+- To: `WaitingOut`
+
+### `ScopeQuarantinedPoisonedLive`
+- From: `Live`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `Live`
+
+### `ScopeQuarantinedPoisonedStopped`
+- From: `Stopped`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `Stopped`
+
+### `ScopeQuarantinedPoisonedAcquiring`
+- From: `Acquiring`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `Acquiring`
+
+### `ScopeQuarantinedPoisonedProving`
+- From: `Proving`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `Proving`
+
+### `ScopeQuarantinedPoisonedResuming`
+- From: `Resuming`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `Resuming`
+
+### `ScopeQuarantinedPoisonedWaitingOut`
+- From: `WaitingOut`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Guards:
+  - `a_new_incarnation`
+  - `poisoned`
+- Emits: `RequestRefused`
+- To: `WaitingOut`
+
+### `ScopeQuarantinedUnopened`
+- From: `Unopened`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Emits: `RequestRefused`
+- To: `Unopened`
+
+### `ScopeQuarantinedLost`
+- From: `Lost`
+- On: `ScopeQuarantined`(key, name, version, commit_ids)
+- Emits: `RequestRefused`
+- To: `Lost`
+
+### `ScopePoisonedLive`
+- From: `Live`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `Live`
+
+### `ScopePoisonedStopped`
+- From: `Stopped`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `Stopped`
+
+### `ScopePoisonedAcquiring`
+- From: `Acquiring`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `Acquiring`
+
+### `ScopePoisonedProving`
+- From: `Proving`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `Proving`
+
+### `ScopePoisonedResuming`
+- From: `Resuming`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `Resuming`
+
+### `ScopePoisonedWaitingOut`
+- From: `WaitingOut`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `not_quarantined`
+- Emits: `ScopePoisonRecorded`
+- To: `WaitingOut`
+
+### `ScopePoisonedAgainLive`
+- From: `Live`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `Live`
+
+### `ScopePoisonedAgainStopped`
+- From: `Stopped`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `Stopped`
+
+### `ScopePoisonedAgainAcquiring`
+- From: `Acquiring`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `Acquiring`
+
+### `ScopePoisonedAgainProving`
+- From: `Proving`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `Proving`
+
+### `ScopePoisonedAgainResuming`
+- From: `Resuming`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `Resuming`
+
+### `ScopePoisonedAgainWaitingOut`
+- From: `WaitingOut`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `poisoned`
+- To: `WaitingOut`
+
+### `ScopePoisonedQuarantinedLive`
+- From: `Live`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `Live`
+
+### `ScopePoisonedQuarantinedStopped`
+- From: `Stopped`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `Stopped`
+
+### `ScopePoisonedQuarantinedAcquiring`
+- From: `Acquiring`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `Acquiring`
+
+### `ScopePoisonedQuarantinedProving`
+- From: `Proving`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `Proving`
+
+### `ScopePoisonedQuarantinedResuming`
+- From: `Resuming`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `Resuming`
+
+### `ScopePoisonedQuarantinedWaitingOut`
+- From: `WaitingOut`
+- On: `ScopePoisoned`(scope, cause)
+- Guards:
+  - `not_poisoned`
+  - `quarantined`
+- Emits: `RequestRefused`
+- To: `WaitingOut`
+
+### `ScopePoisonedUnopened`
+- From: `Unopened`
+- On: `ScopePoisoned`(scope, cause)
+- Emits: `RequestRefused`
+- To: `Unopened`
+
+### `ScopePoisonedLost`
+- From: `Lost`
+- On: `ScopePoisoned`(scope, cause)
+- Emits: `RequestRefused`
+- To: `Lost`
+
 ## Coverage
 ### Code Anchors
 - `host_store_writer_fence` (machine `HostStoreWriterFenceMachine`): `crates/meerkat-runtime/src/store/spi/writer_fence.rs` — HostStoreWriterFenceMachine owns the writer fence of one host store realm: the writer's phase, the token it commits with, the grant it has not installed, the acquires it gave up on, the holder it waits out, and why it stopped or lost the realm
@@ -671,6 +1016,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `writer_fence_renew_answers` — host_store_writer_fence_machine.rs::renew_answers_never_resume_a_stopped_writer ignores a renew that answers once the writer stopped and a fenced-out answer naming the writer's own newer token, loses the realm to any other fenced-out answer, and refuses a renew answer where no renew can be in flight
 - `writer_fence_resume` — host_store_writer_fence_machine.rs::a_stopped_writer_resumes_only_through_a_proved_grant re-acquires from Stopped alone, takes its own recorded lease over, proves the grant with a clean listing, installs its token and resumes on its first renew, and refuses a re-acquire while live, in flight, unopened or lost
 - `writer_fence_failed_attempts` — host_store_writer_fence_machine.rs::a_failed_attempt_leaves_the_writer_stopped returns a failed, timed-out or held takeover acquire, a failed listing and a failed resume renew to Stopped, counts a timed-out acquire, and keeps a grant whose listing failed as the writer's own lease, which the next attempt takes over
-- `writer_fence_open_listing_failed` — host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire
+- `writer_fence_open_listing_failed` — host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire of the stopped writer, changing nothing
+- `writer_fence_scope_classification` — host_store_writer_fence_machine.rs::a_quarantine_records_each_conflicted_incarnation_under_its_key, a_scope_poison_keeps_its_first_cause, a_scope_is_quarantined_or_poisoned_never_both, scope_classifications_survive_a_stop_a_reacquire_and_a_resume and scope_classifications_are_refused_unopened_or_lost record a key and each conflicted incarnation once, keep the first poison cause, refuse a second classification, keep both through a stop, a re-acquire and a resume, and refuse both unopened or lost, in every opened phase
 - `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move
 - `writer_fence_loss` — host_store_writer_fence_machine.rs::the_realm_is_lost_once_and_for_good loses the realm to a foreign batch, a fenced-out resume renew, a grant at or below the installed token and a poison, keeps the first cause, and refuses every later input and every answer the writer did not ask for

@@ -3,12 +3,15 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for HostStoreWriterFenceMachine.
 
-CONSTANTS BooleanValues, NatValues, WriterFenceAcquireOutcomeValues, WriterFenceAcquireStepValues, WriterFenceListingOutcomeValues, WriterFenceLostCauseValues, WriterFenceRefusalValues, WriterFenceRenewOutcomeValues, WriterFenceStopCauseValues
+CONSTANTS BooleanValues, NatValues, ScopePoisonCauseValues, SetOfStringValues, StringValues, WriterFenceAcquireOutcomeValues, WriterFenceAcquireStepValues, WriterFenceListingOutcomeValues, WriterFenceLostCauseValues, WriterFenceRefusalValues, WriterFenceRenewOutcomeValues, WriterFenceStopCauseValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
 
+MapStringScopePoisonCauseValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ScopePoisonCauseValues }
+MapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in NatValues }
 OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
+MapStringSetStringValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in SetOfStringValues }
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
@@ -23,9 +26,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped
+VARIABLES phase, model_step_count, token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes
 
-vars == << phase, model_step_count, token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped >>
+vars == << phase, model_step_count, token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 
 Init ==
     /\ phase = "Unopened"
@@ -39,6 +42,11 @@ Init ==
     /\ stop_cause = "RenewFailed"
     /\ lost_cause = "FencedOutRenew"
     /\ writer_stopped = FALSE
+    /\ open_listing_failed = FALSE
+    /\ quarantined_keys = {}
+    /\ quarantine_versions = [x \in {} |-> None]
+    /\ quarantine_commit_ids = [x \in {} |-> None]
+    /\ poisoned_scopes = [x \in {} |-> None]
 
 TerminalStutter ==
     /\ phase = "Lost"
@@ -46,75 +54,78 @@ TerminalStutter ==
 
 \* Named UNCHANGED frames. One definition per distinct frame; every action
 \* that leaves those variables unchanged references the definition by name.
-UnchangedFrame_0b7d97d0c8a3e6a8 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, lost_cause >>
-UnchangedFrame_27ae1a2ba7929ceb == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped >>
-UnchangedFrame_321073f37d2d1075 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, writer_stopped >>
-UnchangedFrame_3c687f0506a92472 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, lost_cause, writer_stopped >>
-UnchangedFrame_3e297d97d64c5619 == UNCHANGED << granted, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped >>
-UnchangedFrame_4653b2b4b5384b44 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, stop_cause, writer_stopped >>
-UnchangedFrame_5a6cc2b62c1a3af9 == UNCHANGED << token, granted, own_grant, step, waited_holder, lost_cause, writer_stopped >>
-UnchangedFrame_b1ccba944fdc0189 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause >>
-UnchangedFrame_bf8265ad4b2a1ee3 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, lost_cause, writer_stopped >>
-UnchangedFrame_e3f1e6fb26f3c3c2 == UNCHANGED << token, step, stop_cause, lost_cause, writer_stopped >>
-UnchangedFrame_eb3505c1b52ba7b0 == UNCHANGED << granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped >>
-UnchangedFrame_f34d36f620f6c1b5 == UNCHANGED << token, granted, own_grant, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped >>
-UnchangedFrame_fe6e3a1e56d7caf8 == UNCHANGED << token, granted, own_grant, step, timed_out, stop_cause, lost_cause, writer_stopped >>
+UnchangedFrame_00c10643c84d7389 == UNCHANGED << token, granted, own_grant, step, waited_holder, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_137ac3f0a19c832c == UNCHANGED << token, granted, own_grant, step, timed_out, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_24f82e11e61d4af2 == UNCHANGED << token, step, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_31772fce1a106a39 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_4696d43a660b8338 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, stop_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_5da5664c4434ebaa == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids >>
+UnchangedFrame_6e2162eac3ba34b0 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_7ce65679b203ea7c == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, lost_cause, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_848ddefb03e90937 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, poisoned_scopes >>
+UnchangedFrame_8df0ee4ccb177ce9 == UNCHANGED << granted, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_9ce9f28fd4fa9a95 == UNCHANGED << token, granted, own_grant, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_9db99e3860a37faf == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_a66417a329cf0764 == UNCHANGED << granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_d76d071c1c5bf655 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_f3d8f0e3133862c7 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_f9f297b3af911b82 == UNCHANGED << token, own_grant, step, timed_out, waited_holder, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 
 Open(arg_token) ==
     /\ phase = "Unopened"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
     /\ token' = arg_token
-    /\ UnchangedFrame_eb3505c1b52ba7b0
+    /\ UnchangedFrame_a66417a329cf0764
 
 
 OpenAgainLive(arg_token) ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenAgainStopped(arg_token) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenAgainAcquiring(arg_token) ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenAgainProving(arg_token) ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenAgainResuming(arg_token) ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenAgainWaitingOut(arg_token) ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenLost(arg_token) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedLive ==
@@ -123,56 +134,56 @@ WindowClosedLive ==
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "WindowClosed"
     /\ writer_stopped' = TRUE
-    /\ UnchangedFrame_0b7d97d0c8a3e6a8
+    /\ UnchangedFrame_7ce65679b203ea7c
 
 
 WindowClosedNotLiveStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedNotLiveAcquiring ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedNotLiveProving ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedNotLiveResuming ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedNotLiveWaitingOut ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedUnopened ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 WindowClosedLost ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewedInWindow(outcome, renewed, current, in_window) ==
@@ -181,7 +192,7 @@ RenewedInWindow(outcome, renewed, current, in_window) ==
     /\ in_window
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewedAfterTheWindow(outcome, renewed, current, in_window) ==
@@ -192,7 +203,7 @@ RenewedAfterTheWindow(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "WindowClosedBeforeRenew"
     /\ writer_stopped' = TRUE
-    /\ UnchangedFrame_0b7d97d0c8a3e6a8
+    /\ UnchangedFrame_7ce65679b203ea7c
 
 
 RenewStaleLive(outcome, renewed, current, in_window) ==
@@ -201,7 +212,7 @@ RenewStaleLive(outcome, renewed, current, in_window) ==
     /\ ((current # renewed) /\ (current = token))
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewFencedOutLive(outcome, renewed, current, in_window) ==
@@ -211,7 +222,7 @@ RenewFencedOutLive(outcome, renewed, current, in_window) ==
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "FencedOutRenew"
-    /\ UnchangedFrame_321073f37d2d1075
+    /\ UnchangedFrame_d76d071c1c5bf655
 
 
 RenewFailedLive(outcome, renewed, current, in_window) ==
@@ -221,7 +232,7 @@ RenewFailedLive(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "RenewFailed"
     /\ writer_stopped' = TRUE
-    /\ UnchangedFrame_0b7d97d0c8a3e6a8
+    /\ UnchangedFrame_7ce65679b203ea7c
 
 
 RenewTimedOutLive(outcome, renewed, current, in_window) ==
@@ -231,7 +242,7 @@ RenewTimedOutLive(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "RenewTimedOut"
     /\ writer_stopped' = TRUE
-    /\ UnchangedFrame_0b7d97d0c8a3e6a8
+    /\ UnchangedFrame_7ce65679b203ea7c
 
 
 RenewAnsweredStopped(outcome, renewed, current, in_window) ==
@@ -239,7 +250,7 @@ RenewAnsweredStopped(outcome, renewed, current, in_window) ==
     /\ (outcome # "FencedOut")
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewStaleStopped(outcome, renewed, current, in_window) ==
@@ -248,7 +259,7 @@ RenewStaleStopped(outcome, renewed, current, in_window) ==
     /\ ((current # renewed) /\ (current = token))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewFencedOutStopped(outcome, renewed, current, in_window) ==
@@ -258,7 +269,7 @@ RenewFencedOutStopped(outcome, renewed, current, in_window) ==
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "FencedOutRenew"
-    /\ UnchangedFrame_321073f37d2d1075
+    /\ UnchangedFrame_d76d071c1c5bf655
 
 
 ResumeRenewed(outcome, renewed, current, in_window) ==
@@ -268,7 +279,7 @@ ResumeRenewed(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ writer_stopped' = FALSE
-    /\ UnchangedFrame_b1ccba944fdc0189
+    /\ UnchangedFrame_31772fce1a106a39
 
 
 ResumeFencedOut(outcome, renewed, current, in_window) ==
@@ -278,7 +289,7 @@ ResumeFencedOut(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ lost_cause' = "FencedOutAfterReacquire"
-    /\ UnchangedFrame_4653b2b4b5384b44
+    /\ UnchangedFrame_4696d43a660b8338
 
 
 ResumeRenewFailed(outcome, renewed, current, in_window) ==
@@ -288,7 +299,7 @@ ResumeRenewFailed(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ stop_cause' = "ResumeRenewFailed"
-    /\ UnchangedFrame_3c687f0506a92472
+    /\ UnchangedFrame_f9f297b3af911b82
 
 
 ResumeRenewTimedOut(outcome, renewed, current, in_window) ==
@@ -298,99 +309,108 @@ ResumeRenewTimedOut(outcome, renewed, current, in_window) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ stop_cause' = "ResumeRenewTimedOut"
-    /\ UnchangedFrame_3c687f0506a92472
+    /\ UnchangedFrame_f9f297b3af911b82
 
 
 RenewAnsweredNoRenewUnopened(outcome, renewed, current, in_window) ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewAnsweredNoRenewAcquiring(outcome, renewed, current, in_window) ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewAnsweredNoRenewProving(outcome, renewed, current, in_window) ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewAnsweredNoRenewWaitingOut(outcome, renewed, current, in_window) ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 RenewAnsweredLost(outcome, renewed, current, in_window) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquire ==
     /\ phase = "Stopped"
+    /\ ~(open_listing_failed)
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
     /\ step' = "Exclusive"
-    /\ UnchangedFrame_f34d36f620f6c1b5
+    /\ UnchangedFrame_9ce9f28fd4fa9a95
+
+
+BeginReacquireAfterFailedOpen ==
+    /\ phase = "Stopped"
+    /\ open_listing_failed
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireLive ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireInFlightAcquiring ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireInFlightProving ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireInFlightResuming ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireWaitingOut ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireUnopened ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 BeginReacquireLost ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireGranted(outcome, arg_token, lease_moved) ==
@@ -403,7 +423,7 @@ AcquireGranted(outcome, arg_token, lease_moved) ==
     /\ own_grant' = Some(arg_token)
     /\ timed_out' = 0
     /\ waited_holder' = None
-    /\ UnchangedFrame_e3f1e6fb26f3c3c2
+    /\ UnchangedFrame_24f82e11e61d4af2
 
 
 AcquireGrantedOutOfOrder(outcome, arg_token, lease_moved) ==
@@ -413,7 +433,7 @@ AcquireGrantedOutOfOrder(outcome, arg_token, lease_moved) ==
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "TokenOrder"
-    /\ UnchangedFrame_321073f37d2d1075
+    /\ UnchangedFrame_d76d071c1c5bf655
 
 
 AcquireHeldByOwnLease(outcome, arg_token, lease_moved) ==
@@ -424,7 +444,7 @@ AcquireHeldByOwnLease(outcome, arg_token, lease_moved) ==
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
     /\ step' = "TakeoverOwn"
-    /\ UnchangedFrame_f34d36f620f6c1b5
+    /\ UnchangedFrame_9ce9f28fd4fa9a95
 
 
 AcquireHeldByAnother(outcome, arg_token, lease_moved) ==
@@ -436,7 +456,7 @@ AcquireHeldByAnother(outcome, arg_token, lease_moved) ==
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "HeldByAnother"
-    /\ UnchangedFrame_321073f37d2d1075
+    /\ UnchangedFrame_d76d071c1c5bf655
 
 
 AcquireHeldByRenewedHolder(outcome, arg_token, lease_moved) ==
@@ -450,7 +470,7 @@ AcquireHeldByRenewedHolder(outcome, arg_token, lease_moved) ==
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "HolderRenewed"
-    /\ UnchangedFrame_321073f37d2d1075
+    /\ UnchangedFrame_d76d071c1c5bf655
 
 
 AcquireHeldByUnrenewedHolder(outcome, arg_token, lease_moved) ==
@@ -463,7 +483,7 @@ AcquireHeldByUnrenewedHolder(outcome, arg_token, lease_moved) ==
     /\ ~(lease_moved)
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireHeldByPossibleLateGrant(outcome, arg_token, lease_moved) ==
@@ -476,7 +496,7 @@ AcquireHeldByPossibleLateGrant(outcome, arg_token, lease_moved) ==
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
     /\ waited_holder' = Some(arg_token)
-    /\ UnchangedFrame_fe6e3a1e56d7caf8
+    /\ UnchangedFrame_137ac3f0a19c832c
 
 
 AcquireHeldAtTakeover(outcome, arg_token, lease_moved) ==
@@ -486,7 +506,7 @@ AcquireHeldAtTakeover(outcome, arg_token, lease_moved) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "ReacquireFailed"
-    /\ UnchangedFrame_bf8265ad4b2a1ee3
+    /\ UnchangedFrame_f3d8f0e3133862c7
 
 
 AcquireFailed(outcome, arg_token, lease_moved) ==
@@ -495,7 +515,7 @@ AcquireFailed(outcome, arg_token, lease_moved) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ stop_cause' = "ReacquireFailed"
-    /\ UnchangedFrame_bf8265ad4b2a1ee3
+    /\ UnchangedFrame_f3d8f0e3133862c7
 
 
 AcquireTimedOut(outcome, arg_token, lease_moved) ==
@@ -505,112 +525,112 @@ AcquireTimedOut(outcome, arg_token, lease_moved) ==
     /\ model_step_count' = model_step_count + 1
     /\ timed_out' = (timed_out) + 1
     /\ stop_cause' = "ReacquireTimedOut"
-    /\ UnchangedFrame_5a6cc2b62c1a3af9
+    /\ UnchangedFrame_00c10643c84d7389
 
 
 AcquireAnsweredNotAcquiringUnopened(outcome, arg_token, lease_moved) ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredNotAcquiringLive(outcome, arg_token, lease_moved) ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredNotAcquiringStopped(outcome, arg_token, lease_moved) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredNotAcquiringProving(outcome, arg_token, lease_moved) ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredNotAcquiringResuming(outcome, arg_token, lease_moved) ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredNotAcquiringWaitingOut(outcome, arg_token, lease_moved) ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 AcquireAnsweredLost(outcome, arg_token, lease_moved) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEnded ==
     /\ phase = "WaitingOut"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutUnopened ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutLive ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutAcquiring ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutProving ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedNotWaitingOutResuming ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 LeaseEndedLost ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingClean(outcome, arg_token) ==
@@ -621,7 +641,7 @@ ListingClean(outcome, arg_token) ==
     /\ model_step_count' = model_step_count + 1
     /\ token' = arg_token
     /\ own_grant' = None
-    /\ UnchangedFrame_3e297d97d64c5619
+    /\ UnchangedFrame_8df0ee4ccb177ce9
 
 
 ListingForeign(outcome, arg_token) ==
@@ -632,7 +652,7 @@ ListingForeign(outcome, arg_token) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ lost_cause' = "ForeignBatch"
-    /\ UnchangedFrame_4653b2b4b5384b44
+    /\ UnchangedFrame_4696d43a660b8338
 
 
 ListingFailed(outcome, arg_token) ==
@@ -643,7 +663,7 @@ ListingFailed(outcome, arg_token) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ stop_cause' = "ListingFailed"
-    /\ UnchangedFrame_3c687f0506a92472
+    /\ UnchangedFrame_f9f297b3af911b82
 
 
 ListingOtherGrant(outcome, arg_token) ==
@@ -651,56 +671,56 @@ ListingOtherGrant(outcome, arg_token) ==
     /\ (granted # Some(arg_token))
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingUnopened(outcome, arg_token) ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingLive(outcome, arg_token) ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingStopped(outcome, arg_token) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingAcquiring(outcome, arg_token) ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingResuming(outcome, arg_token) ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedNotProvingWaitingOut(outcome, arg_token) ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 ListingCheckedLost(outcome, arg_token) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 Poison(cause) ==
@@ -709,77 +729,447 @@ Poison(cause) ==
     /\ model_step_count' = model_step_count + 1
     /\ granted' = None
     /\ lost_cause' = cause
-    /\ UnchangedFrame_4653b2b4b5384b44
+    /\ UnchangedFrame_4696d43a660b8338
 
 
 PoisonUnopened(cause) ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 PoisonLost(cause) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenListingFailedLive ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedAcquiring ==
     /\ phase = "Acquiring"
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedProving ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedResuming ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedWaitingOut ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ open_listing_failed' = TRUE
+    /\ UnchangedFrame_6e2162eac3ba34b0
 
 
 OpenListingFailedUnopened ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 OpenListingFailedLost ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
-    /\ UnchangedFrame_27ae1a2ba7929ceb
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedLive(key, name, version, commit_ids) ==
+    /\ phase = "Live"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedStopped(key, name, version, commit_ids) ==
+    /\ phase = "Stopped"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedAcquiring(key, name, version, commit_ids) ==
+    /\ phase = "Acquiring"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedProving(key, name, version, commit_ids) ==
+    /\ phase = "Proving"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedResuming(key, name, version, commit_ids) ==
+    /\ phase = "Resuming"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedWaitingOut(key, name, version, commit_ids) ==
+    /\ phase = "WaitingOut"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ quarantine_versions' = MapSet(quarantine_versions, name, version)
+    /\ quarantine_commit_ids' = MapSet(quarantine_commit_ids, name, commit_ids)
+    /\ UnchangedFrame_848ddefb03e90937
+
+
+ScopeQuarantinedAgainLive(key, name, version, commit_ids) ==
+    /\ phase = "Live"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedAgainStopped(key, name, version, commit_ids) ==
+    /\ phase = "Stopped"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids) ==
+    /\ phase = "Acquiring"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedAgainProving(key, name, version, commit_ids) ==
+    /\ phase = "Proving"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedAgainResuming(key, name, version, commit_ids) ==
+    /\ phase = "Resuming"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedAgainWaitingOut(key, name, version, commit_ids) ==
+    /\ phase = "WaitingOut"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedLive(key, name, version, commit_ids) ==
+    /\ phase = "Live"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedStopped(key, name, version, commit_ids) ==
+    /\ phase = "Stopped"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedAcquiring(key, name, version, commit_ids) ==
+    /\ phase = "Acquiring"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedProving(key, name, version, commit_ids) ==
+    /\ phase = "Proving"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedResuming(key, name, version, commit_ids) ==
+    /\ phase = "Resuming"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedPoisonedWaitingOut(key, name, version, commit_ids) ==
+    /\ phase = "WaitingOut"
+    /\ ~((name \in DOMAIN quarantine_versions))
+    /\ (key \in DOMAIN poisoned_scopes)
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedUnopened(key, name, version, commit_ids) ==
+    /\ phase = "Unopened"
+    /\ phase' = "Unopened"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopeQuarantinedLost(key, name, version, commit_ids) ==
+    /\ phase = "Lost"
+    /\ phase' = "Lost"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedLive(scope, cause) ==
+    /\ phase = "Live"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedStopped(scope, cause) ==
+    /\ phase = "Stopped"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedAcquiring(scope, cause) ==
+    /\ phase = "Acquiring"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedProving(scope, cause) ==
+    /\ phase = "Proving"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedResuming(scope, cause) ==
+    /\ phase = "Resuming"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedWaitingOut(scope, cause) ==
+    /\ phase = "WaitingOut"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ ~((scope \in quarantined_keys))
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ poisoned_scopes' = MapSet(poisoned_scopes, scope, cause)
+    /\ UnchangedFrame_5da5664c4434ebaa
+
+
+ScopePoisonedAgainLive(scope, cause) ==
+    /\ phase = "Live"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedAgainStopped(scope, cause) ==
+    /\ phase = "Stopped"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedAgainAcquiring(scope, cause) ==
+    /\ phase = "Acquiring"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedAgainProving(scope, cause) ==
+    /\ phase = "Proving"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedAgainResuming(scope, cause) ==
+    /\ phase = "Resuming"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedAgainWaitingOut(scope, cause) ==
+    /\ phase = "WaitingOut"
+    /\ (scope \in DOMAIN poisoned_scopes)
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedLive(scope, cause) ==
+    /\ phase = "Live"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedStopped(scope, cause) ==
+    /\ phase = "Stopped"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedAcquiring(scope, cause) ==
+    /\ phase = "Acquiring"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedProving(scope, cause) ==
+    /\ phase = "Proving"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedResuming(scope, cause) ==
+    /\ phase = "Resuming"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedQuarantinedWaitingOut(scope, cause) ==
+    /\ phase = "WaitingOut"
+    /\ ~((scope \in DOMAIN poisoned_scopes))
+    /\ (scope \in quarantined_keys)
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedUnopened(scope, cause) ==
+    /\ phase = "Unopened"
+    /\ phase' = "Unopened"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
+
+
+ScopePoisonedLost(scope, cause) ==
+    /\ phase = "Lost"
+    /\ phase' = "Lost"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_9db99e3860a37faf
 
 
 Next ==
@@ -818,6 +1208,7 @@ Next ==
     \/ (phase = "WaitingOut") /\ \E outcome \in WriterFenceRenewOutcomeValues : \E renewed \in 0..2 : \E current \in 0..2 : \E in_window \in BOOLEAN : RenewAnsweredNoRenewWaitingOut(outcome, renewed, current, in_window)
     \/ (phase = "Lost") /\ \E outcome \in WriterFenceRenewOutcomeValues : \E renewed \in 0..2 : \E current \in 0..2 : \E in_window \in BOOLEAN : RenewAnsweredLost(outcome, renewed, current, in_window)
     \/ BeginReacquire
+    \/ BeginReacquireAfterFailedOpen
     \/ BeginReacquireLive
     \/ BeginReacquireInFlightAcquiring
     \/ BeginReacquireInFlightProving
@@ -872,9 +1263,51 @@ Next ==
     \/ OpenListingFailedWaitingOut
     \/ OpenListingFailedUnopened
     \/ OpenListingFailedLost
+    \/ (phase = "Live") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedLive(key, name, version, commit_ids)
+    \/ (phase = "Stopped") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedStopped(key, name, version, commit_ids)
+    \/ (phase = "Acquiring") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAcquiring(key, name, version, commit_ids)
+    \/ (phase = "Proving") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedProving(key, name, version, commit_ids)
+    \/ (phase = "Resuming") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedResuming(key, name, version, commit_ids)
+    \/ (phase = "WaitingOut") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedWaitingOut(key, name, version, commit_ids)
+    \/ (phase = "Live") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainLive(key, name, version, commit_ids)
+    \/ (phase = "Stopped") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainStopped(key, name, version, commit_ids)
+    \/ (phase = "Acquiring") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids)
+    \/ (phase = "Proving") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainProving(key, name, version, commit_ids)
+    \/ (phase = "Resuming") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainResuming(key, name, version, commit_ids)
+    \/ (phase = "WaitingOut") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainWaitingOut(key, name, version, commit_ids)
+    \/ (phase = "Live") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedLive(key, name, version, commit_ids)
+    \/ (phase = "Stopped") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedStopped(key, name, version, commit_ids)
+    \/ (phase = "Acquiring") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedAcquiring(key, name, version, commit_ids)
+    \/ (phase = "Proving") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedProving(key, name, version, commit_ids)
+    \/ (phase = "Resuming") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedResuming(key, name, version, commit_ids)
+    \/ (phase = "WaitingOut") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedPoisonedWaitingOut(key, name, version, commit_ids)
+    \/ (phase = "Unopened") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedUnopened(key, name, version, commit_ids)
+    \/ (phase = "Lost") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedLost(key, name, version, commit_ids)
+    \/ (phase = "Live") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedLive(scope, cause)
+    \/ (phase = "Stopped") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedStopped(scope, cause)
+    \/ (phase = "Acquiring") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAcquiring(scope, cause)
+    \/ (phase = "Proving") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedProving(scope, cause)
+    \/ (phase = "Resuming") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedResuming(scope, cause)
+    \/ (phase = "WaitingOut") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedWaitingOut(scope, cause)
+    \/ (phase = "Live") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainLive(scope, cause)
+    \/ (phase = "Stopped") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainStopped(scope, cause)
+    \/ (phase = "Acquiring") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainAcquiring(scope, cause)
+    \/ (phase = "Proving") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainProving(scope, cause)
+    \/ (phase = "Resuming") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainResuming(scope, cause)
+    \/ (phase = "WaitingOut") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedAgainWaitingOut(scope, cause)
+    \/ (phase = "Live") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedLive(scope, cause)
+    \/ (phase = "Stopped") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedStopped(scope, cause)
+    \/ (phase = "Acquiring") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedAcquiring(scope, cause)
+    \/ (phase = "Proving") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedProving(scope, cause)
+    \/ (phase = "Resuming") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedResuming(scope, cause)
+    \/ (phase = "WaitingOut") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedQuarantinedWaitingOut(scope, cause)
+    \/ (phase = "Unopened") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedUnopened(scope, cause)
+    \/ (phase = "Lost") /\ \E scope \in StringValues : \E cause \in ScopePoisonCauseValues : ScopePoisonedLost(scope, cause)
     \/ TerminalStutter
 
-unopened_holds_nothing == (IF (phase # "Unopened") THEN TRUE ELSE ((token = 0) /\ (granted = None) /\ (own_grant = None) /\ (timed_out = 0) /\ (waited_holder = None) /\ ~(writer_stopped)))
+unopened_holds_nothing == (IF (phase # "Unopened") THEN TRUE ELSE ((token = 0) /\ (granted = None) /\ (own_grant = None) /\ (timed_out = 0) /\ (waited_holder = None) /\ ~(writer_stopped) /\ ~(open_listing_failed) /\ (Cardinality(quarantined_keys) = 0) /\ (Cardinality(DOMAIN quarantine_versions) = 0) /\ (Cardinality(DOMAIN poisoned_scopes) = 0)))
+no_scope_is_quarantined_and_poisoned == (\A key \in quarantined_keys : ~((key \in DOMAIN poisoned_scopes)))
+quarantine_records_are_whole == (DOMAIN quarantine_versions = DOMAIN quarantine_commit_ids)
 live_writer_is_not_stopped == (IF (phase # "Live") THEN TRUE ELSE ~(writer_stopped))
 stopped_and_attempting_writer_is_stopped == (IF ((phase # "Stopped") /\ (phase # "Acquiring") /\ (phase # "Proving") /\ (phase # "Resuming") /\ (phase # "WaitingOut")) THEN TRUE ELSE writer_stopped)
 proving_and_resuming_carry_their_grant == (IF ((phase # "Proving") /\ (phase # "Resuming")) THEN TRUE ELSE (granted # None))
@@ -883,12 +1316,14 @@ own_grant_is_above_the_token == (IF (own_grant = None) THEN TRUE ELSE ((IF "valu
 waiting_out_follows_a_timed_out_acquire == (IF (phase # "WaitingOut") THEN TRUE ELSE ((timed_out > 0) /\ (waited_holder # None)))
 waited_holder_needs_a_timed_out_acquire == (IF (waited_holder = None) THEN TRUE ELSE (timed_out > 0))
 
-CiStateConstraint == /\ model_step_count <= 6
-DeepStateConstraint == /\ model_step_count <= 8
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(quarantined_keys) <= 1 /\ Cardinality(DOMAIN quarantine_versions) <= 1 /\ Cardinality(DOMAIN quarantine_commit_ids) <= 1 /\ Cardinality(DOMAIN poisoned_scopes) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(quarantined_keys) <= 2 /\ Cardinality(DOMAIN quarantine_versions) <= 2 /\ Cardinality(DOMAIN quarantine_commit_ids) <= 2 /\ Cardinality(DOMAIN poisoned_scopes) <= 2
 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []unopened_holds_nothing
+THEOREM Spec => []no_scope_is_quarantined_and_poisoned
+THEOREM Spec => []quarantine_records_are_whole
 THEOREM Spec => []live_writer_is_not_stopped
 THEOREM Spec => []stopped_and_attempting_writer_is_stopped
 THEOREM Spec => []proving_and_resuming_carry_their_grant

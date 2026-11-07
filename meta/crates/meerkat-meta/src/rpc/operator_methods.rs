@@ -67,6 +67,19 @@
 //! - `meta/member_instruction_activations` reads the durable activation
 //!   records of the member's current session.
 //!
+//! And the gateway mob's operator instructions: standing System-plane
+//! instructions by slot and revision, the desired set Meerkat's mob keeps
+//! and delivers at each member's next run start (the activation verbs above
+//! are deprecated in their favour):
+//!
+//! - `meta/set_instruction` writes one for every member, the members of one
+//!   profile or one identity (`MobHandle::set_operator_instruction`);
+//! - `meta/revoke_instruction` revokes one at a higher revision;
+//! - `meta/instruction_status` reads the records and one page of members,
+//!   each named by its Meta identity.
+//!
+//! They map Meta's names onto the mob and keep no state of their own.
+//!
 //! All of these are host verbs: they exist only on the gateway's host
 //! JSON-RPC surface and its SDKs, never in an agent tool catalog.
 
@@ -182,6 +195,18 @@ async fn resolve_operator_target(
         .get("identity")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    resolve_operator_identity(runtime, identity_rt, identity_str, response_id).await
+}
+
+/// [`resolve_operator_target`] for an identity a verb carries somewhere
+/// other than its top-level `identity` param (an operator instruction's
+/// member target).
+async fn resolve_operator_identity(
+    runtime: &UnifiedRuntime,
+    identity_rt: &crate::identity_first::IdentityRuntime,
+    identity_str: &str,
+    response_id: &Value,
+) -> Result<ResolvedOperatorTarget, Box<JsonRpcResponse>> {
     let target = match resolve_rpc_identity_control_target(runtime, identity_rt, identity_str).await
     {
         Ok(target) => target,
@@ -457,6 +482,472 @@ pub(super) async fn handle_member_instruction_activations(
             ),
         },
         Err(error) => member_instruction_error_response(response_id, error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Operator instructions (host verbs; never agent tools)
+// ---------------------------------------------------------------------------
+
+/// The audit actor for host-written operator instructions.
+const OPERATOR_INSTRUCTION_ACTOR: &str = "host";
+
+/// The members an operator instruction selects, as Meta's host verbs name
+/// them: every member of the gateway's mob, the members of one profile, or
+/// one identity.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum InstructionTargetParams {
+    Mob,
+    Profile { profile: String },
+    Member { identity: String },
+}
+
+/// Params of `meta/set_instruction`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetInstructionParams {
+    namespace: meerkat_core::InstructionNamespace,
+    key: meerkat_core::InstructionKey,
+    revision: meerkat_core::InstructionRevision,
+    body: String,
+    #[serde(default)]
+    content_sha256: Option<meerkat_core::InstructionContentDigest>,
+    target: InstructionTargetParams,
+}
+
+/// Params of `meta/revoke_instruction`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeInstructionParams {
+    namespace: meerkat_core::InstructionNamespace,
+    key: meerkat_core::InstructionKey,
+    revision: meerkat_core::InstructionRevision,
+}
+
+/// Params of `meta/instruction_status`; every field is optional.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionStatusParams {
+    #[serde(default)]
+    namespace: Option<meerkat_core::InstructionNamespace>,
+    #[serde(default)]
+    key: Option<meerkat_core::InstructionKey>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+
+/// A record's target as Meta's host verbs name it: a member target names the
+/// member's Meta identity.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum InstructionTargetView {
+    Mob,
+    Profile { profile: String },
+    Member { identity: String },
+}
+
+impl From<meerkat_contracts::WireInstructionTarget> for InstructionTargetView {
+    fn from(target: meerkat_contracts::WireInstructionTarget) -> Self {
+        match target {
+            meerkat_contracts::WireInstructionTarget::Mob => Self::Mob,
+            meerkat_contracts::WireInstructionTarget::Profile { profile } => {
+                Self::Profile { profile }
+            }
+            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
+                identity: crate::member_comms_id::durable_identity_for_roster_member(
+                    &agent_identity,
+                ),
+            },
+        }
+    }
+}
+
+/// One desired record of the gateway's mob, in Meerkat's wire form but for
+/// its target.
+#[derive(Debug, serde::Serialize)]
+struct InstructionRecordView {
+    namespace: meerkat_core::InstructionNamespace,
+    key: meerkat_core::InstructionKey,
+    revision: meerkat_core::InstructionRevision,
+    effect: meerkat_core::InstructionEffect,
+    target: InstructionTargetView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_sha256: Option<meerkat_core::InstructionContentDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_bytes: Option<u64>,
+}
+
+/// One member's status, in Meerkat's wire form but named by its Meta
+/// identity.
+#[derive(Debug, serde::Serialize)]
+struct MemberInstructionStatusView {
+    identity: String,
+    profile: String,
+    residency: meerkat_contracts::WireInstructionResidency,
+    delivery: meerkat_contracts::WireMemberInstructionDelivery,
+    slots: Vec<meerkat_contracts::WireMemberInstructionSlot>,
+    effective_read: meerkat_contracts::WireInstructionEffectiveRead,
+    live_channel_open: bool,
+}
+
+/// The result of `meta/instruction_status`: Meerkat's status page with every
+/// roster member id mapped back to its Meta identity.
+#[derive(Debug, serde::Serialize)]
+struct InstructionStatusView {
+    mob_id: String,
+    generation: u64,
+    desired: Vec<InstructionRecordView>,
+    members: Vec<MemberInstructionStatusView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
+}
+
+impl From<meerkat_contracts::MobInstructionStatusResult> for InstructionStatusView {
+    fn from(page: meerkat_contracts::MobInstructionStatusResult) -> Self {
+        let meerkat_contracts::MobInstructionStatusResult {
+            mob_id,
+            generation,
+            desired,
+            members,
+            next_offset,
+        } = page;
+        Self {
+            mob_id,
+            generation,
+            desired: desired
+                .into_iter()
+                .map(|record| {
+                    let meerkat_contracts::WireInstructionRecord {
+                        namespace,
+                        key,
+                        revision,
+                        effect,
+                        target,
+                        content_sha256,
+                        body_bytes,
+                    } = record;
+                    InstructionRecordView {
+                        namespace,
+                        key,
+                        revision,
+                        effect,
+                        target: target.into(),
+                        content_sha256,
+                        body_bytes,
+                    }
+                })
+                .collect(),
+            members: members
+                .into_iter()
+                .map(|member| {
+                    let meerkat_contracts::WireMemberInstructionStatus {
+                        agent_identity,
+                        profile,
+                        residency,
+                        delivery,
+                        slots,
+                        effective_read,
+                        live_channel_open,
+                    } = member;
+                    MemberInstructionStatusView {
+                        identity: crate::member_comms_id::durable_identity_for_roster_member(
+                            &agent_identity,
+                        ),
+                        profile,
+                        residency,
+                        delivery,
+                        slots,
+                        effective_read,
+                        live_channel_open,
+                    }
+                })
+                .collect(),
+            next_offset,
+        }
+    }
+}
+
+/// The params of an operator-instruction verb, or the `-32602` refusal of
+/// params that do not parse. Absent params read as an empty object.
+fn instruction_params<T: serde::de::DeserializeOwned>(
+    params: &Value,
+    response_id: &Value,
+) -> Result<T, Box<JsonRpcResponse>> {
+    let params = match params {
+        Value::Null => Value::Object(serde_json::Map::new()),
+        params => params.clone(),
+    };
+    serde_json::from_value(params).map_err(|error| {
+        Box::new(rpc_error(
+            response_id.clone(),
+            -32602,
+            format!("invalid params: {error}"),
+        ))
+    })
+}
+
+/// The JSON-RPC answer of an operator-instruction failure, as Meerkat's
+/// `mob/*` verbs answer it: a typed refusal is `-32602` (a malformed
+/// instruction history `-32603`, the server's fault) carrying its closed
+/// code in `data.instruction_set_code`; a mob that could not answer keeps
+/// Meerkat's own code and data.
+fn operator_instruction_error_response(
+    response_id: Value,
+    error: &meerkat_mob::OperatorInstructionError,
+) -> JsonRpcResponse {
+    if let meerkat_mob::OperatorInstructionError::Mob(mob_error) = error {
+        return super::mob_methods::mob_declaration_error(response_id, mob_error);
+    }
+    let Some(code) = error.code() else {
+        return rpc_error(response_id, -32603, error.to_string());
+    };
+    let rpc_code = match code {
+        meerkat_core::InstructionSetErrorCode::MalformedInstructionHistory => -32603,
+        _ => -32602,
+    };
+    match serde_json::to_value(meerkat_contracts::InstructionSetErrorData {
+        instruction_set_code: code,
+    }) {
+        Ok(data) => JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: response_id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: rpc_code,
+                message: error.to_string(),
+                data: Some(data),
+            }),
+        },
+        Err(serialize_error) => rpc_error(
+            response_id,
+            -32603,
+            format!("failed to serialize the operator-instruction refusal: {serialize_error}"),
+        ),
+    }
+}
+
+/// The answer of a committed or repeated write: Meerkat's receipt, which
+/// names no member.
+fn operator_instruction_receipt_response(
+    response_id: Value,
+    receipt: &meerkat_mob::OperatorInstructionReceipt,
+) -> JsonRpcResponse {
+    match serde_json::to_value(receipt.to_wire()) {
+        Ok(receipt) => rpc_result(response_id, receipt),
+        Err(error) => rpc_error(
+            response_id,
+            -32603,
+            format!("failed to serialize the operator-instruction receipt: {error}"),
+        ),
+    }
+}
+
+/// `meta/set_instruction`: write one operator instruction for the members its
+/// target selects in the gateway's mob, through Meerkat's
+/// `MobHandle::set_operator_instruction`.
+///
+/// Params: `namespace`, `key`, `revision`, `body`, optional `content_sha256`,
+/// and `target`: `{kind: "mob"}`, `{kind: "profile", profile}` or `{kind:
+/// "member", identity}`. A member target's identity is resolved through the
+/// identity-control gate the other operator verbs use and reaches Meerkat as
+/// the identity's roster member. The result is Meerkat's write receipt; the
+/// members receive the instruction asynchronously, and
+/// `meta/instruction_status` reports it.
+pub(super) async fn handle_set_instruction(
+    runtime: &UnifiedRuntime,
+    ctx: &IdentityFirstContext,
+    params: &Value,
+    response_id: Value,
+) -> JsonRpcResponse {
+    let params: SetInstructionParams = match instruction_params(params, &response_id) {
+        Ok(params) => params,
+        Err(response) => return *response,
+    };
+    let target = match params.target {
+        InstructionTargetParams::Mob => meerkat_mob::OperatorInstructionTarget::Mob,
+        InstructionTargetParams::Profile { profile } => {
+            meerkat_mob::OperatorInstructionTarget::Profile {
+                profile: meerkat_mob::ProfileName::from(profile),
+            }
+        }
+        InstructionTargetParams::Member { identity } => {
+            let resolved = match resolve_operator_identity(
+                runtime,
+                ctx.runtime.runtime(),
+                &identity,
+                &response_id,
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(response) => return *response,
+            };
+            meerkat_mob::OperatorInstructionTarget::Member {
+                agent_identity: crate::member_comms_id::roster_member_id_for_identity(
+                    resolved.identity.as_str(),
+                ),
+            }
+        }
+    };
+    let write = meerkat_mob::OperatorInstructionWrite {
+        slot: meerkat_core::InstructionSlot {
+            namespace: params.namespace,
+            key: params.key,
+        },
+        revision: params.revision,
+        body: params.body,
+        content_sha256: params.content_sha256,
+        target,
+    };
+    let slot = write.slot.clone();
+    let revision = write.revision;
+    match runtime.mob_handle().set_operator_instruction(write).await {
+        Ok(receipt) => {
+            tracing::info!(
+                actor = OPERATOR_INSTRUCTION_ACTOR,
+                namespace = %slot.namespace,
+                key = %slot.key,
+                revision = %revision,
+                disposition = ?receipt.disposition,
+                generation = receipt.generation,
+                matched_members = receipt.matched_members,
+                "host wrote an operator instruction"
+            );
+            operator_instruction_receipt_response(response_id, &receipt)
+        }
+        Err(error) => {
+            tracing::warn!(
+                actor = OPERATOR_INSTRUCTION_ACTOR,
+                namespace = %slot.namespace,
+                key = %slot.key,
+                revision = %revision,
+                code = ?error.code(),
+                error = %error,
+                "host operator instruction write refused"
+            );
+            operator_instruction_error_response(response_id, &error)
+        }
+    }
+}
+
+/// `meta/revoke_instruction`: revoke one operator instruction of the
+/// gateway's mob at a higher revision, through Meerkat's
+/// `MobHandle::revoke_operator_instruction`; the record keeps its target.
+///
+/// Params: `namespace`, `key` and `revision`. The result is Meerkat's write
+/// receipt.
+pub(super) async fn handle_revoke_instruction(
+    runtime: &UnifiedRuntime,
+    params: &Value,
+    response_id: Value,
+) -> JsonRpcResponse {
+    let params: RevokeInstructionParams = match instruction_params(params, &response_id) {
+        Ok(params) => params,
+        Err(response) => return *response,
+    };
+    let slot = meerkat_core::InstructionSlot {
+        namespace: params.namespace,
+        key: params.key,
+    };
+    match runtime
+        .mob_handle()
+        .revoke_operator_instruction(slot.clone(), params.revision)
+        .await
+    {
+        Ok(receipt) => {
+            tracing::info!(
+                actor = OPERATOR_INSTRUCTION_ACTOR,
+                namespace = %slot.namespace,
+                key = %slot.key,
+                revision = %params.revision,
+                disposition = ?receipt.disposition,
+                generation = receipt.generation,
+                "host revoked an operator instruction"
+            );
+            operator_instruction_receipt_response(response_id, &receipt)
+        }
+        Err(error) => {
+            tracing::warn!(
+                actor = OPERATOR_INSTRUCTION_ACTOR,
+                namespace = %slot.namespace,
+                key = %slot.key,
+                revision = %params.revision,
+                code = ?error.code(),
+                error = %error,
+                "host operator instruction revoke refused"
+            );
+            operator_instruction_error_response(response_id, &error)
+        }
+    }
+}
+
+/// `meta/instruction_status`: the gateway's mob's operator instructions and
+/// one page of members, through Meerkat's
+/// `MobHandle::operator_instruction_status`, read from committed state
+/// without waking a member.
+///
+/// Params, all optional: `namespace` and `key` (the records of one namespace
+/// or slot), `identity` (one member, resolved through the identity-control
+/// gate) or `profile` (the members of one profile), `offset` and `limit` (1
+/// to 200 members, 100 when absent). The result is Meerkat's status page
+/// with each member named by its Meta `identity`, in the member rows and in
+/// a member target.
+pub(super) async fn handle_instruction_status(
+    runtime: &UnifiedRuntime,
+    ctx: &IdentityFirstContext,
+    params: &Value,
+    response_id: Value,
+) -> JsonRpcResponse {
+    let params: InstructionStatusParams = match instruction_params(params, &response_id) {
+        Ok(params) => params,
+        Err(response) => return *response,
+    };
+    let agent_identity = match params.identity.as_deref() {
+        None => None,
+        Some(identity) => {
+            match resolve_operator_identity(runtime, ctx.runtime.runtime(), identity, &response_id)
+                .await
+            {
+                Ok(resolved) => Some(crate::member_comms_id::roster_member_id_for_identity(
+                    resolved.identity.as_str(),
+                )),
+                Err(response) => return *response,
+            }
+        }
+    };
+    let query = meerkat_mob::OperatorInstructionStatusQuery {
+        namespace: params.namespace,
+        key: params.key,
+        agent_identity,
+        profile: params.profile.map(meerkat_mob::ProfileName::from),
+        offset: params
+            .offset
+            .map_or(0, |offset| usize::try_from(offset).unwrap_or(usize::MAX)),
+        limit: params
+            .limit
+            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX)),
+    };
+    match runtime
+        .mob_handle()
+        .operator_instruction_status(query)
+        .await
+    {
+        Ok(page) => match serde_json::to_value(InstructionStatusView::from(page.to_wire())) {
+            Ok(status) => rpc_result(response_id, status),
+            Err(error) => rpc_error(
+                response_id,
+                -32603,
+                format!("failed to serialize the operator-instruction status: {error}"),
+            ),
+        },
+        Err(error) => operator_instruction_error_response(response_id, &error),
     }
 }
 

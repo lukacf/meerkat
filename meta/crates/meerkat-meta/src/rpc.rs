@@ -2032,6 +2032,10 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/console/send",
     crate::console_voice::VOICE_OPEN_METHOD,
     "meta/console/recover_send",
+    // Operator instruction writes: the mob's journal, which the
+    // authoritative launch delivers to its members.
+    "meta/set_instruction",
+    "meta/revoke_instruction",
     // Console schedules: a deferred send's definition or its end, in the
     // schedule store the authoritative launch drains.
     "meta/schedule/create",
@@ -2722,6 +2726,9 @@ async fn handle_unified_rpc_json_inner(
                     "meta/prune_member_system_rows",
                     "meta/member_activate_instruction",
                     "meta/member_instruction_activations",
+                    "meta/set_instruction",
+                    "meta/revoke_instruction",
+                    "meta/instruction_status",
                     "meta/reconcile_identity",
                     "meta/status_identity_bootstrap",
                     "meta/wait_identity_bootstrap",
@@ -6211,6 +6218,45 @@ async fn handle_unified_rpc_json_inner(
                 None => return maybe_identity_not_configured(is_notification, response_id),
             };
             Box::pin(operator_methods::handle_member_instruction_activations(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        // The gateway mob's operator instructions (host verbs, listed with an
+        // identity runtime): a member target names a Meta identity.
+        "meta/set_instruction" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_set_instruction(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/revoke_instruction" => {
+            if identity_ctx.is_none() {
+                return maybe_identity_not_configured(is_notification, response_id);
+            }
+            Box::pin(operator_methods::handle_revoke_instruction(
+                runtime,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/instruction_status" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_instruction_status(
                 runtime,
                 ctx,
                 &request.params,
@@ -12478,13 +12524,18 @@ shell = true
         };
 
         // Every identity method the stale-binding refusal covers: the identity
-        // status, inspect and lifecycle methods, the delivery methods, and two
-        // operator member verbs (the operator path answers through its own
-        // response conversion). meta/member_activate_instruction and
+        // status, inspect and lifecycle methods, the delivery methods, and
+        // three operator member verbs (the operator path answers through its
+        // own response conversion). meta/member_activate_instruction and
         // meta/bound_member_transcript need an activation and a wired
         // transcript service before they resolve; the operator verb harness
         // covers them (operator_verbs_with_preconditions_refuse_a_stale_runtime_id).
-        let operator_methods = ["meta/member_instruction_activations", "meta/compact_member"];
+        // meta/set_instruction's member target is checked after the loop.
+        let operator_methods = [
+            "meta/member_instruction_activations",
+            "meta/compact_member",
+            "meta/instruction_status",
+        ];
         for method in [
             "meta/status_identity",
             "meta/inspect_identity",
@@ -12504,6 +12555,7 @@ shell = true
             "meta/completion_cursor",
             "meta/member_instruction_activations",
             "meta/compact_member",
+            "meta/instruction_status",
         ] {
             let response = Box::pin(call(method, "rt:review:singleton:0")).await?;
             assert_eq!(
@@ -12580,6 +12632,42 @@ shell = true
                 },
             }),
             "{member:#?}"
+        );
+        // An operator instruction's member target passes the same gate, and
+        // the refused write records nothing.
+        let write = Box::pin(handle_unified_rpc_json(
+            &runtime,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "meta/set_instruction",
+                "params": {
+                    "namespace": "host",
+                    "key": "persona",
+                    "revision": 1,
+                    "body": "Answer as the reviewer.",
+                    "target": { "kind": "member", "identity": "rt:review:singleton:0" },
+                },
+            })
+            .to_string(),
+            Duration::from_secs(1),
+            None,
+            Some(&identity_ctx),
+        ))
+        .await;
+        let write = serde_json::from_str::<Value>(&write)?;
+        assert_eq!(
+            write["error"]["data"]["kind"],
+            json!("stale_identity_runtime_binding"),
+            "{write:#?}"
+        );
+        let records = runtime
+            .mob_handle()
+            .operator_instruction_status(meerkat_mob::OperatorInstructionStatusQuery::default())
+            .await?;
+        assert!(
+            records.desired.is_empty(),
+            "the refused write records nothing: {records:?}"
         );
         let status = identity_runtime.status(&identity).await?;
         assert_eq!(

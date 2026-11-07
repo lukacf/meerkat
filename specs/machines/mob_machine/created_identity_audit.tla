@@ -1804,32 +1804,58 @@ RecoverEdgeVerdicts(e, owner) ==
        ENABLED RecoverOwnedIdentityEdgeSkippedRunning(e, owner),
        ENABLED RecoverOwnedIdentityEdgeSkippedStopped(e, owner) >>
 
-\* Member 1 a roster-owned identity declared, seated on its first
-\* incarnation and removed through its retirement to its terminal; member 2
-\* a store-owned identity recorded owed its seat, seated under created
-\* custody, archived (through its retirement) and unarchived, or removed;
-\* member 3 a store-owned identity recorded owed its seat, archived and
-\* unarchived, or removed, at once; the declaration, the end for either
-\* cause and the boot's recovery of each edge among them (and of member 2's
-\* self edge) by each store-owned member, a plain unwire's admission of
-\* each, the host's changes hold and the build seed's composition
-\* authority, in a running and a stopped mob. The boot plan is never sealed
-\* here, so the recovery's arms answer throughout, as declarations do.
+\* The run's seed, one step at a time: members 2 and 3 store-owned
+\* identities recorded owed their seats, then member 1 a roster-owned
+\* identity declared owed its seat, its ladder opened and its first
+\* incarnation seated, then member 2 seated under created custody (and
+\* again after its unarchive). Or, before it, the build seed of a candidate
+\* composition. Once both are seated and before any identity's end begins,
+\* the host's changes hold and the mob's stop and resume. (The seed's order
+\* keeps the run's space to the edges' own steps.)
+EdgesCandidate ==
+    /\ DOMAIN identity_entry_origins = {}
+    /\ SeedMemberResidencyRunning("OnDemand", "NonAuthoritative", {})
+EdgesDeclare ==
+    DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
+                                 ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
+                                 ApplyShape[9], FALSE, FALSE)
+EdgesSeated == Seated(Id1) /\ Seated(Id2)
+EdgesNoEndBegun ==
+    /\ identity_entry_removing = {}
+    /\ identity_entry_archiving = {}
+    /\ identity_entry_tombstones = {}
+    /\ \A id \in EdgeOwners : Unseated(id) \in {None, Some("SeatOwed")}
+EdgesSeed ==
+    /\ composition_authority = "Authoritative"
+    /\ \/ Origin(Id2) = None /\ RecordAs(Id2, "SeatOwed")
+       \/ Origin(Id2) # None /\ Origin(Id3) = None /\ RecordAs(Id3, "SeatOwed")
+       \/ Origin(Id3) # None /\ Origin(Id1) = None /\ EdgesDeclare
+       \/ /\ Origin(Id1) = Some("Declared")
+          /\ ~Seated(Id1)
+          /\ Id1 \notin identity_entry_removing
+          /\ \/ AAuthorize
+             \/ AOpen(AFirst)
+             \/ ASeatAs(AFirst, FALSE, FALSE, FALSE)
+       \/ /\ Seated(Id1)
+          /\ Unseated(Id2) = Some("SeatOwed")
+          /\ \/ CRAuthorize(Id2)
+             \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
+             \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
+
+\* The seed; member 1's removal through its retirement to its terminal;
+\* member 2's archive (through its retirement) and unarchive, or removal;
+\* member 3's archive and unarchive, or removal, at once; the declaration,
+\* the end for either cause and the boot's recovery of each edge among them
+\* (and of member 2's self edge) by each store-owned member, and a plain
+\* unwire's admission of each, in a running and a stopped mob. The boot
+\* plan is never sealed here, so the recovery's arms answer throughout, as
+\* declarations do.
 EdgesNext ==
-    \/ ASeed
-    \/ HoldArm
-    \/ CStop
-    \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
-    \/ AAuthorize
-    \/ AOpen(AFirst)
-    \/ ASeat(AFirst)
+    \/ EdgesCandidate
+    \/ EdgesSeed
+    \/ EdgesSeated /\ EdgesNoEndBegun /\ (HoldArm \/ CStop)
     \/ ARetire(AFirst)
     \/ AArchive(AFirst)
-    \/ RecordAs(Id2, "SeatOwed")
-    \/ RecordAs(Id3, "SeatOwed")
-    \/ CRAuthorize(Id2)
-    \/ COpenAt(<<Rid2, 2, 0>>, FALSE, TRUE)
-    \/ CSeatAt(<<Rid2, 2, 0>>, FALSE)
     \/ CRetireAt(<<Rid2, 2, 0>>)
     \/ CArchiveAt(<<Rid2, 2, 0>>)
     \/ \E id \in EdgeOwners : ArchiveArm(id) \/ UnarchiveArm(id)
@@ -1962,25 +1988,47 @@ AdoptIntoStoreVerdicts(id, src, g) ==
        ENABLED AdoptIdentityIntoStoreChangesHeld(id, src, g),
        ENABLED AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g) >>
 
-\* Member 1 a roster-owned identity declared, owed its seat, seated on its
-\* first incarnation and unlisted (its member retiring); member 2 a worker
-\* the replay recovered and bound (no entry), retired; member 3 a
-\* store-owned identity recorded owed its seat, or a name the scan of its
-\* row reserves (removed or unreadable), or nothing; a declared apply
-\* opened and closed, the host's changes hold and the build seed's
-\* composition authority, in a running and a stopped mob; and the adoption
-\* of each from either source, at no generation, the worker's or another.
+\* The run's seed, one step at a time: member 2 a worker the replay
+\* recovered and bound, then member 1 a roster-owned identity declared owed
+\* its seat, its ladder opened and its first incarnation seated. Or, before
+\* it, the build seed of a candidate composition. Once both are seated and
+\* before any adoption, the host's changes hold and the mob's stop and
+\* resume. (The seed's order keeps the run's space to the adoption's own
+\* steps.)
+AdoptionCandidate ==
+    /\ DOMAIN identity_to_runtime = {}
+    /\ SeedMemberResidencyRunning("OnDemand", "NonAuthoritative", {})
+AdoptionDeclare ==
+    DeclareIdentityEntrySeatOwed(Id1, ApplyShape[1], ApplyShape[2], ApplyShape[3], ApplyShape[4],
+                                 ApplyShape[5], ApplyShape[6], ApplyShape[7], ApplyShape[8],
+                                 ApplyShape[9], FALSE, FALSE)
+AdoptionBound == Id2 \in DOMAIN member_session_bindings
+AdoptionSeated == AdoptionBound /\ Seated(Id1)
+AdoptionNoneAdopted == Origin(Id1) # Some("Created") /\ Origin(Id2) = None
+AdoptionSeed ==
+    /\ composition_authority = "Authoritative"
+    /\ \/ Id2 \notin DOMAIN identity_to_runtime /\ A2Recover
+       \/ ~AdoptionBound /\ A2Bind
+       \/ AdoptionBound /\ Origin(Id1) = None /\ AdoptionDeclare
+       \/ /\ AdoptionBound
+          /\ Origin(Id1) = Some("Declared")
+          /\ ~Seated(Id1)
+          /\ Id1 \notin identity_entry_retiring
+          /\ \/ AAuthorize
+             \/ AOpen(AFirst)
+             \/ ASeatAs(AFirst, FALSE, FALSE, FALSE)
+
+\* The seed; member 1's unlisting (its member retiring); member 2's
+\* retirement; member 3 a store-owned identity recorded owed its seat, or a
+\* name the scan of its row reserves (removed or unreadable), or nothing; a
+\* declared apply opened and closed; and the adoption of each from either
+\* source, at no generation, the worker's or another, in a running and a
+\* stopped mob.
 AdoptionNext ==
-    \/ ASeed
-    \/ HoldArm
-    \/ CStop
-    \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
-    \/ AAuthorize
-    \/ AOpen(AFirst)
-    \/ ASeat(AFirst)
+    \/ AdoptionCandidate
+    \/ AdoptionSeed
+    \/ AdoptionSeated /\ AdoptionNoneAdopted /\ (HoldArm \/ CStop)
     \/ UnlistArm(Id1)
-    \/ A2Recover
-    \/ A2Bind
     \/ A2Retire
     \/ RecordAs(Id3, "SeatOwed")
     \/ \E presence \in {"Tombstone", "Unreadable"} : RecoverArm(Id3, presence, None)

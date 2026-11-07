@@ -1118,10 +1118,10 @@ if [[ ! -x "${created_identity_audit}" ]]; then
 fi
 # Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
-# audits-v; the changes part's admit, commit and update runs in audits-r,
-# its archive, unlist, placement, recovered, edges and adoption runs in
-# audits-t, and its
-# removal, preparation and prepverdicts runs in audits-u.
+# audits-v; the changes part's admit, commit, update and adoption runs in
+# audits-r, its archive, unlist, placement, recovered and edges runs in
+# audits-t, and its removal, preparation and prepverdicts runs in
+# audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1131,16 +1131,16 @@ if run_part audits-v; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part reseat,names
 fi
 if run_part audits-r; then
-  echo "running bounded created identity admissions and records TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update
+  echo "running bounded created identity admissions, records and adoptions TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update,adoption
 fi
 if run_part audits-u; then
   echo "running bounded created identity removals TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part removal
 fi
 if run_part audits-t; then
-  echo "running bounded created identity archives, unlists, owned edges and adoptions TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered,edges,adoption
+  echo "running bounded created identity archives, unlists and owned edges TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered,edges
 fi
 if run_part audits-u; then
   echo "running bounded created identity preparations TLC audit"
@@ -1406,14 +1406,19 @@ run_machine_verify() {
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s;
+# 248-375 s, and its adoption run (0.9.11; 114 s locally with 4 TLC
+# workers, about 130-190 s at the 1.13-1.66x its archive, unlist,
+# placement and recovered runs took hosted over their 202 s there): about
+# 380-565 s;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
 # the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
 # (eleven runs, not yet measured hosted; the empty-resume residency audit's
-# seven runs take 52-64 s): about 400-460 s;
+# seven runs take 52-64 s): about 400-460 s, and its owned edges run
+# (0.9.11; 115 s locally with 4 TLC workers, about 130-190 s at that
+# factor): about 530-650 s;
 # audits-u = its preparation and prepverdicts runs 161-237 and the tool
 # grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
 # removal run, from audits-s: about 454-497 s;

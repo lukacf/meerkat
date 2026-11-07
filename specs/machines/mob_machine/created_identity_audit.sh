@@ -141,31 +141,35 @@
 #   or seat puts a member under the archived identity
 #   (AuditArchivedNeverSeated), and the boot plan's seal, a stop and a
 #   resume keep its standing and its name (AuditArchivedKeepsItsName).
-# - edges (0.9.11): a roster-owned identity declared, seated and removed
-#   through its retirement; a store-owned identity seated under created
-#   custody, archived through its retirement, unarchived and removed; a
-#   store-owned identity no member holds, archived, unarchived and removed
-#   at once; the declaration, the end for either cause and the boot's
-#   recovery of each edge among them (and of a self edge) by each
-#   store-owned identity, and a plain unwire's admission of each, under the
-#   host's changes hold and either composition authority, in a running and
-#   a stopped mob: exactly one arm answers each (AuditEdgesExactlyOne), an
-#   owned edge ends only by its owner's end or by an end's removal
-#   (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it keeps its owner while
-#   owned (AuditOwnedEdgeKeepsItsOwner), and no end naming another identity
-#   than its owner ends it (AuditOnlyTheOwnerEndsItsEdge). Its domains add a
-#   third identity, the run's third end.
-# - adoption (0.9.11): a roster-owned identity declared, owed its seat,
-#   seated and unlisted; a worker the replay recovered and bound, retired; a
-#   store-owned identity recorded owed its seat, or a name the scan of its
-#   row reserves; a declared apply opened and closed; and the adoption of
-#   each from either source at each generation, under the host's changes
-#   hold and either composition authority, in a running and a stopped mob:
-#   exactly one arm answers each (AuditAdoptExactlyOne), an adoption keeps
-#   its member's runtime, generation and session
-#   (AuditAdoptionKeepsTheIncarnation), and takes a settled member only,
-#   outside a declared apply (AuditAdoptionTakesASettledMember). Its domains
-#   add a third identity.
+# - edges (0.9.11): two store-owned identities recorded owed their seats,
+#   then a roster-owned identity declared and seated, then the first of
+#   them seated under created custody, one step at a time (or a candidate
+#   composition before); the roster-owned identity removed through its
+#   retirement; the seated store-owned one archived through its
+#   retirement, unarchived and removed; the other archived, unarchived and
+#   removed at once; the declaration, the end for either cause and the
+#   boot's recovery of each edge among them (and of a self edge) by each
+#   store-owned identity, and a plain unwire's admission of each; and,
+#   once both members are seated and before any end begins, the host's
+#   changes hold, in a running and a stopped mob: exactly one arm answers
+#   each (AuditEdgesExactlyOne), an owned edge ends only by its owner's end
+#   or by an end's removal (AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd), it
+#   keeps its owner while owned (AuditOwnedEdgeKeepsItsOwner), and no end
+#   naming another identity than its owner ends it
+#   (AuditOnlyTheOwnerEndsItsEdge). Its domains add a third identity, the
+#   run's third end.
+# - adoption (0.9.11): a worker the replay recovered and bound, then a
+#   roster-owned identity declared, owed its seat and seated, one step at a
+#   time (or a candidate composition before); the roster-owned identity
+#   unlisted and the worker retired; a store-owned identity recorded owed
+#   its seat, or a name the scan of its row reserves; a declared apply
+#   opened and closed; the adoption of each from either source at each
+#   generation; and, once both are seated and before any adoption, the
+#   host's changes hold, in a running and a stopped mob: exactly one arm
+#   answers each (AuditAdoptExactlyOne), an adoption keeps its member's
+#   runtime, generation and session (AuditAdoptionKeepsTheIncarnation),
+#   and takes a settled member only, outside a declared apply
+#   (AuditAdoptionTakesASettledMember). Its domains add a third identity.
 #
 # Every run checks every generated invariant (the created entries' among
 # them: tombstone_is_never_an_entry, entry_custodies_are_disjoint,
@@ -251,8 +255,8 @@ prepverdicts_states=294
 placement_states=105
 unlist_states=336
 recovered_states=180
-edges_states=84720
-adoption_states=20160
+edges_states=3089
+adoption_states=1620
 
 # Every arm each run must fire. TLC names an arm after the generated
 # operator where it is applied plainly (an audit wrapper that only applies

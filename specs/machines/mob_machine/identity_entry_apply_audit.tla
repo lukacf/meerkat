@@ -78,7 +78,10 @@
 \*     entry custody and its membership commit) and its abort; the dormant
 \*     seat's refusal of a held or hosted entry; member 1 recovered and
 \*     retired by replay (ever created), declared held; the seal (which
-\*     leaves member 2 unmarked while its spawn is in flight); Stop,
+\*     leaves member 2 unmarked while its spawn is in flight, and is refused
+\*     while an unseated entry it does not list remains) and the one-entry
+\*     unlist of either member (which ends an unseated entry the seal
+\*     would refuse over); Stop,
 \*     Resume, Complete and the forced destroy (which ends the held spawn's
 \*     ladder, its membership committed or not), where the declaration and
 \*     the seal refuse; the declared apply's open fact (open, busy, refused,
@@ -989,6 +992,7 @@ HeldNext ==
     \/ \E s \in HeldShapes1 : DeclareArm(Id1, s)
     \/ \E s \in HeldShapes2 : DeclareArm(Id2, s)
     \/ \E d \in SUBSET {Id1, Id2} : SealArm(d)
+    \/ \E id \in {Id1, Id2} : UnlistArm(id)
     \/ H2Authorize
     \/ \E custody \in BOOLEAN : H2Open(custody)
     \/ H2Spawn

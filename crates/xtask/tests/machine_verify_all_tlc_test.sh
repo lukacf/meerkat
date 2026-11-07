@@ -904,7 +904,8 @@ fi
 # rotations under another role or its own, and a first-boot Resume request.
 # --part hosted (shard audits-o): held creation, the held spawn and entries
 # hosted on their first use, the seal that leaves a member whose spawn is in
-# flight unmarked, with Stop, Resume, Complete and the forced destroy (which
+# flight unmarked and the one-entry unlist, with Stop, Resume, Complete and
+# the forced destroy (which
 # ends the held spawn's ladder whether its membership committed or not), and
 # the declared apply's open fact; one bound host and the placed spawn ladder,
 # its remote commit, its retirement and the placed end; and an explicit

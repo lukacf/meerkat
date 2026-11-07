@@ -101,9 +101,10 @@
 #   the mob is still stopped and again once it runs). held: held
 #   creation and the held spawn, entries hosted on their first use, the
 #   dormant seat's refusal of both, the seal that leaves a member whose
-#   spawn is in flight unmarked, and Stop, Resume, Complete and the forced
-#   destroy (which ends the held spawn's ladder, its membership committed or
-#   not), where the declaration and the seal refuse; the declared apply's
+#   spawn is in flight unmarked, the one-entry unlist, and Stop, Resume,
+#   Complete and the forced destroy (which ends the held spawn's ladder,
+#   its membership committed or not), where the declaration and the seal
+#   refuse; the declared apply's
 #   open fact. placed: one bound host and the placed spawn ladder with or
 #   without entry custody, its remote commit, its retirement and the placed
 #   end. They check every generated invariant (the declared apply's among

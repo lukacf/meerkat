@@ -60,6 +60,34 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 This section is for systems running 0.9.10. The full list of changes is in
 the CHANGELOG under `## [0.9.11]`.
 
+### Complete rosters retire unlisted legacy members
+
+A complete declared apply (`MobHandle::apply_declared_roster` with
+`DeclaredRoster::complete`, Rust only) now also retires each member the
+roster does not list whose spawn row carries both legacy marks, the
+durable-identity continuity marker and the legacy `agent_identity` label
+naming its own identity, and that no host's intent row names. A local member
+bound to a session is adopted as an entry, and the apply's seal unlists the
+entry and retires the member with the cause `Unlisted`. A member placed on a
+member host, or bound to no session, is retired without becoming an entry,
+and its retirement records no cause. The answer names either as `Retired` in
+`DeclaredRosterOutcome::unlisted`, and a member whose retirement started
+already as `NotAdopted`. Such a member is one a host seated under its
+identity before identity entries existed, whose identity the roster dropped
+before the host first applied it; 0.9.10 left it serving as a worker. A
+member with one mark only, or one a host adopted, is left as it is, and a
+partial roster retires no member it does not list.
+
+The legacy label is also read in the one encoding of a name into a member id:
+it names a member whose id encodes the label's name (`team:alice`, seated as
+`mk--team_calice`). A listed identity's member labelled so is adopted where
+0.9.10 refused its name `NameHeldByWorker` unless the member carried the
+durable-identity marker.
+
+**Do:** before the first complete apply on 0.9.11, make the roster list every
+identity whose member you keep: a member with both legacy marks that the
+roster does not list is retired by that apply.
+
 ### Decision executors claim each kind
 
 `DecisionExecutorLoop` claims the executor role of each decision kind it
@@ -94,6 +122,85 @@ While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
 
 This section is for systems running 0.9.9. The full list of changes is in
 the CHANGELOG under `## [0.9.10]`.
+
+Meerkat 0.9.10 is Core 0.9.10, Meta 0.9.10 and Connect 0.9.10, released
+together. Meta Forge 0.3.1 ships with them and installs that set.
+
+### Before you upgrade
+
+- **Pin `=0.9.10`.** Move every `meerkat*` dependency to `=0.9.10` at once.
+  Meta 0.9.10 pins Core `=0.9.10`, so a host that embeds Meta moves Meta and
+  Core to 0.9.10 together (Meta 0.9.9 pinned Core `=0.9.9`). Connect 0.9.10
+  is built on Core 0.9.10 and Meta 0.9.10.
+- **Upgrade the SDKs with the server:** `meerkat-sdk`, `@rkat/sdk` and
+  `@rkat/web` for Core; `meerkat-meta` and `@rkat/meta-sdk` for Meta.
+- **Rust 1.97.0 or newer**, as for 0.9.9.
+- **No migration step.** 0.9.10 writes no durable state that 0.9.9 cannot
+  read, apart from the configuration forms listed under
+  [Downgrading to 0.9.9](#downgrading-to-0-9-9).
+
+### Fixes that need no action
+
+- **`session/create` or a first turn no longer hangs during a session
+  teardown.** When a session started to unregister during its first turn
+  (the first turn of an immediate `session/create`, the first `turn/start`
+  of a deferred session, or a cold session's rebuild), the session's
+  runtime loop waited on itself and the request never answered. The usual
+  trigger was an immediate `session/create` whose first agent build failed,
+  for example with `tool_grant_gate_refused`. Such a request now completes,
+  and the loop answers its own turn with the retryable
+  `runtime_teardown_in_progress` error data. Affects `rkat-rpc`, the Python
+  and TypeScript SDKs that drive it, `rkat mob deploy --surface rpc` and
+  other hosts of `meerkat_rpc::SessionRuntime`, from 0.8.22 through 0.9.9.
+- **Dormant members show their peer address in roster reads.** A member
+  seated dormant while its mob ran (a fresh dormant seat, or the next
+  incarnation after a rotation or a same-session respawn) now reads with its
+  peer id and transport key in `MobHandle::get_member`, `roster`,
+  `list_all_members`, `list_members` and the `mob_list_members` tool, as a
+  member restored dormant at a restart already did. The read wakes nothing.
+  A member on network comms still has no address until its first wake. If
+  your host took a missing peer id to mean "not woken yet", read the
+  member's state instead.
+- **Live voice delegations recover after a restart with dormant members.**
+  A host that composes the live delegation coordinator (`openai-live`) with
+  lazily restored members (`member_restore: on_demand`, the default)
+  retried its restart recovery every second, logging "ClientContext restart
+  inventory capture remains pending", for as long as any member stayed
+  dormant, and a live channel opened on that host waited with no limit.
+  Recovery now leaves dormant members dormant and recovers their
+  delegations once, when the member wakes or before the first live channel
+  opened on it. A live channel open waits at most 30 seconds for the
+  start-up recovery and is then refused with an error that names it: treat
+  that refusal as retryable once the mob restores.
+
+### Changes to check
+
+- **Approval files are private on Unix.** `FileApprovalStore` now creates
+  every file it writes (the `approvals.json` store, its lock file, and its
+  temporary and marker files) owner-only (`0600`), whatever the process
+  umask. A store file an earlier release left readable by others becomes
+  private on its next commit; an existing lock file is tightened in place,
+  and a tightening the filesystem refuses is logged as a warning. Other
+  platforms are unchanged. **Do:** if a process that runs as another user
+  or group reads these files (a backup or monitoring agent, for example),
+  run it as the store's user or read approvals through the API.
+- **Per-tool timeouts accept duration strings.** `[tools.tool_timeouts]`
+  entries take a duration string (`"840s"`, `"14m"`, `"1h 2m"`), as the
+  documentation said, as well as the `{ secs, nanos }` table. Before, a
+  string failed the whole config load. Meerkat still writes the table form,
+  also when `config/patch` or `rkat config patch` sets a string. **Do:**
+  before a rollback to 0.9.9 or earlier, turn hand-written strings back into
+  tables: those releases refuse the string form.
+- **A refusal before any tool effect reads as not dispatched.** A governed
+  tool call refused at its own effect entry
+  (`ToolDispatchContext::enter_reviewed_effect`) before any effect of the
+  call entered now reaches the model with `tool_invoked: false`, as a
+  refusal before the dispatcher already did; it read `"unknown"`. Affects
+  0.9.4 through 0.9.9. **Do (Rust):** `OperationRefused::dispatch()` of such
+  a refusal is `NotDispatched`, so comparing it with
+  `OperationRefused::new(kind)` no longer matches: compare `kind()` and
+  `dispatch()`. A tool that runs an effect of its own before its effect
+  entry forwards `OperationRefused::new(refusal.kind())`.
 
 ### Rebuilds after a completed owner change
 
@@ -137,6 +244,125 @@ compiles, but the default disables what it carries:
 
 - a `DecisionStore` wrapper: `claim_executor`. Its default refuses, so no
   `DecisionExecutorLoop` starts over the wrapper (`DecisionError::Unavailable`).
+
+### A poisoned host store scope
+
+One poisoned host store scope no longer refuses store-wide reads realm-wide:
+each such read now depends only on the scope families it reads. A call that
+a poisoned scope or a poisoned realm refuses answers the typed
+`RuntimeStoreError::ScopeRefused { scopes }`, naming each refused scope with
+its poison cause, or `RuntimeStoreError::RealmRefused { cause }`, where it
+answered `ReadFailed` or `WriteFailed` with the refusal's text. Behaviour
+changes for a poisoned scope:
+
+- A committed session read that the store refuses until its realm is
+  reopened surfaces as `SessionError::Store`: its `SessionError::code` is
+  `SESSION_STORE_ERROR` (was `AGENT_ERROR`).
+- `meerkat_core::service::transport::jsonrpc_code` answers `-32006` for it
+  (was `-32000`).
+- A wire error built from it (`WireError::from`) carries `INTERNAL_ERROR`,
+  JSON-RPC `-32603` (was `AGENT_ERROR`, `-32013`).
+- The HTTP status stays 500, and a session method's JSON-RPC error over
+  `rkat-rpc` (and the `rkat` exit status) is `INTERNAL_ERROR` either way.
+- `MobHandle::wait_one`, `wait_all`, `wait_for_kickoff_complete` and
+  `wait_for_members_kickoff_complete` end with `MobError::SessionError`,
+  carrying the store's typed refusal, when a member they wait on is not
+  final and the store refuses its session. They polled that member's status
+  until the caller gave up, a kickoff wait until its timeout.
+- `RuntimeDeliveryInbox::pending_delivery_total` and
+  `runtimes_with_pending_deliveries` answer while only scopes of other
+  families are poisoned, and refuse with
+  `RuntimeDeliveryError::Store(RuntimeStoreError::ScopeRefused { .. })`
+  while a runtime scope is poisoned.
+- Meta: `HostStoreReadiness::is_ready()` no longer counts a scope-only
+  poison; a poisoned realm still makes it not ready.
+  `HostStoreReadiness::poisoned_scopes`, every poisoned scope with its
+  cause, is new.
+
+**Do:** a caller that matched `ReadFailed` or `WriteFailed` for these
+refusals matches the new variants; one that only formats the error keeps
+compiling. A Meta probe that must keep the earlier rule checks
+`readiness.is_ready() && !readiness.scope_poisoned`.
+
+### New
+
+- **GitHub Copilot configured once.** A `[realm.<realm>.copilot]` section
+  names a Copilot account's token source once (`env` or
+  `external_resolver`) and gives the realm the account's `copilot_openai`,
+  `copilot_anthropic` and `copilot_gemini` routes, in place of nine explicit
+  tables. A route of a Copilot account can run a model only the account
+  lists (no catalog row or `[models.<id>]` entry needed); a model the
+  account does not offer is refused before any request, and no other route
+  is tried. Changes in behaviour:
+  - a request that names a route of a Copilot account and a model of
+    another provider family now runs on the account's route of that family,
+    where it failed with a provider-model mismatch;
+  - sessions on the zero-config Copilot routes (`global:copilot_openai`,
+    `global:copilot_anthropic`, `global:copilot_gemini`) carry the account
+    (`global:account:github_copilot`) as their credential identity and run
+    with provider-native tools off, as explicit Copilot routes always did.
+
+  **Do (Rust):** `RealmConfigSection` gains `copilot` (set it to `None` in
+  struct literals); `ProviderBindingError` gains
+  `CopilotAccountRouteConflict` and `CopilotAccountSourceUnsupported`, and
+  `FactoryError` gains `AccountModel`: add the match arms.
+- **The storage doctor counts the rows a rollback to 0.9.8 cannot read.**
+  `rkat storage doctor` reports an Info finding `identity-store-rows` for
+  each mob database that holds identity-store rows of schema version 2 or
+  later (the total, and how many are archived, tombstones and unreadable),
+  and its `operator-instruction-envelope` count also reads committed
+  boundary heads. Rust hosts: `MobStorage::read_identity_record_rows` and
+  `MobStorage::identity_record_rows` count them read-only with no running
+  mob (`IdentityRecordRows`).
+
+### Meta 0.9.10
+
+- **Pins Core `=0.9.10`.** A host that embeds Meta moves Meta and Core to
+  0.9.10 together. The Core fixes above reach Meta gateways where they use
+  the same paths: dormant member reads, governed refusals, per-tool timeouts
+  and the restart recovery of live voice delegations (a Meta gateway
+  composes it when `openai_live`, `experimental_live` or `console_voice` is
+  registered).
+- **Rollback census in the storage doctor.** `meta/storage/doctor` takes the
+  census the Meta 0.9.9 notes promised, read-only, as three Info findings
+  with counts only: `operator-instruction-envelope` (sessions of
+  `runtime.sqlite` at session envelope 5), `operator-instruction-mob-events`
+  (mob events at schema 10 in `event_log.sqlite3` and in each child mob
+  journal under `mobs/`) and `identity-store-rows` (identity-store rows of
+  schema version 2 and later). The doctor's result shape is unchanged, so no
+  SDK changes. `meta_gateway identity-census --json` adds
+  `identity_store_rows`. **Do:** before a rollback to Meta 0.9.7 or earlier,
+  run the doctor instead of the queries in the 0.9.9 notes.
+- **Known limitation: `meta/compact_member` after a failed turn.** When the
+  forced maintenance turn ends in a definite failure (a provider error, a
+  rate limit, or a request that compaction could not shrink), the temporary
+  compaction threshold (1024 tokens by default) stays on the member,
+  durably, and every later `compact_member` on that identity is refused as
+  busy until the gateway restarts. **Do:** after a failed `compact_member`,
+  call `meta/respawn` for the identity, then restart the gateway.
+- **Meta Forge 0.3.1** installs the matched Meta 0.9.10, Connect 0.9.10 and
+  `meerkat-toolkit` 0.9.10 set on Linux x86_64 and macOS arm64. It is the
+  first Forge release from this repository (tag `meta-installer-v0.3.1`);
+  Forge 0.3.0 and earlier stay in `lukacf/meerkat-meta`. **Do:** an
+  application that Forge 0.3.0 prepared with its Connect gateway is prepared
+  again at its next install step.
+
+### Downgrading to 0.9.9
+
+0.9.9 reads what 0.9.10 writes, with these exceptions:
+
+- per-tool timeout strings in `[tools.tool_timeouts]`: 0.9.9 refuses the
+  config file, so turn them into `{ secs, nanos }` tables first;
+- a `[realm.<realm>.copilot]` section: 0.9.9 does not read it, so the routes
+  it declares are missing there; write the explicit Copilot tables first;
+- a session that runs a model only its Copilot account lists: 0.9.9 knows a
+  model only from the catalog or a `[models.<id>]` entry, so such a session
+  does not build there until the model has an entry.
+
+Approval files stay owner-only, which 0.9.9 reads as the same user. Going
+back further, to 0.9.8 or Meta 0.9.7, follows the 0.9.9 notes: run the
+0.9.10 storage doctors first (Core and Meta), which now count what blocks
+it.
 
 ## Upgrading to 0.9.9
 

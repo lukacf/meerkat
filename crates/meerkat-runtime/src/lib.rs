@@ -31,6 +31,42 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-runtime`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(
+    test,
+    not(all(
+        feature = "test-support",
+        feature = "sqlite-store",
+        feature = "live",
+        feature = "local-authorization"
+    ))
+))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-runtime: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-runtime --features test-support,sqlite-store,live,local-authorization` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
@@ -571,12 +607,13 @@ pub use completion::{
     CompletionWaitError,
 };
 pub use delivery_inbox::{
-    ContinuationKeyClaim, KeyedSubmitOutcome, RuntimeDeliveryAcknowledgement, RuntimeDeliveryError,
-    RuntimeDeliveryId, RuntimeDeliveryInbox, RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed,
-    RuntimeDeliveryOwnership, RuntimeDeliveryReceipt, RuntimeDeliveryRecipient,
-    RuntimeDeliveryRecipientGroupOutcome, RuntimeDeliveryRecipientOutcome,
-    RuntimeDeliveryRecipientState, RuntimeDeliveryRecord, RuntimeDeliveryRefusalReason,
-    RuntimeDeliveryStatus, RuntimeDeliverySubmission, delivery_digest_hex,
+    ContinuationKeyClaim, KeyedSubmitOutcome, RuntimeDeliveryAcknowledgement,
+    RuntimeDeliveryBacklog, RuntimeDeliveryError, RuntimeDeliveryId, RuntimeDeliveryInbox,
+    RuntimeDeliveryKind, RuntimeDeliveryOwnerAlreadyArmed, RuntimeDeliveryOwnership,
+    RuntimeDeliveryReceipt, RuntimeDeliveryRecipient, RuntimeDeliveryRecipientGroupOutcome,
+    RuntimeDeliveryRecipientOutcome, RuntimeDeliveryRecipientState, RuntimeDeliveryRecord,
+    RuntimeDeliveryRefusalReason, RuntimeDeliveryStatus, RuntimeDeliverySubmission,
+    delivery_digest_hex,
 };
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use exact_operation::{
@@ -1191,14 +1228,15 @@ pub use store::{
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
     PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
-    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
+    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RefusedScope,
+    RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, ServiceCallAuditBatch,
-    ServiceCallAuditKey, ServiceCallAuditRecord, VerifiedCommittedWholeBlobPayload,
-    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority,
-    WholeBlobRunRebaseOutcome, WholeBlobSessionImport, WholeBlobStoreAuthority,
-    reuse_or_load_committed_whole_blob_snapshot,
+    ServiceCallAuditKey, ServiceCallAuditRecord, UnavailableRuntime,
+    VerifiedCommittedWholeBlobPayload, WholeBlobCommittedTranscriptFacts,
+    WholeBlobProvisionalTailAuthority, WholeBlobRunRebaseOutcome, WholeBlobSessionImport,
+    WholeBlobStoreAuthority, reuse_or_load_committed_whole_blob_snapshot,
 };
 #[cfg(feature = "sqlite-store")]
 pub use store::{

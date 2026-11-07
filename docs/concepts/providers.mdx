@@ -103,6 +103,7 @@ Use `rkat models` for every supported ID and its current limits.
     | `gpt-6-astra` | 1.05M | 128K | Default OpenAI/global model; separate 922K input ceiling |
     | `gpt-6-sol` | 1.05M | 128K | GPT-6 coding and agentic tier; separate 922K input ceiling |
     | `gpt-6.1-sol` | 1.05M | 128K | Near-Astra performance at lower cost; separate 922K input ceiling |
+    | `gpt-6.1-terra` | 1.05M | 128K | Fast, efficient visual reasoning, computer use and writing; separate 922K input ceiling |
     | `gpt-6-luna` | 1.05M | 128K | GPT-6 efficient high-volume tier; separate 922K input ceiling |
     | `gpt-5.6-sol` | 1.05M | 128K | GPT-5.6 catalog variant |
     | `gpt-5.6-terra` | 1.05M | 128K | GPT-5.6 catalog variant |
@@ -305,11 +306,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.9", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.10", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.9", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.10", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -359,6 +360,25 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     above `high` effort are refused when the agent is built and again before
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
+
+    Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a replayed
+    thinking block only while the system prompt, the tools and the earlier
+    messages it was produced under are unchanged, and accounts created on or
+    after 2026-08-31 refuse a request that replays one after a change.
+    Meerkat changes the tools mid-session as MCP servers connect, so it asks
+    Anthropic to drop such blocks instead
+    (`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, with
+    the `thinking-binding-controls-2026-08-01` beta): beside configured
+    `adaptive` thinking, and beside the model's own default,
+    `{"type": "adaptive"}`, when thinking is omitted, since these models
+    think by default. It is never sent beside `between_tools` or `disabled`,
+    and only on the Anthropic API, Vertex and Foundry: Amazon Bedrock and
+    the Copilot route do not send it. A request that forces a tool call with
+    thinking omitted is sent as before, without the control: Meerkat refuses
+    a forced tool call beside explicit thinking, and a forced call skips
+    thinking on the models that accept one. The model answers that turn without
+    the dropped reasoning and the prompt cache restarts at the first dropped
+    block; Meerkat logs a warning naming each dropped block.
 
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
@@ -607,7 +627,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.9", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.10", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

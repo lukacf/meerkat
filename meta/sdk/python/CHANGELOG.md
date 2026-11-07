@@ -1,4 +1,4 @@
-# Changelog — meerkat-meta (Python SDK)
+# Changelog: meerkat-meta (Python SDK)
 
 All notable changes to the Python SDK are documented here.
 
@@ -19,6 +19,10 @@ All notable changes to the Python SDK are documented here.
 - A decide called while the SDK serves a host tool callback raises
   `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
   `"decide_inside_tool_callback"`) and sends nothing.
+
+## 0.9.10
+
+No SDK API changes; released with Meta 0.9.10.
 
 ## 0.9.9
 

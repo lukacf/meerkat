@@ -182,47 +182,20 @@ done
 
 # ── #296: governance/spec changes route formal/governance checks ─────────────
 echo "#296 agent gates route governance/spec changes:"
-if grep -Fq 'is_governance_path' scripts/cargo-agent-gate \
-  && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/cargo-agent-gate; then
-  ok "cargo-agent-gate has governance allowlist + formal gate routing"
-else
-  bad "cargo-agent-gate missing governance allowlist or formal gate routing"
-fi
 if grep -Fq 'is_governance_path' scripts/buildbuddy-agent-gate \
   && grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' scripts/buildbuddy-agent-gate; then
   ok "buildbuddy-agent-gate has governance allowlist + formal gate routing"
 else
   bad "buildbuddy-agent-gate missing governance allowlist or formal gate routing"
 fi
-# Behavioral: a spec-only change is no longer reported as "no changes" and is
+# Behavioral: a governance-only change is not reported as "no changes" and is
 # routed to the governance gate (dry-run avoids invoking cargo/make work).
-gate_out=$(scripts/cargo-agent-gate --dry-run -- specs/machines/example.tla 2>&1 || true)
-if printf '%s' "$gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes specs/machines change to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route specs/machines change to governance gate"
-fi
 docs_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- docs/reference/machine-authority.mdx 2>&1 || true)
 if printf '%s' "$docs_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
   && ! printf '%s' "$docs_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes machine-authority docs to governance gate"
 else
   bad "buildbuddy-agent-gate dry-run did not route machine-authority docs"
-fi
-generated_machine_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs 2>&1 || true)
-if printf '%s' "$generated_machine_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
-  && ! printf '%s' "$generated_machine_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes generated machine catalog changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route generated machine catalog changes"
-fi
-mob_identity_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mob/src/ids.rs 2>&1 || true)
-if printf '%s' "$mob_identity_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate runtime-authority-bypass seam-inventory rmat-audit' \
-  && ! printf '%s' "$mob_identity_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes mob identity authority changes to governance gate"
-else
-  bad "cargo-agent-gate dry-run did not route mob identity authority changes"
 fi
 generated_buildbuddy_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-core/src/generated/protocol_runtime.rs 2>&1 || true)
 if printf '%s' "$generated_buildbuddy_gate_out" | grep -Fq 'machine-check-drift machine-authority-docs-gate seam-inventory rmat-audit' \
@@ -237,40 +210,12 @@ if grep -Fq '//crates/meerkat-machine-schema:docs_machine_authority_alignment_te
 else
   bad "BuildBuddy machine-authority lanes omit machine-authority docs alignment"
 fi
-schema_gate_out=$(scripts/cargo-agent-gate --dry-run -- artifacts/schemas/rest-openapi.json 2>&1 || true)
-if printf '%s' "$schema_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$schema_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes schema artifacts to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route schema artifacts to generated contract ratchets"
-fi
 sdk_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- sdks/typescript/src/generated/types.ts sdks/python/meerkat/generated/types.py 2>&1 || true)
 if printf '%s' "$sdk_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
   && ! printf '%s' "$sdk_gate_out" | grep -Fq 'no build-relevant changes detected.'; then
   ok "buildbuddy-agent-gate dry-run routes SDK generated artifacts to generated contract ratchets"
 else
   bad "buildbuddy-agent-gate dry-run did not route SDK generated artifacts"
-fi
-surface_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-mcp/src/router.rs crates/meerkat-mob-mcp/src/agent_tools.rs docs/api/mcp.mdx sdks/typescript/README.md 2>&1 || true)
-if printf '%s' "$surface_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
-  && ! printf '%s' "$surface_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes public surface docs/router/mob-mcp changes to generated contract ratchets"
-else
-  bad "cargo-agent-gate dry-run did not route public surface docs/router/mob-mcp changes"
-fi
-web_gate_out=$(scripts/cargo-agent-gate --dry-run -- sdks/web/src/runtime.ts 2>&1 || true)
-if printf '%s' "$web_gate_out" | grep -Fq 'test-sdk-web' \
-  && ! printf '%s' "$web_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes Web SDK changes to Web SDK tests"
-else
-  bad "cargo-agent-gate dry-run did not route Web SDK changes"
-fi
-wasm_gate_out=$(scripts/cargo-agent-gate --dry-run -- crates/meerkat-web-runtime/src/lib.rs 2>&1 || true)
-if printf '%s' "$wasm_gate_out" | grep -Fq 'wasm-check' \
-  && ! printf '%s' "$wasm_gate_out" | grep -Fq 'no Rust build-relevant changes detected.'; then
-  ok "cargo-agent-gate dry-run routes web runtime changes to wasm-check"
-else
-  bad "cargo-agent-gate dry-run did not route web runtime changes"
 fi
 rest_gate_out=$(scripts/buildbuddy-agent-gate --dry-run -- crates/meerkat-rest/src/lib.rs crates/meerkat-rpc/src/session_runtime.rs 2>&1 || true)
 if printf '%s' "$rest_gate_out" | grep -Fq 'verify-schema-freshness verify-sdk-codegen-freshness verify-sdk-event-inventory verify-rpc-surface-alignment verify-rest-surface-alignment' \
@@ -388,6 +333,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # runner's coverage parsing stays pinned to that form.
 # empty_resume_residency_audit.sh requires its four witnesses violated, and
 # with --mutants each seeded defect's invariant or property violated.
+# switch_turn_withdrawal_audit.sh requires its five witnesses violated, and
+# with --mutants each seeded defect's property or invariant violated.
 # durable_tail_classification_audit.sh requires its Ready witness violated,
 # and with --mutants each seeded defect's target invariant violated.
 # durable_tail_recovery_ownership_audit.sh requires its four witnesses
@@ -407,9 +354,10 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # covered action of every run generated a state, its seventy-seven step
 # witnesses and six state witnesses violated, and with --mutants its
 # reconcile mutant's generated invariant, its probe mutant's invariant, its
-# adoption mutant's invariant or property, its replay, archive and destroy
-# mutants' generated invariants, its rotation, seat, respawn and
-# preserving-archive mutants' action properties, its declared apply
+# adoption mutant's invariant or property, its unlisted adoption and
+# unadopted retirement mutants' target action properties, its replay,
+# archive and destroy mutants' generated invariants, its rotation, seat,
+# respawn and preserving-archive mutants' action properties, its declared apply
 # mutants' generated invariants (the in-flight seal mutant's run with its
 # target invariant alone), totality invariants and action properties
 # (one per declared apply invariant, property and guard; the reset
@@ -737,6 +685,16 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessCompositionClaimed is violated."' \
   'echo "Error: Invariant AuditVerdictExactlyOne is violated."' \
   'echo "Error: Action property AuditPlacementOwnership is violated."' \
+  'echo "Error: Action property NotAuditWitnessQueuedInputKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedWithdrawn is violated."' \
+  'echo "Error: Action property AuditAbortWithdrawsOnlyTheRequest is violated."' \
+  'echo "Error: Action property AuditAbortOnlyForThePendingRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessConflictRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessStoppedCompleted is violated."' \
+  'echo "Error: Action property AuditPendingSwitchEndsOnlyWithItsRequest is violated."' \
+  'echo "Error: Action property AuditCompleteSettlesTheRequest is violated."' \
+  'echo "Error: Action property NotAuditWitnessFiniteConflictRefused is violated."' \
+  'echo "Error: Invariant AuditNoDenialUnderThePendingSwitch is violated."' \
   'echo "Error: Assumption line 1, col 1 to line 1, col 2 of module member_residency_audit is false."' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
   'echo "200000 states generated, 200000 distinct states found, 0 states left on queue."' \
@@ -777,7 +735,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \
   'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
   'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
-  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
   'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
@@ -867,6 +825,8 @@ printf '%s\n' \
   'echo "Error: Invariant worker_reconcile_spares_entries is violated."' \
   'echo "Error: Invariant AuditProbeExactlyOne is violated."' \
   'echo "Error: Invariant AuditAdoptionExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionNeedsObservation is violated."' \
+  'echo "Error: Action property AuditRetireUnadoptedQualifies is violated."' \
   'echo "Error: Invariant entry_is_seated_or_has_an_unseated_cause is violated."' \
   'echo "Error: Invariant NotAuditWitnessHeldWhileRunCurrent is violated."' \
   'echo "Error: Invariant NotAuditWitnessReleasedThenStaged is violated."' \
@@ -1164,7 +1124,7 @@ lane_part_output() {
 audit_lines() {
   grep -E '^running (bounded .* TLC audit|member [a-z]+ TLC audit|MobMachine arm coverage gate)$' | sort
 }
-audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v"
+audit_shards="audits-a audits-b audits-c audits-d audits-e audits-f audits-g audits-h audits-i audits-j audits-k audits-l audits-m audits-n audits-o audits-q audits-r audits-s audits-t audits-u audits-v audits-w audits-x audits-y"
 shard_outputs="$(mktemp -d)"
 failed_parts=""
 idle_shards=""

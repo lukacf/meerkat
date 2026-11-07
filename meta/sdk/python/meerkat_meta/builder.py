@@ -899,8 +899,10 @@ class MetaBuilder:
 
         Emitted as ``runtime_options.allow_remote``. Same word and rule as
         ``--allow-remote`` on ``rkat-rpc --tcp``: an exposure acknowledgement,
-        not an auth mechanism. Pass it only with an authenticating proxy in
-        front of the listener. Mirrors the TypeScript builder's ``allowRemote``.
+        not an auth mechanism. Without app auth the console treats every caller
+        as one anonymous caller, even behind a proxy that signs people in;
+        configure ``auth_config`` to tell people apart. Mirrors the TypeScript
+        builder's ``allowRemote``.
         """
         self._config.allow_remote = bool(allow)
         return self

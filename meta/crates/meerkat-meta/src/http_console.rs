@@ -171,13 +171,74 @@ struct ConsoleHttpAuthContext {
     verification: Option<crate::runtime::ConsoleCallerVerification>,
 }
 
+/// Who the Console acts as for one request, derived from the connection
+/// alone: the token the Console verified, or none on an open Console. No
+/// request field names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleActorKind {
+    /// A verified human token: an OIDC issuer and `sub`.
+    Person,
+    /// A verified service token (`svc:` principal or service actor).
+    Service,
+    /// A verified token that names no human (no `sub`).
+    TokenPrincipal,
+    /// A caller of an open Console without a verified token.
+    Anonymous,
+}
+
+impl ConsoleActorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Service => "service",
+            Self::TokenPrincipal => "token_principal",
+            Self::Anonymous => "anonymous",
+        }
+    }
+
+    /// The authentication assurance the Console established for this kind
+    /// of caller; a token that names no human claims none.
+    fn assurance(self) -> Option<meerkat_core::ApprovalAssurance> {
+        match self {
+            Self::Person => Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
+            Self::Service => Some(meerkat_core::ApprovalAssurance::ServiceCredential),
+            Self::TokenPrincipal | Self::Anonymous => None,
+        }
+    }
+}
+
 impl ConsoleHttpAuthContext {
+    /// Who the Console acts as for this request.
+    fn actor_kind(&self) -> ConsoleActorKind {
+        match (&self.human, &self.principal) {
+            (Some(_), _) => ConsoleActorKind::Person,
+            (None, Some(_)) if self.service_identity => ConsoleActorKind::Service,
+            (None, Some(_)) => ConsoleActorKind::TokenPrincipal,
+            (None, None) => ConsoleActorKind::Anonymous,
+        }
+    }
+
     /// The scope this caller's console sends are deduplicated in: the
     /// verified human (issuer and subject) when there is one, else the
     /// authenticated principal with its trust source, else the open
     /// Console's shared local account.
     fn send_scope(&self) -> ConsoleSendScope {
         self.send_scope.clone()
+    }
+
+    /// The opaque caller scope `meta/console/whoami` reports for this
+    /// caller.
+    fn caller_scope(&self) -> String {
+        console_caller_scope(&self.send_scope)
+    }
+
+    /// Refuse a change made for another caller: `expected` is the
+    /// `expected_caller_scope` the request carried, if any.
+    fn refuse_other_caller(&self, expected: Option<&str>) -> Result<(), ConsoleCallerRefusal> {
+        match expected {
+            Some(expected) if expected != self.caller_scope() => Err(ConsoleCallerRefusal::Changed),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1030,7 +1091,9 @@ fn console_json_router_with_state(state: ConsoleJsonState) -> Router {
                 .layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_BYTES)),
         )
         .route("/blobs/{blob_id}", get(blob_get_handler));
-    router.with_state(state)
+    let open = crate::gateway_composition::ConsoleAuthPosture::of(&state.decisions)
+        == crate::gateway_composition::ConsoleAuthPosture::Open;
+    served_hosts_only(router.with_state(state), open)
 }
 
 pub async fn console_json_handler(
@@ -1239,6 +1302,78 @@ fn attach_console_send_dedupe(experience: &mut Value, aggregator: Option<&MetaCo
     }
 }
 
+/// `meta/console/whoami`: who the Console acts as for this request. Only
+/// the caller's own principal appears; the approver ids are the ones its
+/// access snapshot holds.
+fn console_whoami_rpc(
+    decisions: &RuntimeDecisionState,
+    auth: &ConsoleHttpAuthContext,
+    request: &JsonRpcRequest,
+) -> Value {
+    use crate::gateway_composition::ConsoleAuthPosture;
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let kind = auth.actor_kind();
+    let posture = match ConsoleAuthPosture::of(decisions) {
+        ConsoleAuthPosture::Open => "open",
+        ConsoleAuthPosture::Enforced => "enforced",
+        ConsoleAuthPosture::ClosedToEveryCaller => "closed",
+    };
+    // The first instant the Console refuses the caller's token: its `exp`
+    // plus the verifier's leeway. `None` without a token or an `exp`.
+    let login_expires_at_ms = auth
+        .verification
+        .as_ref()
+        .and_then(crate::runtime::ConsoleCallerVerification::refused_from)
+        .and_then(|instant| instant.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    let (can_administer, approver_ids) = match &auth.access_view {
+        Some(view) => (
+            view.can_administer(),
+            view.held_approver_ids().into_iter().collect::<Vec<_>>(),
+        ),
+        None => (false, Vec::new()),
+    };
+    response_value(
+        response_id,
+        Some(json!({
+            "actor": {
+                "kind": kind.as_str(),
+                "principal": auth.principal,
+                "assurance": kind.assurance(),
+            },
+            "posture": posture,
+            "login_expires_at_ms": login_expires_at_ms,
+            "can_administer": can_administer,
+            "approver_ids": approver_ids,
+            "caller_scope": console_caller_scope(&auth.send_scope()),
+        })),
+        None,
+    )
+}
+
+/// An opaque, stable digest of the caller the Console resolved for a
+/// request, from its send scope: the verified human (issuer and subject),
+/// the principal with its trust source, or the open Console's one anonymous
+/// caller. The same caller always gets the same digest.
+fn console_caller_scope(scope: &ConsoleSendScope) -> String {
+    use sha2::{Digest, Sha256};
+    let caller = match scope {
+        ConsoleSendScope::Human { issuer, subject } => json!(["human", issuer, subject]),
+        ConsoleSendScope::Principal {
+            principal,
+            provider,
+            issuer,
+        } => json!(["principal", principal, provider, issuer]),
+        ConsoleSendScope::Anonymous | ConsoleSendScope::Unscoped => json!(["anonymous"]),
+    };
+    let digest = Sha256::digest(
+        json!(["meta-console-caller-v1", caller])
+            .to_string()
+            .as_bytes(),
+    );
+    format!("console-caller:v1:{digest:x}")
+}
+
 /// Storage keys are opaque projections of the authenticated runtime/principal.
 /// Anonymous consoles form an explicit shared local account. The browser also
 /// includes its gateway base URL, and custom hosts can supply a stricter scope.
@@ -1266,7 +1401,7 @@ pub async fn console_rpc_handler(
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
     // Parse the request early so we can check the method for auth gating.
-    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -1286,12 +1421,36 @@ pub async fn console_rpc_handler(
     // - When require_app_auth is false: allow requests without a token.
     // - When console.read_only is true: deny mutating methods even for
     //   otherwise authorized callers.
-    let auth_context = match console_request_auth_context(&state, &headers, &uri) {
+    let auth_context = match console_write_auth_context(&state, &headers, &uri) {
         Some(context) => context,
         None => {
             return console_rpc_unauthenticated_response(parsed_request.id.unwrap_or(Value::Null));
         }
     };
+    let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return (
+                StatusCode::OK,
+                Json::<Value>(invalid_params(
+                    parsed_request.id.clone().unwrap_or(Value::Null),
+                    message,
+                )),
+            );
+        }
+    };
+    if is_console_mutating_rpc_method(&request_method)
+        && let Err(refusal) = auth_context.refuse_other_caller(expected_caller_scope.as_deref())
+    {
+        return (
+            StatusCode::OK,
+            Json::<Value>(response_value(
+                parsed_request.id.clone().unwrap_or(Value::Null),
+                None,
+                Some(refusal.json_rpc_error()),
+            )),
+        );
+    }
     // By this point the request is always authorized:
     // - require_app_auth=true: an invalid token already returned 401 above.
     // - require_app_auth=false: all methods are permitted unconditionally.
@@ -1317,6 +1476,10 @@ pub async fn console_rpc_handler(
     if request_method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD {
         let response =
             console_revoke_sessions_rpc(&state, &auth_context, read_only, &parsed_request);
+        return (StatusCode::OK, Json::<Value>(response));
+    }
+    if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
+        let response = console_whoami_rpc(&state.decisions, &auth_context, &parsed_request);
         return (StatusCode::OK, Json::<Value>(response));
     }
     if matches!(
@@ -1347,6 +1510,21 @@ pub async fn console_rpc_handler(
         return (StatusCode::OK, Json::<Value>(response));
     }
     let Some(runtime) = &state.runtime else {
+        // A change checks its caller again right before its handler runs,
+        // as the runtime dispatch does.
+        if is_console_mutating_rpc_method(&request_method)
+            && let Err(refusal) = ConsoleSendGovernance::for_request(&state, &auth_context)
+                .refuse_unless_caller_current()
+        {
+            return (
+                StatusCode::OK,
+                Json::<Value>(response_value(
+                    parsed_request.id.clone().unwrap_or(Value::Null),
+                    None,
+                    Some(refusal.json_rpc_error()),
+                )),
+            );
+        }
         let response_value = Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
@@ -2134,19 +2312,33 @@ async fn console_timeline_handler(
     }
 }
 
+/// `POST /console/send`'s body: the send, and the caller scope its client
+/// made it for (`expected_caller_scope`).
+#[derive(serde::Deserialize)]
+struct ConsoleSendBody {
+    #[serde(flatten)]
+    request: ConsoleSendRequest,
+    #[serde(default)]
+    expected_caller_scope: Option<String>,
+}
+
 async fn console_send_handler(
     State(state): State<ConsoleJsonState>,
     headers: HeaderMap,
     uri: Uri,
-    Json(request): Json<ConsoleSendRequest>,
+    Json(body): Json<ConsoleSendBody>,
 ) -> impl IntoResponse {
-    let Some(auth_context) = console_request_auth_context(&state, &headers, &uri) else {
+    let Some(auth_context) = console_write_auth_context(&state, &headers, &uri) else {
         return console_json_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "console send requires a valid auth token",
         );
     };
+    if let Err(refusal) = auth_context.refuse_other_caller(body.expected_caller_scope.as_deref()) {
+        return refusal.into_response();
+    }
+    let request = body.request;
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
     match Box::pin(send_as_admitted_console_caller(
         &ConsoleSendPath::of_state(&state),
@@ -2176,6 +2368,9 @@ async fn console_send_handler(
             "unavailable",
             "console aggregator unavailable",
         ),
+        Err(AdmittedConsoleSendError::CallerNotCurrent) => {
+            ConsoleCallerRefusal::NotCurrent.into_response()
+        }
         Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
     }
 }
@@ -2224,6 +2419,8 @@ pub(crate) enum AdmittedConsoleSendError {
     Gate(ConsoleSendGateRefusal),
     /// The Console serves no aggregator to send through.
     AggregatorUnavailable,
+    /// The caller's login ended before the send was made.
+    CallerNotCurrent,
     /// The send was refused or failed.
     Send(ConsoleSendError),
 }
@@ -2235,7 +2432,53 @@ impl AdmittedConsoleSendError {
             Self::CandidateLaunch => CANDIDATE_LAUNCH_SEND_REFUSAL.to_string(),
             Self::Gate(refusal) => refusal.message().to_string(),
             Self::AggregatorUnavailable => "console aggregator unavailable".to_string(),
+            Self::CallerNotCurrent => ConsoleCallerRefusal::NotCurrent.message().to_string(),
             Self::Send(error) => console_send_public_message(error),
+        }
+    }
+}
+
+impl From<CheckedConsoleSendError> for AdmittedConsoleSendError {
+    fn from(error: CheckedConsoleSendError) -> Self {
+        match error {
+            CheckedConsoleSendError::Send(error) => Self::Send(error),
+            CheckedConsoleSendError::CallerNotCurrent => Self::CallerNotCurrent,
+        }
+    }
+}
+
+/// Why a Console send that checks its caller right before it is made was
+/// not made.
+#[derive(Debug)]
+pub(crate) enum CheckedConsoleSendError {
+    /// The send was refused or failed.
+    Send(ConsoleSendError),
+    /// The caller's login ended before the send was reserved or sent.
+    CallerNotCurrent,
+}
+
+impl From<ConsoleSendError> for CheckedConsoleSendError {
+    fn from(error: ConsoleSendError) -> Self {
+        Self::Send(error)
+    }
+}
+
+impl CheckedConsoleSendError {
+    /// The refusal as a console RPC answers it.
+    fn json_rpc_error(self) -> JsonRpcError {
+        match self {
+            Self::Send(error) => console_send_json_rpc_error(error),
+            Self::CallerNotCurrent => ConsoleCallerRefusal::NotCurrent.json_rpc_error(),
+        }
+    }
+
+    /// The send's own error. A test's caller has no login to end, so its
+    /// sends never answer `CallerNotCurrent`.
+    #[cfg(test)]
+    pub(crate) fn into_send_error(self) -> ConsoleSendError {
+        match self {
+            Self::Send(error) => error,
+            Self::CallerNotCurrent => ConsoleSendError::State("the caller's login ended"),
         }
     }
 }
@@ -2268,6 +2511,11 @@ pub(crate) async fn send_as_admitted_console_caller(
     )
     .await
     .map_err(AdmittedConsoleSendError::Gate)?;
+    // The caller is checked after the gate's reads, before the operator
+    // note, and again right before the send is reserved or sent.
+    governance
+        .refuse_unless_caller_current()
+        .map_err(|_| AdmittedConsoleSendError::CallerNotCurrent)?;
     // §16 Q1 provisional operator keying: an authenticated principal
     // addressing this identity IS the active operator for its turns.
     // Unauthenticated consoles (no subject) note nothing: operator-scope
@@ -2291,12 +2539,9 @@ pub(crate) async fn send_as_admitted_console_caller(
             ))
             .await
         }
-        None => match governance.refuse_ungoverned_delivery(request.identity.as_str()) {
-            Ok(()) => Box::pin(aggregator.send_scoped(request, &governance.scope)).await,
-            Err(error) => Err(error),
-        },
+        None => Box::pin(console_send_member_lane(aggregator, request, governance)).await,
     };
-    sent.map_err(AdmittedConsoleSendError::Send)
+    sent.map_err(AdmittedConsoleSendError::from)
 }
 
 /// `POST /console/send/recover`: the REST twin of `meta/console/recover_send`.
@@ -2306,15 +2551,24 @@ async fn console_send_recover_handler(
     State(state): State<ConsoleJsonState>,
     headers: HeaderMap,
     uri: Uri,
-    Json(params): Json<Value>,
+    Json(mut params): Json<Value>,
 ) -> impl IntoResponse {
-    let Some(auth_context) = console_request_auth_context(&state, &headers, &uri) else {
+    let Some(auth_context) = console_write_auth_context(&state, &headers, &uri) else {
         return console_json_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "console send recovery requires a valid auth token",
         );
     };
+    let expected_caller_scope = match take_expected_caller_scope(&mut params) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return console_json_error(StatusCode::BAD_REQUEST, "invalid_request", &message);
+        }
+    };
+    if let Err(refusal) = auth_context.refuse_other_caller(expected_caller_scope.as_deref()) {
+        return refusal.into_response();
+    }
     // A candidate launch settles no console send: a recovery marks the send
     // delivered in the Console store the authoritative launch reads. 409
     // `candidate_launch`, as `POST /console/send` answers.
@@ -2358,6 +2612,13 @@ async fn console_send_recover_handler(
         .identity_runtime
         .as_ref()
         .map(|identity_runtime| Arc::clone(identity_runtime.runtime()));
+    // The caller is checked again after the gate's reads, right before the
+    // send is settled, as `meta/console/recover_send` checks it.
+    if let Err(refusal) =
+        ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+    {
+        return refusal.into_response();
+    }
     match Box::pin(recover_console_send(
         aggregator,
         identity_runtime.as_ref(),
@@ -2729,6 +2990,9 @@ pub(crate) struct ConsoleSendGovernance {
     /// The Console's access controller, rechecked with the human when the
     /// host binds.
     pub(crate) access: Option<AccessController>,
+    /// The verification the caller's token passed, when a token identified
+    /// the caller: a change checks it again before it commits.
+    pub(crate) verification: Option<crate::runtime::ConsoleCallerVerification>,
 }
 
 impl ConsoleSendGovernance {
@@ -2742,6 +3006,24 @@ impl ConsoleSendGovernance {
                 .as_ref()
                 .is_some_and(MobRuntime::native_work_governed),
             access: state.access.clone(),
+            verification: auth_context.verification.clone(),
+        }
+    }
+
+    /// Refuse a change whose caller's login ended since the request was
+    /// accepted: the token must still pass the Console's acceptance now,
+    /// its principal's session fence included. The open Console's caller
+    /// without a token has no login to end.
+    pub(crate) fn refuse_unless_caller_current(&self) -> Result<(), ConsoleCallerRefusal> {
+        match &self.verification {
+            Some(verification)
+                if verification
+                    .current_at(std::time::SystemTime::now())
+                    .is_none() =>
+            {
+                Err(ConsoleCallerRefusal::NotCurrent)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -2919,6 +3201,7 @@ async fn console_send_with_identity_first_fallback(
         &crate::http_console::ConsoleSendGovernance::default(),
     )
     .await
+    .map_err(CheckedConsoleSendError::into_send_error)
 }
 
 async fn console_send_governed_with_identity_first_fallback(
@@ -2927,7 +3210,7 @@ async fn console_send_governed_with_identity_first_fallback(
     console_events: Option<&ConsoleEventStore>,
     request: ConsoleSendRequest,
     governance: &ConsoleSendGovernance,
-) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, ConsoleSendError> {
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
     let member_send_request = request.clone();
     match Box::pin(console_send_identity_first_governed(
         aggregator,
@@ -2938,12 +3221,31 @@ async fn console_send_governed_with_identity_first_fallback(
     ))
     .await
     {
-        Err(ConsoleSendError::UnknownIdentity(_)) => {
-            governance.refuse_ungoverned_delivery(member_send_request.identity.as_str())?;
-            Box::pin(aggregator.send_scoped(member_send_request, &governance.scope)).await
+        Err(CheckedConsoleSendError::Send(ConsoleSendError::UnknownIdentity(_))) => {
+            Box::pin(console_send_member_lane(
+                aggregator,
+                member_send_request,
+                governance,
+            ))
+            .await
         }
         result => result,
     }
+}
+
+/// A Console send through the member lane (no identity runtime serves the
+/// target): refused when the target's input is governed, and when the
+/// caller's login ended, checked right before the send.
+async fn console_send_member_lane(
+    aggregator: &MetaConsoleAggregator,
+    request: ConsoleSendRequest,
+    governance: &ConsoleSendGovernance,
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
+    governance.refuse_ungoverned_delivery(request.identity.as_str())?;
+    governance
+        .refuse_unless_caller_current()
+        .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
+    Ok(Box::pin(aggregator.send_scoped(request, &governance.scope)).await?)
 }
 
 #[cfg(test)]
@@ -2967,6 +3269,10 @@ mod console_side_chat_tests;
 mod console_schedule_tests;
 
 #[cfg(test)]
+#[path = "console_actor_tests.rs"]
+mod console_actor_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -2981,6 +3287,7 @@ async fn console_send_identity_first(
         &crate::http_console::ConsoleSendGovernance::default(),
     )
     .await
+    .map_err(CheckedConsoleSendError::into_send_error)
 }
 
 async fn console_send_identity_first_governed(
@@ -2989,7 +3296,7 @@ async fn console_send_identity_first_governed(
     console_events: Option<&ConsoleEventStore>,
     mut request: ConsoleSendRequest,
     governance: &ConsoleSendGovernance,
-) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, ConsoleSendError> {
+) -> Result<crate::console_aggregator::ConsoleInteractionAccepted, CheckedConsoleSendError> {
     let requested_identity = request.identity.clone();
     let parsed_identity = crate::identity_first::AgentIdentity::parse(request.identity.as_str())
         .map_err(|err| ConsoleSendError::InvalidRequest(format!("invalid identity: {err}")))?;
@@ -2998,9 +3305,9 @@ async fn console_send_identity_first_governed(
     if let ContentInput::Text(text) = &content
         && text.trim().is_empty()
     {
-        return Err(ConsoleSendError::InvalidContent(
-            "content must be non-empty".to_string(),
-        ));
+        return Err(
+            ConsoleSendError::InvalidContent("content must be non-empty".to_string()).into(),
+        );
     }
 
     if let ContentInput::Blocks(blocks) = &content
@@ -3008,7 +3315,8 @@ async fn console_send_identity_first_governed(
     {
         return Err(ConsoleSendError::InvalidContent(
             "content blocks must be non-empty".to_string(),
-        ));
+        )
+        .into());
     }
     let handling_mode = parse_identity_first_handling_mode(request.handling_mode.as_deref())?;
 
@@ -3027,7 +3335,8 @@ async fn console_send_identity_first_governed(
                 return Err(identity_runtime_error_to_console_send_error(
                     requested_identity.as_str(),
                     original_err,
-                ));
+                )
+                .into());
             };
             let identity = crate::identity_first::AgentIdentity::parse(canonical_identity.as_str())
                 .map_err(|err| {
@@ -3041,7 +3350,8 @@ async fn console_send_identity_first_governed(
                     return Err(identity_runtime_error_to_console_send_error(
                         requested_identity.as_str(),
                         original_err,
-                    ));
+                    )
+                    .into());
                 }
                 // The alias names a registered identity whose status read
                 // failed: refused, never handed to the member lane.
@@ -3049,7 +3359,8 @@ async fn console_send_identity_first_governed(
                     return Err(identity_runtime_error_to_console_send_error(
                         requested_identity.as_str(),
                         err,
-                    ));
+                    )
+                    .into());
                 }
             };
             request.identity = canonical_identity;
@@ -3059,7 +3370,8 @@ async fn console_send_identity_first_governed(
             return Err(identity_runtime_error_to_console_send_error(
                 requested_identity.as_str(),
                 err,
-            ));
+            )
+            .into());
         }
     };
     // A governed target is admitted only through the host's binder for the
@@ -3071,7 +3383,8 @@ async fn console_send_identity_first_governed(
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
-        ));
+        )
+        .into());
     }
     // Refuse a selection the target cannot carry before anything is
     // reserved, so the caller never sees an acceptance for a turn that will
@@ -3083,7 +3396,8 @@ async fn console_send_identity_first_governed(
     {
         return Err(ConsoleSendError::InvalidRequest(
             "selected skills require a local session-backed member".to_string(),
-        ));
+        )
+        .into());
     }
     let session_id = status
         .session_id
@@ -3093,6 +3407,11 @@ async fn console_send_identity_first_governed(
         .agent_runtime_id
         .as_ref()
         .map(|id| id.as_str().to_string());
+    // The caller is checked again after the reads above, right before the
+    // send is reserved: a login that ended meanwhile sends nothing.
+    governance
+        .refuse_unless_caller_current()
+        .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
     let (accepted, claim) = match Box::pin(aggregator.reserve_identity_first_interaction_scoped(
         request.clone(),
         session_id.as_deref(),
@@ -3117,7 +3436,10 @@ async fn console_send_identity_first_governed(
                 .await
             {
                 NativeSendObservation::Admitted { .. } => {
-                    return aggregator.settle_admitted_send(&frame, &claim).await;
+                    return aggregator
+                        .settle_admitted_send(&frame, &claim)
+                        .await
+                        .map_err(Into::into);
                 }
                 // Dispatched again only as a host-human send: keyed by the
                 // send's delivery identity and pinned to the session it
@@ -3213,10 +3535,9 @@ async fn console_send_identity_first_governed(
                     error = %err,
                     "console identity-first steer was accepted but delivery failed"
                 );
-                return Err(identity_runtime_error_to_console_send_error(
-                    identity.as_str(),
-                    err,
-                ));
+                return Err(
+                    identity_runtime_error_to_console_send_error(identity.as_str(), err).into(),
+                );
             }
         }
         return Ok(accepted);
@@ -4192,6 +4513,115 @@ pub(crate) const ACCESS_DENIED_RPC_CODE: i64 = -32030;
 /// definitely not reserved; the browser renders it as a rejection it can
 /// name ("not authorized"), never as a pending acceptance.
 pub(crate) const CONSOLE_UNAUTHENTICATED_KIND: &str = "unauthenticated";
+
+/// JSON-RPC code of a console change refused for its caller.
+pub(crate) const CONSOLE_CALLER_REFUSED_CODE: i64 = -32056;
+
+/// The request field naming the caller a console change was made for: the
+/// `caller_scope` its client read from `meta/console/whoami`.
+pub(crate) const EXPECTED_CALLER_SCOPE_FIELD: &str = "expected_caller_scope";
+
+/// Why a console change was refused for its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConsoleCallerRefusal {
+    /// The change was made for another caller than the one its token is.
+    Changed,
+    /// The caller's login ended while the change waited.
+    NotCurrent,
+}
+
+impl ConsoleCallerRefusal {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Changed => "caller_changed",
+            Self::NotCurrent => "caller_not_current",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Changed => {
+                "this console change was made for another caller; read meta/console/whoami again"
+            }
+            Self::NotCurrent => {
+                "the caller's console login ended before the change was made; nothing was changed"
+            }
+        }
+    }
+
+    /// The refusal on the console's JSON-RPC routes.
+    pub(crate) fn json_rpc_error(self) -> JsonRpcError {
+        JsonRpcError {
+            code: CONSOLE_CALLER_REFUSED_CODE,
+            message: self.message().to_string(),
+            data: Some(json!({ "kind": self.kind() })),
+        }
+    }
+
+    /// The refusal on the console's REST routes: `409` for a change made for
+    /// another caller, `401` for a login that ended.
+    fn into_response(self) -> axum::response::Response {
+        let status = match self {
+            Self::Changed => StatusCode::CONFLICT,
+            Self::NotCurrent => StatusCode::UNAUTHORIZED,
+        };
+        console_json_error(status, self.kind(), self.message())
+    }
+}
+
+/// Take the `expected_caller_scope` field out of a console RPC's params, so
+/// no method's own params see it. A field that is not a string is invalid
+/// params.
+fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
+    let Some(object) = params.as_object_mut() else {
+        return Ok(None);
+    };
+    match object.remove(EXPECTED_CALLER_SCOPE_FIELD) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(scope)) => Ok(Some(scope)),
+        Some(_) => Err(format!("{EXPECTED_CALLER_SCOPE_FIELD} must be a string")),
+    }
+}
+
+/// An open Console answers only requests addressed to a host it serves, as
+/// the listener serving it records them
+/// (`crate::gateway_composition::ServedHosts`): a page in the operator's
+/// browser that rebinds its own name to the Console's address cannot drive
+/// the anonymous Console. A request without a `Host` (no browser sends one)
+/// or served by a listener that records no hosts passes.
+pub(crate) async fn refuse_foreign_host(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let foreign = match (
+        request
+            .extensions()
+            .get::<crate::gateway_composition::ServedHosts>(),
+        request.headers().get(header::HOST),
+    ) {
+        (Some(served), Some(host)) => !host.to_str().is_ok_and(|host| served.allows(host)),
+        _ => false,
+    };
+    if foreign {
+        return console_json_error(
+            StatusCode::FORBIDDEN,
+            "host_not_served",
+            "this console does not serve the host this request names; declare the gateway's \
+             public base URL when a proxy or another name fronts it",
+        );
+    }
+    next.run(request).await
+}
+
+/// `router`, answering on an open Console (`open`) only the requests
+/// addressed to a host its listener serves ([`refuse_foreign_host`]).
+pub(crate) fn served_hosts_only(router: Router, open: bool) -> Router {
+    if open {
+        router.route_layer(axum::middleware::from_fn(refuse_foreign_host))
+    } else {
+        router
+    }
+}
 
 /// The 401 body for the JSON and multipart console RPC doors. The JSON-RPC
 /// code stays `-32600` for existing clients; `data.kind` is the typed reason.
@@ -7121,7 +7551,7 @@ pub async fn console_rpc_multipart_handler(
     uri: Uri,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let auth_context = match console_request_auth_context(&state, &headers, &uri) {
+    let auth_context = match console_write_auth_context(&state, &headers, &uri) {
         Some(context) => context,
         None => {
             return console_rpc_unauthenticated_response(Value::Null);
@@ -7291,6 +7721,27 @@ pub async fn console_rpc_multipart_handler(
             Json::<Value>(invalid_params(response_id, message)),
         );
     }
+    let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return (
+                StatusCode::OK,
+                Json::<Value>(invalid_params(response_id, message)),
+            );
+        }
+    };
+    if is_console_mutating_rpc_method(&parsed_request.method)
+        && let Err(refusal) = auth_context.refuse_other_caller(expected_caller_scope.as_deref())
+    {
+        return (
+            StatusCode::OK,
+            Json::<Value>(response_value(
+                response_id,
+                None,
+                Some(refusal.json_rpc_error()),
+            )),
+        );
+    }
     if state.decisions.console.read_only && is_console_mutating_rpc_method(&parsed_request.method) {
         return (
             StatusCode::OK,
@@ -7440,6 +7891,20 @@ pub async fn console_rpc_multipart_handler(
     }
     let response_value = if parsed_request.method == "meta/console/send" && state.runtime.is_none()
     {
+        // The send checks its caller again right before it is handed to the
+        // aggregator, as the runtime dispatch does.
+        if let Err(refusal) =
+            ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+        {
+            return (
+                StatusCode::OK,
+                Json::<Value>(response_value(
+                    response_id,
+                    None,
+                    Some(refusal.json_rpc_error()),
+                )),
+            );
+        }
         Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
@@ -7827,19 +8292,51 @@ impl ConsoleViewerResolver {
 }
 
 fn console_request_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    let bearer_token = headers
+    header_bearer_token(headers).or_else(|| query_auth_token(uri))
+}
+
+/// The bearer token of the request's `Authorization` header.
+fn header_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(extract_bearer_token_from_header)
-        .map(String::from);
-    // Parse with form_urlencoded so percent-encoded tokens decode and
-    // `xauth_token=` substring shadowing does NOT match the real key.
-    let query_token = uri.query().and_then(|q| {
+        .map(String::from)
+}
+
+/// The request's `auth_token` query parameter. Parsed with
+/// form_urlencoded so percent-encoded tokens decode and `xauth_token=`
+/// substring shadowing does NOT match the real key.
+fn query_auth_token(uri: &Uri) -> Option<String> {
+    uri.query().and_then(|q| {
         form_urlencoded::parse(q.as_bytes())
             .find(|(key, _)| key == "auth_token")
             .map(|(_, value)| value.into_owned())
-    });
-    bearer_token.or(query_token)
+    })
+}
+
+/// The caller of a Console write (a `POST`), as
+/// [`console_request_auth_context`] resolves it, except that a token only in
+/// the URL's query string is refused (`None`, answered 401), on an open
+/// Console too. A token in a URL reaches proxy logs and browser history;
+/// only a `GET` takes one, since `EventSource` cannot set headers.
+fn console_write_auth_context(
+    state: &ConsoleJsonState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Option<ConsoleHttpAuthContext> {
+    if token_only_in_query(headers, uri) {
+        return None;
+    }
+    console_request_auth_context(state, headers, uri)
+}
+
+/// Whether a request's only token is in the URL's query string: no bearer
+/// `Authorization` header and an `auth_token` query key. Every write on the
+/// Console's listener refuses such a request with 401, on an open Console
+/// too.
+pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
+    header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
 }
 
 #[derive(Debug)]
@@ -9703,6 +10200,7 @@ async fn handle_console_aggregator_rpc(
         "meta/capabilities" => {
             let mut methods = vec![
                 "meta/capabilities",
+                crate::rpc::CONSOLE_WHOAMI_METHOD,
                 "meta/console/list_identities",
                 "meta/console/inspect_identity",
                 "meta/console/query_timeline",
@@ -10084,6 +10582,13 @@ async fn handle_console_runtime_rpc_with_visibility(
             prime_current_runtime_aliases(identity_runtime, controller).await;
         }
     }
+    // A change checks its caller again after the reads above, before it is
+    // handed to its owner: a login that ended meanwhile changes nothing.
+    if is_console_mutating_rpc_method(request.method.as_str())
+        && let Err(refusal) = governance.refuse_unless_caller_current()
+    {
+        return response_value(response_id, None, Some(refusal.json_rpc_error()));
+    }
     if let Some(response) = handle_access_admin_rpc(access, access_view, &request) {
         return response;
     }
@@ -10119,6 +10624,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             let mut methods = vec![
                 "meta/status",
                 "meta/capabilities",
+                crate::rpc::CONSOLE_WHOAMI_METHOD,
                 "meta/list_members",
                 "meta/get_member",
                 "meta/find_members",
@@ -11079,39 +11585,28 @@ async fn handle_console_runtime_rpc_with_visibility(
                     }),
                 );
             };
-            if let Some(identity_runtime) = &identity_runtime {
-                return match Box::pin(console_send_governed_with_identity_first_fallback(
-                    aggregator,
-                    identity_runtime.clone(),
-                    console_events.as_ref(),
-                    send_request,
-                    governance,
-                ))
-                .await
-                {
-                    Ok(accepted) => response_value(
-                        response_id,
-                        Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
-                        None,
-                    ),
-                    Err(err) => {
-                        response_value(response_id, None, Some(console_send_json_rpc_error(err)))
-                    }
-                };
-            }
-            if let Err(err) = governance.refuse_ungoverned_delivery(send_request.identity.as_str())
-            {
-                return response_value(response_id, None, Some(console_send_json_rpc_error(err)));
-            }
-            match Box::pin(aggregator.send_scoped(send_request, &governance.scope)).await {
+            let sent = match &identity_runtime {
+                Some(identity_runtime) => {
+                    Box::pin(console_send_governed_with_identity_first_fallback(
+                        aggregator,
+                        identity_runtime.clone(),
+                        console_events.as_ref(),
+                        send_request,
+                        governance,
+                    ))
+                    .await
+                }
+                None => {
+                    Box::pin(console_send_member_lane(aggregator, send_request, governance)).await
+                }
+            };
+            match sent {
                 Ok(accepted) => response_value(
                     response_id,
                     Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
                     None,
                 ),
-                Err(err) => {
-                    response_value(response_id, None, Some(console_send_json_rpc_error(err)))
-                }
+                Err(err) => response_value(response_id, None, Some(err.json_rpc_error())),
             }
         })
         .await,
@@ -20251,6 +20746,7 @@ message = "review"
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: true,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,
@@ -29320,6 +29816,7 @@ mod console_viewer_resolver_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: true,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth,
@@ -29454,14 +29951,17 @@ mod console_viewer_resolver_tests {
             State(state.clone()),
             bearer(subject),
             Uri::from_static("/console/send"),
-            Json(crate::console_aggregator::ConsoleSendRequest {
-                identity: identity.to_string(),
-                content: json!("hello"),
-                origin: "console".to_string(),
-                idempotency_key: "precheck-1".to_string(),
-                handling_mode: None,
-                origin_kind: None,
-                skill_refs: Vec::new(),
+            Json(ConsoleSendBody {
+                request: crate::console_aggregator::ConsoleSendRequest {
+                    identity: identity.to_string(),
+                    content: json!("hello"),
+                    origin: "console".to_string(),
+                    idempotency_key: "precheck-1".to_string(),
+                    handling_mode: None,
+                    origin_kind: None,
+                    skill_refs: Vec::new(),
+                },
+                expected_caller_scope: None,
             }),
         )
         .await
@@ -29874,6 +30374,7 @@ mod console_human_admission_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "meerkat-console".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,
@@ -29994,7 +30495,10 @@ mod console_human_admission_tests {
                 State(state.clone()),
                 bearer_for(claims.clone()),
                 Uri::from_static("/console/send"),
-                Json(send.clone()),
+                Json(ConsoleSendBody {
+                    request: send.clone(),
+                    expected_caller_scope: None,
+                }),
             )
             .await
             .into_response();
@@ -30263,6 +30767,7 @@ mod console_human_admission_tests {
                 jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#.to_string(),
                 audience: "persistent-gateway".to_string(),
                 require_verified_email: false,
+                shared_account_tokens: false,
             },
             console: crate::ConsolePolicy {
                 require_app_auth: true,
@@ -31174,7 +31679,7 @@ mod console_token_lapse_tests {
 
     /// Call `method` on the console route with `token`, or with no
     /// credentials at all.
-    async fn console_rpc_as(
+    pub(super) async fn console_rpc_as(
         app: &Router,
         token: Option<&str>,
         method: &str,

@@ -536,7 +536,7 @@ jobs:
           - shard: 2
             tests: "[bcglnv]*"
           - shard: 3
-            tests: "identity_first_[i-z]* idle* i[!d]* [afhpuxyz]*"
+            tests: "identity_first_[i-z]* identity_reset_* idle* i[!d]* [afhpuxyz]*"
           - shard: 4
             tests: "[dmorsw]*"
     runs-on: ubuntu-24.04
@@ -1546,7 +1546,7 @@ jobs:
               jobs = [
                   job
                   for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
                   )
                   for job in page["jobs"]
               ]

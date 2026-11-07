@@ -1,4 +1,4 @@
-# Changelog — @rkat/meta-sdk (TypeScript SDK)
+# Changelog: @rkat/meta-sdk (TypeScript SDK)
 
 ## Unreleased
 
@@ -17,6 +17,10 @@
 - A decide called while the SDK serves a host tool callback rejects with
   `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
   `"decide_inside_tool_callback"`) and sends nothing.
+
+## 0.9.10
+
+No SDK API changes; released with Meta 0.9.10.
 
 ## 0.9.9
 

@@ -9,8 +9,10 @@ make build
 make check
 make lint
 make test
-make agent-gate
 ```
+
+To test a change, `node scripts/affected-tests.mjs` prints the commands the CI
+planner selects for it; `--run` runs them and stops at the first failure.
 
 BuildBuddy is opt-in. When the machine has BuildBuddy access, the same broad
 local lanes can run through the macOS arm64 Bazel/RBE path:

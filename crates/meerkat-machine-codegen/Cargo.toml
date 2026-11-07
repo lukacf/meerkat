@@ -30,7 +30,7 @@ meerkat-machine-schema = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# `sqlite-store` mirrors meerkat-runtime's own path-only self-dependency: the
+# `sqlite-store` mirrors one of meerkat-runtime's own test features: the
 # recovery/commit wire types in meerkat-runtime::store are gated on it, so a
 # default-feature build of that crate reports them as dead code. Without this,
 # `clippy -p meerkat-machine-codegen --all-targets -- -D warnings` (the

@@ -71,6 +71,7 @@ impl CanonicalMemberSnapshotMaterial {
             lifecycle_capabilities: None,
             non_portable_disabled: None,
             preview_unavailable: None,
+            store_refusal: None,
             registration_refusal: self.registration_refusal,
             // Volatile actor custody, not machine lifecycle: the status read
             // adds the member's deferral from the published view.

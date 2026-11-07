@@ -23,45 +23,48 @@ archive_file="${3:-}"
 profile=default
 status_level=none
 final_status_level=fail
-# Families over Core's whole workspace start from Core's package selection:
-# `--workspace` and an `--exclude` for every package of the other products
-# (scripts/core-workspace-args.mjs; Cargo unifies features across the packages
-# of one invocation). Only an archive build resolves packages, so only a build
-# derives it.
-CORE_WORKSPACE='<core-workspace>'
+# Every family's package selection is derived by
+# scripts/core-workspace-args.mjs --tests: the families over Core's whole
+# workspace start from Core's selection (`--workspace` and an `--exclude` for
+# every package of the other products; Cargo unifies features across the
+# packages of one invocation), and every selection carries its members' test
+# features, which every test build passes. Only an archive build resolves
+# packages, so only a build derives them. `selection` holds the family's
+# arguments to that script, `cargo_args` its other Cargo arguments.
 case "$family" in
   unit)
-    cargo_args=("$CORE_WORKSPACE" --lib)
+    selection=()
+    cargo_args=(--lib)
     profile=ci-unit
     ;;
   unit-mob)
-    cargo_args=(-p meerkat-mob --lib)
+    selection=(-p meerkat-mob)
+    cargo_args=(--lib)
     profile=ci-unit
     ;;
   int-heavy)
-    cargo_args=(-p meerkat-integration-tests --tests --profile fast)
+    selection=(-p meerkat-integration-tests)
+    cargo_args=(--tests --profile fast)
     profile=fast
     status_level=slow
     final_status_level=slow
     ;;
   int-mob)
-    cargo_args=(
+    selection=(
       -p meerkat-mob
       -p meerkat-mob-adaptive
       -p meerkat-mob-mcp
       -p meerkat-mob-pack
       -p meerkat-schedule
       -p meerkat-workgraph
-      --tests
-      --profile fast
     )
+    cargo_args=(--tests --profile fast)
     profile=fast
     status_level=slow
     final_status_level=slow
     ;;
   int-everything-else)
-    cargo_args=(
-      "$CORE_WORKSPACE"
+    selection=(
       --exclude meerkat-integration-tests
       --exclude meerkat-mob
       --exclude meerkat-mob-adaptive
@@ -96,9 +99,8 @@ case "$family" in
       --exclude meerkat-skills
       --exclude meerkat-store
       --exclude meerkat-tools
-      --tests
-      --profile fast
     )
+    cargo_args=(--tests --profile fast)
     profile=fast
     status_level=slow
     final_status_level=slow
@@ -118,22 +120,12 @@ fi
 case "${1:-}" in
   build)
     mkdir -p "$(dirname "$archive_file")"
-    if [[ " ${cargo_args[*]} " == *" ${CORE_WORKSPACE} "* ]]; then
-      core_selection="$(CARGO="$CARGO" node "${ROOT}/scripts/core-workspace-args.mjs")" || {
-        echo "error: cannot derive Core's package selection" >&2
-        exit 1
-      }
-      mapfile -t core_workspace <<<"$core_selection"
-      expanded=()
-      for arg in "${cargo_args[@]}"; do
-        if [[ "$arg" == "$CORE_WORKSPACE" ]]; then
-          expanded+=("${core_workspace[@]}")
-        else
-          expanded+=("$arg")
-        fi
-      done
-      cargo_args=("${expanded[@]}")
-    fi
+    package_selection="$(CARGO="$CARGO" node "${ROOT}/scripts/core-workspace-args.mjs" --tests "${selection[@]}")" || {
+      echo "error: cannot derive Core's package selection" >&2
+      exit 1
+    }
+    mapfile -t package_args <<<"$package_selection"
+    cargo_args=("${package_args[@]}" "${cargo_args[@]}")
     # Tests of crates that dev-depend on mcp-test-server need its binary;
     # built into the target directory, it rides in the archive
     # (archive.include, .config/nextest.toml).

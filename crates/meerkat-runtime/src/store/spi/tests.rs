@@ -298,12 +298,14 @@ async fn a_poisoned_scope_makes_no_store_call() {
             )
             .await;
         assert!(
-            matches!(&write, Err(RuntimeStoreError::WriteFailed(cause)) if cause.starts_with("host store scope ")),
+            matches!(&write, Err(RuntimeStoreError::ScopeRefused { scopes })
+                if scopes.len() == 1 && scopes[0].scope == "rt:doomed"),
             "{write:?}"
         );
         let read = store.load_input_states(&doomed).await;
         assert!(
-            matches!(&read, Err(RuntimeStoreError::ReadFailed(cause)) if cause.starts_with("host store scope ")),
+            matches!(&read, Err(RuntimeStoreError::ScopeRefused { scopes })
+                if scopes.len() == 1 && scopes[0].scope == "rt:doomed"),
             "{read:?}"
         );
         let commit = commit_one(&realm, &id, row(b"three")).await;
@@ -906,6 +908,562 @@ async fn controller_custody_refuses_while_a_commit_is_in_flight() {
     gate.notify_one();
     writer.await.unwrap().expect("the commit lands");
     assert!(RuntimeStore::try_controller_mutation_custody(&*store, &claim).is_ok());
+}
+
+// One settling commit does not stall other runtimes behind a cross-scope
+// read. The batch of runtime "settling" keeps meeting `Unavailable`, so its
+// commit retries, holding the store's gate shared until it settles. A
+// delivery authority listing (the read a host's delivery driver makes every
+// second) then waits for the gate exclusive. A read of another runtime must
+// still answer at once, while the listing keeps waiting for the settle: it
+// never reads a batch whose outcome is unknown.
+#[tokio::test(start_paused = true)]
+async fn a_settling_commit_does_not_stall_other_runtimes_behind_a_cross_scope_read() {
+    let host = Arc::new(TestHost::new());
+    let (_realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let healthy = LogicalRuntimeId::new("healthy");
+    store
+        .persist_input_state(
+            &healthy,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("the healthy runtime lands");
+
+    let started = host.commits_started.load(Ordering::Acquire);
+    host.faults.lock().unwrap().unavailable = u32::MAX;
+    let settling = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .persist_input_state(
+                    &LogicalRuntimeId::new("settling"),
+                    &persistable(StoredInputState::new_accepted(InputId::new())),
+                )
+                .await
+        })
+    };
+    while host.commits_started.load(Ordering::Acquire) == started {
+        tokio::task::yield_now().await;
+    }
+    let listing = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.list_runtime_delivery_authorities().await })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!listing.is_finished(), "the listing waits for the settle");
+
+    let read =
+        tokio::time::timeout(Duration::from_secs(1), store.load_input_states(&healthy)).await;
+    assert!(
+        read.is_ok(),
+        "a read of another runtime waited behind the listing for the settling commit"
+    );
+    read.unwrap().expect("the healthy runtime reads");
+    assert!(!settling.is_finished(), "the batch still settles");
+    assert!(
+        !listing.is_finished(),
+        "the listing never reads a batch whose outcome is unknown"
+    );
+
+    // The store answers again: the batch lands, then the listing answers.
+    host.faults.lock().unwrap().unavailable = 0;
+    settling
+        .await
+        .unwrap()
+        .expect("the batch lands once the store answers");
+    listing
+        .await
+        .unwrap()
+        .expect("the listing answers after the settle");
+}
+
+// A commit call that hangs without failing counts as slow once it outlasts
+// the host's declared longest commit: from then on a cross-scope read queued
+// behind it stops holding back other runtimes' calls. Before that bound the
+// read keeps its place in the queue, so the stall is at most the bound.
+#[tokio::test(start_paused = true)]
+async fn a_commit_held_past_the_declared_latency_stops_holding_back_other_runtimes() {
+    let bound = Duration::from_secs(1);
+    let timing = FenceTiming::default()
+        .try_with_max_commit_latency(bound)
+        .unwrap();
+    let host = Arc::new(TestHost::with_timing(timing));
+    let (realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let healthy = LogicalRuntimeId::new("healthy");
+    store
+        .persist_input_state(
+            &healthy,
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await
+        .expect("the healthy runtime lands");
+
+    let held_open = Arc::new(tokio::sync::Notify::new());
+    *host.commit_gate.lock().unwrap() = Some(Arc::clone(&held_open));
+    let started = host.commits_started.load(Ordering::Acquire);
+    let held = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move {
+            store
+                .persist_input_state(
+                    &LogicalRuntimeId::new("held"),
+                    &persistable(StoredInputState::new_accepted(InputId::new())),
+                )
+                .await
+        })
+    };
+    while host.commits_started.load(Ordering::Acquire) == started {
+        tokio::task::yield_now().await;
+    }
+    let listing = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { store.list_runtime_delivery_authorities().await })
+    };
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !listing.is_finished(),
+        "the listing waits for the held commit"
+    );
+
+    let asked = tokio::time::Instant::now();
+    let read =
+        tokio::time::timeout(Duration::from_secs(10), store.load_input_states(&healthy)).await;
+    assert!(
+        read.is_ok(),
+        "a read of another runtime waited behind the listing past the declared bound"
+    );
+    read.unwrap().expect("the healthy runtime reads");
+    let waited = asked.elapsed();
+    assert!(
+        waited <= bound + Duration::from_millis(100),
+        "held back for {waited:?}, past the declared {bound:?}"
+    );
+    assert_eq!(
+        *realm.slow_settles().borrow(),
+        1,
+        "the held commit counts as slow"
+    );
+    assert!(!held.is_finished(), "the commit is still held open");
+    assert!(
+        !listing.is_finished(),
+        "the listing never reads a batch whose outcome is unknown"
+    );
+
+    *host.commit_gate.lock().unwrap() = None;
+    held_open.notify_one();
+    held.await.unwrap().expect("the held batch lands");
+    listing
+        .await
+        .unwrap()
+        .expect("the listing answers after the held commit");
+    assert_eq!(*realm.slow_settles().borrow(), 0, "the settle ended");
+}
+
+// No starvation: under a steady stream of fast settles, none of them slow,
+// a cross-scope read keeps its place in the gate's queue and answers while
+// the stream runs, not after it. Every writer holds the gate across each of
+// its awaits, so a read that never queued would find no free moment until
+// the stream ends.
+#[tokio::test(start_paused = true)]
+async fn a_cross_scope_read_completes_under_a_steady_stream_of_fast_settles() {
+    const RUNTIMES: usize = 4;
+    const WRITES: usize = 50;
+    let host = Arc::new(TestHost::new());
+    let (realm, store) = open(&host).await;
+    let store = Arc::new(store);
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stream: Vec<_> = (0..RUNTIMES)
+        .map(|index| {
+            let store = Arc::clone(&store);
+            let written = Arc::clone(&written);
+            tokio::spawn(async move {
+                let runtime = LogicalRuntimeId::new(format!("busy-{index}"));
+                for _ in 0..WRITES {
+                    store
+                        .persist_input_state(
+                            &runtime,
+                            &persistable(StoredInputState::new_accepted(InputId::new())),
+                        )
+                        .await
+                        .expect("a fast settle");
+                    written.fetch_add(1, Ordering::AcqRel);
+                }
+            })
+        })
+        .collect();
+    while written.load(Ordering::Acquire) < RUNTIMES {
+        tokio::task::yield_now().await;
+    }
+
+    store
+        .list_runtime_delivery_authorities()
+        .await
+        .expect("the listing answers");
+    let before = written.load(Ordering::Acquire);
+    assert!(
+        before < RUNTIMES * WRITES,
+        "the listing waited for the whole stream: {before} of {} writes came first",
+        RUNTIMES * WRITES
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "no settle was slow");
+    for writer in stream {
+        writer.await.unwrap();
+    }
+}
+
+// The slow-settle count rises while a settle retries and falls on every way
+// a settle ends: landed, refused (its scope poisoned), fenced out (the realm
+// poisoned) and cancelled (the call dropped mid-settle).
+#[tokio::test(start_paused = true)]
+async fn a_slow_settle_counts_until_it_ends_on_every_path() {
+    use meerkat_core::host_store::HostStore as _;
+
+    type Settle<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpiError>> + 'a>>;
+
+    async fn realm_over(host: &Arc<TestHost>) -> Arc<SpiRealm> {
+        SpiRealm::open(Arc::clone(host) as _, SpiRealmConfig::default())
+            .await
+            .unwrap()
+    }
+
+    /// Run `commit` until its settle counts as slow.
+    async fn until_counted(realm: &SpiRealm, commit: &mut Settle<'_>) {
+        let mut slow = realm.slow_settles();
+        let counted = tokio::select! {
+            settled = commit => Err(settled),
+            counted = slow.wait_for(|count| *count == 1) => Ok(counted.is_ok()),
+        };
+        assert!(
+            matches!(counted, Ok(true)),
+            "the batch settled before it counted as slow: {counted:?}"
+        );
+    }
+
+    let id = ScopeId::new(TEST_FAMILY, "settle");
+    let delta = || ScopeDelta::Changes(vec![("pin".into(), Some(Arc::new(b"v".to_vec())))]);
+
+    // Landed on its second attempt.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = 1;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    commit.await.expect("the batch lands on its second attempt");
+    assert_eq!(*realm.slow_settles().borrow(), 0, "landed");
+
+    // Indeterminate and unread: the batch applied, its head read failed, so
+    // the same batch goes again and settles as landed.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.indeterminate_after_apply = 1;
+        faults.load_head_unavailable = 1;
+    }
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    commit
+        .await
+        .expect("the batch that landed settles on its retry");
+    assert_eq!(
+        *realm.slow_settles().borrow(),
+        0,
+        "indeterminate, then landed"
+    );
+
+    // Refused on its second attempt: the scope is poisoned.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.unavailable = 1;
+        faults.conflict = 1;
+    }
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    let refused = commit.await;
+    assert!(
+        matches!(
+            refused,
+            Err(SpiError::Host(HostStoreError::Conflict { .. }))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "refused");
+
+    // Fenced out while it waits to retry: the realm is poisoned.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = 1;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    host.acquire_fence(AcquireMode::Takeover)
+        .await
+        .expect("another writer takes the fence");
+    let fenced = commit.await;
+    assert!(
+        matches!(fenced, Err(SpiError::RealmPoisoned(_))),
+        "{fenced:?}"
+    );
+    assert_eq!(*realm.slow_settles().borrow(), 0, "fenced out");
+
+    // Cancelled: the call is dropped mid-settle.
+    let host = Arc::new(TestHost::new());
+    let realm = realm_over(&host).await;
+    host.faults.lock().unwrap().unavailable = u32::MAX;
+    let mut commit: Settle<'_> = Box::pin(commit_one(&realm, &id, delta()));
+    until_counted(&realm, &mut commit).await;
+    drop(commit);
+    assert_eq!(
+        *realm.slow_settles().borrow(),
+        0,
+        "a settle dropped mid-way counts no more"
+    );
+}
+
+// The runtime store's gate is taken exclusive only through `exclusive_gate`,
+// which waits outside the gate's queue while a commit settles slowly, and by
+// controller custody, which only tries it. A new cross-scope read, or a
+// merge that brings back a direct `self.gate.write()`, fails here instead of
+// stalling every session behind a slow settle again.
+#[test]
+fn the_store_gate_is_taken_exclusive_only_through_exclusive_gate() {
+    const ALLOWED: [&str; 2] = ["exclusive_gate", "try_controller_mutation_custody"];
+    let code = source_guard::code_only(include_str!("runtime.rs"));
+    let mut allowed: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut outside = Vec::new();
+    for at in source_guard::exclusive_gate_takes(&code) {
+        match source_guard::enclosing_fn(&code, at) {
+            Some(name) if ALLOWED.contains(&name) => *allowed.entry(name).or_default() += 1,
+            owner => outside.push(format!(
+                "runtime.rs:{} in fn {}",
+                source_guard::line(&code, at),
+                owner.unwrap_or("<none>")
+            )),
+        }
+    }
+    assert!(
+        outside.is_empty(),
+        "the store gate is taken exclusive outside exclusive_gate: {outside:?}"
+    );
+    for name in ALLOWED {
+        assert!(
+            allowed.contains_key(name),
+            "fn {name} takes the gate no more ({allowed:?}): update this guard with the code"
+        );
+    }
+}
+
+/// Source reading for the gate guard: code with comments and literals
+/// blanked, the functions it defines, and the gate's exclusive takes.
+mod source_guard {
+    /// Where the comment or the string or character literal starting at
+    /// `at` ends (exclusive), or `None` when none starts there.
+    fn skipped_end(bytes: &[u8], at: usize) -> Option<usize> {
+        let rest = &bytes[at..];
+        if rest.starts_with(b"//") {
+            return Some(
+                rest.iter()
+                    .position(|&byte| byte == b'\n')
+                    .map_or(bytes.len(), |offset| at + offset),
+            );
+        }
+        if rest.starts_with(b"/*") {
+            let (mut depth, mut end) = (0_usize, at);
+            while end < bytes.len() {
+                if bytes[end..].starts_with(b"/*") {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end..].starts_with(b"*/") {
+                    depth -= 1;
+                    end += 2;
+                    if depth == 0 {
+                        return Some(end);
+                    }
+                } else {
+                    end += 1;
+                }
+            }
+            return Some(end);
+        }
+        let after_identifier =
+            at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        if !after_identifier {
+            // Raw strings: r"..", r#".."#, br"..", br#".."#.
+            let prefix = if rest.starts_with(b"br") {
+                2
+            } else {
+                usize::from(rest.starts_with(b"r"))
+            };
+            if prefix > 0 {
+                let hashes = rest[prefix..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'#')
+                    .count();
+                if rest.get(prefix + hashes) == Some(&b'"') {
+                    let mut closing = vec![b'"'];
+                    closing.extend(std::iter::repeat_n(b'#', hashes));
+                    let body = at + prefix + hashes + 1;
+                    return Some(
+                        bytes[body..]
+                            .windows(closing.len())
+                            .position(|window| window == closing.as_slice())
+                            .map_or(bytes.len(), |offset| body + offset + closing.len()),
+                    );
+                }
+            }
+        }
+        match rest.first() {
+            Some(b'"') => {
+                let mut end = at + 1;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                Some((end + 1).min(bytes.len()))
+            }
+            // A character literal; a lifetime or a label stays code.
+            Some(b'\'') => {
+                if rest.get(1) == Some(&b'\\') {
+                    let close = rest.get(3..)?.iter().position(|&byte| byte == b'\'')?;
+                    return Some(at + 3 + close + 1);
+                }
+                let width = match *rest.get(1)? {
+                    byte if byte < 0x80 => 1,
+                    byte if byte >= 0xF0 => 4,
+                    byte if byte >= 0xE0 => 3,
+                    _ => 2,
+                };
+                (rest.get(1 + width) == Some(&b'\'')).then_some(at + 2 + width)
+            }
+            _ => None,
+        }
+    }
+
+    /// `source` with comments and string and character literals blanked
+    /// byte for byte (line breaks kept), so names and brackets are matched
+    /// in code only.
+    pub(super) fn code_only(source: &str) -> Vec<u8> {
+        let bytes = source.as_bytes();
+        let mut code = bytes.to_vec();
+        let mut at = 0;
+        while at < bytes.len() {
+            if let Some(end) = skipped_end(bytes, at) {
+                for byte in &mut code[at..end] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+                at = end;
+            } else {
+                at += 1;
+            }
+        }
+        code
+    }
+
+    fn is_identifier(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    /// Where every exclusive take of the gate (`gate.write(`,
+    /// `gate.try_write(` and their owned forms) starts in `code`, whitespace
+    /// between the tokens allowed.
+    pub(super) fn exclusive_gate_takes(code: &[u8]) -> Vec<usize> {
+        const TAKES: [&[u8]; 6] = [
+            b"gate.write(",
+            b"gate.try_write(",
+            b"gate.write_owned(",
+            b"gate.try_write_owned(",
+            b"gate).write_owned(",
+            b"gate).try_write_owned(",
+        ];
+        let (compact, origin): (Vec<u8>, Vec<usize>) = code
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| !byte.is_ascii_whitespace())
+            .map(|(at, &byte)| (byte, at))
+            .unzip();
+        (0..compact.len())
+            .filter(|&at| {
+                TAKES.iter().any(|take| compact[at..].starts_with(take))
+                    && (at == 0 || !is_identifier(compact[at - 1]))
+            })
+            .map(|at| origin[at])
+            .collect()
+    }
+
+    /// Just past the brace that closes the one at `open`.
+    fn closing(code: &[u8], open: usize) -> usize {
+        let mut depth = 0_usize;
+        for (offset, &byte) in code[open..].iter().enumerate() {
+            if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    return open + offset + 1;
+                }
+            }
+        }
+        code.len()
+    }
+
+    /// The name of the innermost function whose body holds `at`.
+    pub(super) fn enclosing_fn(code: &[u8], at: usize) -> Option<&str> {
+        let mut innermost: Option<(usize, &str)> = None;
+        for start in 0..code.len().saturating_sub(3) {
+            if !code[start..].starts_with(b"fn ") || (start > 0 && is_identifier(code[start - 1])) {
+                continue;
+            }
+            let name_start = start + 3;
+            let name_len = code[name_start..]
+                .iter()
+                .take_while(|&&byte| is_identifier(byte))
+                .count();
+            if name_len == 0 {
+                continue;
+            }
+            // The body opens at the first brace outside the signature's
+            // parentheses and brackets; a `;` there means no body.
+            let mut depth = 0_usize;
+            let mut open = None;
+            for (offset, &byte) in code[name_start + name_len..].iter().enumerate() {
+                match byte {
+                    b'(' | b'[' => depth += 1,
+                    b')' | b']' => depth = depth.saturating_sub(1),
+                    b'{' if depth == 0 => {
+                        open = Some(name_start + name_len + offset);
+                        break;
+                    }
+                    b';' if depth == 0 => break,
+                    _ => {}
+                }
+            }
+            let Some(open) = open else {
+                continue;
+            };
+            if (open..closing(code, open)).contains(&at)
+                && innermost.is_none_or(|(inner_open, _)| open > inner_open)
+            {
+                let name = std::str::from_utf8(&code[name_start..name_start + name_len]).ok()?;
+                innermost = Some((open, name));
+            }
+        }
+        innermost.map(|(_, name)| name)
+    }
+
+    /// The 1-based line of `at`.
+    pub(super) fn line(code: &[u8], at: usize) -> usize {
+        code[..at].split(|&byte| byte == b'\n').count()
+    }
 }
 
 // Unrun until the candidate's validation.
@@ -3368,3 +3926,6 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
         RuntimeStoreError::WriteFailed(_)
     ));
 }
+
+/// What one poisoned scope refuses, and what it leaves serving.
+mod poison_radius;

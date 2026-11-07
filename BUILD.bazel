@@ -1003,6 +1003,8 @@ test_suite(
         "//crates/meerkat:embedded_skill_registration_test",
         "//crates/meerkat:factory_build_agent_test",
         "//crates/meerkat:gemini_stop_reasons_test",
+        "//crates/meerkat:governed_peer_binder_test",
+        "//crates/meerkat:governed_peer_requester_test",
         "//crates/meerkat:governed_peer_send_ticket_test",
         "//crates/meerkat:governed_realm_account_binding_test",
         "//crates/meerkat:governed_realm_test",

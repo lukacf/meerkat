@@ -17,7 +17,8 @@ use meerkat_core::{MobMemberBinding, RunId};
 use super::audit::ToolGrantExpiryDriver;
 use super::deadlines::ToolGrantDeadlines;
 use super::request::{
-    ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestOrigin, hold_tool_grant_request,
+    ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestOrigin,
+    hold_agent_tool_grant_request,
 };
 use super::service::ToolGrantService;
 use crate::decision::DecisionError;
@@ -148,7 +149,9 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
     /// Hold the agent's request for a grant to its first subject, with what
     /// the runtime takes requests with: the requester its host names, the
     /// host policy's approver and deadline, the grant policy's maximum
-    /// lifetime, keyed by the call's run and id.
+    /// lifetime, keyed by the call's run and id. A call for a target the
+    /// subject has an open or approved window request for answers that
+    /// request.
     async fn request_grant(
         &self,
         request: ToolGrantAgentRequest<'_>,
@@ -160,7 +163,7 @@ impl SessionToolGrants for RuntimeSessionToolGrants {
             .service
             .now_ms()
             .map_err(|error| ToolGrantAgentRequestRefusal::Unavailable(error.to_string()))?;
-        let decision = hold_tool_grant_request(
+        let decision = hold_agent_tool_grant_request(
             &host.decisions,
             &host.policy,
             self.service.policy().max_lifetime_ms(),

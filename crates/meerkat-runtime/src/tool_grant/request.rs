@@ -323,6 +323,53 @@ pub fn hold_tool_grant_request(
     now_ms: u64,
     request: ToolGrantIssueRequest,
 ) -> Result<StoredDecision, ToolGrantRequestError> {
+    let (_, hold) = tool_grant_hold(policy, max_lifetime_ms, now_ms, request)?;
+    Ok(decisions.hold(hold, true)?)
+}
+
+/// Hold an agent's grant request as [`hold_tool_grant_request`] holds one,
+/// keeping one request per target: a replayed call (its run and tool call)
+/// answers the decision it held, and a call for a target its subject
+/// already has an open or approved window request for answers that request
+/// instead of holding another. Only otherwise is a decision held. So an
+/// agent that asks again and again leaves one request per target with its
+/// approver.
+///
+/// # Errors
+/// As [`hold_tool_grant_request`], and the decision owner's read failures.
+pub(crate) fn hold_agent_tool_grant_request(
+    decisions: &DurableDecisionService,
+    policy: &ToolGrantRequestPolicy,
+    max_lifetime_ms: u64,
+    now_ms: u64,
+    request: ToolGrantIssueRequest,
+) -> Result<StoredDecision, ToolGrantRequestError> {
+    let subject = request.subject.clone();
+    let target = request.target.clone();
+    let (decision_id, hold) = tool_grant_hold(policy, max_lifetime_ms, now_ms, request)?;
+    match decisions.get(&decision_id) {
+        // A replay holds again, which answers the decision as it stands.
+        Ok(_) => return Ok(decisions.hold(hold, true)?),
+        Err(DecisionError::NotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let open = tool_grant_requests_of(decisions, &subject, None)?
+        .into_iter()
+        .find(|(_, body)| body.target == target && body.run_scope.is_none());
+    if let Some((decision, _)) = open {
+        return Ok(decision);
+    }
+    Ok(decisions.hold(hold, true)?)
+}
+
+/// What holding `request` holds, once its target and duration are checked:
+/// the decision's id and its hold.
+fn tool_grant_hold(
+    policy: &ToolGrantRequestPolicy,
+    max_lifetime_ms: u64,
+    now_ms: u64,
+    request: ToolGrantIssueRequest,
+) -> Result<(DecisionId, DecisionHoldRequest), ToolGrantRequestError> {
     if request.target.names().next().is_none()
         || request.target.names().any(|name| name.as_str().is_empty())
     {
@@ -371,7 +418,7 @@ pub fn hold_tool_grant_request(
         DecisionRendering::new(rendering_text(&body))?,
         DecisionRenderer::new(TOOL_GRANT_ISSUE_RENDERER)?,
     );
-    Ok(decisions.hold(hold, true)?)
+    Ok((decision_id, hold))
 }
 
 /// The tool grant requests held for `subject`, in decision id order per

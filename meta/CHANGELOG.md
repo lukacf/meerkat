@@ -46,10 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `unknown identity: <id>` with no data, `404` `unknown_identity` from
   `POST /console/send`, `member_not_found` from the agent event stream.
 
-- New tool call refusals for personal accounts on MCP servers, each the
-  code of the call's policy denial: `personal_account_shared_thread`,
-  `personal_account_not_owner`, `personal_account_suspended` and
-  `personal_accounts_unsupported`.
+- New refusals for personal accounts on MCP servers. A refused tool call
+  ends with a policy denial whose code is `personal_account_shared_thread`,
+  `personal_account_not_owner` or `personal_account_suspended`.
+  `personal_accounts_unsupported` refuses a configuration at startup
+  (`rpc_gateway` initialization answers `-32602`), and the placement,
+  respawn or wake of a member on another host, whose error names the kind
+  and the server.
 - Rust: `ConventionalPaths` gains `mcp_accounts_toml` (the conventional
   `config/mcp_accounts.toml`), so a struct literal needs it.
 
@@ -140,13 +143,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it resolves (one of the mob definition's, a realm profile, its own, or a
   profile of a child mob an agent creates) declares a server under a
   personal server's name, since that host would serve it with its own
-  credentials.
+  credentials; so is its respawn, before anything is retired. A member
+  placed before the server was marked personal is refused when it is woken
+  again from its stored profile (the member is broken): spawn it again on
+  this host, or mark the server `system` again.
 - Rust: `McpAccountsConfig`, `McpAccountMode`, `McpServerAccounts`,
   `McpAccountsConfigError`, `PersonalMcpAccounts`,
-  `PersonalAccountCredentials`, `PersonalAccountRefusal`,
-  `UnsupportedPersonalServer`, `personal_server_shape`, `private_owner_key`,
+  `PersonalAccountOwnerCheck`, `PersonalAccountCredentials`,
+  `PersonalAccountRefusal`, `UnsupportedPersonalServer`,
+  `personal_server_shape`, `private_owner_key`,
   `private_owner_key_of_principal`, `APPROVAL_BRANCH_LABEL` and
-  `MobBootstrapSpec::with_personal_mcp_accounts`.
+  `MobBootstrapSpec::with_personal_mcp_accounts`. Each member factory of a
+  composition gets an owner check of its own, which the spec of that
+  factory's members takes; a member another factory builds gets no person's
+  credential.
 
 ### Changed
 
@@ -164,6 +174,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from the console yet. The console's app path does not carry the person as
   the requester, so the owner check refuses those uses
   (`personal_account_not_owner`).
+- Personal accounts on MCP servers: a member placed on another host before
+  a server in its profile was marked personal keeps that server on its host
+  until this host wakes it again: while its host keeps it running, and when
+  its host revives it on its own after a restart of that host.
 
 ## [0.9.10] - 2026-11-04
 

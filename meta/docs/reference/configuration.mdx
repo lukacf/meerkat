@@ -569,7 +569,13 @@ accounts = "personal"
   source holds nothing for a personal server, so a member without its
   owner's credential awaits a sign-in. A gateway whose member factory has no
   provider credential store refuses to start with personal servers, and a
-  Rust host's composition without one keeps no personal server.
+  Rust host's composition without one keeps no personal server. A Rust host
+  that composes its own member factory gives it an owner check of its own
+  (`PersonalMcpAccounts::owner_check`, installed with
+  `PersonalAccountOwnerCheck::install`) and gives the same check to the spec
+  whose members that factory builds
+  (`MobBootstrapSpec::with_personal_mcp_accounts`): a member that a factory
+  without it builds gets no person's credential.
 - **Shape.** A personal server is a streamable HTTP server whose account the
   person proves at sign-in (`oauth_account_selection = "discover"`), without
   a connector binding, a fixed `oauth_account` or a static `Authorization`
@@ -582,17 +588,29 @@ accounts = "personal"
   profile's MCP servers, which that host would serve with its own
   credentials. Placing a member whose profile declares a server under a
   personal server's name, in any shape, is refused
-  (`personal_accounts_unsupported`), and so is the rebuild of such a member,
-  whichever profile it resolves: one of the mob definition's, a realm
-  profile, the spawn's own, or a profile of a child mob an agent creates.
-- **Known limitation.** In a private side chat, an MCP App that a personal
+  (`personal_accounts_unsupported`), whichever profile it resolves: one of
+  the mob definition's, a realm profile, the spawn's own, or a profile of a
+  child mob an agent creates. So is its respawn, before anything is retired.
+  A member placed before a server in its profile was marked personal is
+  refused when this host wakes it again from its stored profile: the wake
+  fails and the member is broken, with the refusal as the reason. To keep
+  such an agent, spawn it again on this host (retire it, then spawn it
+  without a placement), or mark the server `system` again.
+- **Known limitations.** In a private side chat, an MCP App that a personal
   server serves cannot read its resources or call its tools from the
   console yet: the console's app path does not carry the person as the
   requester, so the owner check refuses those uses
-  (`personal_account_not_owner`).
+  (`personal_account_not_owner`). A member placed on another host before a
+  server in its profile was marked personal keeps that server on its host
+  until this host wakes it again: while its host keeps it running, and when
+  its host revives it on its own after a restart of that host.
 
-Each refusal reaches the model as the tool call's policy denial, whose code
-is the refusal's kind.
+A refused tool call reaches the model as the call's policy denial, whose
+code is the refusal's kind: `personal_account_shared_thread`,
+`personal_account_not_owner` or `personal_account_suspended`.
+`personal_accounts_unsupported` refuses startup (`rpc_gateway`'s
+initialization answers `-32602`), and the placement, respawn or wake of a
+member on another host, whose error names the kind and the server.
 
 ## Native realm and member auth binding
 

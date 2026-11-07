@@ -8,14 +8,18 @@
 //! profile, the realm profile its role names, or the spawn's own override
 //! profile) to its spawn customizers before it compiles or sends anything
 //! ([`SpawnMemberCustomizer::check_placed_profile`]), on every placed spawn
-//! and rebuild. The guard refuses a profile that declares a server under a
-//! personal server's name, whatever its shape
-//! ([`PersonalAccountRefusal::Unsupported`] with
-//! [`UnsupportedPersonalServer::HostedElsewhere`]). It reads the
-//! composition's personal accounts when it is asked, so it can sit in the
-//! spawn customizers of every mob a composition builds from its spec and in
-//! the agent mob tools' child customizer slot, for every mob an agent
-//! creates, before the composition names its personal servers.
+//! and respawn (a respawn before it retires anything), and the revival of a
+//! placed member, which sends the member's stored spec to its host again,
+//! shows the profile that spec carries. The guard refuses a profile that
+//! declares a server under a personal server's name, whatever its shape and
+//! whichever of them asks ([`PersonalAccountRefusal::Unsupported`] with
+//! [`UnsupportedPersonalServer::HostedElsewhere`]): so a member placed before
+//! the server was marked personal fails its revival, broken, rather than
+//! keep the server. It reads the composition's personal accounts when it is
+//! asked, so it can sit in the spawn customizers of every mob a composition
+//! builds from its spec and in the agent mob tools' child customizer slot,
+//! for every mob an agent creates, before the composition names its
+//! personal servers.
 
 use std::sync::Arc;
 

@@ -1,6 +1,8 @@
 //! Toolkit activation/component lifetime. Native runtime work and grants have
 //! their own owners; this module retains only selected deployment/component
-//! close state and its physical settlement guards.
+//! close state and its physical settlement guards. The settled activation
+//! close ends the bound native grant owner's custody (see
+//! [`NativeHostLifetime::bind_native_grant_custody`]).
 
 pub mod control;
 pub(crate) mod fence;
@@ -9,9 +11,10 @@ mod request;
 
 use control::*;
 use fence::LocalFence;
+use meerkat_authorization::grants::LocalGrantAuthority;
 use meerkat_authorization::publication::LocalAuthorizationPublication;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock as PhaseLock};
+use std::sync::{Arc, RwLock as PhaseLock, Weak};
 use tokio::sync::{Notify, OwnedRwLockReadGuard, RwLock};
 use toolkit_catalog::{
     ComponentLifetimeInput, ComponentLifetimePhase, ToolkitComponentLifetimeMachineAuthority,
@@ -386,6 +389,10 @@ pub struct NativeHostLifetime {
     components: BTreeMap<Id, Arc<ComponentOwner>>,
     closed: Notify,
     native_publication: Option<LocalAuthorizationPublication>,
+    /// The native grant owner whose custody the settled activation close
+    /// ends. Held weakly: this lifetime never keeps the owner alive, and an
+    /// owner already dropped released its custody then.
+    native_grant_custody: Option<Weak<LocalGrantAuthority>>,
 }
 
 impl NativeHostLifetime {
@@ -438,6 +445,7 @@ impl NativeHostLifetime {
             components,
             closed: Notify::new(),
             native_publication: None,
+            native_grant_custody: None,
         })
     }
 
@@ -522,6 +530,33 @@ impl NativeHostLifetime {
         }
         self.native_publication = Some(publication);
         Ok(())
+    }
+
+    /// Install the native grant owner whose custody this host's close ends,
+    /// before this lifetime is shared, beside its publication. Once every
+    /// component and the activation have settled (after the host's last
+    /// legitimate change, before the close reports `Settled`), the close
+    /// releases the owner's custody: a reference a task of this host still
+    /// holds can no longer change or use it, and the store's lease is handed
+    /// back, so a successor in this process restores the same owner at once.
+    /// Rebinding is refused.
+    pub fn bind_native_grant_custody(&mut self, grants: &Arc<LocalGrantAuthority>) -> Result<()> {
+        self.validate_current_selection()?;
+        if self.native_grant_custody.is_some() {
+            return Err(HostLifetimeError::Denied);
+        }
+        self.native_grant_custody = Some(Arc::downgrade(grants));
+        Ok(())
+    }
+
+    /// End the bound native grant owner's custody at the settled close.
+    fn release_native_grant_custody(&self) -> Result<()> {
+        match self.native_grant_custody.as_ref().and_then(Weak::upgrade) {
+            Some(grants) => grants
+                .release_custody()
+                .map_err(|_| HostLifetimeError::Unavailable),
+            None => Ok(()),
+        }
     }
 
     /// Local phase facts for the native authorization observation. The caller
@@ -779,9 +814,14 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
                         return Err(HostLifetimeError::NotSettled);
                     }
                 }
-                self.activation
+                let observation = self
+                    .activation
                     .join(handle, self.native_publication.as_ref())
-                    .await
+                    .await?;
+                if observation.state == HostCloseState::Settled {
+                    self.release_native_grant_custody()?;
+                }
+                Ok(observation)
             }
             HostCloseScope::Component { component } => {
                 self.component(component)?

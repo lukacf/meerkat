@@ -686,6 +686,9 @@ impl PreparedInstalledHost {
             .bind_native_authorization_publication(self.source.publication())
             .map_err(|error| adoption_refusal("installation.bind_publication", error))?;
         owner
+            .bind_native_grant_custody(&self.source.grants())
+            .map_err(|error| adoption_refusal("installation.bind_grant_custody", error))?;
+        owner
             .validate_current_selection()
             .map_err(|error| adoption_refusal("installation.current_selection", error))?;
         Ok((

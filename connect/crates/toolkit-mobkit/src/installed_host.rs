@@ -350,6 +350,7 @@ impl InstalledToolkitHost {
             .await?;
         originals.bind_service_tool_policy(service_policy)?;
         owner.bind_native_authorization_publication(source.publication())?;
+        owner.bind_native_grant_custody(&source.grants())?;
         owner.validate_current_selection()?;
         Ok((
             owner,

@@ -336,6 +336,7 @@ impl OperatorSetup {
             open_owner_pair(&selection, &native, &operator, startup)
         })?;
         lifetime.bind_native_authorization_publication(source.publication())?;
+        lifetime.bind_native_grant_custody(&source.grants())?;
         Ok(Self {
             lifetime: Arc::new(lifetime),
             native,

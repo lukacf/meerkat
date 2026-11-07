@@ -52,7 +52,7 @@ struct LegacyCompactionCommitFingerprint<'a> {
 
 /// Exact post-commit projection work carried by the session snapshot into the
 /// runtime's atomic-apply outbox.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionProjectionIntent {
     pub projection: CompactionProjectionId,
     pub summary_tokens: u64,
@@ -68,7 +68,39 @@ pub struct CompactionProjectionIntent {
     /// when the rewritten history could not be measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_history_tokens_after: Option<u64>,
+    /// The operator-instruction snapshot entry the compaction's fold
+    /// inserted, observed as `OperatorInstructionsApplied` when the commit
+    /// is finalized, right after its `CompactionCompleted`; a rollback drops
+    /// it with the intent, so nothing observes it. `None` when the fold
+    /// inserted no snapshot, and for an intent staged before 0.9.11 (an
+    /// older reader ignores the field). The rewrite the projection identity
+    /// pins fixes it, so it takes no part in the intent's equality: a copy an
+    /// older reader decoded without it still compares equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_snapshot: Option<crate::session::InstructionEntryIdentity>,
 }
+
+impl PartialEq for CompactionProjectionIntent {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            projection,
+            summary_tokens,
+            messages_before,
+            messages_after,
+            summary_source,
+            estimated_history_tokens_after,
+            instruction_snapshot: _,
+        } = self;
+        *projection == other.projection
+            && *summary_tokens == other.summary_tokens
+            && *messages_before == other.messages_before
+            && *messages_after == other.messages_after
+            && *summary_source == other.summary_source
+            && *estimated_history_tokens_after == other.estimated_history_tokens_after
+    }
+}
+
+impl Eq for CompactionProjectionIntent {}
 
 impl CompactionProjectionId {
     /// Mint the projection identity for the exact validated compaction rewrite.
@@ -1143,6 +1175,52 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<CompactionProjectionIntent>(encoded).unwrap(),
             current
+        );
+    }
+
+    /// The operator-instruction snapshot an intent carries round-trips; an
+    /// intent written before it (or decoded by a reader that drops it) reads
+    /// with none; and the snapshot takes no part in the intent's equality, so
+    /// a copy decoded without it compares equal to one with it.
+    #[test]
+    fn compaction_projection_intent_snapshot_round_trips_and_takes_no_part_in_equality() {
+        let session_id = crate::types::SessionId::new();
+        let older_form = serde_json::json!({
+            "projection": {
+                "session_id": session_id,
+                "parent_revision": "parent",
+                "revision": "child",
+                "commit_fingerprint": "sha256:snapshot-intent",
+            },
+            "summary_tokens": 4,
+            "messages_before": 6,
+            "messages_after": 2,
+        });
+        let mut current_form = older_form.clone();
+        current_form["instruction_snapshot"] = serde_json::json!({
+            "render_version": 1,
+            "origin_session_id": session_id,
+            "entry_sequence": 3,
+            "kind": "snapshot",
+            "target_generation": 2,
+        });
+        let older: CompactionProjectionIntent = serde_json::from_value(older_form).unwrap();
+        let current: CompactionProjectionIntent =
+            serde_json::from_value(current_form.clone()).unwrap();
+        assert_eq!(older.instruction_snapshot, None);
+        let snapshot = current
+            .instruction_snapshot
+            .as_ref()
+            .expect("the snapshot reads");
+        assert_eq!(snapshot.entry_sequence(), 3);
+        assert_eq!(
+            serde_json::to_value(&current).unwrap(),
+            current_form,
+            "the snapshot round-trips"
+        );
+        assert_eq!(
+            older, current,
+            "the snapshot takes no part in the intent's equality"
         );
     }
 

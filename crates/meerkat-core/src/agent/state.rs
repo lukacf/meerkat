@@ -5315,6 +5315,12 @@ where
                                                             messages_after: outcome.messages_after,
                                                             summary_source: Some(outcome.summary_source),
                                                             estimated_history_tokens_after: history_tokens_after,
+                                                            // Observed when the runtime
+                                                            // commits the compaction, not now.
+                                                            instruction_snapshot: instruction_fold
+                                                                .as_ref()
+                                                                .and_then(crate::session::InstructionFold::snapshot)
+                                                                .and_then(|row| row.instruction_entry.clone()),
                                                         };
                                                         match compacted_session
                                                             .add_compaction_projection_intent(intent)
@@ -5558,12 +5564,17 @@ where
                                 }
                                 // The snapshot entry the fold inserted is in
                                 // the session's transcript now: observe it
-                                // (the session's instruction read stays the
-                                // authority).
-                                if let Some(entry) = instruction_fold
-                                    .as_ref()
-                                    .and_then(crate::session::InstructionFold::snapshot)
-                                    .and_then(|row| row.instruction_entry.as_ref())
+                                // when the rewrite is committed here (the
+                                // session's instruction read stays the
+                                // authority). A staged rewrite is observed
+                                // when the runtime commits it
+                                // (`finalize_committed_compaction_projections`),
+                                // so a rolled-back fold is never observed.
+                                if emit_completed_now
+                                    && let Some(entry) = instruction_fold
+                                        .as_ref()
+                                        .and_then(crate::session::InstructionFold::snapshot)
+                                        .and_then(|row| row.instruction_entry.as_ref())
                                 {
                                     let _ = crate::event_tap::tap_emit(
                                         &self.event_tap,
@@ -5985,6 +5996,16 @@ where
                     revision = intent.projection.revision(),
                     "compaction event stream receiver dropped before committed CompactionCompleted"
                 );
+            }
+            // The operator-instruction snapshot the compaction's fold
+            // inserted is in effect from this commit on.
+            if let Some(entry) = intent.instruction_snapshot.as_ref() {
+                let _ = crate::event_tap::tap_emit(
+                    &self.event_tap,
+                    self.default_event_tx.as_ref(),
+                    AgentEvent::operator_instructions_applied(self.session.id().clone(), entry),
+                )
+                .await;
             }
         }
         let live_transaction_completed =
@@ -14838,10 +14859,11 @@ mod tests {
     /// A staged compaction's instruction snapshot is observed only when the
     /// runtime commits the compaction. A run whose request after the
     /// compaction fails rolls the compaction back with the snapshot entry its
-    /// fold inserted, so nothing observes that entry; the next entry takes its
-    /// sequence, and no sequence is observed twice. RED before: the fold
-    /// published the snapshot when it installed the rewrite, and the next
-    /// run's delta published the same sequence again with other content.
+    /// fold inserted, so nothing observes that entry; the next entry (a run
+    /// start's delta) takes its sequence, and no sequence is observed twice.
+    /// RED before: the fold published the snapshot when it installed the
+    /// rewrite, and the next run's delta published the same sequence again
+    /// with other content.
     #[cfg(feature = "workspace-tests")]
     #[tokio::test]
     async fn a_rolled_back_staged_fold_publishes_no_instruction_snapshot() {
@@ -14864,9 +14886,9 @@ mod tests {
 
         agent.run("first".into()).await.unwrap();
         drain_events(&mut event_rx);
-        // Run two's start appends the pending change as a delta; its first
-        // request compacts, and the fold puts the delta into a snapshot; the
-        // request after the compaction fails, so the rewrite rolls back.
+        // A pending change: run two's first request compacts, and the fold
+        // applies the change in its snapshot; the request after the
+        // compaction fails, so the rewrite rolls back with the snapshot.
         agent
             .session_mut()
             .set_session_instruction(tone_write(1, "Answer formally."))
@@ -14885,20 +14907,26 @@ mod tests {
                 .all(|(_, kind)| *kind == crate::InstructionEntryKind::Delta),
             "the rolled-back fold's snapshot is never observed: {second:?}"
         );
-        assert_eq!(
-            second.len(),
-            1,
-            "the run start's delta is observed: {second:?}"
+        assert!(
+            second.is_empty(),
+            "nothing of the rolled-back run is observed: {second:?}"
         );
 
-        // Run three's start appends the next change as the next entry.
+        // The next change, applied at run three's start, is the next entry.
         agent
             .session_mut()
             .set_session_instruction(tone_write(2, "Answer briefly."))
             .unwrap();
+        agent
+            .apply_run_start_operator_instructions(crate::InstructionRunStart::FreshRun, None)
+            .expect("the run start applies the pending change");
         agent.run("third".into()).await.unwrap();
         let third = instruction_observations(&drain_events(&mut event_rx));
-        assert_eq!(third.len(), 1, "the next delta is observed: {third:?}");
+        assert_eq!(
+            third.iter().map(|(_, kind)| *kind).collect::<Vec<_>>(),
+            vec![crate::InstructionEntryKind::Delta],
+            "the run start's delta is observed: {third:?}"
+        );
         let mut sequences = second
             .iter()
             .chain(&third)
@@ -15353,6 +15381,7 @@ mod tests {
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot: None,
             })
             .unwrap();
         projection

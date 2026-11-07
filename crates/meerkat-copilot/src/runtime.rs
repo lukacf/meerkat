@@ -5617,6 +5617,64 @@ mod tests {
         assert!(message.contains("gpt-other"), "{message}");
     }
 
+    /// A catalog entry whose endpoint list is empty states that the model has
+    /// no endpoints: no family is served it (an entry that states no list is
+    /// served on Chat Completions), the account's model list refuses it with
+    /// `NoEndpoints`, and a registry model's route says so.
+    #[test]
+    fn an_explicitly_empty_endpoint_list_is_refused() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+        let listed: crate::CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "gpt-test", "supported_endpoints": []},
+                {"id": "gpt-other", "supported_endpoints": ["/responses"]}
+            ]
+        }))
+        .expect("model list");
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("model snapshot");
+        let offering = snapshot.model("gpt-test").expect("listed model");
+        for provider in [Provider::OpenAI, Provider::Gemini, Provider::Anthropic] {
+            assert_eq!(offering.route_for(provider), None, "{provider:?}");
+        }
+        assert_eq!(offering.protocol_provider(), None);
+        let credential = account_identity();
+        assert_eq!(
+            snapshot.account_model(&credential, "gpt-test"),
+            AccountModelLookup::Refused(AccountModelRefusal::NoEndpoints {
+                credential: credential.clone(),
+                model: "gpt-test".to_string(),
+            })
+        );
+
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let route =
+            resolve_route_for_state(&state, Provider::OpenAI, "gpt-test").expect("a cached route");
+        assert_eq!(route.access, CopilotModelAccess::Unavailable);
+        let message =
+            route.unavailable_message(Provider::OpenAI, "gpt-test", CopilotEndpoint::Responses);
+        assert!(
+            message.contains("lists no endpoints for openai model 'gpt-test'"),
+            "{message}"
+        );
+        assert!(message.contains("gpt-other"), "{message}");
+    }
+
     #[test]
     fn shared_account_rejects_conflicting_backend_options() {
         let runtime = CopilotRuntime::new();

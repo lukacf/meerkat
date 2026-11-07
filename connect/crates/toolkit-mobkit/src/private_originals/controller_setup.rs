@@ -22,6 +22,18 @@ pub struct LocalControllerSetup {
 }
 
 impl LocalControllerSetup {
+    pub(in crate::private_originals) fn from_console_bind(
+        source: &Arc<PrivateOriginals>,
+        original: PrivateOriginalRef,
+        context: &GovernedBindContext,
+    ) -> Self {
+        Self {
+            source_owner: Arc::downgrade(source),
+            original,
+            session_id: context.session_id.clone(),
+            controller: context.controller.clone(),
+        }
+    }
     pub(crate) fn source_owner(&self) -> Option<Arc<PrivateOriginals>> {
         self.source_owner.upgrade()
     }
@@ -70,7 +82,7 @@ impl PrivateOriginals {
         self: &Arc<Self>,
         submission: PrivateOriginalSubmit,
     ) -> Result<LocalControllerSetup, PrivateOriginalError> {
-        let route = self.route(&submission.original.route)?;
+        let route = &self.route(&submission.original.route)?;
         let event = self.event(&submission.original).await?;
         if digest(submission.content.as_bytes()) != event.content_sha256 {
             return Err(PrivateOriginalError::Conflict);

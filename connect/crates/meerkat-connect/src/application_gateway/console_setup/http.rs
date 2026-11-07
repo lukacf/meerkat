@@ -40,6 +40,19 @@ pub(super) fn status_disclosure_failure(
         _ => StatusCode::FORBIDDEN,
     }
 }
+pub(super) fn task_status_failure(
+    error: toolkit_mobkit::private_originals::PrivateOriginalError,
+) -> StatusCode {
+    use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+    use toolkit_mobkit::private_originals::PrivateOriginalError;
+    let (cause, error) = match error {
+        PrivateOriginalError::Unavailable => ("Unavailable", HostLifetimeError::Unavailable),
+        PrivateOriginalError::Denied => ("Denied", HostLifetimeError::Denied),
+        PrivateOriginalError::Conflict => ("Conflict", HostLifetimeError::Denied),
+    };
+    status_read_refused("http.data.active_task", cause);
+    status_disclosure_failure(error)
+}
 fn failure(status: StatusCode) -> Response {
     response(
         status,
@@ -118,7 +131,7 @@ fn selected(
         headers,
         uri,
         login,
-        task: active.task.clone(),
+        target: active.target.clone(),
         identity: Arc::new(OnceLock::new()),
     };
     Ok((active, action))
@@ -285,15 +298,27 @@ async fn data_from(
         }
     };
     let active = active.filter(|active| active.login.same_owner(&login));
-    if let Some(active) = &active
-        && (active
-            .task
-            .check_console_viewer(&current, &login)
-            .await
-            .is_err()
-            || current().is_none())
-    {
-        return failure(StatusCode::FORBIDDEN);
+    if let Some(active) = &active {
+        let allowed = match &active.target {
+            ReviewTarget::Agent(task) => match task.check_console_viewer(&current, &login).await {
+                Ok(_) => true,
+                Err(error) => return failure(task_status_failure(error)),
+            },
+            ReviewTarget::Member => current().is_some_and(|viewer| {
+                !viewer.service_identity
+                    && viewer
+                        .human
+                        .as_ref()
+                        .is_some_and(|human| human.current().is_ok())
+                    && viewer
+                        .access_view
+                        .as_ref()
+                        .is_some_and(|view| view.can_administer())
+            }),
+        };
+        if !allowed || current().is_none() {
+            return failure(StatusCode::FORBIDDEN);
+        }
     }
     let selected = request
         .as_ref()

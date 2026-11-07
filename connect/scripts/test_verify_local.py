@@ -42,7 +42,10 @@ if args[0] == 'metadata':
         print(json.dumps(metadata))
     sys.exit(0)
 if args[0] == control.get('mutate_on'):
-    Path(control['mutate_path']).write_text(control['mutate_contents'])
+    if control.get('mutate_remove'):
+        Path(control['mutate_path']).unlink()
+    else:
+        Path(control['mutate_path']).write_text(control['mutate_contents'])
 if args[0] == control.get('fail_on'):
     print('fixture command failed', file=sys.stderr)
     sys.exit(9)
@@ -56,7 +59,7 @@ def sha(path):
 
 class VerifyLocalTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="verify-local-tests-")
+        self.temp = tempfile.TemporaryDirectory(prefix="verify-local-native-parent-tests-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.root = self.base / "toolkit with spaces"
@@ -153,8 +156,49 @@ class VerifyLocalTests(unittest.TestCase):
         self.assertIn(".cargo/config.toml", sources)
         self.assertIn(str(self.cargo_home / "config.toml"), sources)
         self.assertNotIn("crates/alpha/target/generated", sources)
-        self.assertFalse(any("native" in name or "external owners" in name for name in sources))
+        excluded = (self.root / "crates/native", self.candidate.parent, self.external_root)
+        for name in sources:
+            path = Path(name) if Path(name).is_absolute() else self.root / name
+            self.assertFalse(any(path.is_relative_to(root) for root in excluded), name)
         self.assertTrue(receipt["source_unchanged"])
+
+    def test_absent_optional_guidance_does_not_block_selected_workspace(self):
+        for relative in ("AGENTS.md", "docs/spec/meerkat-toolkit-capability-acquisition.md"):
+            (self.root / relative).unlink()
+        result, receipt, calls = self.invoke()
+        self.assertEqual(result.returncode, 0, receipt)
+        self.assertTrue(receipt["source_unchanged"])
+        self.assertEqual([c[0] for c in calls], ["--print-env", "metadata", "fmt", "test", "clippy", "metadata"])
+        for relative in ("AGENTS.md", "docs/spec/meerkat-toolkit-capability-acquisition.md"):
+            self.assertNotIn(relative, receipt["source_sha256"])
+        self.assertIn("Cargo.lock", receipt["source_sha256"])
+        self.assertIn("crates/alpha/src/lib.rs", receipt["source_sha256"])
+
+    def test_optional_guidance_add_remove_and_change_are_source_drift(self):
+        for relative in ("AGENTS.md", "docs/spec/meerkat-toolkit-capability-acquisition.md"):
+            path = self.root / relative
+            original = path.read_bytes()
+            for action in ("add", "remove", "change"):
+                with self.subTest(relative=relative, action=action):
+                    if action == "add":
+                        path.unlink()
+                    self.control.update(mutate_on="test", mutate_path=str(path),
+                                        mutate_remove=action == "remove", mutate_contents="Changed guidance.\n")
+                    result, receipt, calls = self.invoke()
+                    self.assertEqual(result.returncode, 1, receipt)
+                    self.assertFalse(receipt["source_unchanged"])
+                    self.assertEqual([c[0] for c in calls],
+                                     ["--print-env", "metadata", "fmt", "test", "clippy", "metadata"])
+                    before, after = receipt["source_sha256"], receipt["source_after_sha256"]
+                    self.assertEqual(relative in before, action != "add")
+                    self.assertEqual(relative in after, action != "remove")
+                    changed = {name for name in before.keys() | after.keys()
+                               if before.get(name) != after.get(name)}
+                    self.assertEqual(changed, {relative})
+                    self.assertIn("source identity changed", receipt["failure"]["message"])
+                path.write_bytes(original)
+                shutil.rmtree(self.root / "docs/verification")
+                (self.root / "calls.jsonl").unlink()
 
     def test_candidate_records_actual_external_owner_and_assets(self):
         result, receipt, calls = self.invoke("--manifest-path", "native-candidate/Cargo.toml")

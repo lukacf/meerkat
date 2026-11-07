@@ -401,7 +401,9 @@ impl InstalledAccountRequests {
         let task_expires_in_ms = request.selection.expires_in_ms;
         let task_tool_policy = request.selection.tool_policy.clone();
         let (cancel_review, cancellation) = ReviewCancellation::channel();
-        let reviewing = self.review.review_account_with_task(
+        // The review is passed by value into the driver, which keeps it as
+        // its own state and pins it again. Box this large future once here.
+        let reviewing = Box::pin(self.review.review_account_with_task(
             &request.job_id,
             request.target,
             request.selection.operations.clone(),
@@ -416,7 +418,7 @@ impl InstalledAccountRequests {
             task_expires_in_ms,
             task_tool_policy,
             Some(cancellation),
-        );
+        ));
         let reviewed = drive_review_cancellable(
             reviewing,
             &approvals,

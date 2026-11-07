@@ -295,6 +295,94 @@ class SelectedNodeBuildOwnerTests(SelectedFixture, unittest.TestCase):
         self.assertEqual(seen, [900])
         self.assertEqual(c._job_context.installer_timeout, 77)
 
+    def test_shared_state_skips_discarded_planning_and_ordinary_state_stays_fresh(self):
+        from test_shared_preparation import transport_call
+
+        async def exercise():
+            c = self.controller()
+            owner = adapter.ControllerConnections(c)
+            peer = owner.open()
+            try:
+                shared = await transport_call(peer, "/api/state", {})
+                self.assertNotIn("node_build", shared)
+                self.assertEqual(c.runner.calls, [], "shared state must not probe the discarded toolchain")
+                ordinary = c.state()
+                self.assertTrue(ordinary["node_build"]["available"])
+                self.assertEqual(sum("--describe-node-build" in argv for argv, _ in c.runner.calls), 1)
+                for field in ("families", "scope", "catalog", "selected_installation", "job_history"):
+                    self.assertEqual(shared[field], ordinary[field])
+                self.assertEqual(await transport_call(peer, "/api/state", {}), shared)
+                self.assertEqual(sum("--describe-node-build" in argv for argv, _ in c.runner.calls), 1)
+                self.assertEqual(c.state(), ordinary)
+                self.assertEqual(sum("--describe-node-build" in argv for argv, _ in c.runner.calls), 2,
+                                 "ordinary state must reobserve the selected toolchain, not cache planning")
+                # Shared status does not claim current build readiness. The
+                # actual build check must still refuse a changed pinned tool.
+                tool = c.workspace / "selected-tools/node_build"
+                tool.write_bytes(b"changed pinned build profile")
+                before = list(c.runner.calls)
+                with self.assertRaisesRegex(backend.SetupError, "selected_tool_changed"):
+                    c.selected_check(self.stage_build())
+                self.assertEqual(c.runner.calls, before)
+            finally:
+                await owner.aclose()
+        asyncio.run(exercise())
+
+    def test_shared_state_and_other_peer_job_do_not_enter_blocked_planning(self):
+        from test_shared_preparation import transport_call, transport_check
+
+        async def exercise():
+            c = self.controller()
+            owner = adapter.ControllerConnections(c)
+            a, b = owner.open(), owner.open()
+            entered, release = threading.Event(), threading.Event()
+            tasks = []
+
+            async def invoke(peer, route, arguments):
+                index = owner._connections.index(peer)
+                token = (await asyncio.to_thread(owner.owner_control, {"operation": "prepare_entry",
+                    "peer": index, "connection": "1", "tool": "setup_" + route.removeprefix("/api/"),
+                    "arguments": arguments, "preparation": None}))["entry"]
+                try:
+                    return await peer.dispatch(route, arguments, _entry=token)
+                finally:
+                    for operation in ("close_entry", "finish_entry"):
+                        await asyncio.to_thread(owner.owner_control,
+                            {"operation": operation, "peer": index, "entry": token})
+
+            try:
+                selected = await transport_check(owner, b, self.stage_build())
+                with patch.object(c, "wait_selected_install", wraps=c.wait_selected_install) as joined:
+                    installed = await transport_call(b, "/api/selected_install", self.selection(selected))
+                identifier = installed["job"]["id"]
+                joined.assert_called_once_with(identifier)
+                self.assertEqual(installed["job"]["status"], "succeeded")
+                self.assertFalse(c._job_threads[identifier].is_alive(), "actual install worker must be joined")
+                run = c.runner.run
+
+                def held_planning(argv, **kwargs):
+                    if "--describe-node-build" in argv:
+                        entered.set()
+                        if not release.wait(10):
+                            raise AssertionError("fixture planning was not released")
+                    return run(argv, **kwargs)
+
+                with patch.object(c.runner, "run", held_planning):
+                    tasks.extend((asyncio.create_task(invoke(a, "/api/state", {})),
+                                  asyncio.create_task(invoke(b, "/api/job", {"job_id": identifier}))))
+                    done, _ = await asyncio.wait(tasks, timeout=2)
+                    self.assertEqual(len(done), 2, "discarded planning delayed shared state or another peer's job")
+                    state, job = await asyncio.gather(*tasks)
+                    self.assertFalse(entered.is_set())
+                    self.assertIsNone(state["job"], "shared state must not disclose the other peer's job")
+                    self.assertEqual((job["job"]["id"], job["job"]["status"]), (identifier, "succeeded"))
+                    self.assertFalse(any("--describe-node-build" in argv for argv, _ in c.runner.calls))
+            finally:
+                release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await owner.aclose()
+        asyncio.run(exercise())
+
 
 if __name__ == "__main__":
     unittest.main()

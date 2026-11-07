@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc,
-    mpsc::{Receiver, SyncSender, sync_channel},
+    mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
 
 use meerkat::{
@@ -12,6 +12,16 @@ use meerkat_core::{AgentToolDispatcher, MobMemberBinding, RealmLocator, SessionI
 
 use super::{InstalledServiceReview, compose_with_auth, refused};
 use crate::{ConnectError, approval::LocalApprovals, connector_auth::ConnectorAuth};
+
+#[cfg(all(unix, feature = "console"))]
+mod shared;
+#[cfg(all(unix, feature = "console"))]
+pub(crate) use shared::LiveSharedSetup;
+#[cfg(all(unix, feature = "console"))]
+pub use shared::{
+    BoundSharedSetupInstallation, PreparedSharedSetupInstallation, SharedSetupInstallation,
+    configure_shared_setup_installation, prepare_shared_setup_installation,
+};
 
 /// Configure the application's existing factory before it prepares members.
 /// The application supplies its exact selected helper, realm, native account
@@ -105,7 +115,7 @@ impl McpAdapterComposer for SelectedReviewComposer {
         }
         self.approvals
             .bind_session(session_id)
-            .map_err(|_| composition_refused())?;
+            .map_err(|error| connect_composition_refused("session_binding", &error))?;
         let review = compose_with_auth(
             adapter.clone(),
             self.auth.clone(),
@@ -113,14 +123,17 @@ impl McpAdapterComposer for SelectedReviewComposer {
             session_id.clone(),
             self.approvals.clone(),
         )
-        .map_err(|_| composition_refused())?;
+        .map_err(|error| connect_composition_refused("review_composition", &error))?;
         let dispatcher = review.checked_dispatcher();
         // Failed transfer drops the review, retiring its existing review and
         // checked-install owners. Native construction still owns and shuts
         // down the actual adapter on the returned refusal.
-        self.reviews
-            .try_send(review)
-            .map_err(|_| composition_refused())?;
+        self.reviews.try_send(review).map_err(|error| match error {
+            TrySendError::Full(_) => composition_refused("review_transfer", "receiver_full"),
+            TrySendError::Disconnected(_) => {
+                composition_refused("review_transfer", "receiver_closed")
+            }
+        })?;
         Ok(dispatcher)
     }
 }
@@ -255,9 +268,14 @@ impl McpAdapterComposer for TerminalReviewComposer {
         if !selected_member(&self.selected, member)? {
             return Ok(adapter.clone());
         }
+        // This synchronous callback may fail before presenter enrollment. Keep
+        // only its fixed stage locally; never retain or render the inner error.
+        let mut stage = "presenter_enrollment";
         self.presenters
             .create_installed_with_tasks(self.tasks.clone(), |approvals| {
+                stage = "session_binding";
                 approvals.bind_session(session_id)?;
+                stage = "review_composition";
                 let mut review = compose_with_auth(
                     adapter.clone(),
                     self.auth.clone(),
@@ -266,9 +284,10 @@ impl McpAdapterComposer for TerminalReviewComposer {
                     approvals,
                 )?;
                 review.realm_installation = self.realm_installation.clone();
+                stage = "presenter_enrollment";
                 Ok(review)
             })
-            .map_err(|_| composition_refused())
+            .map_err(|error| connect_composition_refused(stage, &error))
     }
 }
 
@@ -349,12 +368,12 @@ impl McpAdapterComposer for PolicyReviewComposer {
                 &self.artifact_parent,
                 self.installation.clone(),
             )
-            .map_err(|_| composition_refused())?
+            .map_err(|error| connect_composition_refused("approval_creation", &error))?
             .with_service_tasks(Some(self.tasks.clone())),
         );
         approvals
             .bind_session(session_id)
-            .map_err(|_| composition_refused())?;
+            .map_err(|error| connect_composition_refused("session_binding", &error))?;
         match &self.service {
             Some(service) => super::account_request::compose_application_policy_requests(
                 adapter.clone(),
@@ -365,7 +384,7 @@ impl McpAdapterComposer for PolicyReviewComposer {
                 self.tasks.clone(),
                 service.clone(),
             )
-            .map_err(|_| composition_refused()),
+            .map_err(|error| connect_composition_refused("policy_request_composition", &error)),
             None => {
                 // Software authority does not require an access parent. This
                 // selected composition adds no account/public request surface.
@@ -375,17 +394,15 @@ impl McpAdapterComposer for PolicyReviewComposer {
                 );
                 checked
                     .bind_realm(&self.realm)
-                    .map_err(|_| composition_refused())?;
+                    .map_err(|_| composition_refused("realm_binding", "binding_refused"))?;
                 Ok(checked)
             }
         }
     }
 }
 
-/// Early factory composition keeps the actual adapter/auth facade and one
-/// selection reference. Only final same-owner adoption makes policy usable.
 #[cfg(all(unix, feature = "console"))]
-pub(crate) fn gateway_selected_policy_composition(
+pub(crate) fn gateway_selected_policy_composition_with_workflows(
     construction: &meerkat_mobkit::rpc_gateway::GatewayFactoryConstruction<'_>,
     selected: MobMemberBinding,
     realm: RealmLocator,
@@ -393,6 +410,7 @@ pub(crate) fn gateway_selected_policy_composition(
     presenters: Option<crate::application_gateway::LocalSetupApprovals>,
     artifact_parent: std::path::PathBuf,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
+    workflows: Option<Arc<LiveSharedSetup>>,
 ) -> Result<
     meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
     meerkat_toolkit::host_lifetime::control::HostLifetimeError,
@@ -415,16 +433,32 @@ pub(crate) fn gateway_selected_policy_composition(
         selected,
         facade,
         realm,
-        policy,
+        policy.clone(),
         presenters,
         artifact_parent,
-        tasks,
+        tasks.clone(),
     )
     .map_err(|_| HostLifetimeError::Unavailable)?;
     Arc::get_mut(&mut composer)
         .ok_or(HostLifetimeError::Unavailable)?
         .realm_installation = realm_installation;
     let provider = composer.auth.context_provider.clone();
+    let (composer, provider): (
+        Arc<dyn McpAdapterComposer>,
+        Arc<dyn meerkat_mcp::McpCallContextProvider>,
+    ) = match workflows {
+        Some(workflows) => (
+            workflows.composer(
+                composer,
+                tasks,
+                Arc::new(super::account_request::ServicePolicySource::Selected(
+                    policy,
+                )),
+            ),
+            workflows.provider(provider)?,
+        ),
+        None => (composer, provider),
+    };
     Ok(
         meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
             .with_call_context_provider(provider),
@@ -479,12 +513,15 @@ impl McpAdapterComposer for SelectedPolicyComposer {
             return Ok(adapter.clone());
         }
         if let Some(presenters) = &self.presenters {
+            let mut stage = "presenter_enrollment";
             return presenters
                 .create_installed_selected(
                     Some(self.tasks.clone()),
                     Some(self.policy.clone()),
                     |approvals| {
+                        stage = "session_binding";
                         approvals.bind_session(session)?;
+                        stage = "review_composition";
                         let mut review = compose_with_auth(
                             adapter.clone(),
                             self.auth.clone(),
@@ -493,10 +530,11 @@ impl McpAdapterComposer for SelectedPolicyComposer {
                             approvals,
                         )?;
                         review.realm_installation = self.realm_installation.clone();
+                        stage = "presenter_enrollment";
                         Ok(review)
                     },
                 )
-                .map_err(|_| composition_refused());
+                .map_err(|error| connect_composition_refused(stage, &error));
         }
         // No unused presenter or account queue in the headless composition.
         let (approvals, _) = LocalApprovals::create_for_selected_policy(
@@ -504,11 +542,11 @@ impl McpAdapterComposer for SelectedPolicyComposer {
             self.policy.clone(),
             None,
         )
-        .map_err(|_| composition_refused())?;
+        .map_err(|error| connect_composition_refused("approval_creation", &error))?;
         let approvals = Arc::new(approvals.with_service_tasks(Some(self.tasks.clone())));
         approvals
             .bind_session(session)
-            .map_err(|_| composition_refused())?;
+            .map_err(|error| connect_composition_refused("session_binding", &error))?;
         super::account_request::compose_selected_policy_requests(
             adapter.clone(),
             self.auth.clone(),
@@ -518,7 +556,7 @@ impl McpAdapterComposer for SelectedPolicyComposer {
             self.tasks.clone(),
             self.policy.clone(),
         )
-        .map_err(|_| composition_refused())
+        .map_err(|error| connect_composition_refused("policy_request_composition", &error))
     }
 }
 
@@ -533,15 +571,37 @@ fn selected_member(
         return Ok(true);
     }
     if member.mob_id == selected.mob_id && member.member == selected.member {
-        return Err(composition_refused());
+        return Err(composition_refused("member_selection", "role_mismatch"));
     }
     Ok(false)
 }
 
-fn composition_refused() -> McpAdapterComposeRefusal {
-    // Factory failures may reach a public error sink. Do not include private
-    // presenter, account, storage or ceremony details in this error.
-    McpAdapterComposeRefusal::new("The selected setup review could not be composed")
+fn connect_composition_refused(
+    stage: &'static str,
+    error: &ConnectError,
+) -> McpAdapterComposeRefusal {
+    // Use only the existing typed category, never Display/Debug, operation
+    // labels, nested sources or application-provided strings. These diagnostic
+    // labels make no claim about retry permission or effect settlement.
+    let cause = match error {
+        ConnectError::ReviewCancelled => "review_cancelled",
+        ConnectError::ProviderSetup { .. } => "provider_setup",
+        ConnectError::Native { .. } => "native",
+        ConnectError::InvalidInput(_) => "invalid_input",
+        ConnectError::MissingCompletion { .. } => "missing_completion",
+        ConnectError::MissingRegistration => "missing_registration",
+        ConnectError::MissingAttachment => "missing_attachment",
+        ConnectError::Cleanup { .. } => "cleanup",
+    };
+    composition_refused(stage, cause)
+}
+
+fn composition_refused(stage: &'static str, cause: &'static str) -> McpAdapterComposeRefusal {
+    // Factory failures may reach a public error sink. Both labels are fixed
+    // at this composition boundary; private owner details stay withheld.
+    McpAdapterComposeRefusal::new(format!(
+        "The selected setup review could not be composed (stage: {stage}; cause: {cause})"
+    ))
 }
 
 #[cfg(test)]

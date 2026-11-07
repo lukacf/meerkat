@@ -9,13 +9,18 @@ use meerkat_core::{
     RealmId,
 };
 use meerkat_toolkit::host_lifetime::{
-    NativeHostLifetime, control::HostLifetimeError, policy::CompiledArtifactReference,
+    NativeHostLifetime,
+    control::HostLifetimeError,
+    policy::{CompiledArtifactReference, CompiledMemberClass},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeSet,
     sync::{Arc, OnceLock},
+};
+use toolkit_mobkit::installed_host::dynamic_members::{
+    MemberClassAdmission, MemberClassAdmissionPhase,
 };
 use toolkit_mobkit::private_originals::{
     ApplicationServicePolicy, ApplicationServicePolicyDecision, ApplicationServicePolicyRequest,
@@ -61,7 +66,7 @@ pub enum AccessSelection {
 /// adoption. It has no early lifetime or grant and cannot authorize live work
 /// before bind. Recovery rechecks explicit standing scope or the canonical
 /// owner's exact retained broader human decision.
-pub(crate) struct SelectedPolicyBinding {
+pub struct SelectedPolicyBinding {
     facts: Arc<PolicyFacts>,
     bound: OnceLock<BoundPolicies>,
 }
@@ -77,6 +82,7 @@ struct PolicyScope {
     deployment: Id,
     realm: RealmId,
     members: BTreeSet<String>,
+    classes: Vec<CompiledMemberClass>,
     installed: OnceLock<InstalledFacts>,
 }
 struct InstalledFacts {
@@ -87,12 +93,43 @@ struct PolicyFacts {
     scope: Arc<PolicyScope>,
 }
 impl SelectedPolicyBinding {
+    /// Retain an explicit trusted application choice from the actual pending
+    /// owner. This participant stays unavailable until bind authenticates the
+    /// same deployment, realm, administrator, members and final setup artifact.
+    pub fn from_preparation(
+        owner: &toolkit_mobkit::installed_host::preparation::PreparedInstallationOwner,
+        selection: StandingPolicySelection,
+    ) -> Arc<Self> {
+        let selected = owner.selected();
+        let native = &selected.native_host;
+        Self::new(
+            selection,
+            native.grant_administrator.clone(),
+            selected.deployment.clone(),
+            native.realm.clone(),
+            native
+                .members
+                .iter()
+                .map(|row| row.member.member.clone())
+                .collect(),
+        )
+    }
     pub(crate) fn new(
         selection: StandingPolicySelection,
         owner: PrincipalRef,
         deployment: Id,
         realm: RealmId,
         members: BTreeSet<String>,
+    ) -> Arc<Self> {
+        Self::new_with_member_classes(selection, owner, deployment, realm, members, Vec::new())
+    }
+    pub(crate) fn new_with_member_classes(
+        selection: StandingPolicySelection,
+        owner: PrincipalRef,
+        deployment: Id,
+        realm: RealmId,
+        members: BTreeSet<String>,
+        classes: Vec<CompiledMemberClass>,
     ) -> Arc<Self> {
         Arc::new(Self {
             facts: Arc::new(PolicyFacts {
@@ -102,6 +139,7 @@ impl SelectedPolicyBinding {
                     deployment,
                     realm,
                     members,
+                    classes,
                     installed: OnceLock::new(),
                 }),
             }),
@@ -110,11 +148,27 @@ impl SelectedPolicyBinding {
     }
     /// Default checked setup retains only recovery of a real broader human
     /// decision. This is not a standing selection or an installed grant owner.
+    #[cfg(test)]
     pub(crate) fn human_review_participant(
         owner: PrincipalRef,
         deployment: Id,
         realm: RealmId,
         members: BTreeSet<String>,
+    ) -> Arc<dyn ApplicationServicePolicy> {
+        Self::human_review_participant_with_member_classes(
+            owner,
+            deployment,
+            realm,
+            members,
+            Vec::new(),
+        )
+    }
+    pub(crate) fn human_review_participant_with_member_classes(
+        owner: PrincipalRef,
+        deployment: Id,
+        realm: RealmId,
+        members: BTreeSet<String>,
+        classes: Vec<CompiledMemberClass>,
     ) -> Arc<dyn ApplicationServicePolicy> {
         Arc::new(PolicyFacts {
             scope: Arc::new(PolicyScope {
@@ -123,11 +177,12 @@ impl SelectedPolicyBinding {
                 deployment,
                 realm,
                 members,
+                classes,
                 installed: OnceLock::new(),
             }),
         })
     }
-    pub(crate) fn participant(&self) -> Arc<dyn ApplicationServicePolicy> {
+    pub fn participant(&self) -> Arc<dyn ApplicationServicePolicy> {
         self.facts.clone()
     }
     pub(crate) fn owner(&self) -> &PrincipalRef {
@@ -142,7 +197,7 @@ impl SelectedPolicyBinding {
     ) -> Result<(), HostLifetimeError> {
         self.bind_with_service_parent(lifetime, selection, reference, None)
     }
-    pub(crate) fn bind_with_service_parent(
+    pub fn bind_with_service_parent(
         &self,
         lifetime: Arc<NativeHostLifetime>,
         selection: StandingPolicySelection,
@@ -172,6 +227,7 @@ impl SelectedPolicyBinding {
             || native.grant_administrator != scope.owner
             || native.realm != scope.realm
             || members != scope.members
+            || native.member_classes != scope.classes
             || native.setup.as_ref() != Some(reference)
             || self.bound.get().is_some()
         {
@@ -280,6 +336,8 @@ impl PolicyScope {
         &self,
         proposal: &ServiceToolPolicyProposal,
         canonical: &[u8],
+        admissions: &[MemberClassAdmission],
+        historical: bool,
     ) -> Result<(), HostLifetimeError> {
         if proposal.lifetime != MemberPolicyLifetime::UntilSuperseded
             || !self.members.contains(&proposal.member)
@@ -293,14 +351,63 @@ impl PolicyScope {
             || compiled.policy_id != proposal.policy_id
             || compiled.revision != proposal.candidate.revision
             || PolicyDigest::from_canonical_bytes(canonical) != proposal.candidate.digest
-            || compiled
-                .members
-                .iter()
-                .map(|row| row.member_identity.clone())
-                .collect::<BTreeSet<_>>()
-                != self.members
         {
             return Err(HostLifetimeError::WrongOwner);
+        }
+        let members = compiled
+            .members
+            .iter()
+            .map(|row| row.member_identity.clone())
+            .collect::<BTreeSet<_>>();
+        if !self.members.is_subset(&members) {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        if !historical
+            && admissions.iter().any(|admission| {
+                matches!(
+                    &admission.phase,
+                    MemberClassAdmissionPhase::Prepared { .. }
+                        | MemberClassAdmissionPhase::Active { .. }
+                ) && !members.contains(&admission.instance.member.member.member)
+            })
+        {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        let mut matched = BTreeSet::new();
+        for row in compiled
+            .members
+            .iter()
+            .filter(|row| !self.members.contains(&row.member_identity))
+        {
+            let mut candidates = admissions
+                .iter()
+                .filter(|admission| admission.instance.member.member.member == row.member_identity);
+            let admission = candidates.next().ok_or(HostLifetimeError::WrongOwner)?;
+            if candidates.next().is_some()
+                || !matched.insert(admission.id.clone())
+                || !self.classes.contains(&admission.class)
+                || admission.instance.member.setup_capability.is_some()
+                || admission
+                    .class
+                    .materialize(&self.realm, &admission.instance)?
+                    != *row
+            {
+                return Err(HostLifetimeError::WrongOwner);
+            }
+            // This is preservation evidence from the canonical owner, never
+            // permission to add or operate an instance. Fresh proposals only
+            // contain prepared/active rows. Recovery checks exact saved bytes,
+            // so retirement or a new reservation can leave that exact row in
+            // the old decision while the current provider omits it. The
+            // canonical owner validates that narrowing and any pending
+            // reinstatement; this reservation does not authorize member use.
+            match &admission.phase {
+                MemberClassAdmissionPhase::Prepared { .. }
+                | MemberClassAdmissionPhase::Active { .. } => {}
+                MemberClassAdmissionPhase::Reserved | MemberClassAdmissionPhase::Retired
+                    if historical => {}
+                _ => return Err(HostLifetimeError::Denied),
+            }
         }
         Ok(())
     }
@@ -343,6 +450,50 @@ impl ApplicationInstallationPolicy for PolicyFacts {
     }
 }
 impl ApplicationServicePolicy for PolicyFacts {
+    fn reserve_member_policy(
+        &self,
+        request: &toolkit_mobkit::installed_host::dynamic_members::ApplicationMemberPolicyRequest<
+            '_,
+        >,
+    ) -> Result<ApplicationToolPolicyRecoveryDecision, HostLifetimeError> {
+        use toolkit_mobkit::installed_host::dynamic_members::MemberClassAdmissionPhase;
+        let admission = request.admission;
+        // The authenticated package selected these finite class declarations.
+        // Installation/access review preferences confer no class authority.
+        if request.owner != &self.scope.owner
+            || request.realm != &self.scope.realm
+            || request.deployment != self.scope.deployment.as_str()
+            || !self.scope.classes.contains(&admission.class)
+            || self
+                .scope
+                .members
+                .contains(&admission.instance.member.member.member)
+            || admission.instance.member.setup_capability.is_some()
+        {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        let expected = admission
+            .class
+            .materialize(request.realm, &admission.instance)?;
+        let canonical =
+            CompiledApplicationToolPolicy::parse_canonical_json(request.canonical_policy)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?;
+        let actual = canonical
+            .members
+            .iter()
+            .find(|row| row.member_identity == expected.member_identity);
+        match &admission.phase {
+            MemberClassAdmissionPhase::Reserved | MemberClassAdmissionPhase::Retired
+                if actual.is_none() => {}
+            MemberClassAdmissionPhase::Prepared { .. }
+            | MemberClassAdmissionPhase::Active { .. }
+                if actual == Some(&expected) => {}
+            _ => return Err(HostLifetimeError::Denied),
+        }
+        Ok(ApplicationToolPolicyRecoveryDecision::Permit(Box::new(
+            self.scope.reserve("member_class"),
+        )))
+    }
     fn reserve(
         &self,
         request: &ApplicationServicePolicyRequest<'_>,
@@ -362,8 +513,12 @@ impl ApplicationServicePolicy for PolicyFacts {
             if selection.tool_policy.is_none() {
                 return Ok(ApplicationServicePolicyDecision::RequiresHuman);
             }
-            self.scope
-                .proposal(proposal, proposal.candidate_canonical_json.as_bytes())?;
+            self.scope.proposal(
+                proposal,
+                proposal.candidate_canonical_json.as_bytes(),
+                request.member_admissions,
+                false,
+            )?;
             return Ok(ApplicationServicePolicyDecision::PermitWithToolPolicy {
                 reservation: Box::new(self.scope.reserve("service_and_member_tool_policy")),
                 approval: Box::new(ServiceToolPolicyApproval::until_superseded(proposal)?),
@@ -392,8 +547,12 @@ impl ApplicationServicePolicy for PolicyFacts {
         if !standing && !exact_human_policy_decision(decision)? {
             return Ok(ApplicationToolPolicyRecoveryDecision::RequiresHuman);
         }
-        self.scope
-            .proposal(&decision.proposal, request.canonical_json)?;
+        self.scope.proposal(
+            &decision.proposal,
+            request.canonical_json,
+            request.member_admissions,
+            true,
+        )?;
         Ok(ApplicationToolPolicyRecoveryDecision::Permit(Box::new(
             self.scope.reserve("member_tool_policy_recovery"),
         )))
@@ -457,3 +616,6 @@ impl ApplicationServicePolicyReservation for SelectedReservation {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod member_class_tests;

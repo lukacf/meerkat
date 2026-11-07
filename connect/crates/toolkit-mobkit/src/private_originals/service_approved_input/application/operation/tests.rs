@@ -326,7 +326,7 @@ async fn exercise(case: Case, connector: bool) {
         let task = actual_task(&fixture).await;
         let fresh = task.fresh.clone();
         let source_a = task.parent.clone();
-        let route = fixture.source.route(&source_a.route).unwrap();
+        let route = &fixture.source.route(&source_a.route).unwrap();
         assert!(route.application_parent.is_none(), "fresh real destination has no configured service parent");
         assert!(task.console_login.is_none(), "stock fixture source does not authenticate a Console Human");
         let mut config = reviewed_config(&fixture.scope.realm);

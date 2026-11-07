@@ -64,6 +64,48 @@ pub(crate) fn is_parent_record(stored: &StoredRecord) -> bool {
 }
 
 impl OperatorSetup {
+    /// Decode one historical approval for compensation through its existing
+    /// native/store owner. This returns no setup/issuance capability and needs
+    /// no new Open entry: the accepted operation may settle during host close.
+    pub(crate) fn retained_service_approval_for_cleanup(
+        lifetime: Arc<NativeHostLifetime>,
+        originals: Arc<dyn ToolkitStore>,
+        source: Arc<ToolkitOriginalOwner>,
+        stored: &StoredRecord,
+    ) -> Result<Option<RetainedServiceApproval>, HostLifetimeError> {
+        let selected = lifetime.selected_policy();
+        let native = selected
+            .native_host
+            .clone()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        if stored.key.realm != native.realm.to_string()
+            || stored.key.owner != selected.deployment.to_string()
+            || source.ingress_domain() != &native.ingress_domain
+        {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        let operator = match &native.remote_operator {
+            Some(operator) => operator.clone(),
+            None => {
+                StockPrincipals::for_local_operator(&native.realm)
+                    .map_err(|_| HostLifetimeError::Unavailable)?
+                    .operator
+            }
+        };
+        // Keep the existing exact decoder, decision key and compensation
+        // carrier. This temporary view never escapes this read-only method.
+        Self {
+            lifetime,
+            native,
+            operator,
+            originals,
+            source,
+            helper_selection: None,
+            additional_helpers: vec![],
+        }
+        .retained_service_approval(stored)
+    }
+
     pub(crate) fn recovery_operator(&self) -> &PrincipalRef {
         &self.operator
     }

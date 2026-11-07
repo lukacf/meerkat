@@ -79,6 +79,22 @@ impl PrivateOriginals {
         selected: &ApprovedServiceSelection,
     ) -> Result<(StoredRecord, SourceRecord), PrivateOriginalError> {
         self.service_input_host_current()?;
+        let (stored, record) = self
+            .retained_selected_service_source(snapshot, selected)
+            .await?;
+        self.service_console_login(&record)?;
+        self.service_input_host_current()?;
+        Ok((stored, record))
+    }
+
+    /// Historical source correlation only. Rejection still requires this
+    /// owner's exact durable native cancellation below; closing cannot turn
+    /// that non-entry proof into a fresh source/admission capability.
+    async fn retained_selected_service_source(
+        &self,
+        snapshot: &SetupSnapshot,
+        selected: &ApprovedServiceSelection,
+    ) -> Result<(StoredRecord, SourceRecord), PrivateOriginalError> {
         if selected.source.realm != self.scope.realm || selected.source.owner != self.scope.owner {
             return Err(PrivateOriginalError::Denied);
         }
@@ -99,9 +115,67 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Conflict);
         }
-        self.service_console_login(&record)?;
-        self.service_input_host_current()?;
         Ok((stored, record))
+    }
+
+    /// Admission completed setup, but only the selected native input's
+    /// finalization releases its cohort membership. No current service grant
+    /// or Console login is reconstructed to observe this historical result.
+    pub(in crate::private_originals) async fn approved_service_continuation_finalized(
+        &self,
+        snapshot: &SetupSnapshot,
+        obligation: &ContinuationObligation,
+    ) -> Result<bool, PrivateOriginalError> {
+        let SetupTerminalOutcome::ApprovedServiceAdmitted {
+            admission: committed,
+            ..
+        } = obligation.outcome()
+        else {
+            return Err(PrivateOriginalError::Conflict);
+        };
+        let selected = obligation
+            .approved_service()
+            .ok_or(PrivateOriginalError::Conflict)?;
+        if snapshot.approved_service() != Some(selected) {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        let (_, record) = self
+            .retained_selected_service_source(snapshot, selected)
+            .await?;
+        let Some(admission) = &record.service_admission else {
+            return Ok(false);
+        };
+        let task = record
+            .approved_task
+            .as_ref()
+            .ok_or(PrivateOriginalError::Conflict)?;
+        let association = record
+            .final_association
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let admission_digest = ContentDigest::of_bytes(
+            &canonical_json(&(selected, association, admission))
+                .map_err(|_| PrivateOriginalError::Conflict)?,
+        );
+        if association.candidate().original_work != selected.original_work
+            || committed.source_admission.owner.as_str() != selected.source.owner
+            || committed.source_admission.id.as_str() != selected.source.id
+            || committed.source_admission.revision.as_str() != admission_digest.as_str()
+            || committed.source_admission.content_digest != admission_digest
+            || committed.runtime.as_str() != task.original_task.retained_work.runtime_id()
+            || committed.session.as_str() != admission.session_id
+            || committed.input.as_str() != admission.input_id
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        let reference = PrivateOriginalRef {
+            route: record.event.route.clone(),
+            original: record.event.original.clone(),
+            event_sha256: digest(
+                &canonical_json(&record.event).map_err(|_| PrivateOriginalError::Conflict)?,
+            ),
+        };
+        self.service_input_finalized(&reference, record).await
     }
 
     pub(super) async fn reserve_service_continuation(
@@ -170,8 +244,12 @@ impl PrivateOriginals {
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<(), PrivateOriginalError> {
-        self.reject_service_continuation_with_failure(reference, None, None, None)
-            .await
+        // The rejection holds three decoded source records across its awaits;
+        // its callers keep only a pointer to it.
+        box_in_own_frame(|| {
+            self.reject_service_continuation_with_failure(reference, None, None, None)
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -215,15 +293,17 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Denied)?;
         task.attachment_member(grant)?;
         let batch_member = matches!(task, ApprovedTaskLink::Batch(_)).then_some(grant);
-        self.reject_service_continuation_with_failure(
-            reference,
-            Some(failure),
-            observation,
-            batch_member,
-        )
+        box_in_own_frame(|| {
+            self.reject_service_continuation_with_failure(
+                reference,
+                Some(failure),
+                observation,
+                batch_member,
+            )
+        })
         .await?;
         self.retire_service_attachment(reference, task).await;
-        self.compensate_rejected_batch(reference).await
+        box_in_own_frame(|| self.compensate_rejected_batch(reference)).await
     }
 
     async fn reject_service_continuation_with_failure(
@@ -468,7 +548,7 @@ impl ApprovedServiceSourceOwner for ServiceSource<'_> {
     ) -> Result<Option<ContextReference>, SetupError> {
         let (stored, record) = self
             .source
-            .selected_service_source(snapshot, selected)
+            .retained_selected_service_source(snapshot, selected)
             .await
             .map_err(|_| SetupError::Denied)?;
         if !record.operation_cancelled

@@ -366,6 +366,54 @@ compiling. A Meta probe that must keep the earlier rule checks
   application that Forge 0.3.0 prepared with its Connect gateway is prepared
   again at its next install step.
 
+### Connect 0.9.10
+
+Connect 0.9.10 is the first Connect release from this repository: GitHub
+release `connect-v0.9.10` in `lukacf/meerkat`, a prerelease that is never the
+repository's latest. Earlier releases (0.9.0 and 0.9.4, and the Linux
+component prereleases 0.9.5 and 0.9.6) stay in `lukacf/meerkat-connect`.
+Connect's version moves to 0.9.10 to match Core and Meta; there are no
+Connect 0.9.7 to 0.9.9 releases.
+
+- **Paired-host names.** Connect's paired-host contract no longer names one
+  host product. Options, tools, fields and stored names say `paired-host` or
+  `paired_host` (for example `--paired-host`, `--paired-host-memory-only`,
+  the `paired_host_*` tools, the cookies `paired_host_pair` and
+  `paired_host_device`, the digest prefix `paired-host-change-v1:sha256:`,
+  the keyring service id `ai.rkat.meerkat-connect.paired-host-device.v1` and
+  the Python extra `paired-host-live`). **Do:** pair each device again,
+  prepare again any change prepared before the upgrade, install the
+  `paired-host-live` extra, and update host and agent configuration that
+  names the earlier options, tools or fields.
+- **Build from the repository root.** Connect's six crates are members of
+  the root Cargo workspace (Rust 1.97.0) and take Core and Meta at the
+  workspace's exact pins (`=0.9.10`). Build with, for example,
+  `./scripts/repo-cargo build -p meerkat-connect`.
+- **SDK packages.** The Python SDK `meerkat-toolkit` 0.9.10 (its
+  `native-host` extra requires `meerkat-meta==0.9.10`) and the TypeScript
+  package `@rkat/toolkit` 0.9.10 (development and optional peer dependencies
+  `@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10) are release assets, not
+  PyPI or npm packages.
+- **Bundled discovery catalog** revision `discovery-2026-10-28.1`: the
+  Telegram recipe is a generic bot frontend built on the Python SDK's public
+  frontend modules.
+- **Setup check fix.** When a setup check answered again for a validation it
+  had already accepted, with something that is not a valid proposal (for
+  example a file list that names both a declaration and an activation
+  document), the check was refused but the selection made from the earlier
+  proposal stayed in force. Such an answer now withdraws the earlier
+  proposal, so a selection made from it no longer applies.
+- **Private approval files.** The files Connect keeps through Core's file
+  approval store (its approval store and `native-decisions.json`) are
+  created owner-only (`0600`) whatever the umask (see
+  [Changes to check](#changes-to-check)).
+- **Going back.** A Connect built on Core 0.9.8 or older (Connect 0.9.0 to
+  0.9.6) can refuse sessions written at session envelope 5 and mob journals
+  at mob event schema 10, which Connect 0.9.10 can write. Before such a
+  rollback, run `rkat storage doctor` and handle what it lists under
+  `operator-instruction-envelope` and `operator-instruction-mob-events` as
+  [Downgrading to 0.9.8](#downgrading-to-0-9-8) describes.
+
 ### Downgrading to 0.9.9
 
 0.9.9 reads what 0.9.10 writes, with these exceptions:

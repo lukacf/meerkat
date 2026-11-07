@@ -134,3 +134,84 @@ async fn gateway_close_retains_failed_finish_after_core_forgets_record() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn empty_restore_receipt_requires_native_close_and_join_and_replays_cleanup() {
+    exercise("normal", |case, state| {
+        Box::pin(async move {
+            let artifacts = case.protocol._directory.path().join("artifacts");
+            empty_close_observation(&artifacts, "initial-empty");
+            let closed = artifacts.join("local-round-closed.json");
+            let session = case.fixture.register().await;
+            let route = case.route(&session);
+            case.add(route, ExternalToolDeltaPhase::Applied).await;
+            assert!(
+                state
+                    .join(
+                        &case.attempts,
+                        &case.guards,
+                        tokio::time::Instant::now() + Duration::from_millis(20)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !closed.exists(),
+                "active transport cannot publish a close receipt"
+            );
+            let report = case.close(route).await;
+            case.assert_settled(report);
+            state
+                .join(
+                    &case.attempts,
+                    &case.guards,
+                    tokio::time::Instant::now() + BOUND,
+                )
+                .await
+                .expect("exact Installed transport and factory joined");
+            let raw = exact_file(&closed).unwrap();
+            let receipt: Value = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(receipt["session"], session.to_string());
+            assert_eq!(
+                receipt["helper"],
+                serde_json::to_value(case.fixture.member()).unwrap()
+            );
+            state
+                .join(
+                    &case.attempts,
+                    &case.guards,
+                    tokio::time::Instant::now() + BOUND,
+                )
+                .await
+                .expect("repeated successful host cleanup is a no-op");
+            assert_eq!(exact_file(&closed).unwrap(), raw);
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn abnormal_native_close_cannot_publish_even_with_empty_observation() {
+    exercise("abnormal_exit", |case, state| {
+        Box::pin(async move {
+            let artifacts = case.protocol._directory.path().join("artifacts");
+            empty_close_observation(&artifacts, "initial-empty");
+            let session = case.fixture.register().await;
+            let route = case.route(&session);
+            case.add(route, ExternalToolDeltaPhase::Applied).await;
+            case.close(route).await;
+            assert!(
+                state
+                    .join(
+                        &case.attempts,
+                        &case.guards,
+                        tokio::time::Instant::now() + BOUND
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(!artifacts.join("local-round-closed.json").exists());
+        })
+    })
+    .await;
+}

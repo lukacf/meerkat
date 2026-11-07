@@ -1,25 +1,35 @@
 # Meerkat Toolkit TypeScript operations
 
-## Install 0.9.0
+## Install the tagged 0.9.0 release
 
 ```sh
 npm install https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/rkat-toolkit-0.9.0.tgz
 ```
 
 This is the Connect release asset, not a Toolkit npm registry selection.
-For source development, follow the local packaging commands below.
+Current source package metadata declares `0.9.10`; the tagged asset does not
+select the current development code. For source development, follow the local
+packaging commands below. The source manifest and lock select published
+`@rkat/sdk` 0.9.10 and `@rkat/meta-sdk` 0.9.10. Native-host composition also needs
+the matching gateway; see [SDK selection](../../BUILDING.md#sdks) for the
+distinction between package checks and installed qualification.
 
 This optional ESM package exposes Home Assistant, [Gmail REST operations](GMAIL.md),
 [Slack history/thread reads](SLACK.md) and [Google Calendar Events operations](GOOGLE-CALENDAR.md). It runs
 without Meerkat, MobKit, a tool registry, or a model. The host supplies an already
 selected, authenticated Fetch function and an exact instance URL. The library
 borrows that function and never closes it, obtains credentials, infers a person,
-or decides permission. Node 22 or later is the supported execution profile.
+or decides permission. Node 22.12.0 or later is the supported execution profile.
 
 The separate [`@rkat/toolkit/ui` browser entrypoint](UI.md) provides reusable
 connection, setup-progress, frontend and package management components. It consumes
 authenticated host projections and owner-bound controls; it does not import the
 Node connectors or implement authentication and lifecycle owners.
+
+The development [`@rkat/toolkit/provider-setup` host entry](PROVIDER-SETUP.md)
+presents native model-target and credential setup through a dedicated Connect
+child. Its source-only examples are separate from the browser UI, ordinary
+`--stdio` guide protocol and published release.
 
 ```ts
 import { HomeAssistantOperations } from "@rkat/toolkit/connectors/home-assistant";

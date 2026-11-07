@@ -11,7 +11,7 @@ An application keeps the setup request, runtime continuation and external operat
 | Record or observation | Owns |
 | --- | --- |
 | Acquisition | One original request, its required roles and per-request outcome |
-| Shared preparation (0.9.5) | Exact reusable auth/install preparation after concrete selection |
+| Shared preparation | Exact reusable auth/install preparation after concrete selection |
 | Role intent and grant | Desired service access or frontend exposure and permitted scope |
 | Runtime acknowledgment | Actual selected binding at a current revision/incarnation |
 | Original task continuation | Where the admitted task resumes |
@@ -43,11 +43,6 @@ An awaiting caller can disappear after a successful commit. Recover using the sa
 
 ## Coalescing without merging authority
 
-<Note>
-Shared multi-caller setup is deferred to 0.9.5. The following describes that
-planned contract; ordinary 0.9.4 setup retains separate caller authority.
-</Note>
-
 Exact replay and host-authorized workflow grouping can avoid duplicate setup teams. Every distinct logical request still receives agent interpretation. After concrete package/subject/strategy selection, compatible requests can share one preparation.
 
 Shared preparation does not merge requester, grant, role, target, audience, deadline or result destination. Cancelling one waiter releases its interest and prevents its uncommitted role activation while preserving callbacks needed by surviving waiters. The preparation owner's policy decides what happens when no waiters remain.
@@ -58,12 +53,17 @@ Shared preparation does not merge requester, grant, role, target, audience, dead
 | --- | --- |
 | Browser or UI closes | Observe the durable operation; UI lifetime does not cancel it |
 | Auth callback arrives late | Revalidate the owning attempt and current cancellation/expiry state |
-| Runtime member is restored | Resolve the current session from durable identity and reconcile bindings |
+| Runtime member is restored | Resolve its canonical durable identity and exact session; explicitly materialize a dormant member before live custody checks, then reconcile bindings |
 | Deployment wait expires | Report waiter expiry separately from rollout outcome |
 | Send may have completed | Preserve unknown effect; reconcile before any permitted repeat |
 | Provider accepted one multipart part | Retain each part's receipt and uncertainty independently |
 
 A credential challenge must itself be durably owned or explicitly invalidated after restart. Persisting setup state alone does not preserve a process-local browser transaction. Person-bound ceremonies may prohibit replacement until domain reconciliation.
+
+Restored identity observations are read-only and do not start an executor.
+Materialization, source admission and recovery completion remain separate
+steps. See the [host reconstruction contract](/guides/host-composition) for the
+development setup-continuation path and its remaining qualification limits.
 
 ## Output delivery
 

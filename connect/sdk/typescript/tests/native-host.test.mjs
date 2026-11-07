@@ -8,6 +8,7 @@ import { join } from "node:path";
 // Required selected peer, deliberately not an optional import or skipped suite.
 import { Meta, PersistentTransport, GatewayStartupCleanupError, InitOutcomeUnknownError, StorageResolutionError } from "@rkat/meta-sdk";
 import { ToolkitHost, ToolkitApplicationUpdate, ToolkitApplicationPreparation } from "../dist/native-host.js";
+import { MemberMcpApplication } from "../dist/member-classes.js";
 import { HostControlError, HostObservationTimeout, HostRefusedError, HostTransportError, PrivateHostClient } from "../dist/private-host.js";
 
 const pin = { path: "/private/original.json", sha256: "1".repeat(64) };
@@ -605,3 +606,81 @@ test("bad startup pins and unsupported builder combinations refuse before any pr
   await assert.rejects(new ToolkitApplicationUpdate(f.startup).configure(f.builder()).mob("not-read.toml").build(), /mutually exclusive/);
   assert.equal(f.rows().length, 0);
 });
+
+
+test("failed native startup joins entered MCP write and preserves primary plus cleanup errors", async t => {
+  const f = fixture(t, "member-mcp-start-failed");
+  const entered = deferred(), release = deferred();
+  const marker = Object.create(null); let writes = 0;
+  const app = new MemberMcpApplication({
+    async retain() { writes++; entered.resolve(); await release.promise; throw marker; },
+    async lookup() { throw new Error("unused"); },
+  });
+  const host = new ToolkitHost(original, { memberMcp: app });
+  const builder = f.builder().rosterProvider({ async roster() {
+    await entered.promise; throw new Error("fixture roster refused");
+  } });
+  let done = false;
+  const build = host.configure(builder).build().finally(() => { done = true; });
+  void build.catch(() => {});
+  await entered.promise;
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(done, false, "failed startup still owns the entered durable write");
+  release.resolve();
+  let failure;
+  await assert.rejects(build, error => {
+    failure = error;
+    assert.ok(error instanceof GatewayStartupCleanupError);
+    assert.ok(error.startupError instanceof HostRefusedError);
+    assert.equal(error.startupError.refusal, "unavailable");
+    assert.ok(error.cleanupError instanceof AggregateError);
+    return true;
+  });
+  const contains = value => value === marker || (value instanceof AggregateError && value.errors.some(contains));
+  assert.ok(contains(failure.cleanupError));
+  await assert.rejects(app.join(), contains);
+  await assert.rejects(failure.cleanup.shutdown(), contains);
+  assert.equal(writes, 1);
+  assert.equal(privateRequests(f).length, 1, "cleanup cannot invent an ACK or replay startup");
+});
+
+for (const enabled of [false, true]) test(`fresh preparation private workflow opt-in ${enabled} uses same native transport`, async t => {
+  const f = fixture(t, "prepare-ready");
+  const host = new ToolkitApplicationPreparation({ plan: f.startup.selection }, async () => original,
+    enabled ? { privateWorkflowLaunch: true } : {});
+  f.remember(await host.build(f.builder()));
+  const starts = f.rows().filter(row => row.kind === "start");
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].args.filter(value => value === "--private-workflow-launch").length, Number(enabled));
+  assert.deepEqual(privateRequests(f).map(row => row.request.command.kind), ["prepare_application", "bootstrap"]);
+});
+
+test("workflow launch refuses nonboolean selection before file or child access", () => {
+  assert.throws(() => new ToolkitApplicationPreparation({ plan: pin }, async () => original,
+    { privateWorkflowLaunch: "true" }), /explicit boolean/);
+});
+
+for (const kind of ["restore", "prepare", "update"]) for (const base of [undefined, "https://host.example/app/mcp", "native-validates-url"]) {
+  test(`hosted redirect ${kind} startup ${base === undefined ? "omitted" : base} stays in actual child argv`, async t => {
+    const f = fixture(t, kind === "prepare" ? "prepare-ready" : "ready");
+    const options = base === undefined ? {} : { hostedMcpRedirectBase: base };
+    const host = kind === "prepare" ? new ToolkitApplicationPreparation({ plan: f.startup.selection }, async () => original, options)
+      : kind === "update" ? new ToolkitApplicationUpdate(f.startup, options) : new ToolkitHost(original, options);
+    f.remember(kind === "prepare" ? await host.build(f.builder()) : await host.configure(f.builder()).build());
+    const starts = f.rows().filter(row => row.kind === "start"); assert.equal(starts.length, 1);
+    const args = starts[0].args; assert.equal(args.filter(value => value === "--hosted-mcp-redirect-base").length, Number(base !== undefined));
+    if (base !== undefined) {
+      assert.equal(args[args.indexOf("--hosted-mcp-redirect-base") + 1], base);
+      assert.equal(JSON.stringify(privateRequests(f)).includes(base), false);
+      assert.equal(JSON.stringify(nativeRequests(f, "meta/init")).includes(base), false);
+    }
+  });
+}
+for (const base of ["", "   ", null, true, 7, [], "https://host/\nnext", "https://host/\0", "https://host/\x7f", "https://host/\u0085"]) {
+  test(`hosted redirect invalid shape ${JSON.stringify(base)} refuses before files/process`, () => {
+    const options = { hostedMcpRedirectBase: base };
+    assert.throws(() => new ToolkitHost(original, options), /hosted MCP redirect base/);
+    assert.throws(() => new ToolkitApplicationPreparation({ plan: pin }, async () => original, options), /hosted MCP redirect base/);
+    assert.throws(() => new ToolkitApplicationUpdate({ selection: pin, prior_tool_policy: pin, association_directory: "/absent" }, options), /hosted MCP redirect base/);
+  });
+}

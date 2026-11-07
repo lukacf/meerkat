@@ -167,7 +167,7 @@ def service_receipt(case):
     if case == "without":
         del report["phase"]
         report["status"] = "terminal_without_receipt"
-    elif case in {"batch", "finalization_failure", "terminated"}:
+    elif case in {"batch", "finalization_failure", "terminated", "outcome_unknown"}:
         report = {"status": "finalized", "input_id": "input-b", "terminal": {"outcome_type": "consumed"},
                   "attempt_count": 2, "scope": {"kind": "run", "run_id": "run-b"}, "run_id": "run-b",
                   "owner_input_id": "input-a", "recipient_input_ids": ["input-a", "input-b"],
@@ -176,11 +176,15 @@ def service_receipt(case):
             report["outcome"] = {"completion_type": "completed_with_finalization_failure", "error": {"fixture_payload": "preserved"}}
         elif case == "terminated":
             report.update(scope={"kind": "runtime_termination"}, run_id=None, outcome={"completion_type": "cancelled"})
+        elif case == "outcome_unknown":
+            # R5 4g is a runless receipt; the prior run belongs only to the outcome.
+            report.update(scope={"kind": "runtime_termination"}, run_id=None,
+                          outcome={"completion_type": "outcome_unknown", "run_id": "run-b"})
     observed["receipt"] = {"source": "durable_store", "report": report}
     return observed
 
 
-@pytest.mark.parametrize("case", ["unresolved", "absent", "pending", "without", "batch", "finalization_failure", "terminated"])
+@pytest.mark.parametrize("case", ["unresolved", "absent", "pending", "without", "batch", "finalization_failure", "terminated", "outcome_unknown"])
 def test_service_receipt_read_preserves_native_states_witness_batch_and_outcome(case):
     client, reader, writer = pipes()
     original, _, _ = submission()
@@ -196,12 +200,13 @@ def test_service_receipt_read_preserves_native_states_witness_batch_and_outcome(
         finish(client, reader, writer)
 
 
+@pytest.mark.parametrize("receipt_case", ["batch", "outcome_unknown"])
 @pytest.mark.parametrize("case", ["original", "input", "owner", "scope", "witness", "status", "extra", "count"])
-def test_service_receipt_rejects_mismatched_or_invented_projection(case):
+def test_service_receipt_rejects_mismatched_or_invented_projection(case, receipt_case):
     client, reader, writer = pipes()
     original, _, _ = submission()
     returned = dataclasses.asdict(original)
-    observed = service_receipt("batch")
+    observed = service_receipt(receipt_case)
     report = observed["receipt"]["report"]
     if case == "original":
         returned["original"] = "another"
@@ -210,7 +215,10 @@ def test_service_receipt_rejects_mismatched_or_invented_projection(case):
     elif case == "owner":
         report["owner_input_id"] = "input-b"
     elif case == "scope":
-        report["scope"]["run_id"] = "another"
+        if receipt_case == "outcome_unknown":
+            report["run_id"] = "another"  # RuntimeTermination requires a null receipt run.
+        else:
+            report["scope"]["run_id"] = "another"
     elif case == "witness":
         observed["receipt"]["source"] = "model_text"
     elif case == "status":

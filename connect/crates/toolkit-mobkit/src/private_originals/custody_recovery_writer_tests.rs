@@ -159,7 +159,12 @@ async fn second_original(fixture: &Fixture) -> PrivateOriginalSubmit {
             |final_association| {
                 let source = fixture.source.clone();
                 let reference = reference.clone();
-                async move { source.persist_binding(&reference, &final_association).await }
+                async move {
+                    source
+                        .persist_binding(&reference, &final_association)
+                        .await
+                        .map(Into::into)
+                }
             },
         )
         .await

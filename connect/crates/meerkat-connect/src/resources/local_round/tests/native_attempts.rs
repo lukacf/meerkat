@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-const NATIVE: &str = r#"import json, os, pathlib, select, sys
+pub(super) const NATIVE: &str = r#"import json, os, pathlib, select, sys
 root = pathlib.Path(sys.argv[1]); pid = os.getpid()
 mode = (root/'native-mode').read_text()
 (root/(str(pid)+'.native-started')).write_text(json.dumps({'pid':pid}))
@@ -46,6 +46,8 @@ try:
 finally:
     (root/(str(pid)+'.native-ended')).write_text(json.dumps({'pid':pid}))
 if mode == 'abnormal_exit': sys.exit(2)
+if mode == 'term_close':
+    import time; time.sleep(30)
 "#;
 
 struct Probe {

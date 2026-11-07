@@ -3279,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-connect"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -3315,6 +3315,7 @@ dependencies = [
  "nix 0.31.3",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3326,6 +3327,7 @@ dependencies = [
  "toolkit-package",
  "toolkit-store",
  "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -4212,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-toolkit"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6826,7 +6828,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "toolkit-catalog"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "indexmap",
  "meerkat-machine-codegen",
@@ -6838,7 +6840,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-mobkit"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -6848,6 +6850,7 @@ dependencies = [
  "meerkat-authorization-contracts",
  "meerkat-core",
  "meerkat-llm-core",
+ "meerkat-mcp",
  "meerkat-meta",
  "meerkat-mob",
  "meerkat-mob-mcp",
@@ -6871,7 +6874,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-package"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "cap-std",
@@ -6894,7 +6897,7 @@ dependencies = [
 
 [[package]]
 name = "toolkit-store"
-version = "0.9.4"
+version = "0.9.10"
 dependencies = [
  "async-trait",
  "hex",

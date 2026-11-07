@@ -149,6 +149,7 @@ impl Case {
             handoff_sha256: digest(b"synthetic-handoff"),
             poisoned: false,
             process: None,
+            continuity: continuity::Continuity::default(),
             test_location: Some((executable, pin)),
         };
         Self {
@@ -521,3 +522,188 @@ async fn readiness_is_exact_and_refuses_oversized_unterminated_output_without_wa
 
 #[cfg(feature = "console")]
 mod native_attempts;
+#[cfg(feature = "console")]
+mod private_attempts;
+
+#[cfg(feature = "console")]
+fn empty_close_observation(artifacts: &Path, workspace: &str) -> PathBuf {
+    // Opaque Python-owner observation for Rust binding controls. Actual snapshot
+    // semantics and real helper tool calls are covered by the Python tests.
+    let root = artifacts.join("prepared/local-session");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let session = serde_json::to_vec(&json!({"workspace": workspace})).unwrap();
+    retain(&root.join("session.json"), &session).unwrap();
+    retain(
+        &root.join("empty-close.json"),
+        &serde_json::to_vec(&json!({
+            "schema_version": 1, "round": {"session_sha256": digest(&session), "checkpoints": []}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    root
+}
+
+#[cfg(feature = "console")]
+fn restored_copy(owner: &LocalRoundOwner) -> LocalRoundOwner {
+    let (executable, pin) = owner.test_location.as_ref().unwrap();
+    LocalRoundOwner {
+        resources: InstalledResources::from_executable(executable, pin).unwrap(),
+        artifacts: owner.artifacts.clone(),
+        request: owner.request.clone(),
+        handoff_sha256: owner.handoff_sha256.clone(),
+        poisoned: false,
+        process: None,
+        continuity: continuity::Continuity::default(),
+        test_location: owner.test_location.clone(),
+    }
+}
+
+#[cfg(feature = "console")]
+#[test]
+fn empty_close_receipt_is_exact_one_use_and_requires_orderly_evidence() {
+    let mut case = Case::new("ready");
+    let owner = case.owner.as_mut().unwrap();
+    let helper = meerkat_core::MobMemberBinding {
+        mob_id: "fixture".into(),
+        role: "setup".into(),
+        member: "helper".into(),
+    };
+    let session = meerkat_core::SessionId::new().to_string();
+    let closed = owner.artifacts.join("local-round-closed.json");
+    let claimed = owner.artifacts.join("local-round-claimed.json");
+    assert!(
+        owner.select_closed(&helper).is_err(),
+        "old bundles have no inferred receipt"
+    );
+    empty_close_observation(&owner.artifacts, "first");
+    owner.persist_empty_close().unwrap();
+    assert!(
+        !closed.exists(),
+        "Python observation alone is not joined native evidence"
+    );
+    owner.observed_graceful_close(helper.clone(), session.clone());
+    owner.persist_empty_close().unwrap();
+    let raw = exact_file(&closed).unwrap();
+    owner.persist_empty_close().unwrap();
+    assert_eq!(
+        exact_file(&closed).unwrap(),
+        raw,
+        "successful close is idempotent"
+    );
+
+    let mut restored = restored_copy(owner);
+    let mut changed = restored_copy(owner);
+    changed.handoff_sha256 = "0".repeat(64);
+    assert!(changed.select_closed(&helper).is_err());
+    changed = restored_copy(owner);
+    changed.request["extra"] = json!(true);
+    assert!(changed.select_closed(&helper).is_err());
+    changed = restored_copy(owner);
+    assert!(
+        changed
+            .select_closed(&meerkat_core::MobMemberBinding {
+                member: "other".into(),
+                ..helper.clone()
+            })
+            .is_err()
+    );
+    restored.select_closed(&helper).unwrap();
+    let mut competing = restored_copy(owner);
+    competing.select_closed(&helper).unwrap();
+    assert!(
+        restored
+            .before_attempt(&helper, "different-session")
+            .is_err()
+    );
+    assert_eq!(exact_file(&closed).unwrap(), raw);
+    assert!(
+        !claimed.exists(),
+        "mismatched native session cannot consume"
+    );
+    restored.before_attempt(&helper, &session).unwrap();
+    assert!(!closed.exists());
+    assert_eq!(exact_file(&claimed).unwrap(), raw);
+    assert!(restored.request.get("expected_round").is_some());
+    assert!(
+        competing.before_attempt(&helper, &session).is_err(),
+        "one atomic claimant"
+    );
+    assert!(
+        restored_copy(owner).select_closed(&helper).is_err(),
+        "consumed is not reopenable"
+    );
+    restored.persist_empty_close().unwrap();
+    assert!(
+        !closed.exists(),
+        "claim alone cannot republish its old observation"
+    );
+    restored.observed_graceful_close(helper.clone(), session);
+    fs::write(&claimed, b"different claimant").unwrap();
+    assert!(restored.persist_empty_close().is_err());
+    assert_eq!(exact_file(&claimed).unwrap(), b"different claimant");
+    assert!(!closed.exists(), "cannot overwrite another claimant");
+    fs::write(&claimed, &raw).unwrap();
+    let local = restored.artifacts.join("prepared/local-session");
+    fs::remove_file(local.join("session.json")).unwrap();
+    fs::remove_file(local.join("empty-close.json")).unwrap();
+    empty_close_observation(&restored.artifacts, "second");
+    restored.persist_empty_close().unwrap();
+    assert!(
+        !claimed.exists(),
+        "only this owner's exact claim is released"
+    );
+    assert_ne!(
+        exact_file(&closed).unwrap(),
+        raw,
+        "the new empty round has its own receipt"
+    );
+    restored_copy(&restored).select_closed(&helper).unwrap();
+}
+
+#[cfg(feature = "console")]
+#[tokio::test]
+async fn empty_close_claim_then_cancel_keeps_consumed_marker_and_joins_child() {
+    run_case("hold", |case| {
+        Box::pin(async move {
+            let owner = case.owner.as_mut().unwrap();
+            let helper = meerkat_core::MobMemberBinding {
+                mob_id: "fixture".into(),
+                role: "setup".into(),
+                member: "helper".into(),
+            };
+            let session = meerkat_core::SessionId::new().to_string();
+            let root = empty_close_observation(&owner.artifacts, "first");
+            owner.observed_graceful_close(helper.clone(), session.clone());
+            owner.persist_empty_close().unwrap();
+            let mut restored = restored_copy(owner);
+            restored.select_closed(&helper).unwrap();
+            // Retained session changes are refused before consumption.
+            fs::write(root.join("session.json"), b"changed").unwrap();
+            assert!(restored.before_attempt(&helper, &session).is_err());
+            let session_bytes = serde_json::to_vec(&json!({"workspace":"first"})).unwrap();
+            fs::write(root.join("session.json"), session_bytes).unwrap();
+            restored.before_attempt(&helper, &session).unwrap();
+            let closed = restored.artifacts.join("local-round-closed.json");
+            let claimed = restored.artifacts.join("local-round-claimed.json");
+            let consumed = exact_file(&claimed).unwrap();
+            case.owner = Some(restored);
+            case.start(false);
+            case.started().await;
+            case.cancel();
+            case.receive_begin().await;
+            assert!(case.last_error);
+            case.assert_reaped();
+            let owner = case.owner.as_mut().unwrap();
+            owner.persist_empty_close().unwrap();
+            assert!(!closed.exists());
+            assert_eq!(exact_file(&claimed).unwrap(), consumed);
+            assert!(owner.poisoned && !owner.has_pending_round());
+        })
+    })
+    .await;
+}
+
+#[cfg(all(feature = "console", target_os = "linux"))]
+pub(super) mod selected_input;

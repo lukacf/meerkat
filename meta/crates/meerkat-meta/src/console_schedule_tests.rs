@@ -2144,3 +2144,79 @@ async fn mutation_rechecks_caller_after_await() -> TestResult {
     fixture.stop().await;
     Ok(())
 }
+
+/// A fire on a console that requires sign-in records a thread whose replies
+/// are for the schedule's sender (its caller scope, its console principal
+/// and the requester the fire carried); the same schedule fired on an open
+/// console names no one to reply to privately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_thread_names_the_schedule_sender() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-fire-thread").await?;
+    let controller = enforced(vec![grant(
+        "erin-drives-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN).under(&controller)).await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let signed_in = doors(
+        &fixture,
+        console_decisions(true, false, &[ERIN]),
+        Some(controller.clone()),
+        fences.clone(),
+        ungoverned(),
+    );
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    let interaction = sent[0].interaction_id.clone().expect("an interaction");
+    let replies = crate::console_replies::ConsoleReplies::new(fixture.aggregator.clone(), None);
+    let reference = replies
+        .thread_reference(&interaction)
+        .await?
+        .expect("the fire records a thread");
+    assert_eq!(
+        reference.addressee,
+        Some(super::console_caller_scope(&Caller::human(ERIN).scope())),
+        "{reference:?}"
+    );
+    assert_eq!(reference.access_principal.as_deref(), Some(ERIN));
+    assert_eq!(
+        reference.requester,
+        crate::runtime::console_human_principal(ISSUER, &subject_of(ERIN)).ok(),
+        "{reference:?}"
+    );
+    assert_eq!(
+        reference.audience,
+        crate::console_aggregator::ConsoleThreadAudience::Shared
+    );
+
+    let open = doors(
+        &fixture,
+        open_decisions(false),
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+    let open_key = format!("schedule:{schedule_id}:occurrence:2");
+    fire(&fixture, &open, &schedule_id, &open_key).await?;
+    let sent = sends_under(&fixture, "alpha", &open_key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    let interaction = sent[0].interaction_id.clone().expect("an interaction");
+    let reference = replies
+        .thread_reference(&interaction)
+        .await?
+        .expect("the fire records a thread");
+    assert_eq!(
+        (reference.addressee.clone(), reference.requester.clone()),
+        (None, None),
+        "{reference:?}"
+    );
+    assert_eq!(replies.can_deliver(&interaction).await, Ok(false));
+    fixture.stop().await;
+    Ok(())
+}

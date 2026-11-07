@@ -125,6 +125,10 @@ pub(crate) struct ConsoleThreadReference {
     /// email, else the `sub`; the sender's display name): what an approver's
     /// `people` entry is matched against.
     pub(crate) access_principal: Option<String>,
+    /// That person's qualified principal: the requester the send carried to
+    /// the agent's run (the sender's `requester`), which a reply route
+    /// matches the work it answers against.
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
 }
 
 /// How a private reply's frame went into its thread.
@@ -343,5 +347,6 @@ fn thread_reference_of(record: &ConsoleFrame) -> Option<ConsoleThreadReference> 
         access_principal: addressee
             .and_then(|addressee| addressee.access_principal)
             .map(str::to_string),
+        requester: None,
     })
 }

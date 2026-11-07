@@ -1656,15 +1656,39 @@ impl meerkat::McpAdapterComposer for RecordingComposer {
     }
 }
 
-/// `request` for a real member build: a model the test client answers.
+/// `request` for a real member build, on a session that records what a
+/// stored session records (a resumed build reads its model from there).
 fn member_build(
     labels: BTreeMap<String, String>,
     servers: Vec<McpServerConfig>,
     fork_source: Option<meerkat_core::ForkBuildSource>,
 ) -> CreateSessionRequest {
+    let mut session = meerkat_core::Session::new();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "gpt-5.5".to_string(),
+            model_fallback: None,
+            max_tokens: 1024,
+            structured_output_retries: meerkat_core::config::default_structured_output_retries(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            auth_binding: None,
+            mob_member_binding: None,
+        })
+        .expect("the session's metadata");
     CreateSessionRequest {
-        model: "mock-model".to_string(),
-        ..request(labels, servers, fork_source)
+        model: "gpt-5.5".to_string(),
+        ..request_on(labels, servers, fork_source, session)
     }
 }
 
@@ -1807,6 +1831,11 @@ id = "personal-builder"
 
 [profiles.worker]
 model = "gpt-5.5"
+runtime_mode = "turn_driven"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
 
 [[profiles.worker.tools.mcp_servers]]
 name = "notes"

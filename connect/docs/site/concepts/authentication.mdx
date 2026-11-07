@@ -55,7 +55,7 @@ Several people can answer setup prompts at the same time: each login has its own
 
 When two people change the realm's configuration at the same moment, for example both installing a service, one change is made and the other is refused as a conflict (`conflict`), with nothing of it written; that person reviews the request again.
 
-A host that runs the gateway can keep its own audit of these changes by passing Connect a recorder (`PreparedGatewayAcquisition::with_administration_recorder`, which takes Core's `AdministrationRecorder`). Each credential change a person makes by answering a setup prompt (the service's installation into the realm's configuration, and each credential stored for it) then reaches the recorder as one record once it settles: the person's qualified principal, the digest of their login, what changed (never a value) and whether it committed. Connect keeps no audit of its own; without a recorder nothing is recorded.
+A host that composes the gateway in Rust can keep its own audit of these changes by passing Connect a recorder (`PreparedGatewayAcquisition::with_administration_recorder`, which takes Core's `AdministrationRecorder`). The `toolkit_gateway` binary cannot pass one yet, and the application driver path (a gateway that prepares an application) gets the option in 0.9.11. Each credential change a person makes by answering a setup prompt (the service's installation into the realm's configuration, and each credential stored for it) then reaches the recorder as one record once it settles: the person's qualified principal, the digest of their login, what changed (never a value) and whether it committed. Connect keeps no audit of its own; without a recorder nothing is recorded.
 
 ## Cancellation and recovery
 

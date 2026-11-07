@@ -27,15 +27,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Console setup: a host can pass a recorder for the administrative changes the
-  Console admits (`PreparedGatewayAcquisition::with_administration_recorder`,
-  with Core's `AdministrationRecorder`). Each credential change a person makes
-  by answering a setup prompt (the service's installation into the realm's
-  configuration, and each credential stored for it) reaches the recorder as
-  one record once it settles, naming the person (the qualified principal) and
-  a digest of the login they answered in, what changed and how it ended,
-  never a value, the token or the login itself. Without a recorder nothing is
-  recorded, as before.
+- Console setup: a host that composes the gateway in Rust can pass a recorder
+  for the administrative changes the Console admits
+  (`PreparedGatewayAcquisition::with_administration_recorder`, with Core's
+  `AdministrationRecorder`); the `toolkit_gateway` binary cannot pass one yet.
+  Each credential change a person makes by answering a setup prompt (the
+  service's installation into the realm's configuration, and each credential
+  stored for it) reaches the recorder as one record once it settles, naming
+  the person (the qualified principal) and a digest of the login they
+  answered in, what changed and how it ended, never a value, the token or the
+  login itself. Without a recorder nothing is recorded, as before.
 
 ### Fixed
 

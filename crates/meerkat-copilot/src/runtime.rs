@@ -1497,6 +1497,21 @@ impl CopilotCapabilityGatedClient {
     }
 }
 
+/// The most input tokens one request that asks for `output_budget` output
+/// tokens may carry on an account model: the tighter of its stated prompt
+/// limit and its context window less that budget, either alone when only
+/// one is stated. The gate's check of a measured prompt and the limit
+/// stated to the factory (for the compaction threshold) both read it.
+fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) -> Option<u32> {
+    let window_room = limits
+        .max_context_window_tokens
+        .map(|window| window.saturating_sub(output_budget));
+    match (limits.max_prompt_tokens, window_room) {
+        (Some(prompt), Some(room)) => Some(prompt.min(room)),
+        (prompt, room) => prompt.or(room),
+    }
+}
+
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1511,15 +1526,13 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .or_else(|| self.inner.output_token_limit())
     }
 
-    /// The account model's own prompt limit: the tighter of its prompt
-    /// limit and its context window, either alone when only one is stated.
+    /// The account model's own prompt limit ([`account_prompt_limit`]) for
+    /// the most output its account lets a request ask: never above the limit
+    /// the gate enforces on a request it admits.
     fn prompt_token_limit(&self) -> Option<u32> {
         let limits = &self.capabilities.limits;
-        match (limits.max_prompt_tokens, limits.max_context_window_tokens) {
-            (Some(prompt), Some(window)) => Some(prompt.min(window)),
-            (prompt, window) => prompt.or(window),
-        }
-        .or_else(|| self.inner.prompt_token_limit())
+        account_prompt_limit(limits, limits.max_output_tokens.unwrap_or(0))
+            .or_else(|| self.inner.prompt_token_limit())
     }
 
     fn project_replay_messages(
@@ -1540,17 +1553,8 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
                 .provider_issued_input_tokens
                 .map(|tokens| (tokens, value))
         }) {
-            let prompt_limit = self
-                .capabilities
-                .limits
-                .max_prompt_tokens
-                .or_else(|| {
-                    self.capabilities
-                        .limits
-                        .max_context_window_tokens
-                        .map(|context| context.saturating_sub(request.max_tokens))
-                })
-                .map(u64::from);
+            let prompt_limit =
+                account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
             // A prompt the provider measured over the account's limit is a
             // context refusal, the class the agent compacts on. Copilot's own
             // answer to such a prompt is not known, so none is assumed.

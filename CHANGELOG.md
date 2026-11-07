@@ -334,7 +334,8 @@ them.
   tokens one request may carry on the client's account and model, when the
   provider states one (default `None`; wrappers delegate). A GitHub Copilot
   route states the account model's prompt limit (the tighter of
-  `max_prompt_tokens` and `max_context_window_tokens`).
+  `max_prompt_tokens` and `max_context_window_tokens` less the most output
+  tokens the account lets a request ask, the limit its gate enforces).
 - `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
   model, state }` refuses a model the account lists under a policy that is
   not `enabled`, naming the state.

@@ -102,6 +102,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
 
+- A downgrade to 0.9.10 leaves the attention items stored and unread, and
+  shows a private reply in a person's side chat there as a runtime event to
+  whoever may view that side chat: 0.9.10 has no private side chats, so
+  that is everyone who may view the agent it was forked from.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -177,12 +182,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   items and `meta/console/attention/dismiss` dismisses one; a reply in a
   private conversation is a `private_reply` frame there. A request from an
   open console, a service or a token that names no person has no private
-  reply route. A host's payload policy rewrites an attention item as it
-  rewrites the reply's frame. The Console counts the person's items in
-  **Needs you** and
-  lists them in its inbox, where each opens the chat it answers and can be
-  dismissed; a private reply reads as the agent's message in the person's
-  own conversation.
+  reply route. An item shows no more of its reply than a thread would show
+  the reply's frame: a host's payload policy applies before the item is
+  stored, the reading console's own policy as it is read, and an item is
+  listed only while its person may view the agent it came from. Items,
+  dismissed ones too, are kept for good, one per reply delivered as an
+  item; a read considers the newest 200 not dismissed and answers at most
+  100. The Console counts the person's items in **Needs you** and lists
+  them in its inbox, where each opens the chat it answers and can be
+  dismissed; a reply whose text a policy hid reads
+  **Content hidden by policy**. A private reply reads as the agent's
+  message in the person's own conversation.
 - Rust: `ConsoleLogStore` gains the provided
   `send_frame_by_interaction`. A store outside Meta answers none unless it
   implements it, so no reply reaches the senders of the sends it holds
@@ -224,6 +234,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   authenticated") when the record names the verified decider, not only
   the approver label, and says when the gateway keeps its records in
   memory, where decisions from before a gateway restart may be missing.
+
+### Known limitations
+
+- `meta_gateway` keeps its console log and its metadata store for the life
+  of the process, so a restart forgets the console's requests and the
+  private replies delivered to them: a reply to a request made before the
+  restart is refused (its thread is unknown), never delivered twice, and
+  the attention list starts empty.
 
 ## [0.9.10] - 2026-11-04
 

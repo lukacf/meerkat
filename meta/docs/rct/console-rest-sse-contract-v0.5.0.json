@@ -1361,7 +1361,7 @@
               "items",
               "retention"
             ],
-            "note": "The caller's own attention items, newest first, at most 100: replies meant for the caller alone that no private thread of theirs took. Only a verified person on a console that requires sign-in holds items; every other caller reads an empty list. An item has id, created_at_ms and kind; a private_reply item adds origin {identity, interaction_id, input_frame_id}, the text a host's payload policy leaves of the reply (as it leaves the reply's frame) and redacted: true when the policy rewrote it. A client shows the kinds it knows and skips the rest. retention is durable or process."
+            "note": "The caller's own attention items, newest first, at most 100 from the newest 200 not dismissed: replies meant for the caller alone that no private thread of theirs took. Every console that keeps an attention list serves a verified person the items addressed to them, whatever its posture; every other caller reads an empty list. An item has id, created_at_ms and kind; a private_reply item adds origin {identity, interaction_id, input_frame_id}, the text the payload policies leave of the reply (the host's before the item is stored, this console's as it is read, as they leave the reply's frame in a thread; absent when they leave none) and redacted: true when a policy rewrote it. An item is listed only while the caller may view the agent the request went to. A client shows the kinds it knows and skips the rest. retention is durable or process."
           },
           "errors": [
             {

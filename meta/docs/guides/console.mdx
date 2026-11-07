@@ -540,8 +540,13 @@ shared conversation:
 The console counts the person's items in **Needs you** and lists them in its
 inbox after the approvals. Each names the agent that answered and opens the
 chat it answers, and **Dismiss** takes it off the list (a read-only console
-offers no Dismiss). A reply in the person's own conversation reads there as
-the agent's message.
+offers no Dismiss). A reply whose text a payload policy hid reads
+**Content hidden by policy** and is dismissed the same way. A reply in the
+person's own conversation reads there as the agent's message.
+
+An item shows no more of its reply than the conversation would: the
+console's payload policy applies as the list is read, and an item is listed
+only while the person may view the agent it came from.
 
 Each console send records where it came from (its `user_input` frame's
 `thread`): the agent, the interaction, and who may read the replies to it.

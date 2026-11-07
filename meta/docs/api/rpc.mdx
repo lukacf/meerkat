@@ -1370,16 +1370,17 @@ give or take one page of 64 rows; an embedder sets other bounds with
 The caller's own attention items: replies meant for the caller alone that
 no private thread of theirs took, such as an answer to a request the caller
 made in a shared agent (see `meta/console/send`). Takes no params.
-Read-only, and served on the console route only. Only a verified person
-holds items, and reads them by its own identity (issuer and subject); every
-other caller (an open console's caller without a token, a service, a token
-that names no person) reads none, and no param names whose items are read.
-A console that keeps no attention list (a router built without a runtime)
-answers `-32601`.
+Read-only, and served on the console route only. A verified person reads
+the items addressed to them, by their own identity (issuer and subject), on
+every console that keeps an attention list; every other caller (an open
+console's caller without a token, a service, a token that names no person)
+reads none, and no param names whose items are read. A console that keeps
+no attention list (a router built without a runtime, or one whose metadata
+store keeps no realm documents) answers `-32601`.
 
 | Result field | Type | Description |
 |--------------|------|-------------|
-| `items` | `object[]` | The caller's items not dismissed, newest first, at most 100 (below) |
+| `items` | `object[]` | The caller's items not dismissed that the caller may see, newest first: at most 100, from the newest 200 not dismissed (below) |
 | `retention` | `string` | How long the items are kept, from the metadata store the gateway opened: `durable` (across restarts) or `process` (for the life of the gateway process) |
 
 An item:
@@ -1389,8 +1390,8 @@ An item:
 | `id` | `string` | Opaque and stable; names the item to dismiss it |
 | `created_at_ms` | `integer` | When the item was delivered, in milliseconds since the epoch |
 | `kind` | `string` | `private_reply`: a reply to the caller's own request, made in a conversation that is not private to them. Other kinds may be added; a client shows what it knows and skips the rest |
-| `text` | `string` | The reply, as a host's payload policy keeps the reply's frame; absent when the policy left no text |
-| `redacted` | `boolean` | `true` when a host's payload policy rewrote the reply, as it rewrites the reply's frame; absent otherwise |
+| `text` | `string` | The reply, as this console shows the reply's frame in a thread; absent when the payload policies left no text |
+| `redacted` | `boolean` | `true` when a payload policy rewrote the reply: the host's before the item was stored, or this console's as it is read; absent otherwise |
 | `origin.identity` | `string` | The agent the request was sent to |
 | `origin.interaction_id` | `string` | The request's interaction |
 | `origin.input_frame_id` | `string` | The request's `user_input` frame |
@@ -1400,13 +1401,27 @@ that thread instead, as a `private_reply` frame (`payload.text`, and
 `payload.in_reply_to` with the request's `interaction_id` and
 `input_frame_id`; the frame's `caused_by_frame_id` is the request's frame),
 which only the caller and the access admins see. A reply is delivered once:
-the same reply again changes nothing. A host's payload policy rewrites an
-item as it rewrites the reply's frame, before the item is stored, so no one
-reads more of a reply in the attention list than in a thread. The items are
-kept in the realm's metadata store, as the console audit log is, and are
-never pruned: a dismissed item stays stored, so its reply stays delivered.
-The list grows by one stored item per reply delivered as an item; the audit
-log's bounds do not apply to it.
+the same reply again changes nothing.
+
+An item shows no more of its reply than a thread would show the reply's
+frame. It is stored in the form a host's payload policy gives that frame
+before it is stored, and each read shows it as the reading console shows
+the frame: under that console's own payload policy and visibility, and only
+while the caller may view the agent the request was sent to (`agent.view`,
+decided on the request's captured lineage as for the agent's own frames).
+An item the console or the caller's access hides is left out, and listed
+again once that changes. An item whose text a policy left none of is
+listed without `text`, with `redacted: true`, and is dismissed like any
+other.
+
+The items are kept in the realm's metadata store, as the console audit log
+is, and are never pruned: a dismissed item stays stored, so its reply stays
+delivered. The list grows by one stored item per reply delivered as an
+item; the audit log's bounds do not apply to it. A read lists only the
+items not dismissed and reads at most the newest 200 of them; an item
+hidden from the caller still takes its place among those 200. An item the
+gateway cannot read (one a later version wrote, or a damaged one) is left
+out of the list and logged by its key.
 
 ### `meta/console/attention/dismiss`
 

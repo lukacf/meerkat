@@ -983,7 +983,9 @@ use action \"update\" on its id instead of creating a duplicate.\n\
 selection reads when deciding whether to recall the record.\n\
 - Mark epistemic status honestly: \"operator_said\" for facts the operator told you, \
 \"observed\" (default) for things you inferred or saw, \"verified_claim\" only when you actually \
-checked, with `verification_evidence` describing what you checked.\n\
+checked, with `verification_evidence` describing what you checked. When operator memory is on, \
+`remember` files an \"operator_said\" fact only in the operator memory of the person whose own \
+message started the run, never in your own memory.\n\
 - Convert relative dates to absolute at write time (\"2026-07-01\", never \"today\" or \
 \"next week\") — a future session cannot recover what \"today\" meant.\n\
 - An open_loop record must state its explicit resolution condition (\"resolved when X\") so \
@@ -991,6 +993,87 @@ steward dreams can close it.\n\
 - Do not save what the repository, configuration, or platform already records.\n\
 - Mob-shared knowledge goes through action \"propose_to_mob\" for steward review; you cannot \
 write mob scope directly.";
+
+/// Why the `memory` tool refused a person's own fact (an `operator_said`
+/// fact while operator memory is on). Nothing is stored. The refusal is a
+/// typed tool error: `data.kind` is [`Self::kind`], which callers classify
+/// by (never the message), and the message names the alternative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorFactRefusal {
+    /// No person's own message started this run (no requester, a request
+    /// carried from another agent, a principal that names no person, or a
+    /// governed run), so there is no person to file the fact for.
+    WithoutAPerson,
+    /// The memory store keeps no proposals, so a person's operator memory
+    /// cannot be filed.
+    OperatorMemoryUnavailable,
+    /// `update` changes this agent's own memory, never a person's.
+    Update,
+}
+
+impl OperatorFactRefusal {
+    /// The typed `kind` the tool error carries.
+    const fn kind(self) -> &'static str {
+        match self {
+            Self::WithoutAPerson => "operator_fact_without_a_person",
+            Self::OperatorMemoryUnavailable => "operator_memory_unavailable",
+            Self::Update => "operator_fact_update_refused",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::WithoutAPerson => {
+                "An \"operator_said\" fact is kept only in the operator memory of the person who \
+                 said it, and this run was not started by a person's own message: nothing was \
+                 stored. If it is this agent's own knowledge, remember it without epistemic \
+                 \"operator_said\"."
+            }
+            Self::OperatorMemoryUnavailable => {
+                "An \"operator_said\" fact is kept only in the operator memory of the person who \
+                 said it, and this memory store keeps no such proposals: nothing was stored. If \
+                 it is this agent's own knowledge, remember it without epistemic \
+                 \"operator_said\"."
+            }
+            Self::Update => {
+                "An update changes this agent's own memory, and an \"operator_said\" fact is \
+                 kept only in the operator memory of the person who said it: nothing was \
+                 stored. File the person's fact with \"remember\"; update this agent's own \
+                 records without epistemic \"operator_said\"."
+            }
+        }
+    }
+
+    /// The typed tool error for this refusal.
+    fn to_tool_error(self) -> meerkat_core::ToolError {
+        meerkat_core::ToolError::execution_failed_with_data(
+            self.message(),
+            serde_json::json!({
+                "kind": self.kind(),
+                "retryable": false,
+            }),
+        )
+    }
+}
+
+/// How a `memory` call failed: a typed refusal (a typed tool error), or any
+/// other failure (an error result that names it).
+enum MemoryToolFailure {
+    Refused(OperatorFactRefusal),
+    Failed(String),
+}
+
+impl From<String> for MemoryToolFailure {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<OperatorFactRefusal> for MemoryToolFailure {
+    fn from(refusal: OperatorFactRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
 
 fn memory_tool_description() -> String {
     "Remember durable knowledge that must outlive this session — operator preferences and \
@@ -1004,7 +1087,8 @@ fn memory_tool_description() -> String {
      Protocol: check your injected memory index first and prefer `update` on an existing \
      record id over writing a near-duplicate; keep one fact per record; write `description` \
      for future retrieval; set `epistemic` to \"operator_said\" when the operator told you the \
-     fact, \"observed\" (default) when you inferred or observed it yourself, or \
+     fact (with operator memory on, such a fact is filed only for the person whose own message \
+     started the run), \"observed\" (default) when you inferred or observed it yourself, or \
      \"verified_claim\" with `verification_evidence` when you actually verified it (verification \
      is recorded as a claim for steward review — it does not raise the record's trust tier). \
      Convert relative dates to absolute at write time (a future session cannot recover what \
@@ -1267,70 +1351,77 @@ impl MemoryRecorder {
         }
     }
 
-    /// An `operator_said` fact is also proposed to the operator memory of
-    /// the person who said it: the run's direct requester
+    /// Whether this call files a person's own fact while operator memory is
+    /// on: an `operator_said` fact then goes only to the operator memory of
+    /// the person who said it, never into the agent's shared identity
+    /// memory. With operator memory off, an `operator_said` fact stays the
+    /// agent's own memory, as before.
+    fn files_person_fact(&self, args: &MemoryToolArgs) -> bool {
+        args.epistemic.as_deref() == Some("operator_said")
+            && self.config.operator_scope == AgentMemoryOperatorScope::Provisional
+    }
+
+    /// File an `operator_said` fact for the person who said it: a proposal
+    /// to the operator memory of the run's direct requester
     /// (`operator_requester`), keyed by their caller scope, never a key an
-    /// argument names. A run without one proposes none, and so does a
-    /// deployment with the operator scope off or a provider without
-    /// proposals. Returns the line the tool result adds, if any.
-    async fn propose_operator_fact(
+    /// argument names. Nothing is stored in the agent's own memory. A run
+    /// without such a person (no requester, a requester carried across a
+    /// peer hop, a principal that names no person, a governed run), or a
+    /// provider without proposals, files nothing and is refused, typed.
+    async fn file_person_fact(
         &self,
-        args: &MemoryToolArgs,
-        record: &NewMemoryRecord,
+        record: NewMemoryRecord,
         operator_requester: Option<&meerkat_core::PrincipalRef>,
-    ) -> Option<String> {
-        if args.epistemic.as_deref() != Some("operator_said")
-            || self.config.operator_scope != AgentMemoryOperatorScope::Provisional
-            || !self.provider.supports_propose()
-        {
-            return None;
+    ) -> Result<String, MemoryToolFailure> {
+        let operator = operator_requester
+            .and_then(crate::http_console::person_caller_scope)
+            .ok_or(OperatorFactRefusal::WithoutAPerson)?;
+        if !self.provider.supports_propose() {
+            return Err(OperatorFactRefusal::OperatorMemoryUnavailable.into());
         }
-        let operator = operator_requester.and_then(crate::http_console::person_caller_scope)?;
         let scope = MemoryScope::Operator {
             realm: self.config.realm.clone(),
             operator,
         };
-        Some(
-            match self
-                .provider
-                .propose(&scope, record.clone(), self.author())
-                .await
-            {
-                Ok(proposal_id) => format!(
-                    " Proposed to the operator memory of the person who said it as \
-                     {proposal_id}; a steward or operator reviews it."
-                ),
-                Err(err) => format!(
-                    " The proposal to the operator memory of the person who said it failed: \
-                     {err}"
-                ),
-            },
-        )
+        let proposal_id = self
+            .provider
+            .propose(&scope, record, self.author())
+            .await
+            .map_err(|err| {
+                format!(
+                    "The proposal to the operator memory of the person who said it failed: \
+                     {err}. Nothing was stored."
+                )
+            })?;
+        Ok(format!(
+            "Proposed to the operator memory of the person who said it as {proposal_id}; a \
+             steward or operator reviews it. It is not stored in this agent's own memory: a \
+             person's own facts stay theirs."
+        ))
     }
 
     async fn handle(
         &self,
         args: MemoryToolArgs,
         operator_requester: Option<&meerkat_core::PrincipalRef>,
-    ) -> Result<String, String> {
+    ) -> Result<String, MemoryToolFailure> {
         match args.action.as_str() {
             "remember" => {
                 let record = self.new_record(&args, "remember")?;
+                if self.files_person_fact(&args) {
+                    return self.file_person_fact(record, operator_requester).await;
+                }
                 let receipt = self
                     .provider
-                    .remember_authored(&self.identity_scope(), record.clone(), self.author())
+                    .remember_authored(&self.identity_scope(), record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
-                let mut message = self.describe_receipt("Stored", &receipt);
-                if let Some(proposed) = self
-                    .propose_operator_fact(&args, &record, operator_requester)
-                    .await
-                {
-                    message.push_str(&proposed);
-                }
-                Ok(message)
+                Ok(self.describe_receipt("Stored", &receipt))
             }
             "update" => {
+                if self.files_person_fact(&args) {
+                    return Err(OperatorFactRefusal::Update.into());
+                }
                 let prior = args
                     .memory_id
                     .as_deref()
@@ -1340,12 +1431,7 @@ impl MemoryRecorder {
                 let record = self.new_record(&args, "update")?;
                 let receipt = self
                     .provider
-                    .supersede_authored(
-                        &self.identity_scope(),
-                        prior,
-                        record.clone(),
-                        self.author(),
-                    )
+                    .supersede_authored(&self.identity_scope(), prior, record, self.author())
                     .await
                     .map_err(|err| err.to_string())?;
                 let mut message = self.describe_receipt("Updated: new record", &receipt);
@@ -1354,12 +1440,6 @@ impl MemoryRecorder {
                     crate::memory::records::RecordStatus::Quarantined { .. }
                 ) {
                     message.push_str(" The prior record remains active until review.");
-                }
-                if let Some(proposed) = self
-                    .propose_operator_fact(&args, &record, operator_requester)
-                    .await
-                {
-                    message.push_str(&proposed);
                 }
                 Ok(message)
             }
@@ -1382,10 +1462,7 @@ impl MemoryRecorder {
                         result.memory_id
                     ))
                 } else {
-                    Err(format!(
-                        "memory {} was not found in your scope",
-                        result.memory_id
-                    ))
+                    Err(format!("memory {} was not found in your scope", result.memory_id).into())
                 }
             }
             "recall" => {
@@ -1446,7 +1523,8 @@ impl MemoryRecorder {
                         })
                     })
                     .collect();
-                serde_json::to_string_pretty(&rendered).map_err(|err| err.to_string())
+                serde_json::to_string_pretty(&rendered)
+                    .map_err(|err| MemoryToolFailure::Failed(err.to_string()))
             }
             "propose_to_mob" => {
                 let scope = self.mob_scope().ok_or_else(propose_outside_mob)?;
@@ -1465,7 +1543,7 @@ impl MemoryRecorder {
                      and commit it before it becomes shared memory."
                 ))
             }
-            other => Err(unknown_memory_action(other)),
+            other => Err(unknown_memory_action(other).into()),
         }
     }
 }
@@ -1839,7 +1917,9 @@ impl meerkat_core::agent::AgentToolDispatcher for RecorderToolDispatcher {
         };
         let (text, is_error) = match self.recorder.handle(args, operator_requester).await {
             Ok(text) => (text, false),
-            Err(text) => (text, true),
+            Err(MemoryToolFailure::Failed(text)) => (text, true),
+            // A person's own fact this run cannot file: a typed tool error.
+            Err(MemoryToolFailure::Refused(refusal)) => return Err(refusal.to_tool_error()),
         };
         Ok(meerkat_core::ToolResult {
             host_metadata: Default::default(),
@@ -3436,6 +3516,53 @@ memory = false
         Ok((text, outcome.result.is_error))
     }
 
+    /// Dispatch one `memory` call in a run whose requester is `requester`,
+    /// keeping a dispatch error (a typed refusal) as the call's outcome.
+    async fn memory_tool_outcome_for(
+        dispatcher: &Arc<dyn AgentToolDispatcher>,
+        args: serde_json::Value,
+        requester: Option<meerkat_core::TurnRequester>,
+    ) -> Result<Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>, Box<dyn Error>>
+    {
+        let raw = serde_json::value::RawValue::from_string(args.to_string())?;
+        let context = meerkat_core::ToolDispatchContext::default().with_requester(requester);
+        Ok(dispatcher
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: "call-1",
+                    name: MEMORY_TOOL_NAME,
+                    args: &raw,
+                },
+                &context,
+            )
+            .await)
+    }
+
+    /// The kind of a `memory` call's typed refusal: the call ended in a
+    /// typed tool error (`data.kind`) whose message says nothing was stored
+    /// and names the alternative. Anything else is an error naming what the
+    /// call did instead.
+    fn typed_refusal(
+        label: &str,
+        outcome: Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+    ) -> Result<String, String> {
+        match outcome {
+            Err(meerkat_core::ToolError::ExecutionFailedWithData { message, data })
+                if message.contains("nothing was stored")
+                    && message.contains("without epistemic \"operator_said\"") =>
+            {
+                data.get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("{label}: the refusal names no kind: {data}"))
+            }
+            other => Err(format!(
+                "{label}: the call must be refused with a typed tool error that names the \
+                 alternative: {other:?}"
+            )),
+        }
+    }
+
     /// A person as a Console send names its requester.
     fn console_person(subject: &str) -> Result<meerkat_core::PrincipalRef, Box<dyn Error>> {
         Ok(meerkat_core::PrincipalRef::in_domain(
@@ -3525,9 +3652,9 @@ memory = false
     /// files no `operator_said` fact anywhere: no requester, a requester
     /// carried across a peer hop, a principal that names no person, or a
     /// governed run (even one a person asked for). The call is refused with
-    /// a tool error that names the alternative, and neither the agent's own
-    /// memory nor any operator memory holds the fact. The person's own
-    /// direct run files it.
+    /// a typed tool error (`operator_fact_without_a_person`) that names the
+    /// alternative, and neither the agent's own memory nor any operator
+    /// memory holds the fact. The person's own direct run files it.
     #[tokio::test]
     async fn memory_tool_proposes_no_operator_memory_without_a_direct_requester()
     -> Result<(), Box<dyn Error>> {
@@ -3541,14 +3668,6 @@ memory = false
             "svc:reporter",
             meerkat_core::TrustDomainId::new("service-issuer:reporting")?,
         )?;
-        let refused = |label: &str, text: &str, is_error: bool| {
-            if !is_error || !text.contains("nothing was stored") {
-                return Err(format!(
-                    "{label}: the call must be refused, naming why: {text}"
-                ));
-            }
-            Ok(())
-        };
         for (label, requester) in [
             ("no requester", None),
             (
@@ -3560,9 +3679,13 @@ memory = false
                 Some(meerkat_core::TurnRequester::direct(service)),
             ),
         ] {
-            let (text, is_error) =
-                call_memory_tool_for(&dispatcher, operator_said(label), requester).await?;
-            refused(label, &text, is_error)?;
+            let outcome =
+                memory_tool_outcome_for(&dispatcher, operator_said(label), requester).await?;
+            assert_eq!(
+                typed_refusal(label, outcome)?,
+                "operator_fact_without_a_person",
+                "{label}"
+            );
         }
         // A governed run proposes no operator memory, even for the person
         // who asked: its prepared authorization names only the call's own
@@ -3596,18 +3719,11 @@ memory = false
         let outcome = meerkat_core::agent::dispatch_tool_execution_plan_fenced(
             &recorder, call, &governed, &plan,
         )
-        .await?;
-        let text = outcome
-            .result
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        refused("a governed run", &text, outcome.result.is_error)?;
+        .await;
+        assert_eq!(
+            typed_refusal("a governed run", outcome)?,
+            "operator_fact_without_a_person"
+        );
         assert!(
             proposed_operator_scopes(&store).await?.is_empty(),
             "no run without a direct person requester proposes operator memory"
@@ -3626,6 +3742,83 @@ memory = false
             proposed_operator_scopes(&store).await?.len(),
             1,
             "the person's own direct run proposes"
+        );
+        Ok(())
+    }
+
+    /// A store with authored writes and no proposals; it records every
+    /// authored write.
+    #[derive(Default)]
+    struct AuthoredWritesOnly {
+        writes: Mutex<Vec<MemoryScope>>,
+    }
+
+    #[async_trait]
+    impl AgentMemoryProvider for AuthoredWritesOnly {
+        async fn recall(
+            &self,
+            _request: AgentMemoryRecallRequest,
+        ) -> Result<Vec<AgentMemoryRecord>, AgentMemoryError> {
+            Ok(Vec::new())
+        }
+
+        async fn remember_authored(
+            &self,
+            scope: &MemoryScope,
+            _record: NewMemoryRecord,
+            _author: crate::memory::records::MemoryAuthor,
+        ) -> Result<AuthoredWriteReceipt, AgentMemoryError> {
+            self.writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(scope.clone());
+            Ok(AuthoredWriteReceipt {
+                memory_id: "mem-written".to_string(),
+                status: crate::memory::records::RecordStatus::Active,
+            })
+        }
+
+        fn supports_authored_writes(&self) -> bool {
+            true
+        }
+    }
+
+    /// With operator memory on and a store that keeps no proposals, a
+    /// person's own `operator_said` fact is refused with a typed tool error
+    /// (`operator_memory_unavailable`): it is never stored in the agent's
+    /// own memory instead.
+    #[tokio::test]
+    async fn operator_said_fact_without_proposals_is_refused_not_shared()
+    -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(AuthoredWritesOnly::default());
+        let dispatcher = recorder_dispatcher(
+            store.clone(),
+            AgentMemoryConfig {
+                operator_scope: AgentMemoryOperatorScope::Provisional,
+                ..AgentMemoryConfig::default()
+            },
+        )
+        .await?
+        .ok_or("recorder registered")?;
+        let outcome = memory_tool_outcome_for(
+            &dispatcher,
+            operator_said("Prefers terse status notes"),
+            Some(meerkat_core::TurnRequester::direct(console_person(
+                "alice",
+            )?)),
+        )
+        .await?;
+        assert_eq!(
+            typed_refusal("a store without proposals", outcome)?,
+            "operator_memory_unavailable"
+        );
+        assert!(
+            store
+                .writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "nothing is stored in the agent's own memory instead"
         );
         Ok(())
     }
@@ -3695,7 +3888,8 @@ memory = false
 
     /// With operator memory on, `update` never turns a record of the
     /// agent's own memory into a person's `operator_said` fact: the call is
-    /// refused and the record stays as it was.
+    /// refused with a typed tool error (`operator_fact_update_refused`) and
+    /// the record stays as it was.
     #[tokio::test]
     async fn operator_said_update_is_refused_when_operator_memory_is_on()
     -> Result<(), Box<dyn Error>> {
@@ -3717,7 +3911,7 @@ memory = false
         let [record] = records.as_slice() else {
             return Err(format!("expected one record, got {}", records.len()).into());
         };
-        let (text, is_error) = call_memory_tool_for(
+        let outcome = memory_tool_outcome_for(
             &dispatcher,
             serde_json::json!({
                 "action": "update",
@@ -3729,9 +3923,10 @@ memory = false
             Some(meerkat_core::TurnRequester::direct(alice)),
         )
         .await?;
-        assert!(
-            is_error && text.contains("nothing was stored"),
-            "an operator_said update is refused: {text}"
+        assert_eq!(
+            typed_refusal("an operator_said update", outcome)?,
+            "operator_fact_update_refused",
+            "an operator_said update is refused, typed"
         );
         let after = identity_records(&provider).await?;
         assert_eq!(

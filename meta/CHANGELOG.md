@@ -38,15 +38,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The labels only Meta writes are reserved: `side_chat_of`,
   `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
-  Member creation (`meta/ensure_member`, `mob/spawn_member`,
-  `UnifiedRuntime::spawn` and `spawn_many`) refuses each of them as invalid
-  params naming the label, and an agent's spawn tools refuse them as invalid
-  arguments. A fork's child no longer inherits a side chat's lineage labels
-  from its source.
-- A console member hidden from the caller by its private owner answers as
-  an unknown member on every console surface: `-32001`
-  `unknown identity: <id>` with no data, `404` `unknown_identity` from
-  `POST /console/send`, `member_not_found` from the agent event stream.
+  Member creation refuses each of them as invalid params naming the label:
+  the console and SDK `meta/ensure_member`, `UnifiedRuntime::spawn` and
+  `spawn_many`, and the host fork API (`UnifiedRuntime::fork_member`); an
+  agent's spawn tools refuse them as invalid arguments. A Meta fork's child
+  (a console side chat fork, the host fork API) no longer inherits a side
+  chat's lineage labels from its source; a fork Meerkat makes (`fork_off`,
+  a council participant) still copies them, where they count for nothing.
+- Rust: `identity_creation::META_RESERVED_LABEL_KEYS` lists the four as
+  well (`[&str; 11]`).
+- A console request that names a member hidden from the caller by its
+  private owner is answered as one naming a member that does not exist:
+  each method gives its own answer for an absent member (for example
+  `meta/get_member` answers `-32602` `member not found`), `POST
+  /console/send` answers `404` `unknown_identity` and the agent event
+  stream `member_not_found`. A request that would create a member under a
+  hidden member's name, or record something for it (an announcement
+  subscription, a schedule, a remembered fact, a topology edge, a WorkGraph
+  goal or attention target), is refused as
+  `-32001` `unknown identity: <id>` with no data.
+- A member seated exempt from the mob definition's wiring rules (every side
+  chat) is outside the definition's role-wide flow steps (Meerkat): a
+  role-wide `meta/run_flow` no longer reaches a side chat; role targets that
+  name one still do.
+- The `/healthz` JSON summary counts broken members (`broken_member_count`)
+  and names none: `broken_members` is gone from it (`meta/status` on the
+  stdio gateway still names them).
 
 ### Security
 
@@ -123,15 +140,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - On a console with sign-in, a side chat is private to the person who
   opened it; access admins can also see it. It holds with or without an
-  access configuration, on every surface that shows an agent. The members
-  a private side chat creates (a member its turn spawns, a `fork_off`
-  child, a helper forked from it) are private to the same person too, by
-  the private owner Meta writes on them, so they stay private after the
-  side chat is closed and after a restart. Its memory stays its own: the
-  memory distiller never reads a private member's conversation, and the
-  memory steward never dreams over a private member's memory, proposals or
-  exit interview. Side chats opened before this release keep their
-  audience, and consoles without sign-in keep side chats shared.
+  access configuration, on the console's routes, streams and panels; the
+  access control guide's Known limitations name what it does not cover
+  (the stdio gateway, WorkGraph reads, a taken name). The members a
+  private side chat creates are private to the same person too, by the
+  private owner Meta writes on them: a member its turn spawns, in its own
+  mob or in a mob it creates (`mob_create`, the implicit mob `delegate`
+  runs its helpers in), a `fork_off` child and a helper forked from it.
+  They stay private after the side chat is closed and after a restart,
+  and they are seated outside the shared topology (exempt from the
+  definition's wiring rules, so no role-wide flow step reaches them). Side
+  chats opened before this release keep their audience, and consoles
+  without sign-in keep side chats shared.
+- A private member's memory stays its own: the memory distiller never
+  reads its conversation, the memory steward never dreams over its memory,
+  proposals or exit interview, and its `memory` tool proposes nothing to
+  its mob (`propose_to_mob` is refused). A private member is built without
+  WorkGraph tools, the voice preface names no private peer, and an
+  announcement role template never takes a private member.
+- No console surface names a member hidden from the caller: the run
+  records (`meta/flow_status` answers a run that reached one as a run that
+  does not exist, and `meta/list_runs` leaves it out), wiring and operator
+  events, peer lists (`wired_to`, `topology_peers`), `meta/reset_all`
+  (which no longer closes another person's private side chat), the
+  announcement listings, the memory panel's proposals, the readiness and
+  completion listings, the host send precheck, and a console with no local
+  runtime, which reads its runtimes' members before it decides a timeline
+  frame or a multipart send.
+- On a console with sign-in, a non-administrator is shown no memory scope,
+  and attaches no session, of a member the console does not know (one
+  that ended before this process read who its members are private to): it
+  may have been private. Who each member is private to is read in the
+  background from the start, and read again until it is read; until then
+  a spawn into a mob a member created before the restart is refused as
+  retryable.
+- The SDK gateway's strict live voice authority decides with the
+  configured access controller, primed from the roster, so its access rules
+  and the private-owner rule apply to its configured principal; without an
+  access configuration the stdio gateway stays the trusted host plane.
+- The host send precheck (`ConsoleSendPrecheck::check`) decides with the
+  viewer's audience whether or not the console has an access controller, and
+  refuses a target the runtime holds no member or registered identity for
+  (`UnknownIdentity`), as `POST /console/send` refuses it.
 - A private owner on a member's own roster labels names its owner whatever
   made the member (Meta, or a host that declares it); it no longer counts
   only on a verified side chat.

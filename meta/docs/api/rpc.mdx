@@ -1385,7 +1385,9 @@ Returns `{runs: MobRun[]}` carrying the full meerkat ledger projection:
 `loops` (map keyed by loop id), `loop_iteration_ledger`,
 `flow_state`, `activation_params`, `schema_version`,
 `root_step_outputs`, `loop_iteration_outputs`, and `role_targets` for a
-role-targeted run (see `meta/run_flow`).
+role-targeted run (see `meta/run_flow`). On the console, a run that reached
+a member hidden from the caller is left out (`meta/flow_status` answers it
+as a run that does not exist).
 
 ### `meta/run_flow`
 
@@ -1403,7 +1405,10 @@ Start a run of one of the mob's flows.
 Returns `{run_id}`, plus `role_targets` for a role-targeted run.
 
 Without `role_targets`, a step dispatches to every active member of its
-role. With them, each step dispatches only to the bound members of its role
+role that the mob definition's wiring rules apply to: a member seated
+exempt from them (every console side chat, and every member a private side
+chat creates) is outside role-wide steps, and only a run whose
+`role_targets` names it reaches it. With them, each step dispatches only to the bound members of its role
 that are still active and still hold the role, never to another member of
 the role, so several runs can share one mob and one role. The binding must
 name every role the flow's steps use and no other, no quorum step may need
@@ -3016,8 +3021,8 @@ restart recovers it from its durable state.
 `broken_members` is present only when Core holds members Broken: members it
 could not restore at this start, for example because a restored member's comms
 identity is missing on this host. They serve nothing until they are repaired,
-so a readiness probe can read the list; `/healthz` reports the same list in
-JSON.
+so a readiness probe can read the list; `/healthz` reports their count in
+JSON (`broken_member_count`) and names none.
 
 <Accordion title="broken_members entries">
 | Field | Type | Description |

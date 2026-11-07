@@ -120,6 +120,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - On a console without an access controller, a caller can no longer end
   another person's sessions.
 
+- A Flow Editor change on the console's listener re-checks, right before it
+  writes the draft store or writes a deploy's or a validation's archive and
+  runs `rkat`, that its caller's login is still current, and is refused with
+  `caller_not_current` otherwise; nothing is written or run.
+
 ### Upgrade
 
 - A front that mints one token per person with a shared secret adds
@@ -177,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to the first user who loads the console after the upgrade; drafts kept
   under it start empty.
 
+- Sign-outs live in the console session fence record
+  (`console-session-fences.json`) beside the revocations. A binary without
+  sign-out keeps them in the file but does not enforce them while it runs;
+  they apply again after the upgrade.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -205,6 +215,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   you**, or **Waiting for** the approver it names (with no decision offered).
   A request for you that someone else decides keeps its card, saying how and
   by whom, read from the gating audit.
+
+- `meta/console/sign_out` signs the caller out of one console login: the
+  login its token belongs to (the issuer's `sid`, or the token alone when it
+  carries none). The Console refuses that login's tokens from then on and
+  ends the streams and voice sessions they opened; the caller's other logins
+  and its schedules are untouched. A principal keeps at most 64 sign-outs,
+  and the next folds the oldest into one fence of all its logins older than
+  that sign-out, which stops no schedule. Revoking a principal still ends
+  every login of that principal.
+
+- The Flow Editor RPC on the console's listener takes
+  `expected_caller_scope` on its changes (draft writes, deploys with
+  `execute`, validations with `rkat_validate`) and refuses a change made for
+  another caller with `caller_changed`. Its `meta/capabilities` reports the
+  caller's scope as `auth.caller_scope`, and the stock Flow Editor sends it
+  back with every request; after a 401 or a refusal of its caller it reads
+  the capabilities again before it sends another request. The changes are
+  the ones a candidate launch refuses, read from one list as each handler
+  parses its request.
 
 ### Changed
 
@@ -274,6 +303,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the copy of a queue the storage lock keeps in IndexedDB on an origin
   without Web Locks, and the browser leaves for the sign-out once that is
   done, or after at most 1.5 seconds.
+
+- A candidate launch serves a `meta/mobpacks/validate` whose
+  `rkat_validate` is `false`, which runs no `rkat`, whatever `rkatValidate`
+  says; before, it refused it.
 
 ### Fixed
 

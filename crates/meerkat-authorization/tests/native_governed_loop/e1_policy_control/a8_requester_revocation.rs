@@ -534,6 +534,7 @@ async fn exercise_a8(server: &Server, barrier: &Arc<EntryBarrier>) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants: grants.clone(),
                 ingress,

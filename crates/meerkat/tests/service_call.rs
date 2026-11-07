@@ -974,6 +974,7 @@ fn composition(
         invocation: ScopedInvocation::from_policy(Arc::new(Permissive)),
         operation_owner: Arc::new(Operations { reviewed }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration()
 }
@@ -1108,6 +1109,7 @@ async fn a_host_or_owner_without_service_call_support_refuses_unavailable() {
                 reviewed: BTreeSet::new(),
             }),
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             configured_mcp_attachment: None,
         },

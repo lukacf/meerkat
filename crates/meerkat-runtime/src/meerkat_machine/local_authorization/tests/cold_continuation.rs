@@ -560,6 +560,7 @@ async fn open_without_resume_composition(
             invocation: ScopedInvocation::from_policy(Arc::clone(&owners.policy)),
             operation_owner: Arc::clone(&owners.operation_owner),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration()
     })
@@ -5004,13 +5005,15 @@ async fn a_kept_resume_whose_host_cannot_say_now_waits_with_its_attempts_for_the
 /// answer, has passed, the next such answer ends it as a refused resume,
 /// `Abandoned { ResumeRefused }`, with its attempts unchanged and nothing
 /// run. While it waits without its client, the machine refuses the
-/// controller's credential publication; once it ended, that publication
-/// succeeds, as the machine-wide refusal cleared. RED at base: nothing asked
-/// the host again; three stagings without a client used the attempts up and
-/// it ended `Abandoned { MaxAttemptsExhausted }`.
+/// controller's credential publication and every controller grant mutation
+/// (a held kept governed prompt, which waits without a time bound, refuses
+/// neither: `a_controller_grant_mutation_proceeds_while_a_kept_governed_prompt_is_held`);
+/// once it ended, both succeed, as the machine-wide refusal cleared. RED at
+/// base: nothing asked the host again; three stagings without a client used
+/// the attempts up and it ended `Abandoned { MaxAttemptsExhausted }`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() {
-    let (configuration, template, _account, _publication) = mutable_controller_configuration(true);
+    let (configuration, template, account, _publication) = mutable_controller_configuration(true);
     let owners = owners_of(&configuration, &template);
     drop(configuration);
     let store = InMemoryRuntimeStore::new();
@@ -5030,6 +5033,10 @@ async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() 
     assert_eq!(
         error.context, "NativeControllerCredentialRelease::AuthorityUnavailable",
         "the kept resume without its client refuses it"
+    );
+    assert!(
+        grant_mutations_refused_throughout(&machine, Duration::from_millis(250)).await,
+        "the kept resume without its client refuses every controller grant mutation while it waits"
     );
 
     let row = terminal_row(&machine, &session, &resume_id).await;
@@ -5056,6 +5063,9 @@ async fn a_kept_resume_whose_host_never_answers_ends_refused_after_its_budget() 
     publish_credential(&machine, &controller_selection(&template))
         .await
         .expect("the machine-wide refusal cleared with the kept resume's end");
+    mutate_controller_account(&machine, &account, true)
+        .await
+        .expect("the machine-wide refusal of grant mutations cleared with the kept resume's end");
 }
 
 /// An ordinary governed prompt (authenticated fresh, under its own
@@ -5192,6 +5202,26 @@ async fn mutate_controller_account(
             other => return other,
         }
     }
+}
+
+/// Whether every controller grant mutation tried through `machine`'s custody
+/// (`with_preserved_controllers`) for `period`, one every 20 ms, is refused
+/// as unavailable: the machine-wide refusal while work waits without its
+/// client. A busy custody answers so too, but only for the moment a runtime
+/// loop holds a driver, never for a whole period.
+async fn grant_mutations_refused_throughout(machine: &MeerkatMachine, period: Duration) -> bool {
+    use meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal;
+    let deadline = tokio::time::Instant::now() + period;
+    while tokio::time::Instant::now() < deadline {
+        let changed = machine
+            .try_controller_grant_mutation()
+            .and_then(|mut custody| custody.with_preserved_controllers(|_, _| Ok(()), || ()));
+        if changed != Err(ControllerCustodyRefusal::Unavailable) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
 }
 
 /// Whether `session`'s machine holds `input_id` for its controller

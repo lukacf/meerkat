@@ -124,6 +124,33 @@ them.
   `worker_gate_unavailable` row now expects the run kept at that restart and
   resumed once at the next restart, with the gate recovered.
 
+- `meerkat-runtime`, `meerkat`: `NativeGrantWorkConfiguration` and
+  `ScopedGrantComposition` (meerkat-runtime) and `GovernedRealmBootstrap`
+  (meerkat) gain the public field `kept_original`
+  (`Option<Arc<NativeKeptOriginalCheck>>`), the check that supplies again
+  the controller client of a kept governed input (see Changed). A struct
+  literal of one of them outside its crate must set it: `kept_original:
+  None` keeps such an input ending as a refused resume, as before.
+  `ScopedGrantComposition::with_retained_resume` installs it with the
+  retained-resume check, and `ScopedRetainedResume::into_checks` builds both
+  over the same owners.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`, `meerkat`:
+  a governed input admitted under its own authority association (a governed
+  prompt, for example) that a graceful requeue stop keeps, or that a restart
+  finds in the store, now runs at its session's next registration when its
+  host supplies its controller client again
+  (`NativeWorkAuthorizationHost::authenticate_kept_original`; a composition
+  built with `ScopedGrantComposition::with_retained_resume` asks its
+  controller owner for the stored selection), and a run left open whose
+  first input it is resumes on that client. Before, every attachment ended
+  such an input as a refused resume (`Abandoned { ResumeRefused }`) before it
+  served, and such a prompt had to be submitted again with a fresh
+  authentication of its caller: a host that still submits it again runs it
+  twice (see Upgrade notes). A host without the check ends such inputs as
+  before, and so does the stock governed realm, whose controller pins do not
+  outlive their registration.
+
 ### Added
 
 - `meerkat-runtime`: `MeerkatMachine::resumed_run_admission_held`, the run a
@@ -188,6 +215,17 @@ them.
   listing of the chapter also checks that names strictly increase across
   pages.
 
+- `meerkat-runtime`: `NativeWorkAuthorizationHost::authenticate_kept_original`,
+  the host's answer for a kept governed input's controller: it re-attests
+  the original through the host's own custody record, decides the
+  requester's invocation and the controller admission again under the
+  current grants, and returns a client for the stored association's
+  selection. The default answers `Readiness(UnsupportedScope)`, a definite
+  refusal. With it `NativeKeptOriginalCheck` (the local grant host's check,
+  `NativeGrantWorkConfiguration::kept_original`) and the scoped
+  composition's `ScopedRetainedResume::check_kept_original` and
+  `ScopedRetainedResume::into_checks`.
+
 ### Changed
 
 - `meerkat-runtime`: a host store realm lists the four scope kinds at once,
@@ -196,6 +234,24 @@ them.
   writer stopped on a slow store resumes sooner; the retry budget and the
   fencing are unchanged. A store now sees up to four `list_heads` calls of
   one realm at once, never two of one kind.
+
+- `meerkat-runtime`: a kept governed input whose host cannot say yet whether
+  it supplies its controller client (a `Readiness` answer other than
+  `UnsupportedScope`) waits for an answer: the machine holds it with its
+  attempts (`HoldInputController`), later work goes first, and a run left
+  open that it is bound to stays marked, with no other run of the session
+  starting before that run settles. It is asked again at each wake of the
+  session's runtime loop and at the session's next registration, never on a
+  timer, and is never refused for its time; a definite answer ends it as a
+  refused resume, with its runtime-termination receipt. While the machine
+  holds it without a client, it causes none of the machine-wide refusals of
+  work that waits without its client: controller grant mutations
+  (`NativeControllerGrantMutation::with_preserved_controllers`), credential
+  publications and auth lease releases and replacements proceed, as it has
+  no client to preserve and its pin decides again under the grants and
+  credentials current then. A held resume of retained work still causes
+  them, within its 30 s budget, and a revocation of a grant in a held
+  input's stored controller lineage is still refused as in use.
 
 ### Fixed
 
@@ -308,6 +364,17 @@ them.
   this release Core also lists the four scope kinds at once, so up to four
   `list_heads` calls of one realm run concurrently. Run the chapter against
   your store before you upgrade.
+
+- Hosts with a governed composition whose controller owner supplies clients
+  again after a stop or a restart: a governed prompt kept across a graceful
+  requeue stop or a restart now resumes once the host supplies its
+  controller again, where it ended as a refused resume. Submit such a prompt
+  again only once it ended refused (`Abandoned { ResumeRefused }`), or it
+  runs twice. A custom `NativeWorkAuthorizationHost` answers
+  `authenticate_kept_original` synchronously from its own records, as
+  `authenticate_retained_resume`, and answers `Readiness` only while it
+  cannot say now: the input waits for a definite answer without a time
+  bound.
 
 ### Known limitations
 

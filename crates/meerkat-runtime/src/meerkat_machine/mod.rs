@@ -1196,7 +1196,7 @@ pub use controller_custody::NativeControllerGrantMutation;
 pub use local_authorization::{
     AgentConfiguredMcpProvider, AgentInstallationGrant, ConfiguredMcpAttachmentProvider,
     ConfiguredMcpConjuncts, NativeGrantWorkConfiguration, NativeIngressCheck,
-    NativeRetainedResumeCheck,
+    NativeKeptOriginalCheck, NativeRetainedResumeCheck,
 };
 #[cfg(feature = "local-authorization")]
 mod scoped_original;
@@ -3993,10 +3993,10 @@ const SETTLED_RUN_TERMINAL_PUBLICATION_BOUND: std::time::Duration =
 pub(crate) const EXPIRED_KEPT_RUN_TERMINATION_REASON: &str =
     "a kept run outlived the stop's max age and was settled instead of resumed";
 
-/// The runtime-termination reason a kept governed input with no way back to
-/// its controller client, or a kept run it is the first input of, carries to
-/// its interaction terminals.
-const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
+/// The runtime-termination reason a kept governed input whose host supplies
+/// no controller client again, or a kept run it is the first input of,
+/// carries to its interaction terminals.
+pub(crate) const KEPT_GOVERNED_INPUT_TERMINATION_REASON: &str =
     "a kept governed input's controller cannot be supplied again without a fresh authentication";
 
 impl PendingRuntimeExecutorAttachment {
@@ -4449,18 +4449,20 @@ impl PendingRuntimeExecutorAttachment {
         Ok(expired)
     }
 
-    /// End, before this attachment can serve, every kept governed input with
-    /// no way back to its controller client: an input this registration
+    /// End, before this attachment can serve, every kept governed input whose
+    /// host supplies no controller client again: an input this registration
     /// recovered from the store that was admitted with an authority
     /// association of its own (a governed prompt, for example), not as a
-    /// resume of retained work, whose host is asked for the client again. A
-    /// controller client never survives the store, and the host contract can
-    /// supply such an input's client again only with a fresh authentication
-    /// of its caller, so it could never run: each run of it would fail before
-    /// the model is called until its attempts ran out, and while it waited
-    /// the whole machine would refuse controller grant changes, credential
-    /// publications and auth lease releases. Each queued one is abandoned
-    /// through the machine's `AbandonInput` as a refused resume
+    /// resume of retained work. A controller client never survives the
+    /// store; the registration's recovery asked the installed host for it
+    /// with the input's stored association
+    /// (`NativeWorkAuthorizationHost::authenticate_kept_original`). An input
+    /// whose client was pinned runs; one whose host cannot say yet is held by
+    /// the machine and waits for a later answer. One the host refused
+    /// definitely (or that no installed host answers for) could never run:
+    /// each run of it would fail before the model is called until its
+    /// attempts ran out. Each queued one is abandoned through the machine's
+    /// `AbandonInput` as a refused resume
     /// ([`crate::input_state::InputAbandonReason::ResumeRefused`]), in its own
     /// durable commit with the runless runtime-termination carrier it is owed.
     ///

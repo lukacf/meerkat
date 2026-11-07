@@ -698,6 +698,7 @@ impl Fixture {
             })),
             operation_owner: Arc::new(ControllerOwner),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         assert!(configuration.require_scoped_destination);

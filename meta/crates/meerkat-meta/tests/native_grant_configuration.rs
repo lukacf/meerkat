@@ -99,6 +99,7 @@ fn configuration_with(grants: Arc<LocalGrantAuthority>) -> NativeGrantWorkConfig
         invocation_owner: Arc::new(RefusingOwner),
         operation_owner: Arc::new(RefusingOwner),
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: true,
         configured_mcp_attachment: None,
     }

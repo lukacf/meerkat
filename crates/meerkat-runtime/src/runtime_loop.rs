@@ -8323,6 +8323,22 @@ async fn process_queue(
                     )
                     .await
             };
+            // Kept governed work whose host supplies no controller client
+            // again ends as before the host was asked: with the kept-governed
+            // termination reason.
+            let ended_kept = if asks.refused_kept.is_empty() {
+                crate::meerkat_machine::SettledRefusedResumes::default()
+            } else {
+                driver
+                    .lock()
+                    .await
+                    .settle_refused_queued_resumes(
+                        &asks.refused_kept,
+                        crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        || refused_terminals.owe(),
+                    )
+                    .await
+            };
             drop(queue_authority_guard);
             let published = publish_refused_retained_resumes(
                 driver,
@@ -8332,13 +8348,27 @@ async fn process_queue(
                 REFUSED_RETAINED_RESUME_REASON,
             )
             .await;
+            let published_kept = publish_refused_retained_resumes(
+                driver,
+                completions,
+                &*executor,
+                &ended_kept.settled,
+                crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+            )
+            .await;
             refused_terminals.release();
-            if let Some(error) = ended.failure.or(published.err()) {
-                let reason = format!("refused retained-work resumes could not be settled: {error}");
-                tracing::error!(%error, "failed closed settling refused retained-work resumes");
+            if let Some(error) = ended
+                .failure
+                .or(published.err())
+                .or(ended_kept.failure)
+                .or(published_kept.err())
+            {
+                let reason = format!("refused kept inputs could not be settled: {error}");
+                tracing::error!(%error, "failed closed settling refused kept inputs");
                 if let Some(completions) = completions {
                     let mut completions = completions.lock().await;
                     fail_completion_waiters(&mut completions, &asks.refused, reason.clone());
+                    fail_completion_waiters(&mut completions, &asks.refused_kept, reason.clone());
                 }
                 return stop_runtime_loop_executor_from_dsl_effect(
                     driver,
@@ -8350,16 +8380,27 @@ async fn process_queue(
                 )
                 .await;
             }
-            if let Some(run_id) = asks.refused_run.clone() {
+            let refused_run = match (asks.refused_run.clone(), asks.refused_kept_run.clone()) {
+                (Some(run_id), _) => Some((
+                    run_id,
+                    "its host supplied no controller for the retained work an input of the run \
+                     resumes",
+                )),
+                (None, Some(run_id)) => Some((
+                    run_id,
+                    "its first input is kept governed work whose controller cannot be supplied \
+                     again",
+                )),
+                (None, None) => None,
+            };
+            if let Some((run_id, detail)) = refused_run {
                 match settle_refused_resumed_run(
                     driver,
                     completions,
                     executor,
                     authority_binding,
                     &run_id,
-                    "its host supplied no controller for the retained work an input of the run \
-                     resumes"
-                        .to_string(),
+                    detail.to_string(),
                 )
                 .await
                 {
@@ -8382,7 +8423,7 @@ async fn process_queue(
                     ResumedRunAdmissionLap::Exit(wake) => return wake,
                 }
             }
-            if asks.changed_plan(ended.settled.len()) {
+            if asks.changed_plan(ended.settled.len() + ended_kept.settled.len()) {
                 continue;
             }
         }
@@ -8794,26 +8835,27 @@ async fn process_queue(
                     input_ids: superseded,
                 };
             }
-            // No batch can select a kept resume of retained work still
+            // No batch can select a kept input (a resume of retained work, or
+            // governed work admitted under its own association) still
             // without its client, by construction: this lap's first step
             // asked every such row the machine did not hold (a client pins
             // it, a definite answer ends it, any other answer holds it), or,
             // while the registration drains for its unregister, held each
             // through the machine without asking; a released resumable run
-            // holds its requeued kept resumes again; and the machine's batch
+            // holds its requeued kept inputs again; and the machine's batch
             // filter never selects a held input. One here means the shell
             // and the machine disagree: fail closed instead of staging it
             // without its client.
             if let Some(unpinned) = batch
                 .input_ids()
                 .iter()
-                .find(|input_id| d.kept_retained_resume_without_client(input_id))
+                .find(|input_id| d.kept_input_without_client(input_id))
             {
                 break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
                     input_ids: batch.input_ids().to_vec(),
                     reason: format!(
-                        "the selected batch names kept retained-work resume {unpinned} without its \
-                         controller client"
+                        "the selected batch names kept input {unpinned} without its controller \
+                         client"
                     ),
                 };
             }

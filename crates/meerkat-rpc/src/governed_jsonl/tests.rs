@@ -1106,6 +1106,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: mcp,
             grants,
             ingress,

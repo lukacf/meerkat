@@ -1966,13 +1966,18 @@ impl UnifiedRuntime {
     /// one the runtime holds a record with no file, which refuses to set a
     /// fence. On a candidate launch the record writes nothing: the
     /// principals it accepts a token without `exp` for are kept in this
-    /// process only.
+    /// process only. The composition's personal accounts on MCP servers read
+    /// the same record: a revocation suspends the revoked person's accounts
+    /// in the private members opened before it.
     pub fn set_console_session_fences(
         &mut self,
         fences: crate::auth::session_fence::ConsoleSessionFences,
     ) {
         if !self.speaks_for_composition() {
             fences.keep_non_expiring_notes_in_process();
+        }
+        if let Some(accounts) = self.mob_runtime().personal_mcp_accounts() {
+            accounts.bind_session_fences(fences.clone());
         }
         self.console_session_fences = fences;
     }

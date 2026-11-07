@@ -3097,6 +3097,7 @@ async fn governed_bound_lifetime(
         PersistentAuthority::StateDir,
         None,
         None,
+        None,
     )
     .await
     .expect("persistent spec")

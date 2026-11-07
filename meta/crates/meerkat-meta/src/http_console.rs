@@ -8177,9 +8177,16 @@ fn console_audience_view(
 pub(crate) fn console_person_private_owner_key(
     human: &crate::runtime::AuthenticatedConsoleHuman,
 ) -> String {
+    person_private_owner_key(human.issuer(), human.subject())
+}
+
+/// The private-owner key of the person a verified OIDC `issuer` and `subject`
+/// name: the one digest [`console_person_private_owner_key`], `whoami`'s
+/// `caller_scope` and the personal account owner check all compute.
+pub(crate) fn person_private_owner_key(issuer: &str, subject: &str) -> String {
     console_caller_scope(&ConsoleSendScope::Human {
-        issuer: human.issuer().to_string(),
-        subject: human.subject().to_string(),
+        issuer: issuer.to_string(),
+        subject: subject.to_string(),
     })
 }
 

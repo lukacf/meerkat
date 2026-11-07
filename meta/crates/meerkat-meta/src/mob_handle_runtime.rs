@@ -1372,6 +1372,53 @@ fn with_pre_build_hook(
     })
 }
 
+/// `factory` with the owner check of the composition's personal accounts on
+/// MCP servers, keeping the people's accounts in its own credential store
+/// below `realm` (see [`crate::personal_accounts`]). Without a credential
+/// store no member build keeps a personal server. Unchanged without
+/// personal accounts.
+fn with_personal_accounts(
+    factory: AgentFactory,
+    accounts: Option<&Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+    runtime: &meerkat_runtime::MeerkatMachine,
+    realm: meerkat_core::RealmId,
+) -> AgentFactory {
+    let Some(accounts) = accounts else {
+        return factory;
+    };
+    if let Err(error) = accounts.keep_accounts_in(
+        &factory,
+        runtime.provider_auth_runtime_authority(),
+        realm,
+        None,
+    ) {
+        tracing::warn!(
+            %error,
+            "personal accounts on MCP servers have no credential store; no member build keeps a \
+             personal server"
+        );
+    }
+    factory.with_mcp_adapter_composer(accounts.composer(None))
+}
+
+/// `hook`, then the classification of the build's personal servers with
+/// `accounts` (see [`crate::personal_accounts`]), for a stock constructor's
+/// own layer. Its hook (the host's session hook, its document bindings) runs
+/// after the spec's base layer has classified the build, so a personal
+/// server that hook adds is classified here too; classifying a build again
+/// changes nothing the first pass decided.
+fn classifying_personal_servers(
+    hook: PreBuildHook,
+    accounts: Option<&Arc<crate::personal_accounts::PersonalMcpAccounts>>,
+) -> PreBuildHook {
+    let Some(accounts) = accounts else {
+        return hook;
+    };
+    let slot = crate::personal_accounts::build::PersonalAccountsSlot::default();
+    slot.fill(Arc::clone(accounts));
+    slot.after_hook(hook)
+}
+
 /// `hook`, then the refusal of a marked document MCP descriptor it left
 /// unresolved ([`crate::document_mcp_marker`]). A host document binding
 /// resolves its descriptors in the hook, so the refusal runs after it, on
@@ -6929,6 +6976,10 @@ pub struct MobBootstrapSpec {
     /// identity (`crate::memory::side_chat_memory`); see
     /// [`Self::side_chat_memory_slot`].
     pub(crate) side_chat_memory_slot: crate::memory::side_chat_memory::SideChatMemorySlot,
+    /// Late-bound personal accounts the base session-service wrapper
+    /// classifies each member build's personal MCP servers with
+    /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
+    pub(crate) personal_accounts_slot: crate::personal_accounts::build::PersonalAccountsSlot,
     /// The host's fork instruction policy for this mob's member forks
     /// ([`Self::with_fork_instruction_policy`]). The mob does not persist
     /// it, so bootstrap applies it on create and on resume.
@@ -7017,9 +7068,11 @@ impl MobBootstrapSpec {
         // layers around it.
         let dispatch_taint_slot = crate::memory::dispatch_taint::DispatchTaintSlot::default();
         let side_chat_memory_slot = crate::memory::side_chat_memory::SideChatMemorySlot::default();
+        let personal_accounts_slot =
+            crate::personal_accounts::build::PersonalAccountsSlot::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: side_chat_memory_slot.after_hook(hook),
+            hook: personal_accounts_slot.after_hook(side_chat_memory_slot.after_hook(hook)),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7097,6 +7150,7 @@ impl MobBootstrapSpec {
             controller_pin_source: None,
             dispatch_taint_slot,
             side_chat_memory_slot,
+            personal_accounts_slot,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -7123,6 +7177,23 @@ impl MobBootstrapSpec {
         &self,
     ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
         self.side_chat_memory_slot.clone()
+    }
+
+    /// Classify every member build of this spec's personal MCP servers with
+    /// `accounts` (see [`crate::personal_accounts`]): a member private to its
+    /// owner keeps them and carries its owner's credential source, every
+    /// other member gets none. The member factory the spec's session service
+    /// builds with must compose its MCP adapters with
+    /// [`crate::PersonalMcpAccounts::composer`] and keep the accounts in its
+    /// credential store ([`crate::PersonalMcpAccounts::keep_accounts_in`]); a
+    /// build whose factory does neither keeps no personal server.
+    #[must_use]
+    pub fn with_personal_mcp_accounts(
+        self,
+        accounts: Arc<crate::personal_accounts::PersonalMcpAccounts>,
+    ) -> Self {
+        self.personal_accounts_slot.fill(accounts);
+        self
     }
 
     /// Bind the session builder's own default agent-LLM-client decorator
@@ -8519,6 +8590,7 @@ impl MobBootstrapSpec {
             PersistentAuthority::StateDir,
             None,
             None,
+            None,
         )
         .await
     }
@@ -8546,6 +8618,10 @@ impl MobBootstrapSpec {
     /// when it names one: the factory holds it in place of the process
     /// default before the member builder takes it, so every agent of the
     /// composition resolves and persists provider credentials there.
+    ///
+    /// `personal_accounts` are the composition's personal accounts on MCP
+    /// servers, when it has any: the factory gets their owner check and
+    /// keeps them in its own credential store.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn persistent_inner_with_provider_stores(
         definition: MobDefinition,
@@ -8570,6 +8646,7 @@ impl MobBootstrapSpec {
         authority: PersistentAuthority,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+        personal_accounts: Option<Arc<crate::personal_accounts::PersonalMcpAccounts>>,
     ) -> Result<Self, StorageResolutionError> {
         // The startup checks and the composition record need to know whether
         // the mob store outlives the process.
@@ -8757,6 +8834,12 @@ impl MobBootstrapSpec {
             factory = factory
                 .with_image_generation_machine(weak_image_generation_machine(&runtime_adapter));
         }
+        factory = with_personal_accounts(
+            factory,
+            personal_accounts.as_ref(),
+            &runtime_adapter,
+            meerkat_realm.clone(),
+        );
         let config = crate::compaction_policy::with_meta_compaction_defaults(
             agent_config.unwrap_or_default(),
         );
@@ -8913,7 +8996,10 @@ impl MobBootstrapSpec {
         let controller_pin_source: Arc<dyn crate::identity_first::bridge::ControllerPinSource> =
             concrete_session_service.clone();
         let session_service: Arc<dyn MobSessionService> = concrete_session_service;
-        let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(
+            refusing_unresolved_document_markers(hook),
+            personal_accounts.as_ref(),
+        );
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,
@@ -9084,6 +9170,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -9113,6 +9200,7 @@ impl MobBootstrapSpec {
         operation_refusal_observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+        personal_accounts: Option<Arc<crate::personal_accounts::PersonalMcpAccounts>>,
     ) -> Result<Self, StorageResolutionError> {
         caps.image_generation |= mob_definition_may_use_image_generation(&definition);
         let config = crate::compaction_policy::with_meta_compaction_defaults(
@@ -9213,6 +9301,15 @@ impl MobBootstrapSpec {
             factory = factory
                 .with_image_generation_machine(weak_image_generation_machine(&runtime_adapter));
         }
+        factory = with_personal_accounts(
+            factory,
+            personal_accounts.as_ref(),
+            &runtime_adapter,
+            provider_meerkat_stores.as_ref().map_or_else(
+                crate::storage_provider::default_meerkat_level_realm,
+                |provider| provider.realm.clone(),
+            ),
+        );
         let member_model_config = Arc::new(config.clone());
         let mut builder = FactoryAgentBuilder::new(factory, config);
         // What the member builder's factory resolves provider credentials
@@ -9328,7 +9425,10 @@ impl MobBootstrapSpec {
             runtime_adapter.clone(),
             after_create_hook,
         ));
-        let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(
+            refusing_unresolved_document_markers(hook),
+            personal_accounts.as_ref(),
+        );
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,
@@ -10029,6 +10129,8 @@ pub struct MobRuntime {
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
     console_schedules: crate::console_schedules::ConsoleSchedules,
+    /// See [`MobBootstrapSpec::with_personal_mcp_accounts`].
+    personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -10978,6 +11080,7 @@ impl MobRuntime {
                 member_mcp_custody: spec.member_mcp_custody,
                 side_chat_lineages: Arc::default(),
                 console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+                personal_accounts: spec.personal_accounts_slot,
             },
             pending_activation,
         ))
@@ -11032,6 +11135,7 @@ impl MobRuntime {
             member_mcp_custody: None,
             side_chat_lineages: Arc::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+            personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
         }
     }
 
@@ -11039,6 +11143,14 @@ impl MobRuntime {
     /// [`MobBootstrapSpec::with_member_auth_binding`]).
     pub(crate) fn member_auth_binding(&self) -> Option<&meerkat_core::AuthBindingRef> {
         self.member_auth_binding.as_ref()
+    }
+
+    /// The composition's personal accounts on MCP servers, when it has any
+    /// (see [`MobBootstrapSpec::with_personal_mcp_accounts`]).
+    pub(crate) fn personal_mcp_accounts(
+        &self,
+    ) -> Option<Arc<crate::personal_accounts::PersonalMcpAccounts>> {
+        self.personal_accounts.accounts()
     }
 
     /// The verified side chat lineages of this runtime's member incarnations,
@@ -21622,6 +21734,7 @@ comms = true
                 PersistentAuthority::StateDir,
                 None,
                 None,
+                None,
             )
             .await
             .expect("persistent constructor")
@@ -21639,6 +21752,7 @@ comms = true
                 None,
                 None,
                 provider,
+                None,
                 None,
                 None,
                 None,

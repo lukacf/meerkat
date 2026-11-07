@@ -1224,6 +1224,35 @@ mod tests {
         );
     }
 
+    /// The premise of the intent's equality: the transcript digest (what a
+    /// projection's revision is) covers an operator-instruction entry's
+    /// identity, so two transcripts whose snapshot entry differs only in its
+    /// identity, here its entry sequence, have different revisions. Two
+    /// intents with one projection therefore carry one snapshot.
+    #[test]
+    fn the_transcript_digest_covers_an_instruction_entry_identity() {
+        let session_id = crate::types::SessionId::new();
+        let row = |sequence: u64| {
+            let mut system = crate::types::SystemMessage::new("operator instructions");
+            system.instruction_entry = Some(
+                serde_json::from_value(serde_json::json!({
+                    "render_version": 1,
+                    "origin_session_id": session_id,
+                    "entry_sequence": sequence,
+                    "kind": "snapshot",
+                    "target_generation": 2,
+                }))
+                .unwrap(),
+            );
+            crate::types::Message::System(system)
+        };
+        assert_ne!(
+            crate::session::transcript_messages_digest(&[row(3)]).unwrap(),
+            crate::session::transcript_messages_digest(&[row(4)]).unwrap(),
+            "the transcript digest covers the entry's identity"
+        );
+    }
+
     fn range(start: u64, end: u64) -> MessageRange {
         MessageRange::new(start, end).unwrap()
     }

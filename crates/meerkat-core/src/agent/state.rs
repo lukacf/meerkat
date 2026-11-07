@@ -15123,6 +15123,97 @@ mod tests {
         assert!(finalized.contains(&carried));
     }
 
+    /// Two staged compactions commit together, and the runtime store's
+    /// outbox names their projections in its own order (by digest), not in
+    /// the order they were staged. The session publishes each completion and
+    /// its operator-instruction snapshot in staging order, so the published
+    /// entry sequences strictly increase. RED before: the finalize published
+    /// them in the order the outbox named them.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn staged_compactions_publish_their_snapshots_in_staging_order() {
+        let memory_store = Arc::new(AbortRetryMemoryStore::new());
+        let mut session = crate::Session::new();
+        let session_id = session.id().clone();
+        let snapshot = |sequence: u64| -> crate::session::InstructionEntryIdentity {
+            serde_json::from_value(serde_json::json!({
+                "render_version": 1,
+                "origin_session_id": session_id,
+                "entry_sequence": sequence,
+                "kind": "snapshot",
+                "target_generation": sequence,
+            }))
+            .unwrap()
+        };
+        let first = append_test_projection(&mut session, "first", Some(snapshot(1)));
+        let second = append_test_projection(&mut session, "second", Some(snapshot(2)));
+        memory_store
+            .staged
+            .lock()
+            .unwrap()
+            .extend([first.clone(), second.clone()]);
+        let (event_tx, mut event_rx) = mpsc::channel(64);
+        let mut agent = with_test_turn_state_handle_for_session(AgentBuilder::new(), session)
+            .memory_store(memory_store.clone())
+            .with_compaction_commit_coordinator(Arc::new(AllowCompactionCoordinator {
+                session_id: session_id.clone(),
+            }))
+            .with_default_event_tx(event_tx)
+            .build_standalone(
+                Arc::new(CompactionTerminalLlmClient::new(
+                    PostCompactionOutcome::CallbackPending,
+                )),
+                Arc::new(CallbackPendingTools::new()),
+                Arc::new(NoopStore),
+            )
+            .await;
+        let mut intents = agent
+            .session()
+            .validated_compaction_projection_intents()
+            .unwrap();
+        assert_eq!(
+            intents
+                .iter()
+                .map(|intent| intent.projection.clone())
+                .collect::<Vec<_>>(),
+            vec![first, second],
+            "the session lists the intents in staging order"
+        );
+        let staged_messages_before = intents
+            .iter()
+            .map(|intent| intent.messages_before)
+            .collect::<Vec<_>>();
+        // The outbox names them in its own order: here, the reverse.
+        intents.reverse();
+
+        agent
+            .reconcile_runtime_compaction_projections(&intents)
+            .await
+            .expect("both staged compactions commit");
+        let events = drain_events(&mut event_rx);
+        assert_eq!(
+            instruction_observations(&events)
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "the snapshots publish in staging order, their entry sequences strictly increasing"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::event::AgentEvent::CompactionCompleted {
+                        messages_before, ..
+                    } => Some(*messages_before),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            staged_messages_before,
+            "the completions publish in staging order"
+        );
+    }
+
     /// A run checkpoint wrote a pending compaction's rewrite and intent into
     /// the run's provisional tail, and then the run is interrupted. The abort
     /// releases the transaction and leaves the rewrite, the intent and the
@@ -15338,6 +15429,18 @@ mod tests {
         session: &mut crate::Session,
         label: &str,
     ) -> crate::memory::CompactionProjectionId {
+        append_test_projection(session, label, None)
+    }
+
+    /// A staged compaction of the session's whole transcript, labelled
+    /// `label`, whose intent carries `instruction_snapshot` as the snapshot
+    /// entry its fold inserted (a fixture identity: no row of the rewrite
+    /// carries it).
+    fn append_test_projection(
+        session: &mut crate::Session,
+        label: &str,
+        instruction_snapshot: Option<crate::session::InstructionEntryIdentity>,
+    ) -> crate::memory::CompactionProjectionId {
         session.push(Message::User(UserMessage::text(format!(
             "verbose context {label} one"
         ))));
@@ -15381,7 +15484,7 @@ mod tests {
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
-                instruction_snapshot: None,
+                instruction_snapshot,
             })
             .unwrap();
         projection

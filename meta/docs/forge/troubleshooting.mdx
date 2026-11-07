@@ -361,6 +361,25 @@ minute. The address is the connection's own, so everyone who reaches the
 Console through one relay (an SSH or IAP tunnel, a TLS ingress) shares that
 relay's address limit. Wait a minute, then sign in again.
 
+### OIDC sign-in is refused
+
+An application with OIDC sign-in sends people to its identity provider and
+admits only a verified email that is the operator's or on the
+`CONSOLE_ALLOWED_EMAILS` list. The refusal page says which:
+- no verified email: the provider did not confirm one for that account;
+  confirm it there, or use an account whose email the provider verifies;
+- not on the list: the operator adds the address to `CONSOLE_ALLOWED_EMAILS`
+  with **Change private settings**, then restarts the application;
+- the identity provider is unavailable: the Console could not read the
+  provider's settings or keys. Check that the provider is reachable from the
+  deployment computer and that its issuer is exactly the one in
+  `application/console.json`;
+- the sign-in expired or was started elsewhere: a sign-in lasts ten minutes
+  and finishes in the browser that started it. Sign in again.
+
+The provider must list the Console's `/login/callback` address as a redirect
+URI, or it refuses the sign-in before it reaches the Console.
+
 ### Administrators added in the Console after a rollback
 
 The Console keeps its access rules, the administrators and rules added in its

@@ -73,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   capped, and every account costs the same scrypt check. Signing in over a
   live session ends the earlier login, and a path with dot or empty
   segments is refused.
+- Forge: with OIDC sign-in the console accepts only tokens the front
+  signed under its own issuer: not the provider's ID token, not another key
+  or issuer, not an unverified or missing email, and only the listed
+  people. A sign-in's state is spent once and bound to the browser that
+  started it; the provider's code exchange carries the PKCE verifier and
+  the client's credentials, and its tokens never reach the browser.
 
 ### Upgrade
 
@@ -122,6 +128,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `config/access.toml`, and Forge would then refuse to start, change or
   update the installation. Update forward instead; the console then reads
   its kept copy again.
+- Forge: OIDC sign-in is an application's own choice, for a new
+  installation: no update moves an installation to it or from it. Register
+  `<Console address>/login/callback` as a redirect URI with the identity
+  provider (`http://127.0.0.1:<port>/login/callback` for the local
+  Console). Keep `.mobkit/console-oidc-issuer` with the installation's
+  backups: the console knows each person by it, and a new one makes
+  everyone new to the console.
 
 ### Added
 
@@ -147,6 +160,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Forge: the front forwards native consent reads and decisions
   (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
   rules, so people decide native consent in the console as themselves.
+- Forge: OIDC sign-in for the console
+  (`{"authentication":"oidc","issuer":...,"client_id":...,"client_secret":{"env":NAME}}`,
+  or `{"file":PATH}` for the secret). People sign in at the application's
+  identity provider with the authorization code flow, PKCE, state and
+  nonce. The front verifies the provider's ID token (its signature through
+  the provider's published keys, fetched again for an unknown key at most
+  every 30 seconds; issuer, audience, authorized party, expiry and issue
+  time within a minute, and the sign-in's nonce) and admits a verified
+  email that is the operator's (`CONSOLE_USER_ID`) or listed in
+  `CONSOLE_ALLOWED_EMAILS`. It keeps none of the provider's tokens and signs
+  the console's tokens itself, as its own issuer recorded once per
+  installation (`.mobkit/console-oidc-issuer`), with an ES256 key kept in
+  `.mobkit/console-oidc-signing.pem`; each token's subject carries the
+  provider's issuer and subject. The console gets the front's issuer and
+  public key only (`provider: "oidc"`). The client secret is referenced, by
+  a declared secret private field or a private file, never written into
+  source. Needs the Meta runtime.
 
 ### Changed
 
@@ -176,6 +206,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   changes, controller review or setup answers. Use the product route.
 - Forge: the same holds for an application on the MobKit runtime, since
   named accounts need the Meta runtime.
+- Forge: OIDC sign-in needs the Meta runtime too. Signing out ends the
+  front's login and the console's tokens for it, not the person's session
+  at the identity provider. The front reaches the provider directly, not
+  through a proxy set in its environment.
 
 ## [0.9.10] - 2026-11-04
 

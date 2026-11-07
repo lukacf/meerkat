@@ -465,6 +465,19 @@ settings** and give each of them a named account. A single shared Console
 password lets everyone who knows it chat, but approvals (frontend changes, the
 controller review and setup prompts) need a person's own account.
 
+An application can instead sign people in at its organization's identity
+provider (OIDC). Its setup then asks for the operator's email as the Console
+user, the OIDC client secret (or the application reads it from a private
+file), and optionally the email addresses of the further people who may sign
+in. Register the Console's sign-in callback with the identity provider as a
+redirect URI: `http://127.0.0.1:<port>/login/callback` for the local Console,
+or the same path on its public address. People then choose **Continue to sign
+in** and sign in at the provider; only a verified email that is the
+operator's or on the list opens the Console, each person as themselves. The
+Console keeps none of the provider's tokens. Keep the installation's
+`.mobkit/` folder in its backups: it holds the Console's own sign-in issuer,
+by which the Console knows each person.
+
 Follow the installation action and its checks. **Install and start** starts an
 ordinary supported package. **Install application** checks the selected
 Meta/Toolkit runtime and leaves the application stopped. Its **Application setup

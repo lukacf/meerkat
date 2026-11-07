@@ -668,6 +668,13 @@ They are the installation's own account; the operator adds a named account for
 each further person with the generated setup, and each signed-in person is their
 own principal. {"authentication":"local-password"} with the same fields is one
 account that everyone with its password shares: it chats but approves nothing.
+To sign people in at the organization's identity provider instead, declare
+{"authentication":"oidc","issuer":"<exact https issuer>","client_id":"<client id>",
+"client_secret":{"env":"<declared required secret field>"}} or
+{"file":"<absolute path>"} for the secret, with required nonsecret
+CONSOLE_USER_ID (the operator's email) and optional nonsecret
+CONSOLE_ALLOWED_EMAILS; never put the client secret itself in source. OIDC
+sign-in needs the Meta runtime.
 Optional on_console_input(event) receives a host-authenticated Console submission
 only after actual native admission. The native timeline does not retain the human
 principal. Neither an agent message nor a caller-controlled origin is approval.

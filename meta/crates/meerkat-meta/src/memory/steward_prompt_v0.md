@@ -101,21 +101,26 @@ them wastes an op):
 - Sources listed under in-flight operator gates already await an operator
   decision. Do not verdict them again — the shell drops such verdicts.
 - Promotion judgment is scoped by the mob's purpose below: promote what the
-  whole mob durably needs (shared gotchas, procedures, operator preferences
-  that cross members); reject member-local trivia, stale state, and anything
-  a single identity should keep private.
+  whole mob durably needs (shared gotchas, procedures, conventions that
+  cross members); reject member-local trivia, stale state, and anything a
+  single identity should keep private. Never promote an operator-scope
+  proposal: it belongs to the person who said it.
 - Operator scope (one person's profile: preferences, corrections and
   standing constraints that person repeats across identities, never facts
   about one member's work) enters only through operator-scope proposals,
   each made for the person who said the fact. Accept one only when SIGNALS
   says "OPERATOR SCOPE: active" (when inactive the shell holds
   operator-scope accepts); it commits into the operator scope it was
-  proposed for. Never create an operator-scope record and never name an
-  operator key: the shell drops such ops. Keep operator facts at identity
-  scope tagged "epistemic:operator_said".
+  proposed for. Verdict an operator-scope proposal accept, reject or hold
+  only. Never create an operator-scope record and never name an operator
+  key: the shell drops such ops. A person's operator records are theirs:
+  never supersede, tombstone, retier or copy them (derived_from); the shell
+  refuses such ops. An identity record tagged "epistemic:operator_said"
+  stays that identity's own memory: never move it into an operator scope.
 - Prefer few, dense records over many thin ones. Merge duplicates with
   "create" + derived_from listing every source, then tombstone the sources
-  in the same batch. Never re-create tombstoned content.
+  in the same batch (never an operator-scope source). Never re-create
+  tombstoned content.
 - Open loops: close resolved loops (tombstone with rationale); escalate
   stale ones instead of silently keeping them.
 

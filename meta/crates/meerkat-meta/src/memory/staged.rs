@@ -469,6 +469,9 @@ pub fn validate_batch(
                         });
                     }
                 }
+                check_steward_operator_write(op_index, batch, scope, derived_from, |source| {
+                    lookup(&overlay, source)
+                })?;
                 let tainted = chain_reaches_taint(&overlay, view, derived_from.iter());
                 if tainted && *trust > TrustTier::llm_write_ceiling() {
                     return Err(StagedBatchError::TransitiveTaintCeiling {
@@ -529,6 +532,7 @@ pub fn validate_batch(
                         id: prior.clone(),
                     });
                 }
+                check_steward_operator_change(op_index, batch, &prior_view.scope)?;
                 // The new record lives in the prior's scope (§8.2: supersede
                 // stays within a single record's lineage in its own scope).
                 check_scope(op_index, batch, &prior_view.scope)?;
@@ -548,6 +552,13 @@ pub fn validate_batch(
                         });
                     }
                 }
+                check_steward_operator_write(
+                    op_index,
+                    batch,
+                    &prior_view.scope,
+                    derived_from,
+                    |source| lookup(&overlay, source),
+                )?;
                 // Acyclicity: explicit-id supersedes can express cycles
                 // (imports of chains); walk the prior's chain with the new
                 // edge in place.
@@ -629,6 +640,7 @@ pub fn validate_batch(
                         id: id.clone(),
                     });
                 }
+                check_steward_operator_change(op_index, batch, &existing.scope)?;
                 check_scope(op_index, batch, &existing.scope)?;
                 batch_tombstoned.insert((existing.scope.clone(), existing.content_hash.clone()));
                 // Overlaying `Tombstoned` over a `Quarantined` view must not
@@ -658,6 +670,7 @@ pub fn validate_batch(
                         id: id.clone(),
                     });
                 }
+                check_steward_operator_change(op_index, batch, &existing.scope)?;
                 check_scope(op_index, batch, &existing.scope)?;
                 if *trust == TrustTier::AgentVerified {
                     // §10.2: agent_verified is granted only by a steward
@@ -758,6 +771,53 @@ fn check_scope(
         }
     }
     Ok(())
+}
+
+/// A person's operator memory is theirs: a steward batch never changes an
+/// operator-scope record (supersede, tombstone, retier).
+fn check_steward_operator_change(
+    op_index: usize,
+    batch: &StagedMutationBatch,
+    target: &MemoryScope,
+) -> Result<(), StagedBatchError> {
+    if matches!(batch.author, MemoryAuthor::Steward { .. })
+        && matches!(target, MemoryScope::Operator { .. })
+    {
+        return Err(StagedBatchError::OperatorMemoryRefused {
+            op_index,
+            refusal: OperatorMemoryRefusal::ChangesOperatorRecord,
+        });
+    }
+    Ok(())
+}
+
+/// A steward batch writes an operator scope only in a reviewed batch (the
+/// accept of the person's own proposal), and never derives a record in
+/// another scope from an operator-scope record.
+fn check_steward_operator_write(
+    op_index: usize,
+    batch: &StagedMutationBatch,
+    target: &MemoryScope,
+    derived_from: &[MemoryId],
+    lookup: impl Fn(&str) -> Option<StagedRecordView>,
+) -> Result<(), StagedBatchError> {
+    if !matches!(batch.author, MemoryAuthor::Steward { .. }) {
+        return Ok(());
+    }
+    let refusal = if matches!(target, MemoryScope::Operator { .. }) {
+        (batch.kind != StagedBatchKind::ReviewVerdict)
+            .then_some(OperatorMemoryRefusal::WritesOperatorScope)
+    } else {
+        derived_from
+            .iter()
+            .filter_map(|source| lookup(source))
+            .any(|source| matches!(source.scope, MemoryScope::Operator { .. }))
+            .then_some(OperatorMemoryRefusal::CopiesOperatorRecord)
+    };
+    match refusal {
+        Some(refusal) => Err(StagedBatchError::OperatorMemoryRefused { op_index, refusal }),
+        None => Ok(()),
+    }
 }
 
 fn check_tier_assignment(

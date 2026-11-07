@@ -38,10 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Forge: a single shared console account
   (`{"authentication":"local-password"}`) no longer approves frontend
-  changes, answers the controller review or answers setup prompts: each is
-  refused with 403 `approver_unauthenticated`. Reads stay open. Named
-  accounts (`{"authentication":"local-accounts"}`) sign each person in as
-  themselves.
+  changes, answers the controller review or answers the Forge setup
+  bridge's prompts: each is refused with 403 `approver_unauthenticated`.
+  The native Toolkit setup panel's answers are refused by the console itself
+  (403). Reads stay open. Named accounts
+  (`{"authentication":"local-accounts"}`) sign each person in as themselves;
+  they need the Meta runtime, so on the MobKit runtime the console approves
+  nothing.
 
 ### Security
 
@@ -64,7 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   when the console does not confirm, the front still ends its own session
   and says so. Failed sign-ins are limited per account and per client
   address, so one person's mistakes no longer lock out the others, and
-  login forms and sessions are bounded per address and per account.
+  login forms and sessions are bounded per address and per account. The
+  client address is the connection's peer, never a forwarded-for header;
+  an attempt counts before its password check, checks running at once are
+  capped, and every account costs the same scrypt check. Signing in over a
+  live session ends the earlier login, and a path with dot or empty
+  segments is refused.
 
 ### Upgrade
 
@@ -91,11 +99,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   named accounts on its next update. That update changes only
   `application/console.json` (`local-password` to `local-accounts`); the
   private fields, the installation's own account and password, and the
-  operator stay as they are. Add an account for each further person with
+  operator stay as they are. The installation's own account then becomes
+  the operator's personal account and the first administrator: if others
+  know its Console password, change it (Change private settings) when you
+  switch. Add an account for each further person with
   `.venv/bin/python setup.py` on the deployment computer.
+- Forge: named accounts need the Meta runtime. An application on the MobKit
+  runtime keeps one shared account, whose console approves nothing.
 - Forge: an application on the legacy ordinary route keeps one shared
   console account, which decides nothing in its console. To approve there,
   build the application again on the product route.
+- Forge: the console keeps its access rules in
+  `.mobkit/console-access.toml`, copied once from `config/access.toml` at
+  the first start. An installation whose console already rewrote
+  `config/access.toml` needs its original bytes restored once. After a
+  rollback to a package built by an earlier Forge, the console reads
+  `config/access.toml` again, so administrators added in the console are
+  absent until you add them again: access fails closed.
 
 ### Added
 
@@ -130,18 +150,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Forge: the controller review is open to every console administrator and
-  stays open after the person who opened it signs out.
-- Forge: `config/access.toml` may list further admins after the
-  installation's own account. Forge keeps managing an installation after
-  the console's Access panel rewrites that file, as long as access stays
-  enabled and the installation's own account stays an admin.
+- Forge: the controller review is open to every console administrator. It
+  starts at an administrator's first sign-in and stays open after that
+  person signs out, until their sign-in would have expired (8 hours).
+- Forge: the console keeps its access edits (a second administrator, rules,
+  groups) in its own live copy, `.mobkit/console-access.toml`, so they no
+  longer stop Forge from changing private settings, starting, updating,
+  downloading or supervising the installation. `config/access.toml` stays
+  the package's exact bytes and may list further admins after the
+  installation's own account.
 
 ### Known limitations
 
 - Forge: an application on the legacy ordinary route keeps one shared
   console account, which decides nothing in its console: no frontend
   changes, controller review or setup answers. Use the product route.
+- Forge: the same holds for an application on the MobKit runtime, since
+  named accounts need the Meta runtime.
 
 ## [0.9.10] - 2026-11-04
 

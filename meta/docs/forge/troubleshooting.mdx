@@ -354,6 +354,23 @@ computer: run `.venv/bin/python setup.py` in the project folder, press Enter to
 keep each saved setting, enter the account name and a new password, then
 restart the application.
 
+### Sign-in says "Too many login attempts"
+
+Failed sign-ins are limited per account and per client address for one
+minute. The address is the connection's own, so everyone who reaches the
+Console through one relay (an SSH or IAP tunnel, a TLS ingress) shares that
+relay's address limit. Wait a minute, then sign in again.
+
+### Administrators added in the Console after a rollback
+
+The Console keeps its access rules, the administrators and rules added in its
+Access panel included, in `.mobkit/console-access.toml`. Its first start
+copies that file from the package's `config/access.toml`, which stays as
+installed. A package built by an earlier Forge reads `config/access.toml`
+instead, so after a rollback to such a package the administrators added in
+the Console are missing until they are added again. Access fails closed
+meanwhile.
+
 ### An update crosses into Meta 0.9.4
 
 Meta 0.9.4 keeps sessions and identities in Core's own stores and refuses a

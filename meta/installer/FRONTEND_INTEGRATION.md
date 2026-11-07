@@ -101,8 +101,9 @@ The prepared proposal must contain `change_id`, `configuration` and
 `expected_revision`. Its change ID uses 1-128 letters, numbers, dots,
 underscores, colons or ASCII hyphens. The application may retain additional
 proposal fields. The facade binds the complete proposal to the current host,
-human account and expiry, then returns a protected proof alongside it. Proofs
-expire after 300 seconds.
+the signed-in login and its account, and expiry, then returns a protected
+proof alongside it. Only the login that prepared it can submit it, and not
+after that login ends. Proofs expire after 300 seconds.
 
 Successful responses include `protocol: 1` and the bound `host`. Prepare returns
 `proposal` and `approval: {expires_at, proof}` at the top level. Inventory, submit

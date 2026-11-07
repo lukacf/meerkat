@@ -457,7 +457,10 @@ new password or remove (`:remove NAME`), and keeps only password hashes on the
 deployment computer. Changes apply at the next start. An installation built
 earlier with one shared Console password moves to named accounts at its next
 update, keeping its Console user and password; an application on the older
-ordinary route keeps the shared password. A single shared Console
+ordinary route keeps the shared password. After that move the installation's
+own account is the operator's personal account and the first administrator:
+if others know its Console password, change it with **Change private
+settings** and give each of them a named account. A single shared Console
 password lets everyone who knows it chat, but approvals (frontend changes, the
 controller review and setup prompts) need a person's own account.
 
@@ -763,7 +766,7 @@ Console may open without a separate sign-in. Signing in does not send a job.
 without stopping the application or deleting its saved state. Successful sign-out
 returns to the password screen. If the Console did not confirm the sign-out, the
 page says so: you are signed out of that browser, and the tokens the Console
-already holds for that login expire within two minutes. If neither page appears,
+already holds for that login expire within three minutes. If neither page appears,
 treat sign-out as unconfirmed; closing the tab is not confirmation.
 
 To add another conversation channel to a custom application, return to the same

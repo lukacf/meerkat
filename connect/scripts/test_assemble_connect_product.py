@@ -2493,6 +2493,44 @@ class InstalledConsoleBoundaryTests(unittest.TestCase):
             with self.assertRaises((ValueError, AssertionError)):
                 VERIFIER.unique_json(raw)
 
+    def test_final_artifacts_require_the_person_who_answered_the_software_prompt(self):
+        c = self.console
+        scope = "installed-console-fixture-scope"
+        approver = {"principal": c.human(), "assurance": "person_authenticated",
+                    "authentication_scope_digest": "sha256:" + hashlib.sha256(scope.encode()).hexdigest()}
+
+        def record(actor, provenance):
+            decision = {"decision": "approve", "actor": actor, "decided_at": "2026-11-07T00:00:00Z"}
+            if provenance is not None:
+                decision["provenance"] = provenance
+            return {"approval_id": "software-approval", "status": "approved", "decision": decision}
+
+        report = {"enrollment": {"login_scope_id": scope}, "decisions": [
+            {"kind": "software", "prompt": {"review_id": 1, "prompt": {"approval_id": "software-approval"}}},
+            {"kind": "public_access", "prompt": {"review_id": 2, "prompt": {"approval_id": "access-approval"}}}]}
+        scenario = c.ConsoleScenario(VERIFIER, "http://127.0.0.1:18444")
+        with tempfile.TemporaryDirectory(prefix="inert-console-decisions-") as scratch:
+            directory = Path(scratch)
+            store = directory / "deployment" / "consent-fixture"
+            store.mkdir(parents=True)
+            path = store / "native-decisions.json"
+            path.write_text(json.dumps({"approvals": [record(c.SUBJECT, {"approver": approver})]}))
+            scenario.check_final_artifacts(directory, report)
+            for actor, provenance in (
+                    ("connect-console-presenter", None),
+                    (c.SUBJECT, None),
+                    ('principal:["human","oidc-issuer:' + c.ISSUER + '","' + c.SUBJECT + '"]',
+                     {"approver": approver}),
+                    (c.SUBJECT, {"approver": {**approver, "assurance": "service_credential"}}),
+                    (c.SUBJECT, {"approver": {**approver, "authentication_scope_digest": scope}})):
+                with self.subTest(actor=actor, provenance=provenance):
+                    path.write_text(json.dumps({"approvals": [record(actor, provenance)]}))
+                    with self.assertRaises(AssertionError):
+                        scenario.check_final_artifacts(directory, report)
+            path.write_text(json.dumps({"approvals": []}))
+            with self.assertRaisesRegex(AssertionError, "the stored software decision is missing"):
+                scenario.check_final_artifacts(directory, report)
+
 
 if __name__ == "__main__":
     unittest.main()

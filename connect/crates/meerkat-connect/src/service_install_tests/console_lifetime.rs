@@ -258,6 +258,51 @@ async fn exact_decision_refusal_does_not_record_or_wake_software_dispatch() {
     assert_eq!(f.count(), 0);
 }
 
+/// MU-11 row 2, software half (review P2-2): a software prompt answered in
+/// the Console, past its Console task check, is recorded as made by the
+/// person who answered: the approver in its provenance names the person,
+/// never this owner's presenter.
+#[cfg(feature = "console")]
+#[tokio::test]
+async fn a_console_software_answer_records_the_answering_person() {
+    use crate::installed_service_review::account_request::console::{
+        fixture_answerer, fixture_person,
+    };
+    let mut f = Fixture::local(false, 0);
+    f.check().await;
+    let run = f.install();
+    let mut prompt = f.prompt().await;
+    let id = prompt.record.approval_id.clone();
+    prompt
+        .decide_checked_answer(
+            ApprovalDecision::Approve,
+            Arc::new(|| true),
+            &fixture_answerer().unwrap(),
+        )
+        .unwrap();
+    assert!(run.await.unwrap().is_ok(), "the approved install completed");
+    let decision = f
+        .approvals
+        .shared
+        .service
+        .get(&id)
+        .unwrap()
+        .decision
+        .unwrap();
+    assert_eq!(decision.decision, ApprovalDecision::Approve);
+    assert_ne!(
+        decision.actor.as_str(),
+        "connect-console-presenter",
+        "the software answer was recorded as the presenter's"
+    );
+    let approver = &decision
+        .provenance
+        .as_ref()
+        .expect("the software answer records its approver")["approver"];
+    assert_eq!(approver["principal"], json!(fixture_person()));
+    assert_eq!(approver["assurance"], "person_authenticated");
+}
+
 #[cfg(feature = "console")]
 #[tokio::test]
 async fn status_pages_are_bounded_by_actual_login_owner_and_stale_reads_cannot_publish() {

@@ -534,11 +534,12 @@ async fn two_logins_hold_their_setup_prompts_at_once() {
     drop(pipe);
 }
 
-/// MU-11 row 3: the Console presenter loop starts a second login's request
+/// MU-11 row 3: the presenter loop's turns start a second login's request
 /// while the first login's prompt waits for its answer, and one login's
-/// requests take turns in the order they arrived.
+/// requests take turns in the order they arrived. (The loop itself runs in
+/// `the_presenter_loop_serves_two_logins_at_once_and_one_login_in_arrival_order`.)
 #[tokio::test]
-async fn the_presenter_loop_takes_two_logins_at_once() {
+async fn login_turns_take_two_logins_at_once() {
     let (connection, pipe, [a, b]) = two_logins().await;
     let mut turns = LoginTurns::default();
     assert_eq!(turns.offer(Some(a.clone()), "A1"), Some("A1"));
@@ -570,5 +571,401 @@ async fn the_presenter_loop_takes_two_logins_at_once() {
     assert_eq!(next, "A3");
     assert!(turns.finished(Some(&a)).is_none());
     connection.finish().await.unwrap();
+    drop(pipe);
+}
+
+/// The callers the answer gate refuses, as the Console resolves them, and a
+/// signed-in person: a shared-account token, an open Console's caller
+/// without a token, a service token, and a token that stopped verifying.
+type GateCallers = Vec<(&'static str, Option<ConsoleViewerContext>)>;
+fn gate_callers(console: &viewers::Console) -> (ConsoleViewerContext, GateCallers) {
+    let person = console
+        .viewer(Some("personal"))
+        .expect("a person's token verifies");
+    assert!(person.human.is_some(), "the person's token names a human");
+    let shared = console
+        .viewer(None)
+        .expect("a shared-account token verifies");
+    assert!(
+        shared.human.is_none(),
+        "a shared-account token names no person"
+    );
+    let anonymous = ConsoleViewerContext {
+        principal: None,
+        service_identity: false,
+        access_view: None,
+        human: None,
+    };
+    let service = ConsoleViewerContext {
+        principal: Some("svc:setup-answers-fixture".into()),
+        service_identity: true,
+        access_view: None,
+        human: None,
+    };
+    (
+        person,
+        vec![
+            ("a shared-account token", Some(shared)),
+            ("an open Console's caller without a token", Some(anonymous)),
+            ("a service token", Some(service)),
+            ("a token that stopped verifying", None),
+        ],
+    )
+}
+
+/// MU-11 row 5 (review P2-2): the one refusal function both answer checks
+/// share. A signed-in person reaches the login lookup and gets its login;
+/// every caller that is not a verified, current person is refused with
+/// `approver_unauthenticated` before its login is looked up. A person whose
+/// login ended is refused alike; any other lookup refusal keeps its status.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_answer_gate_refuses_non_persons_before_their_login_is_looked_up() {
+    let (connection, pipe, [login, _]) = two_logins().await;
+    let console = viewers::Console::start("setup-answer-lookup").await;
+    let (person, callers) = gate_callers(&console);
+    let lookups = std::cell::Cell::new(0);
+    let current = |_: &ConsoleViewerContext| {
+        lookups.set(lookups.get() + 1);
+        http::LoginLookup::Current(login.clone())
+    };
+    let found = http::answering_login(Some(&person), current).expect("a signed-in person answers");
+    assert!(found.same_owner(&login));
+    assert_eq!(lookups.get(), 1, "the person's login is looked up");
+    for (caller, viewer) in &callers {
+        assert_eq!(
+            http::answering_login(viewer.as_ref(), current).map(|_| ()),
+            Err(http::Refusal::ApproverUnauthenticated),
+            "{caller} was not refused as not a person"
+        );
+    }
+    assert_eq!(lookups.get(), 1, "no non-person's login is looked up");
+    assert_eq!(
+        http::answering_login(Some(&person), |_| http::LoginLookup::Ended).map(|_| ()),
+        Err(http::Refusal::ApproverUnauthenticated),
+        "a person whose login ended answers nothing"
+    );
+    assert_eq!(
+        http::answering_login(Some(&person), |_| {
+            http::LoginLookup::Refused(StatusCode::FORBIDDEN)
+        })
+        .map(|_| ()),
+        Err(http::Refusal::Status(StatusCode::FORBIDDEN))
+    );
+    console.stop().await;
+    connection.finish().await.unwrap();
+    drop(pipe);
+}
+
+/// MU-11 row 5 at the routes (review P2-2): the selection every answer route
+/// makes (`select_presentation`) and its check after the route's awaits
+/// (`still_current`) each run the gate. A caller that is not a verified,
+/// current person is refused with `approver_unauthenticated` even when its
+/// login lookup and the presentation would succeed; a signed-in person gets
+/// the presentation of its own login and passes the check after the awaits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_answer_checks_refuse_a_non_person_with_approver_unauthenticated() {
+    let (connection, pipe, [login, other]) = two_logins().await;
+    let console = viewers::Console::start("setup-answer-routes").await;
+    let (person, callers) = gate_callers(&console);
+    let held = Arc::new("login A's prompt");
+    let lookup = |_: &ConsoleViewerContext| http::LoginLookup::Current(login.clone());
+    let own = |selected: &ConsoleLoginHandle| -> Result<Option<Arc<&'static str>>, StatusCode> {
+        Ok(selected.same_owner(&login).then(|| held.clone()))
+    };
+    let (presentation, selected) =
+        http::select_presentation(&person, lookup, own).expect("the person selects its prompt");
+    assert!(Arc::ptr_eq(&presentation, &held) && selected.same_owner(&login));
+    assert_eq!(
+        http::still_current(Some(&person), &login, true, || true, || Ok(true)),
+        Ok(())
+    );
+    assert!(
+        matches!(
+            http::select_presentation(&person, |_| http::LoginLookup::Current(other.clone()), own),
+            Err(http::Refusal::Status(StatusCode::CONFLICT))
+        ),
+        "a login without an open prompt selects none"
+    );
+    for (caller, viewer) in &callers {
+        if let Some(viewer) = viewer {
+            assert!(
+                matches!(
+                    http::select_presentation(viewer, lookup, own),
+                    Err(http::Refusal::ApproverUnauthenticated)
+                ),
+                "{caller} selected a presentation"
+            );
+        }
+        assert_eq!(
+            http::still_current(viewer.as_ref(), &login, true, || true, || Ok(true)),
+            Err(http::Refusal::ApproverUnauthenticated),
+            "{caller} passed the check after the route's awaits"
+        );
+    }
+    console.stop().await;
+    connection.finish().await.unwrap();
+    drop(pipe);
+}
+
+/// Retire `enrollment` on the two logins' private pipe, as the host does at
+/// sign-out, with the pipe's next command `id`, and read the pipe's answer.
+async fn retire_login(
+    pipe: &mut (tokio::fs::File, tokio::io::BufReader<tokio::fs::File>),
+    id: u64,
+    enrollment: u64,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let mut command = serde_json::to_vec(&json!({"version":1,"id":id,
+        "command":{"kind":"retire_console_login","enrollment_id":enrollment}}))
+    .unwrap();
+    command.push(b'\n');
+    pipe.0.write_all(&command).await.unwrap();
+    pipe.0.flush().await.unwrap();
+    let mut line = String::new();
+    assert!(pipe.1.read_line(&mut line).await.unwrap() > 0);
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(reply["id"], id, "{reply}");
+}
+
+/// MU-11 (review P3-1): after the route's awaits, a person whose Console
+/// login ended while the answer waited (its host retired it at sign-out)
+/// answers nothing and is refused with `approver_unauthenticated`, though
+/// the token still verifies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_whose_login_was_retired_while_it_waited_is_refused_as_not_a_current_person() {
+    let (connection, mut pipe, [login, _]) = two_logins().await;
+    let console = viewers::Console::start("setup-answer-retired").await;
+    let (person, _) = gate_callers(&console);
+    assert_eq!(
+        http::still_current(Some(&person), &login, true, || true, || Ok(true)),
+        Ok(())
+    );
+    // Login A is enrollment 2; the pipe's commands so far are 1 to 3.
+    retire_login(&mut pipe, 4, 2).await;
+    assert!(matches!(
+        login.check(),
+        Err(toolkit_mobkit::private_host::ConsoleLoginRefusal::Retired)
+    ));
+    // The token still verifies. The action's own check and the carrier's
+    // current login fail for a retired login, as they do on the routes.
+    assert_eq!(
+        http::still_current(Some(&person), &login, false, || false, || Ok(true)),
+        Err(http::Refusal::ApproverUnauthenticated),
+        "the answer of a login retired while it waited was not refused as not a current person"
+    );
+    console.stop().await;
+    connection.finish().await.unwrap();
+    drop(pipe);
+}
+
+/// A labelled access review: its summary names the request, for the loop's
+/// hooks below.
+fn labelled_review(session: meerkat_core::SessionId, label: &str) -> meerkat_core::ApprovalRequest {
+    use meerkat_core::{
+        ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
+        ApprovalProposedAction, ApprovalRequest, ApprovalResourceId, ApprovalResourceKind,
+        ApprovalResourceRef, ApprovalRisk,
+    };
+    ApprovalRequest {
+        requester: ApprovalPrincipalId::new("selected-application").unwrap(),
+        owner: ApprovalOwnerRef::Session {
+            session_id: session,
+        },
+        resource: ApprovalResourceRef {
+            kind: ApprovalResourceKind::Runtime,
+            id: ApprovalResourceId::new("selected-account-access"),
+        },
+        proposed_action: ApprovalProposedAction {
+            kind: ApprovalActionKind::Other,
+            summary: label.into(),
+            body: Some(json!({"selection": {"account": "test-account", "operations": ["read"]}})),
+        },
+        risk: ApprovalRisk::High,
+        request_body: Some(json!({"application_selection": "exact-private-value"})),
+        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+            .into_iter()
+            .collect(),
+        expires_at: Some(
+            (std::time::SystemTime::now() + std::time::Duration::from_secs(120)).into(),
+        ),
+        metadata: Default::default(),
+        request_provenance: None,
+    }
+}
+
+const LOOP_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A new setup owner, enrolled in the loop, asking for the review `label`.
+async fn enroll_review(
+    factory: &super::super::setup_presenter::LocalSetupApprovals,
+    label: &str,
+) -> tokio::task::JoinHandle<Result<meerkat_core::ApprovalRecord, ConnectError>> {
+    let owner = tokio::time::timeout(LOOP_BOUND, async {
+        loop {
+            // The loop takes one enrollment at a time from its channel.
+            if let Ok(owner) = factory.create() {
+                break owner;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the loop took the new enrollment");
+    let session = meerkat_core::SessionId::new();
+    owner.bind_session(&session).unwrap();
+    let request = labelled_review(session, label);
+    tokio::spawn(async move { owner.review_access(request).await })
+}
+
+/// The next thing the loop's hooks saw, within the bound.
+async fn loop_saw(
+    observed: &mut tokio::sync::mpsc::UnboundedReceiver<(&'static str, String)>,
+) -> Option<(&'static str, String)> {
+    tokio::time::timeout(LOOP_BOUND, observed.recv())
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Whether the loop's hooks saw nothing more for a moment.
+async fn loop_quiet(
+    observed: &mut tokio::sync::mpsc::UnboundedReceiver<(&'static str, String)>,
+) -> bool {
+    tokio::time::timeout(std::time::Duration::from_millis(300), observed.recv())
+        .await
+        .is_err()
+}
+
+/// MU-11 row 3 at the loop (review P2-1): the Console presenter loop, with
+/// real setup enrollments and two real logins, presents login B's request
+/// while login A's presentation is held, starts login A's next requests one
+/// at a time in the order they arrived, and on host closure retires the
+/// request still waiting and joins the running presentations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_presenter_loop_serves_two_logins_at_once_and_one_login_in_arrival_order() {
+    use super::super::setup_presenter::{Enrollment, SetupEvent, channel};
+    use std::collections::HashMap;
+    let (connection, pipe, [a, b]) = two_logins().await;
+    let closed = connection.closed_observer();
+    let directory = tempfile::tempdir().unwrap();
+    let (factory, reviews) = channel(directory.path().to_owned());
+    let logins: HashMap<&'static str, ConsoleLoginHandle> = HashMap::from([
+        ("A1", a.clone()),
+        ("B1", b.clone()),
+        ("A2", a.clone()),
+        ("A3", a.clone()),
+        ("A4", a.clone()),
+    ]);
+    let label = |event: &SetupEvent| match event {
+        SetupEvent::Approval(prompt) => prompt.record().proposed_action.summary.clone(),
+        _ => unreachable!("only reviews are requested here"),
+    };
+    // Each hook reports what it saw, in order.
+    let (seen, mut observed) = tokio::sync::mpsc::unbounded_channel::<(&'static str, String)>();
+    let releases = Arc::new(Mutex::new(HashMap::<String, oneshot::Sender<()>>::new()));
+    let login_of = {
+        let seen = seen.clone();
+        move |event: &SetupEvent| {
+            let label = label(event);
+            let login = logins.get(label.as_str()).cloned();
+            seen.send(("arrived", label)).unwrap();
+            login
+        }
+    };
+    let present = {
+        let releases = releases.clone();
+        move |login: Option<ConsoleLoginHandle>,
+              enrollment: Enrollment,
+              event: SetupEvent,
+              closed: PrivateHostClosed|
+              -> Presentation {
+            let label = label(&event);
+            let (release, released) = oneshot::channel::<()>();
+            releases.lock().unwrap().insert(label.clone(), release);
+            seen.send(("started", label)).unwrap();
+            Box::pin(async move {
+                tokio::select! {
+                    _ = released => {}
+                    _ = closed.wait_closed() => {}
+                }
+                // The prompt ends without a decision.
+                drop(event);
+                (
+                    login,
+                    enrollment,
+                    Presented::Software(Ok(ApprovalPromptOutcome::Continue)),
+                )
+            })
+        }
+    };
+    let release = |label: &str| {
+        let sender = releases.lock().unwrap().remove(label);
+        sender.expect("a held presentation").send(()).unwrap();
+    };
+    let serve = tokio::spawn(serve_setup_presentations(
+        reviews, closed, login_of, present,
+    ));
+    let event = |kind: &'static str, label: &str| Some((kind, label.to_owned()));
+
+    let a1 = enroll_review(&factory, "A1").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A1"));
+    assert_eq!(loop_saw(&mut observed).await, event("started", "A1"));
+    let b1 = enroll_review(&factory, "B1").await;
+    assert_eq!(
+        [loop_saw(&mut observed).await, loop_saw(&mut observed).await],
+        [event("arrived", "B1"), event("started", "B1")],
+        "login B's request waited for login A's presentation"
+    );
+    let a2 = enroll_review(&factory, "A2").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A2"));
+    let a3 = enroll_review(&factory, "A3").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A3"));
+    assert!(
+        loop_quiet(&mut observed).await,
+        "login A's next request started while its first was presented"
+    );
+    release("A1");
+    assert_eq!(
+        loop_saw(&mut observed).await,
+        event("started", "A2"),
+        "login A's second request did not start in its turn"
+    );
+    assert!(
+        loop_quiet(&mut observed).await,
+        "login A's third request started with its second"
+    );
+    release("A2");
+    assert_eq!(
+        loop_saw(&mut observed).await,
+        event("started", "A3"),
+        "login A's third request did not start in its turn"
+    );
+    // At closure A3 and B1 are presented and A4 waits for login A's turn.
+    let a4 = enroll_review(&factory, "A4").await;
+    assert_eq!(loop_saw(&mut observed).await, event("arrived", "A4"));
+    assert!(
+        loop_quiet(&mut observed).await,
+        "A4 started while A3 was presented"
+    );
+    let finishing = tokio::spawn(connection.finish());
+    let served = tokio::time::timeout(LOOP_BOUND, serve)
+        .await
+        .expect("the loop ended at closure")
+        .unwrap();
+    assert!(served.is_ok(), "the loop ended with {served:?}");
+    assert!(
+        loop_quiet(&mut observed).await,
+        "a waiting request started after closure"
+    );
+    // The waiting request retired with its enrollment and the running ones
+    // were joined: every review ended, and none was decided.
+    for review in [a1, b1, a2, a3, a4] {
+        let ended = tokio::time::timeout(LOOP_BOUND, review)
+            .await
+            .expect("every review ended")
+            .unwrap();
+        assert!(ended.is_err(), "a review was decided: {ended:?}");
+    }
+    finishing.await.unwrap().unwrap();
     drop(pipe);
 }

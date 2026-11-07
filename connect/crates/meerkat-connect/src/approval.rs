@@ -184,9 +184,10 @@ struct Attempt {
     dispatch_error: Option<meerkat_core::ToolDispatchTerminalErrorKind>,
     deadline: Instant,
     custody: Custody,
-    // Who the recorded decision names: this owner's presenter, or the person
-    // who answered in the Console. Set only when the decision is recorded.
-    decided_by: Option<ApprovalPrincipalId>,
+    // Who the recorded decision names: this owner's presenter, a policy's
+    // actor, or the person who answered in the Console. Set only when the
+    // decision is recorded.
+    decided_by: Option<Decider>,
     held: Option<HeldAction>,
     service: Option<ServiceReview>,
     service_entry: Option<toolkit_mobkit::private_host::ConsoleLoginReservation>,
@@ -683,7 +684,11 @@ impl LocalApprovals {
             || retained != **request
             || native.status != expected_status
             || native.decision.as_ref().is_none_or(|record| {
-                record.decision != decision || attempt.decided_by.as_ref() != Some(&record.actor)
+                record.decision != decision
+                    || !attempt
+                        .decided_by
+                        .as_ref()
+                        .is_some_and(|decider| decider.names(record))
             })
             || attempt.custody != Custody::DecisionRecorded(decision)
         {
@@ -1384,6 +1389,7 @@ impl ConsoleAnswerer {
             .map_err(|error| ConnectError::native("identify the Console answerer", error))?;
         Ok(RecordedDecider {
             actor,
+            principal: self.principal.clone(),
             provenance: serde_json::json!({"approver": {
                 "principal": self.principal,
                 "assurance": meerkat_core::ApprovalAssurance::PersonAuthenticated,
@@ -1394,12 +1400,45 @@ impl ConsoleAnswerer {
 }
 
 /// Who a decision is recorded as made by, when it is not this owner's
-/// presenter: the actor and the provenance of the decision's record. Only a
-/// Console answer builds one.
+/// presenter: the actor and the provenance of the decision's record, and the
+/// qualified principal they name. Only a Console answer builds one.
 #[cfg_attr(not(feature = "console"), allow(dead_code))]
 struct RecordedDecider {
     actor: ApprovalPrincipalId,
+    principal: meerkat_core::PrincipalRef,
     provenance: serde_json::Value,
+}
+
+impl RecordedDecider {
+    /// What this owner checks its own recorded decision against.
+    fn decider(&self) -> Decider {
+        Decider::Person {
+            actor: self.actor.clone(),
+            principal: self.principal.clone(),
+        }
+    }
+}
+
+/// Who a recorded decision must name, for this owner's check of its own
+/// write.
+#[derive(Clone, Debug)]
+enum Decider {
+    /// This owner's presenter, or a policy's actor: the record's actor.
+    Actor(ApprovalPrincipalId),
+    /// The person who answered in the Console.
+    Person {
+        actor: ApprovalPrincipalId,
+        principal: meerkat_core::PrincipalRef,
+    },
+}
+
+impl Decider {
+    /// Whether `record` names this decider.
+    fn names(&self, record: &meerkat_core::ApprovalDecisionRecord) -> bool {
+        match self {
+            Self::Actor(actor) | Self::Person { actor, .. } => &record.actor == actor,
+        }
+    }
 }
 
 impl ApprovalPrompt {
@@ -1440,6 +1479,17 @@ impl ApprovalPrompt {
         if self.console_task().is_none() {
             return Err(invalid("The software prompt has no Console task"));
         }
+        self.decide_checked_answer(decision, current, answerer)
+    }
+    /// [`Self::decide_console`] past its Console task check: the decision,
+    /// checked by `current` at its entry, is recorded as made by `answerer`.
+    #[cfg(feature = "console")]
+    fn decide_checked_answer(
+        &mut self,
+        decision: ApprovalDecision,
+        current: crate::installed_service_review::account_request::console::DecisionCheck,
+        answerer: &ConsoleAnswerer,
+    ) -> Result<(), ConnectError> {
         self.decide_as(decision, Some(current), Some(answerer.recorded()?))
     }
     fn decide_current(
@@ -1495,19 +1545,20 @@ impl ApprovalPrompt {
         }
         // A Console answer records the person who answered; every other
         // decision records this owner's presenter.
-        let (actor, provenance) = match decider {
-            Some(RecordedDecider { actor, provenance }) => (actor, Some(provenance)),
-            None => (self.shared.actor.clone(), None),
+        let (actor, provenance, decided_by) = match decider {
+            Some(decider) => {
+                let decided_by = decider.decider();
+                (decider.actor, Some(decider.provenance), decided_by)
+            }
+            None => (
+                self.shared.actor.clone(),
+                None,
+                Decider::Actor(self.shared.actor.clone()),
+            ),
         };
         self.shared
             .service
-            .decide(
-                &attempt.approval_id,
-                decision,
-                actor.clone(),
-                None,
-                provenance,
-            )
+            .decide(&attempt.approval_id, decision, actor, None, provenance)
             .map_err(|e| ConnectError::native("record native approval decision", e))?;
         if let Some(reservation) = reservation {
             reservation.settled();
@@ -1515,7 +1566,7 @@ impl ApprovalPrompt {
         if let Some(service) = &mut attempt.service {
             service.decision_current = current;
         }
-        attempt.decided_by = Some(actor);
+        attempt.decided_by = Some(decided_by);
         attempt.custody = Custody::DecisionRecorded(decision);
         self.response
             .take()
@@ -1665,7 +1716,7 @@ impl Shared {
                             None,
                         )
                         .map_err(|_| refused())?;
-                    Some(actor)
+                    Some(Decider::Actor(actor))
                 }
                 None => None,
             };
@@ -3963,5 +4014,96 @@ mod tests {
                 .is_err()
         );
         assert_eq!(f.inner.entered.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// How a Console answer is recorded (MU-11, review P3-4): in Core's
+/// convention for an authenticated approver, the decision's actor is the
+/// person's bare id and the approver in its provenance carries the
+/// qualified principal, the assurance and the login's digest.
+#[cfg(all(test, feature = "console"))]
+mod recorded_decider_tests {
+    use super::*;
+    use crate::installed_service_review::account_request::console::{
+        FIXTURE_LOGIN, fixture_person,
+    };
+
+    /// A decision `principal` made, recorded in Core's convention.
+    fn decided_by(principal: &meerkat_core::PrincipalRef) -> meerkat_core::ApprovalDecisionRecord {
+        serde_json::from_value(serde_json::json!({
+            "decision": "approve",
+            "actor": principal.id.as_str(),
+            "decided_at": "2026-11-07T00:00:00Z",
+            "provenance": {"approver": {
+                "principal": principal,
+                "assurance": "person_authenticated",
+                "authentication_scope_digest": format!("sha256:{}", "0".repeat(64)),
+            }},
+        }))
+        .unwrap()
+    }
+
+    /// The person who answered is named by the qualified principal of the
+    /// record's approver, not by the bare id alone: the person's own
+    /// decision names the person, and a principal with the same bare id but
+    /// another kind is another decider.
+    #[test]
+    fn a_recorded_person_is_named_by_the_qualified_approver_not_the_bare_id() {
+        let person = fixture_person();
+        let other = meerkat_core::PrincipalRef {
+            kind: meerkat_core::PrincipalKind::PersonalAgent,
+            ..person.clone()
+        };
+        assert_eq!(person.id, other.id);
+        let decider = ConsoleAnswerer::new(person.clone(), FIXTURE_LOGIN)
+            .unwrap()
+            .recorded()
+            .unwrap()
+            .decider();
+        assert!(
+            decider.names(&decided_by(&person)),
+            "the person's own decision, recorded in Core's convention, does not name the person"
+        );
+        assert!(
+            !decider.names(&decided_by(&other)),
+            "a principal with the same bare id but another kind named the person"
+        );
+    }
+
+    /// The approver a Console answer records reads as Core's consent
+    /// approver, field for field: the qualified principal, the assurance and
+    /// the digest of the login the answer was made in.
+    #[test]
+    fn the_recorded_approver_is_core_consent_approver() {
+        let person = fixture_person();
+        let recorded = ConsoleAnswerer::new(person.clone(), FIXTURE_LOGIN)
+            .unwrap()
+            .recorded()
+            .unwrap();
+        let approver = &recorded.provenance["approver"];
+        let mut fields = approver
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(
+            fields,
+            ["assurance", "authentication_scope_digest", "principal"]
+        );
+        let read: meerkat_core::ApprovalConsentApprover =
+            serde_json::from_value(approver.clone()).unwrap();
+        assert_eq!(read.principal, person);
+        assert_eq!(
+            read.assurance,
+            meerkat_core::ApprovalAssurance::PersonAuthenticated
+        );
+        assert_eq!(
+            read.authentication_scope_digest,
+            Some(meerkat_core::approval::decision::Sha256Digest::of(
+                FIXTURE_LOGIN.as_bytes()
+            ))
+        );
     }
 }

@@ -825,10 +825,27 @@ fn present_one(
 /// different enrollments. Host closure, a presentation that reports the host
 /// stopped and a shared custody failure each end the intake: waiting
 /// requests retire with their enrollments, and every running presentation
-/// is joined (each observes the closure itself), never dropped.
+/// is joined, never dropped (on closure each observes it and ends).
 pub async fn serve_console_setup(
     reviews: super::LocalSetupReviews,
     closed: PrivateHostClosed,
+) -> Result<(), ConnectError> {
+    serve_setup_presentations(reviews, closed, request_login, present_one).await
+}
+
+/// [`serve_console_setup`] with its two per-request hooks passed in: the
+/// login a request belongs to (`login_of`) and the presentation of one
+/// request (`present`).
+async fn serve_setup_presentations(
+    reviews: super::LocalSetupReviews,
+    closed: PrivateHostClosed,
+    login_of: impl Fn(&super::setup_presenter::SetupEvent) -> Option<ConsoleLoginHandle>,
+    present: impl Fn(
+        Option<ConsoleLoginHandle>,
+        super::setup_presenter::Enrollment,
+        super::setup_presenter::SetupEvent,
+        PrivateHostClosed,
+    ) -> Presentation,
 ) -> Result<(), ConnectError> {
     use futures_util::StreamExt as _;
     enum Step {
@@ -879,9 +896,9 @@ pub async fn serve_console_setup(
             }
             Step::Next(None) => idle = true,
             Step::Next(Some((enrollment, event))) => {
-                let login = request_login(&event);
+                let login = login_of(&event);
                 if let Some((enrollment, event)) = turns.offer(login.clone(), (enrollment, event)) {
-                    running.push(present_one(login, enrollment, event, closed.clone()));
+                    running.push(present(login, enrollment, event, closed.clone()));
                 }
             }
             Step::Finished(None) => {}
@@ -916,7 +933,7 @@ pub async fn serve_console_setup(
                 if presenters.is_some()
                     && let Some((login, (enrollment, event))) = next
                 {
-                    running.push(present_one(login, enrollment, event, closed.clone()));
+                    running.push(present(login, enrollment, event, closed.clone()));
                 }
             }
         }

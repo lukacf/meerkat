@@ -152,20 +152,20 @@ fn selected(
 ) -> Result<(Arc<Active>, Action), Refusal> {
     mutation(panel, &headers, &uri)?;
     let viewer = resolve_viewer(panel, &headers, &uri)?;
-    // Only a verified, current person answers a setup prompt.
-    answering_person(Some(&viewer))?;
-    let login = panel
-        .0
-        .binding
-        .current_login(&viewer)
-        .map_err(|_| StatusCode::FORBIDDEN)?;
-    // The caller answers only the prompt of its own login.
-    let active = panel
-        .0
-        .active
-        .of(&login)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .ok_or(StatusCode::CONFLICT)?;
+    let (active, login) = select_presentation(
+        &viewer,
+        |viewer| match panel.0.binding.current_login(viewer) {
+            Ok(login) => LoginLookup::Current(login),
+            Err(_) => LoginLookup::Refused(StatusCode::FORBIDDEN),
+        },
+        |login| {
+            panel
+                .0
+                .active
+                .of(login)
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        },
+    )?;
     let action = Action {
         viewer: panel
             .0
@@ -182,27 +182,86 @@ fn selected(
     };
     Ok((active, action))
 }
-/// After the route's awaits: the answer's carrier must still name a verified,
-/// current person (a login that ended answers nothing), then the action's own
-/// check (`checked`) and its exact presentation must still hold.
+/// After the route's awaits ([`still_current`] with the retained carrier).
 fn still_selected(
     panel: &ConsoleSetup,
     active: &Arc<Active>,
     action: &Action,
     checked: bool,
 ) -> Result<(), Refusal> {
-    answering_person(action.viewer.resolve(&action.headers, &action.uri).as_ref())?;
-    if !checked {
+    still_current(
+        action.viewer.resolve(&action.headers, &action.uri).as_ref(),
+        &action.login,
+        checked,
+        || action.current().is_some(),
+        || {
+            panel
+                .0
+                .active
+                .of(&action.login)
+                .map(|current| current.is_some_and(|current| Arc::ptr_eq(&current, active)))
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        },
+    )
+}
+/// What a caller's login lookup found, made only for a verified, current
+/// person.
+pub(super) enum LoginLookup {
+    /// The person's current Console login.
+    Current(ConsoleLoginHandle),
+    /// The person's Console login ended: its host retired it, or it expired.
+    Ended,
+    /// No current login for another reason: the untyped status.
+    Refused(StatusCode),
+}
+/// The one refusal sequence of every setup answer, at the request
+/// ([`select_presentation`]) and again after the route's awaits
+/// ([`still_current`]): a verified, current person first (anything else is
+/// `approver_unauthenticated`, and `lookup` is never made), then that
+/// person's login. A login that ended is `approver_unauthenticated` too; any
+/// other lookup failure keeps its untyped status.
+pub(super) fn answering_login(
+    viewer: Option<&ConsoleViewerContext>,
+    lookup: impl FnOnce(&ConsoleViewerContext) -> LoginLookup,
+) -> Result<ConsoleLoginHandle, Refusal> {
+    answering_person(viewer)?;
+    let viewer = viewer.ok_or(Refusal::ApproverUnauthenticated)?;
+    match lookup(viewer) {
+        LoginLookup::Current(login) => Ok(login),
+        LoginLookup::Ended => Err(Refusal::ApproverUnauthenticated),
+        LoginLookup::Refused(status) => Err(status.into()),
+    }
+}
+/// A setup answer route's selection: [`answering_login`] for the request's
+/// viewer, then the presentation the caller's own login holds (none is 409).
+/// `lookup` and `presentation` read the panel's login and presentations.
+pub(super) fn select_presentation<T>(
+    viewer: &ConsoleViewerContext,
+    lookup: impl FnOnce(&ConsoleViewerContext) -> LoginLookup,
+    presentation: impl FnOnce(&ConsoleLoginHandle) -> Result<Option<Arc<T>>, StatusCode>,
+) -> Result<(Arc<T>, ConsoleLoginHandle), Refusal> {
+    let login = answering_login(Some(viewer), lookup)?;
+    // The caller answers only the prompt of its own login.
+    let held = presentation(&login)?.ok_or(StatusCode::CONFLICT)?;
+    Ok((held, login))
+}
+/// After the route's awaits: [`answering_login`] for the answer's carrier as
+/// the Console resolves it now (`viewer`), with the carrier's own `login`, so
+/// a person whose token stopped verifying answers nothing; then the action's
+/// own check (`checked`), the carrier's current login (`current`) and the
+/// exact presentation (`held`).
+pub(super) fn still_current(
+    viewer: Option<&ConsoleViewerContext>,
+    login: &ConsoleLoginHandle,
+    checked: bool,
+    current: impl FnOnce() -> bool,
+    held: impl FnOnce() -> Result<bool, StatusCode>,
+) -> Result<(), Refusal> {
+    answering_login(viewer, |_| LoginLookup::Current(login.clone()))?;
+    if !checked || !current() {
         return Err(StatusCode::FORBIDDEN.into());
     }
-    action.current().ok_or(StatusCode::FORBIDDEN)?;
-    if !panel
-        .0
-        .active
-        .of(&action.login)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .is_some_and(|current| Arc::ptr_eq(&current, active))
-    {
+    if !held()? {
         return Err(StatusCode::CONFLICT.into());
     }
     Ok(())

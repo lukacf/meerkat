@@ -436,7 +436,8 @@ restarts. A start that reads no row of a Created entry's name
 invariant `created_origin_without_row_is_unreadable` holds this.
 `ImportIdentityRecord` decides each exported record, one arm per verdict
 (`IdentityImportVerdict`): the record comes back for a member seated under
-its name in place, for an unseated name owed its seat on its archived
+its name in place (a plain member only on the session the record names),
+for an unseated name owed its seat on its archived
 session, as recorded for a pending, an archived or a removed name, or by the
 adoption's step for a roster's adopted identity whose roster declared it
 again; a name another holder keeps is reported and left, and a rowless

@@ -161,7 +161,11 @@ Rolled forward, a start reads each store-owned identity whose row was purged
 as unreadable: its name is reserved, nothing acts on it and nothing seats it
 until the import restores its row. The import re-creates each record and
 re-binds its session: a member seated under its name is bound in place, on
-its session; an identity with no member is seated again, Dormant, on its
+its session, a plain member only when it is bound to the session the record
+names (a member on another session, a new worker the older release seated
+or the identity's own on a session the export does not name, is reported
+`name_taken_meanwhile` and left as it is: adopt it to take it into store
+custody); an identity with no member is seated again, Dormant, on its
 archived session, or on a fresh session with the history unavailable notice
 when the session store no longer holds it; pending, archived and removed
 names are restored as recorded; and an adopted identity whose roster

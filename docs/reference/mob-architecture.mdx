@@ -742,9 +742,10 @@ composition without the built-in identity and member store commits no change
   identity's name reserves the name (it reads unreadable, and nothing seats
   it). `MobHandle::import_created_identities` (the host operator, imported
   consent) restores each record and re-binds its session in one
-  transaction: in place, Dormant on its archived session (fresh, with the
-  history unavailable notice, when that session is gone), or as recorded;
-  a name another holder keeps is reported (`name_taken_meanwhile`).
+  transaction: in place (a plain member only on the session its record
+  names), Dormant on its archived session (fresh, with the history
+  unavailable notice, when that session is gone), or as recorded; a name
+  another holder keeps is reported (`name_taken_meanwhile`).
 
 An update, removal, archive or unarchive of an identity whose spawn, wake,
 retirement, removal, archive or accepted activation is in flight is refused

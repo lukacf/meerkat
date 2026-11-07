@@ -4139,7 +4139,7 @@ macro_rules! mob_catalog_machine_dsl {
             } else {
             if seated == true {
                 if kind == ImportedRecordKind::Present && placed == false && session_bound == true
-                    && (session_matches == true || session_bound == true) {
+                    && session_matches == true {
                     IdentityImportVerdict::RestoredInPlace
                 } else {
                     IdentityImportVerdict::NameTakenMeanwhile

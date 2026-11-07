@@ -4009,3 +4009,6 @@ mod unsettled_budget;
 
 /// A re-acquire compares a listing only with a baseline the open installed.
 mod open_listing;
+
+/// A listing waits for its slowest scope kind, not for the sum of the kinds.
+mod concurrent_listing;

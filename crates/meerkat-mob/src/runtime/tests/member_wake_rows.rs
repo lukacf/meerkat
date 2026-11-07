@@ -4114,6 +4114,13 @@ async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
         .await
         .expect("the first wake builds the member");
     let session = fixture.session(&identity).await;
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: nothing holds the seated member"
+    );
 
     // A run in flight, then the role move held: the member's run starts are
     // held, and the run goes on.
@@ -4213,6 +4220,23 @@ async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
     );
     assert_eq!(fixture.session(&identity).await, session);
     assert!(holding(), "its run starts stay held");
+    assert!(
+        fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: the held member's run starts are held"
+    );
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(
+                &AgentIdentity::from("no-such-member"),
+                HostRunStartHoldReason::HostPreparation,
+            )
+            .expect("an unseated member's hold reads"),
+        "a member the mob does not seat holds nothing"
+    );
     match fixture
         .handle
         .identity_entry(&identity)

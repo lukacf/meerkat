@@ -10724,6 +10724,47 @@ impl MobHandle {
         }
     }
 
+    /// Whether this mob's host holds `agent_identity`'s run starts for
+    /// `reason`: [`Self::members_holding_run_starts`] for one member, read
+    /// the same way (the published machine state and the runtime's hold
+    /// registry, with no actor command and no wake; the
+    /// [`crate::ControlScope::List`] scope) at the cost of that member
+    /// alone. A member this mob does not seat, a placed member (its session
+    /// lives on its host) and a mob without the runtime adapter hold none.
+    pub fn member_holds_run_starts(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<bool, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let session = self.read_published_machine_state(crate::ControlScope::List, |state| {
+            if state.member_placement.contains_key(&dsl_identity) {
+                return None;
+            }
+            state
+                .member_session_bindings
+                .get(&dsl_identity)
+                .map(|session| session.0.clone())
+        })?;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let (Some(session), Some(adapter)) = (session, self.runtime_adapter.as_ref()) else {
+                return Ok(false);
+            };
+            let session_id = SessionId::parse(&session).map_err(|error| {
+                MobError::Internal(format!(
+                    "member '{agent_identity}' holds an invalid session binding: {error}"
+                ))
+            })?;
+            Ok(adapter.registration_run_start_hold_staged(&session_id, reason.runtime()))
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = (session, reason);
+            Ok(false)
+        }
+    }
+
     /// One page of this mob's member lifecycle journal: the member
     /// lifecycle facts of the journal events after `after` (from the first
     /// with [`super::MobJournalCursor::START`]), reading at most `limit`

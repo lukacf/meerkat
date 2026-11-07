@@ -37,6 +37,12 @@ export function forgetOwnSends(): void {
   ownSendKeys.clear();
 }
 
+/** Remember the caller scope `meta/console/whoami` reports for this
+ * console's caller. (No effect yet.) */
+export function rememberOwnCallerScope(scope: string | null | undefined): void {
+  void scope;
+}
+
 export function isOwnSend(key: unknown): boolean {
   return typeof key === "string" && ownSendKeys.has(key.trim());
 }

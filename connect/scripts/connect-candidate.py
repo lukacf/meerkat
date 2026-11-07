@@ -617,6 +617,17 @@ def build():
     verification = work / "verification/manifest.json"
     report = read_json(verification)
     require(report["status"] == "passed", "actual installed verification failed")
+    # The installed Console journey on the same staged product: a person
+    # answers the setup prompts in the Console, and the stored software
+    # decision must name that person. The harness serves its own model
+    # provider and token issuer; no live credential is used.
+    record.run("installed-console", [python, "-I", ROOT / "scripts/verify_native_gateway_subprocess.py",
+        "--toolkit-gateway", work / ("stage/meerkat-connect-" + target + "/bin/toolkit_gateway"),
+        "--toolkit-python", site, "--meta-python", site, "--case", "installed-console",
+        "--installed-staging", staged, "--installed-staging-sha256", digest(staged),
+        "--output", work / "verification-console"], seconds=900)
+    require(read_json(work / "verification-console/manifest.json")["status"] == "passed",
+            "actual installed Console verification failed")
     record.run("assemble", [*assembly, "--destination", work / "assembled",
         "--gateway-verification", verification, "--gateway-verification-sha256", digest(verification)], seconds=600)
     final = read_json(work / "assembled/assembly.json")

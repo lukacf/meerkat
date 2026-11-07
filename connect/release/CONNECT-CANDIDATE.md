@@ -54,8 +54,12 @@ The existing producer path is used without weakening its acceptance:
    `verify_native_gateway_subprocess.py --case installed-product` against the
    staged gateway and the selected installed SDK wheel bytes. Both its success
    and resource-corruption cases must pass their existing cleanup assertions.
-6. Final assembly consumes that exact verifier report and all of its original
-   records. The emitted scope remains
+   Then run `--case installed-console` against the same staging: a person
+   answers the setup prompts in the Console (the harness serves its own model
+   provider and token issuer; no live credential), and the stored software
+   decision must name that person. It must pass too.
+6. Final assembly consumes the installed-product verifier report and all of
+   its original records. The emitted scope remains
    `installed_gateway_schema4_resource_startup_and_shutdown_preview` and its
    existing exclusions remain in `assembly.json`.
 7. Emit the existing `forge-meta-toolkit-runtime-selection-v1` shape, then invoke

@@ -176,10 +176,11 @@ impl PrivateOwners {
             .insert((mob_id.to_string(), member.to_string()), owner);
     }
 
-    /// What this record knows of member `member` of mob `mob_id`: what its
-    /// build recorded, else what the event log named. `None` for a member it
-    /// does not know; `Some(None)` for one private to no one.
-    fn known(&self, mob_id: &str, member: &str) -> Option<Option<String>> {
+    /// The person member `member` of mob `mob_id` is private to, as far as
+    /// this record knows: what its build recorded, else what the event log
+    /// named. `None` for a member private to no one, and for one the record
+    /// does not know.
+    pub(crate) fn owner_of(&self, mob_id: &str, member: &str) -> Option<String> {
         let key = (mob_id.to_string(), member.to_string());
         if let Some(recorded) = self
             .inner
@@ -188,7 +189,7 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
         {
-            return Some(recorded.clone());
+            return recorded.clone();
         }
         self.inner
             .logged
@@ -196,12 +197,7 @@ impl PrivateOwners {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
             .cloned()
-    }
-
-    /// The person member `member` of mob `mob_id` is private to, as far as
-    /// this record knows.
-    pub(crate) fn owner_of(&self, mob_id: &str, member: &str) -> Option<String> {
-        self.known(mob_id, member).flatten()
+            .flatten()
     }
 
     /// Every member this record knows, keyed by the identity its memory
@@ -260,14 +256,16 @@ impl PrivateOwners {
     }
 
     /// The owner of mob `mob_id`, which a member created: `None` for a mob
-    /// this record does not know, `Some(None)` for one private to no one.
-    fn mob_owner(&self, mob_id: &str) -> Option<Option<String>> {
+    /// private to no one. A mob this record does not know yet is refused as
+    /// retryable ([`unknown_mob_owner`]).
+    fn mob_owner(&self, mob_id: &str) -> Result<Option<String>, MobError> {
         self.inner
             .mob_owners
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(mob_id)
             .cloned()
+            .ok_or_else(|| unknown_mob_owner(mob_id))
     }
 
     /// Record that mob `mob_id` is private to `owner` (`None`: to no one).
@@ -619,9 +617,7 @@ impl PrivateOwners {
         spawner: Option<&meerkat_mob::AgentIdentity>,
         spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
-        let Some(mob_owner) = self.mob_owner(mob_id) else {
-            return Err(unknown_mob_owner(mob_id));
-        };
+        let mob_owner = self.mob_owner(mob_id)?;
         let requested = self.requested_owner(mob_id, spawner, spec)?;
         let owner = match (mob_owner, requested) {
             (Some(mob_owner), Some(requested)) if mob_owner != requested => {

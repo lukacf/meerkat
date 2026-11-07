@@ -158,6 +158,74 @@ them.
   enum is exhaustive, so a downstream exhaustive match needs the new arm, or
   a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`: the max age of a graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, `RequeueMaxAge`) is
+  measured from the stop that kept an input, not from the input's admission
+  (see Fixed). A kept input now runs at a start that comes within `max_age`
+  of that stop, however long before the stop it was admitted, so a host
+  that used `max_age` to bound how old an input may be when it runs must
+  bound that itself; see the upgrading guide.
+
+- `meerkat-core`: `HttpAuthorizationContent` gains the public field
+  `initiator: HttpRequestInitiator`, a new enum (`User`, the default, and
+  `Agent`) that says who a provider request continues. Code that builds the
+  struct with a literal sets the field or adds `..Default::default()`.
+- `meerkat-copilot`: `CopilotModelPolicyState` keeps a policy state other
+  than `enabled` and `disabled` as the account states it: the variant
+  `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
+  It still serializes as the state string. New
+  `CopilotModelPolicyState::as_str`.
+- `meerkat-copilot`: `CopilotModel::supported_endpoints` and
+  `CopilotModelOffering::supported_endpoints` are
+  `Option<Vec<CopilotEndpoint>>`: `None` when the catalog entry states no
+  list, `Some(vec![])` for an explicitly empty one.
+
+- `meerkat-contracts`: `WireMemberPreviewUnavailable` gains `StoreRefused`
+  (wire `store_refused`), appended last. The enum is exhaustive, so a
+  downstream exhaustive match needs an arm; so does an exhaustive switch over
+  the Web SDK's `WireMemberPreviewUnavailable` type, which gains
+  `"store_refused"`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-contracts`: a member status read whose session the store refuses
+  until its realm is reopened answers `preview_unavailable: "store_refused"`
+  (`mob/member_status`, and the members of `mob/wait_kickoff` and
+  `mob/wait_ready`), where 0.9.10 sent `read_failed`;
+  `MemberPreviewUnavailable::StoreRefused` serializes as `store_refused` and
+  reads back from it. A client that keeps the closed vocabulary of an earlier
+  release (the Python and TypeScript SDKs through 0.9.10) fails such a read
+  with `INVALID_RESPONSE`: update the SDK with the server.
+
+- Python and TypeScript SDKs (not measured by the gate): a member's preview
+  marker (`preview_unavailable` in Python, `previewUnavailable` in
+  TypeScript, on member status snapshots and on the members of the kickoff
+  and ready waits) is now `WireMemberPreviewUnavailable |
+  MobMemberPreviewUnavailableUnknown`. A reason the SDK does not know reads
+  as `{"unknown": <value>}` instead of failing the read with
+  `INVALID_RESPONSE`; code that treats the field as a known reason must
+  handle the unknown form. A value that is not a string still fails closed.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
+  commit whose batch is still unsettled at the self-fence deadline of the
+  fence token it carries fails with `SpiError::UnsettledAtFenceWindow`, and
+  through the runtime store with `RuntimeStoreError::UnsettledAtFenceWindow`.
+  Before, it was retried until its retry budget ran out and then failed with
+  `SpiError::Host` (`RuntimeStoreError::WriteFailed`), unless a retry sent
+  past the deadline landed. While renews fail, the retry budget is therefore
+  cut at the self-fence window. Through the session service, a checkpoint
+  write (a round commit or a closing save) that stops so answers the
+  teardown class (`AgentError::SessionDurableProjectionAuthorityUnknown`),
+  where a failed checkpoint write answered `AgentError::InternalError`. See
+  Fixed.
+
+- `meerkat-core`: `service::MobToolsBuildArgs`, the arguments
+  `MobToolsFactory::build_mob_tools` receives, gains the public fields
+  `provider: Provider` and `self_hosted_server_id: Option<String>`: the
+  provider route the owning agent's build resolved for its `model` (see
+  Fixed). Code that builds it literally, or destructures it without `..`,
+  must name them; a factory that only reads its fields is unaffected.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -364,6 +432,47 @@ them.
   `thinking_binding_controls`), so their model profiles' `beta_headers`
   show it.
 
+- `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
+  `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
+  host-plane operator releases a work item's claim it does not own, bound
+  to the request's revision. The Released event records the operator and
+  the released claim under `break_glass`, as
+  `break_glass_reassign_attention` records its move.
+
+- `meerkat-llm-core`: `LlmRequest::initiator` says who a request continues,
+  from its last message; `PreparedLlmRequest::agent_initiated` marks a
+  request-local call (a compaction summary, a tool's own model call) as the
+  agent's own work, and `PreparedLlmRequest::initiator` reads either.
+- `meerkat-openai`: `OpenAiCompatibleClient::with_copilot_chat_stream` gives
+  a Chat Completions client GitHub Copilot's stream discipline (a finish
+  reason is required, only choice 0 is read); both Copilot Chat Completions
+  routes set it.
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
+  tokens one request may carry on the client's account and model, when the
+  provider states one (default `None`; wrappers delegate). A GitHub Copilot
+  route states the account model's prompt limit (the tighter of
+  `max_prompt_tokens` and `max_context_window_tokens`).
+- `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
+  model, state }` refuses a model the account lists under a policy that is
+  not `enabled`, naming the state.
+- `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
+  refuses a model the account lists with an empty endpoint list.
+
+- `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
+  last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
+  store commit that stopped at its fence token's self-fence deadline with
+  its outcome unknown, so a caller classifies it by type. Both enums are
+  `#[non_exhaustive]`.
+
+- `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
+  `store_refused` value of a member's `preview_unavailable`
+  (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the
+  member's session until its realm is reopened. The SDKs read it as a known
+  reason; the Python and TypeScript SDKs read a reason a later server adds as
+  `MobMemberPreviewUnavailableUnknown`, and the Web SDK, whose runtime is the
+  same release, keeps its closed vocabulary. `mob_check_member` gives such a
+  member a note of its own (see Fixed).
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -408,6 +517,59 @@ them.
   thinking and no control: the client refuses a forced tool call beside
   explicit thinking, and a forced call skips thinking on the models that
   accept one.
+
+- GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
+  request continues the agent's own work (after a tool result or the
+  assistant's own output, and for a compaction summary or a tool's own
+  model call), `user` otherwise, as other Copilot clients send it. A
+  request and its retry after a 401 carry the same value.
+- GitHub Copilot: the account's model list is refreshed off the request
+  path. A request that finds the five-minute refresh due goes out at once on
+  the current token and the list the account holds, and one refresh runs
+  beside it for the account; before, that request and every concurrent one of
+  the account waited for `GET /models` (up to 30 seconds). A refresh that
+  refuses the token has the next request authorize again (a device sign-in
+  mints a new token, whose own listing decides; a token route builds its
+  account again); any other failure keeps the last list and is tried
+  again later, as before.
+- GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
+  network failure or timeout, is tried once more at once, both attempts
+  within the listing's existing 30-second bound; any other answer is final,
+  as before.
+- GitHub Copilot: when a temporary token exchange failure leaves no valid
+  token and the exchange sent `Retry-After`, every turn until then fails
+  with the outage's retryable error without calling the exchange (for at
+  most an hour); the first turn after it tries the exchange again. Without
+  `Retry-After` the next turn tries it at once, as before.
+- GitHub Copilot: a session's default compaction threshold stays below the
+  account model's prompt limit. The model-aware default (four-fifths of the
+  model's context window or input ceiling) now also takes the selected
+  account's prompt limit when the account states a smaller one, so a long
+  session compacts before the account refuses its prompt. An explicit
+  threshold or a per-build override above the account's prompt limit is
+  lowered to the limit, with a warning, as the request-byte cap bounds a
+  configured cap; one under it keeps its value. A prompt the provider
+  measured over that limit is refused as a context-length error, the class
+  the agent compacts on, instead of an invalid request; Copilot's own answer
+  to an over-limit prompt is not known, so no error body is assumed.
+- GitHub Copilot: a model whose catalog entry states no endpoint list is
+  served on `/chat/completions` by the OpenAI and Gemini routes (before, it
+  could not be selected). An entry whose list is empty states that the model
+  has no endpoints, and the model is refused
+  (`AccountModelRefusal::NoEndpoints` for a model only the account defines,
+  "Copilot account lists no endpoints for ..." on a registry model's route).
+  A model that lists only endpoints Meerkat does not speak still has none.
+- GitHub Copilot: a model the account lists under a policy other than
+  `enabled` is refused naming the state: an account-defined model with
+  `AccountModelRefusal::PolicyNotEnabled` (before, "does not offer"), a
+  registry model's route with "Copilot account policy state for ... is
+  '<state>', not 'enabled'" (before, "does not expose").
+- `meerkat`: a fallback web-search helper resolves its binding like a build
+  whose output budget is known: during a temporary credential exchange
+  outage of its account (a GitHub Copilot route) an explicit web search is
+  provisioned, and an inherited one kept, instead of failing the build or
+  dropping the tool for the build's lifetime. The first search completes the
+  exchange.
 
 ### Deprecated
 
@@ -548,6 +710,169 @@ them.
   before any request is sent, instead of being sent and answered with that
   400, which mapped to the same typed refusal.
 
+- `meerkat-runtime`: a kept input's requeue age is measured from the
+  graceful stop that kept it, not from its admission, so a run admitted long
+  before a restart is no longer ended as `requeue_expired` after a short
+  restart. A graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, which `rkat-rpc`'s, the
+  REST server's and a mob's default graceful shutdowns use with a 15-minute
+  max age for sessions with per-round commits) marks each input it keeps
+  with the stop's time, and the next start now ends the input as
+  `RequeueExpired` only when more than `max_age` has passed since that time:
+  `max_age` bounds the outage after which kept work still runs. The start
+  measured the age from the input's admission instead, so every run
+  admitted more than 15 minutes before a graceful restart, however short the
+  restart, was settled as `RequeueExpired` instead of resumed (its session
+  stream ending it with a `RunFailed`), and a queued input admitted that
+  long before ended `RequeueExpired` without running. A later graceful stop
+  that keeps an input again, before a start runs it, still replaces its
+  mark with its own time and max age, so the age counts from the last stop
+  that kept it. Every mark written since 0.9.5 carries the stop's time, so
+  no migration is needed. Affects 0.9.5 through 0.9.10.
+
+- `meerkat-sandbox`: on Linux, a read-only literal file grant whose last
+  component is a symbolic link is confined, where it was refused
+  (`UnsupportedRequirement`), so a confined process with IP access resolves
+  host names on a host whose `/etc/resolv.conf` links to systemd-resolved's
+  file (grant `/etc/resolv.conf` as a literal read path). The link's
+  regular-file target is pinned when the requirement compiles and bound
+  read-only at the link's path; every launch checks that the link keeps its
+  text and still resolves to that file, and setup reopens it only while it is
+  the file the launch checked. A file replaced under its name (a new file
+  renamed into place, as systemd-resolved rewrites its stub file when its DNS
+  settings change) is checked again by the same rules at the next launch and
+  pinned in its place, so confined launches keep resolving names after the
+  change; a link replaced with other text, or a file replaced by anything
+  those rules refuse, refuses the launch. The link's own text alone must
+  name its target (a link to a link is refused), the target must not be in
+  `/proc`, `/sys` or `/dev`, and the link and every directory above it must
+  be owned by root or the effective user, as their filesystem reports, and
+  writable by neither group nor others unless sticky; any other link is
+  still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
+  through 0.9.10.
+
+- `meerkat-openai`: on the GitHub Copilot Responses route, a response no
+  longer fails the turn for good when Copilot gives its output items new
+  ids. Copilot re-identifies an item on most events of its lifecycle while
+  the item's `output_index` stays, and the route matched completed and
+  terminal items by content and refused every other shape. An item is now
+  its `output_index` slot: it keeps the first id any event of the slot
+  carried, and the terminal output is taken when it lines up with the
+  slots, each item committed under its slot's id with its own reasoning
+  ciphertext. A terminal output that does not line up (an item missing,
+  extra, of another kind, or with other content than the completed one)
+  and a stream that contradicts itself fail the response with a retryable
+  incomplete-response error that names the slot, so the turn is tried
+  again, and nothing of that response is committed. A stream that ends with
+  `[DONE]` and no terminal response commits its completed items. Other
+  OpenAI routes are unchanged.
+- `meerkat-copilot`: a `/models` 403 on a device sign-in's route no longer
+  sends the account to a new sign-in unless its body asks for an action on
+  the account (`error_details.notification_id`, as the token exchange reads
+  it). Any other 403 (a policy, an integration the account does not allow)
+  is a model discovery failure: the token keeps serving, with the last model
+  list or none, and the list is asked for again later.
+- `meerkat-openai`: on GitHub Copilot's Chat Completions routes (chat-only
+  OpenAI models and the Gemini models), a stream that ends without a finish
+  reason, at the end of the body or at `[DONE]`, no longer completes the
+  turn with truncated text or a dropped tool call, and a choice other than
+  choice 0 is no longer merged into the answer: both fail the response with
+  the retryable incomplete-response error, so the turn is tried again and
+  nothing of the response is committed. A finish reason still completes a
+  turn with or without `[DONE]`. Other routes are unchanged.
+
+- `meerkat-runtime`: a host store commit no longer sends its batch past its
+  fence token's lease. A commit whose outcome stayed unknown or unavailable
+  was retried for its whole retry budget (30 s by default), also after
+  renews failed and the self-fence window of the token its batch carries
+  closed. Once the store's lease for that token ended, another process could
+  acquire, and a store that only hides the old token's batches at load
+  (outside the contract, which refuses them at commit) acknowledged a retry
+  that no load shows. Core now sends a batch, the first time or again, only
+  while the realm holds its fence and before the token's self-fence
+  deadline (the start of its last successful acquire or renew plus the
+  self-fence window); a commit still unsettled there stops, typed, and
+  poisons its scopes like any batch whose outcome stays unknown. Affects
+  0.9.5 through 0.9.10.
+
+- `meerkat-session`: a round commit or a closing save whose batch the host
+  store left unsettled at its fence window is no longer waited on and
+  written again, or suspended as if nothing had been written: its outcome is
+  unknown, so the checkpoint answers the teardown class at once, the live
+  session is torn down, and it is reloaded from what the store holds (after
+  a reopen of the realm, what landed). A direct turn whose round commit
+  failed at a store fence gap no longer says that the round was not written:
+  its retryable store error says that the round commit failed.
+
+- `meerkat-runtime`: a stopped host store writer no longer poisons its realm
+  when the store grants an acquire the writer gave up on. Each acquire of a
+  re-acquire runs under `SpiRealmConfig::renew_timeout`; a store that still
+  granted a timed-out one left a token the writer never recorded, and the
+  writer's next re-acquire met it as another holder and poisoned the realm
+  until a reopen. While an acquire of its own timed out since its last
+  grant, the writer now waits out such a holder's recorded lease and
+  acquires again; it poisons the realm only when that holder renewed its
+  lease or the listing shows a batch it did not write. With no timed-out
+  acquire, a holder it does not know poisons the realm at once, as before.
+  Affects 0.9.5 through 0.9.10.
+
+- `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
+  again later for a member whose session the store refuses until its realm
+  is reopened. Such a member's status carried `read_failed` on the wire, so
+  its note said a later check may bring the preview back; it now carries
+  `store_refused`, and its note says that no check brings the preview back
+  before that reopen. Affects 0.9.10.
+
+- `meerkat-mob-mcp`: `delegate` from a session on a model the catalog does
+  not list, a realm `[models.<id>]` entry or a self-hosted model, runs its
+  helper. The session's implicit delegation mob named the session's model
+  without its provider, so its definition did not validate and every such
+  call failed with `unknown_model`, on every surface. The mob's `delegate`
+  profile now names the provider, and the self-hosted server, that the
+  session's build resolved for the model, so the helper runs on the
+  session's own route. An implicit mob created before this fix is reused.
+  Affects 0.7.0 through 0.9.10.
+
+### Security
+
+- `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
+  each granted path by name and followed a symbolic link in any directory
+  on the way. Someone who could write a directory partway down a granted
+  path could exchange that directory with a link while the requirement
+  compiled, and get another file or directory of the host's user pinned and
+  bound in its place: read-only, or writable for a writable grant. This
+  held for every grant kind, file and subtree grants and the platform
+  baseline alike. Every granted path is now opened with no symbolic link in
+  any component, when the requirement compiles, when a final link's
+  replaced target is captured again, and at each launch's setup: openat2
+  with `RESOLVE_NO_SYMLINKS`, or, on a kernel without openat2, a walk that
+  opens each directory without following a link. A grant whose path holds a
+  link at that moment is refused. Affects 0.8.52 through 0.9.10.
+
+- `meerkat-gemini`: the Gemini client marks its credential header values
+  sensitive, as the other provider clients do: the values a dynamic
+  authorizer supplies (a Vertex or Code Assist bearer) and the static API
+  key's `x-goog-api-key`, so a request's `Debug` output does not print them
+  and HTTP/2 never indexes them. A value that is not a valid header value
+  fails the request as an authentication failure before it is sent.
+
+- `meerkat-auth-core`: the credential directories the persisted token
+  stores create are owner-only on Unix: mode 0700, set explicitly whatever
+  the process umask. They are each realm directory of the file token store
+  (the stock CLI's credential store, and the store the `auto` backend
+  keeps a key in when the keyring does not hold it) and the refresh lock
+  directory (`refresh-locks` under the credentials root), which the
+  keyring backend uses too. Both were created with the umask (0755 under
+  the common 022), so another local user could list them: a realm
+  directory names the secret slots of the realm that hold a value, and the
+  lock directory keeps a lock file named after every slot that took a
+  refresh or mutation lock. Only slot names were exposed, never a secret
+  value: the credential files were already 0600, and the lock files are
+  empty. A directory an earlier release created keeps its mode: run
+  `chmod 700` on the realm directories and on `refresh-locks` under the
+  credentials root (`<platform-config>/meerkat/credentials` by default) to
+  tighten them.
+
 ### Upgrade notes
 
 - A host binder of in-process deliveries from governed work binds them
@@ -587,6 +912,14 @@ them.
   executes before its deadline. A decision decided with no login, and every
   decision decided before the upgrade, read as before.
 
+- Host store hosts: Core now sends no commit attempt past the self-fence
+  deadline of the token it carries, so while renews fail a
+  `SpiRealmConfig::commit_retry_budget` longer than the self-fence window
+  (20 s at the default timing) is cut there. To tolerate a slower store, set
+  `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
+  the timing as the host store SPI reference describes (Core's Timeouts And
+  The Safety Condition).
+
 ### Known limitations
 
 - Peers keep the original requester in process only. A delivery over a
@@ -609,6 +942,13 @@ them.
   Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
+
+- `meerkat-runtime`: a takeover acquire that a host store grants after the
+  writer gave up on it, and after the writer's next successful acquire,
+  supersedes the writer's live token: the writer meets `FencedOut` and the
+  realm is poisoned until it is reopened. A store that gives each acquire a
+  server-side deadline below Core's acquire timeout
+  (`SpiRealmConfig::renew_timeout`) avoids it.
 
 ## [0.9.10] - 2026-11-04
 

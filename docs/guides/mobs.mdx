@@ -93,6 +93,11 @@ rkat run --tools full "Ask one helper to inspect the test failure, then summariz
 A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
+Unless its `tooling` supplies a profile, a helper runs on the model and
+provider (and self-hosted server) the calling session was built with, so a
+session on a realm `[models.<id>]` entry or a self-hosted model delegates. The
+helper resolves its own credentials from the realm.
+
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
 A mob member can also fork itself with `fork_off`. The child starts from the
@@ -1738,11 +1743,14 @@ objective, as a host human input submitted with `HandlingMode::Queue` is. It
 stays in the member's input store, its waiter ends with
 `BoundedTurnFailure::RequeuedAcrossStop`, and the mob's next start runs it
 once, in admission order, before new work; a same-key replay after the
-restart re-attaches to its result. Do not resubmit it. If it is older than
-`max_age`, measured from its admission, when a start finds it still queued
-(every such start checks again), it ends as abandoned (`requeue_expired`)
-without running, and a same-key replay answers
-`BoundedTurnFailure::RequeueExpired`: resubmit it if it is still wanted.
+restart re-attaches to its result. Do not resubmit it. If more than
+`max_age` has passed since the Shutdown kept it when a start finds it still
+queued (every such start checks again), it ends as abandoned
+(`requeue_expired`) without running, and a same-key replay answers
+`BoundedTurnFailure::RequeueExpired`: resubmit it if it is still wanted. The
+age counts from the Shutdown, not from the input's admission: `max_age`
+bounds how long the member may stay down, however long the input waited
+before the Shutdown.
 Steer, ephemeral, event, directed and objective-bound inputs that are not
 bound to the running turn's run, and peer messages, end as stopped. A
 member's kickoff is bound to its objective, so a kickoff still queued at a
@@ -2131,6 +2139,7 @@ wasm-pack output into that bundle; it does not compile wasm32.
 | External spawn rejected | Verify the external binding includes address, Ed25519 identity, and typed bootstrap token |
 | Flow run missing | Use `mob/flows` first and confirm the `flow_id` exists in the definition |
 | Live open fails | Confirm the member's model has realtime capability and `rkat-rpc --live-ws` is enabled when using RPC audio |
+| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
 
 ## See Also
 

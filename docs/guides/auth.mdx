@@ -221,12 +221,29 @@ OpenAI, Anthropic, and Gemini provider identities; `credential_account =
 AuthMachine lifecycle, status, and logout shared. Meerkat queries the signed-in
 account's `/models` endpoint and rejects a known-unavailable model/dialect
 before dispatch. If discovery is temporarily unavailable, auth still succeeds
-and the request is attempted normally. A known-unavailable error includes the
+and the request is attempted normally. The account's model list is refreshed
+every five minutes off the request path: a request that finds the refresh due
+goes out at once on the current token and the list the account holds, and the
+refresh runs beside it. A listing that meets a 408, 502, 503 or 504, or a
+network failure or timeout, is tried once more at once, both attempts within
+the listing's 30-second bound. On the device sign-in's routes, a refresh that fails
+(a network failure, a 5xx, a rate limit, or a 403 that asks for no action on
+the account) keeps the last list and is tried again after 30 seconds, or after
+the listing's `Retry-After`; a 401, or a 403 that asks for an account action,
+refuses the current token: the next request mints a new one, and a listing
+that refuses that one too needs a new sign-in. A token route's listing keeps
+its own rules ([below](#github-copilot-with-a-service-account-token)), applied
+on the request after the refresh. A known-unavailable error includes the
 compatible model IDs observed for that account. An ID outside Meerkat's
 built-in catalog runs when the request names a route of the account: the
 account's model list defines it, protocol and limits included (see
 [GitHub Copilot configured once](#github-copilot-configured-once)); a
-`[models.<id>]` entry for it still works, and wins.
+`[models.<id>]` entry for it still works, and wins. On the Chat Completions
+routes (chat-only OpenAI models and the Gemini models), a response counts as
+complete only once its stream names a finish reason: a stream that ends
+without one, at the end of the body or at `[DONE]`, or that carries a choice
+other than the first, fails as an incomplete response, which the agent loop
+retries, and nothing of it is kept.
 
 The device sign-in's routes send a Copilot token that Meerkat obtains from the
 GitHub sign-in by a token exchange and replaces before it expires. A temporary
@@ -235,7 +252,9 @@ or a GitHub API rate limit) does not fail turns: the current token, minted from
 the current sign-in, keeps serving until it expires, and the exchange is tried
 again after its `Retry-After` (at least a second later), or after 30 seconds
 without one. Once no valid token is left, a turn fails with a retryable error
-(rate limited, server error, network timeout), which the agent loop retries. A
+(rate limited, server error, network timeout), which the agent loop retries;
+when the exchange sent `Retry-After`, every turn until then fails the same way
+without calling the exchange (for at most an hour). A
 token Copilot rejects with a 401 is replaced on its next use, and the
 account's routes stay resolvable. Restoring or waking a session, or building
 one whose output budget is set explicitly or in the configuration, succeeds
@@ -257,7 +276,10 @@ inherited by workspace realms via the chain tail. Secret tokens are separate:
 the stock CLI's file-backed TokenStore uses
 `<platform-config>/meerkat/credentials/global/<credential-stem>.json`,
 where `<platform-config>` is `dirs::config_dir()`. Files are created with mode
-0600 on Unix. `--user-config-root` relocates the config doc, not this token
+0600 on Unix, and the directories created under
+`<platform-config>/meerkat/credentials` (`global/` here, and
+`refresh-locks` for the cross-process refresh locks) with mode 0700.
+`--user-config-root` relocates the config doc, not this token
 root; custom hosts may choose a keyring or another TokenStore.
 
 To use a binding owned by another realm (for example `prod:openai`), declare that
@@ -599,9 +621,16 @@ Choosing a model:
   has looked the account up. The endpoints Copilot lists for the model choose
   the protocol, never its vendor: a model on `/v1/messages` runs on the
   Anthropic Messages wire, otherwise a model on `/responses` or
-  `/chat/completions` runs on the OpenAI wire, Responses first. The session
+  `/chat/completions` runs on the OpenAI wire, Responses first; a model whose
+  entry states no endpoint list runs on `/chat/completions`, and one whose list
+  is empty is refused. The session
   moves to the account's route of that protocol, whichever route of the
-  account it named. The model's limits come from the same list: its context
+  account it named. On the Chat Completions route such a model gets the
+  check every model gets there, so a reply that splits its output across
+  choices is refused as incomplete: for a model that answers that way (a
+  Claude model the account lists without `/v1/messages`, for one), add a
+  `[models.<id>]` entry, whose `provider` then picks the route (`anthropic`
+  for the Messages route). The model's limits come from the same list: its context
   window, prompt limit and output limit, and whether it takes images. Tool
   calls, streaming, structured outputs and thinking budgets are checked
   against the list on every request, as for every Copilot model. Nothing
@@ -621,10 +650,19 @@ made, and no other route or credential is tried in its place:
 
 | What happened | Refusal |
 |---|---|
-| The account's model list does not name the model, or the account's policy disables it | `account model refused`: the credential does not offer the model, followed by the ids it offers |
+| The account's model list does not name the model | `account model refused`: the credential does not offer the model, followed by the ids it offers |
+| The account's policy for the model is not `enabled` (`disabled`, `unconfigured` or another state) | `account model refused`: the credential lists the model with that policy state, not `enabled` |
+| The account lists the model with an empty endpoint list | `account model refused`: the credential lists the model with no endpoints |
 | The account offers the model on no endpoint Meerkat speaks | `account model refused`: offered on no endpoint Meerkat speaks |
 | The account's model discovery failed | `account model refused`: the model list is not available; retry once it loads |
 | The account has no route for the model's protocol (explicit tables without it) | the credential account has no route for that provider |
+
+A model the registry defines follows the account's list on a Copilot route
+too: a model whose entry states no endpoint list is served on
+`/chat/completions` by the OpenAI and Gemini routes, one whose list is empty
+is refused with an error that says the account lists no endpoints for it, and
+one the account lists under a policy other than `enabled` is refused with an
+error that names the state.
 
 A `[models.<id>]` entry keeps owning its model: the account is never asked
 about it, and its `provider` still decides the route. To move from the
@@ -780,15 +818,16 @@ descriptors (`CredentialSourceSpec::FileDescriptor`) let host
 applications inject tokens without going through OAuth.
 
 Credential header values are marked sensitive on every OpenAI Responses,
-OpenAI-compatible Chat Completions and Anthropic Messages request, so the
-request's `Debug` output does not print them and HTTP/2 never indexes them:
-the values a dynamic authorizer supplies (an `external_authorizer` route's, a
-Copilot route's bearer) and a static API key's (the OpenAI `Authorization`
-bearer, Azure OpenAI's `api-key`, the compatible client's bearer, Anthropic's
-`x-api-key`). The Gemini client's credential headers are not marked. A value
-that is not a valid HTTP header value fails the request as an authentication
-failure ("a credential header value is not a valid HTTP header value") before
-it is sent. Those clients also pass what they read from a text generation
+OpenAI-compatible Chat Completions, Anthropic Messages and Gemini request, so
+the request's `Debug` output does not print them and HTTP/2 never indexes
+them: the values a dynamic authorizer supplies (an `external_authorizer`
+route's, a Copilot route's bearer, a Vertex or Code Assist bearer) and a
+static API key's (the OpenAI `Authorization` bearer, Azure OpenAI's `api-key`,
+the compatible client's bearer, Anthropic's `x-api-key`, Gemini's
+`x-goog-api-key`). A value that is not a valid HTTP header value fails the
+request as an authentication failure ("a credential header value is not a
+valid HTTP header value") before it is sent. The OpenAI and Anthropic clients
+also pass what they read from a text generation
 response (a rejection body, a stream error event, a data line that does not
 parse, the provider error fields they log) through the authorizer's
 `HttpAuthorizer::redact_response_diagnostic` before it reaches a caller or a

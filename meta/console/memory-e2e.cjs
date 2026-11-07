@@ -14,6 +14,7 @@
 // only through it.
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -30,6 +31,25 @@ const screenshotDir = fs.mkdtempSync(path.join(os.tmpdir(), "memory-e2e-"));
 
 // Non-fatal panel findings collected during the run (reported, not thrown).
 const findings = [];
+
+// A quarantine decision is a signed-in person's, so the open-access flows
+// run as one: an HS256 token of the fixture's development issuer
+// (memory_console_reference.rs), volunteered on every browser request.
+function reviewerToken() {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const signed = `${encode({ alg: "HS256", typ: "JWT", kid: "kid-current" })}.${encode({
+    sub: "reviewer@memory-e2e.test",
+    email: "reviewer@memory-e2e.test",
+    provider: "google_oauth",
+    iss: "https://trusted.meta.localhost",
+    aud: "meerkat-console",
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const signature = crypto.createHmac("sha256", "phase7-trusted-current-secret").update(signed).digest("base64url");
+  return `${signed}.${signature}`;
+}
 
 // ── Harness plumbing (matches browser-e2e.cjs) ──────────────────────────
 
@@ -500,9 +520,10 @@ const openAccessFlows = [
         `quarantine click-through biography: ${detailText.slice(0, 300)}`,
       );
 
-      // Open access on a mutable console offers the decision. Gated
-      // promotions are waiting on this record, so a release is refused
-      // typed (Approvals decides it) and nothing changes.
+      // Open access on a mutable console offers the decision to a
+      // signed-in person. Gated promotions are waiting on this record, so
+      // a release is refused typed (Approvals decides it) and nothing
+      // changes.
       await page.getByTestId(T.QUARANTINE_DECIDE).waitFor({ timeout: 10_000 });
       await page.getByTestId(T.QUARANTINE_RELEASE).click();
       const refusal = page.getByTestId(T.QUARANTINE_ERROR);
@@ -904,7 +925,10 @@ async function main() {
     gateway = await startSeededGateway("open");
     const seed = await fetchSeedIds(gateway.baseUrl);
     browser = await launchBrowser();
-    const page = await browser.newPage();
+    const reviewer = await browser.newContext({
+      extraHTTPHeaders: { authorization: `Bearer ${reviewerToken()}` },
+    });
+    const page = await reviewer.newPage();
     const context = { page, baseUrl: gateway.baseUrl, seed };
     for (const flow of openAccessFlows) {
       await runFlow(flow, context, results);

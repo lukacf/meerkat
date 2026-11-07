@@ -679,16 +679,25 @@ fn apply_access_to_experience(body: &mut Value, view: &AccessView) {
                     view.allows_agent(crate::access::ACTION_AGENT_RETIRE, identity.as_str());
                 let can_respawn =
                     view.allows_agent(crate::access::ACTION_AGENT_RESPAWN, identity.as_str());
+                let can_manage_schedules =
+                    view.allows_agent(crate::access::ACTION_SCHEDULE_MANAGE, identity.as_str());
                 if let Some(affordances) =
                     agent.get_mut("affordances").and_then(Value::as_object_mut)
                 {
                     intersect_bool(affordances, "can_send_message", can_send);
                     intersect_bool(affordances, "can_retire", can_retire);
                     intersect_bool(affordances, "can_respawn", can_respawn);
-                    any_can_send |= affordances
+                    // A console schedule change takes `agent.send` and
+                    // `schedule.manage` on the agent.
+                    let can_send_message = affordances
                         .get("can_send_message")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    affordances.insert(
+                        "can_manage_schedules".to_string(),
+                        Value::Bool(can_send_message && can_manage_schedules),
+                    );
+                    any_can_send |= can_send_message;
                     any_can_retire |= affordances
                         .get("can_retire")
                         .and_then(Value::as_bool)

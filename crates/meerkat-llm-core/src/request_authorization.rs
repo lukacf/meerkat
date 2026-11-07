@@ -137,6 +137,10 @@ impl LlmClient for SelectedTargetClient {
         self.inner.output_token_limit()
     }
 
+    fn prompt_token_limit(&self) -> Option<u32> {
+        self.inner.prompt_token_limit()
+    }
+
     fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
         Some(self.target.controller_model_selection())
     }

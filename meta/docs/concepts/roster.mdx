@@ -353,7 +353,9 @@ external-member observations, resolved model capabilities, execution progress,
 placement, reachability, freshness, and lifecycle-capability diagnostics.
 When Meerkat could not observe the member's session for the status (meerkat
 0.8.45+), `preview_unavailable` names why (`observation_deadline`,
-`read_failed`, `session_absent`, `not_observed_while_retiring`), and a missing
+`read_failed`, `session_absent`, `not_observed_while_retiring`, and from
+meerkat 0.9.11 `store_refused`: the store refuses to read the member's session
+until its realm is reopened), and a missing
 `output_preview` then does not mean an empty member. `meta/inspect_identity`
 and the console's per-member progress carry the same marker.
 

@@ -15,8 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeUpdate,
-    ScopeVersion, VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeUpdate, ScopeVersion, VersionedHead,
 };
 use meerkat_core::{RunId, ToolCallDedupeKey};
 use serde_json::value::RawValue;
@@ -27,6 +27,137 @@ use crate::long_run::{
     ResumedRun, RoundSet, call_id, resumes, takes_first_commit,
 };
 use crate::{ConformanceFailure, HostStoreFactory, InMemoryHostStore, chapters};
+
+/// A store that meets obligation 4 at load: the reference store refuses the
+/// second batch for one version at commit, and this store keeps it instead,
+/// so the scope loads as a typed conflict at that version from then on. With
+/// `per_scope` its listings report such a scope in `conflicts`; without, a
+/// page that would show it fails whole, as a store that does not report a
+/// conflict per scope does.
+struct LoadConflicting {
+    inner: Arc<InMemoryHostStore>,
+    per_scope: bool,
+    newest: AtomicU64,
+    conflicted: Mutex<BTreeMap<ScopeRef, ScopeVersion>>,
+}
+
+impl LoadConflicting {
+    fn factory(per_scope: bool) -> Shared {
+        let inner = Arc::new(InMemoryHostStore::new());
+        let store = Arc::new(Self {
+            inner: Arc::clone(&inner),
+            per_scope,
+            newest: AtomicU64::new(0),
+            conflicted: Mutex::new(BTreeMap::new()),
+        });
+        Shared::canary(inner, store)
+    }
+
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.conflicted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(scope)
+            .map(|version| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(*version),
+            })
+    }
+}
+
+#[async_trait]
+impl HostStore for LoadConflicting {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        let grant = self.inner.acquire_fence(mode).await?;
+        self.newest.fetch_max(grant.token.get(), Ordering::SeqCst);
+        Ok(grant)
+    }
+
+    async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+        self.inner.renew_fence(token).await
+    }
+
+    fn fence_timing(&self) -> FenceTiming {
+        self.inner.fence_timing()
+    }
+
+    async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        match self.conflict_of(scope) {
+            Some(conflict) => Err(conflict),
+            None => self.inner.load_head(scope).await,
+        }
+    }
+
+    async fn list_heads(
+        &self,
+        kind: ScopeKind,
+        after: Option<&ScopeName>,
+        limit: usize,
+    ) -> Result<HeadPage, HostStoreError> {
+        let every = self.inner.list_heads(kind, after, usize::MAX).await?;
+        let conflicted = self
+            .conflicted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut last = None;
+        let mut more = false;
+        for entry in every.heads {
+            if heads.len() + conflicts.len() == limit {
+                more = true;
+                break;
+            }
+            let scope = ScopeRef::new(kind, entry.name.clone());
+            last = Some(entry.name.clone());
+            match conflicted.get(&scope) {
+                Some(version) if self.per_scope => {
+                    conflicts.push(ScopeConflict::new(entry.name, *version, Vec::new()));
+                }
+                Some(version) => {
+                    return Err(HostStoreError::Conflict {
+                        scope,
+                        current: Some(*version),
+                    });
+                }
+                None => heads.push(entry),
+            }
+        }
+        let next = if more { last } else { None };
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
+    }
+
+    async fn read_rows(
+        &self,
+        scope: &ScopeRef,
+        from: RowIndex,
+        limit: usize,
+    ) -> Result<Vec<Row>, HostStoreError> {
+        match self.conflict_of(scope) {
+            Some(conflict) => Err(conflict),
+            None => self.inner.read_rows(scope, from, limit).await,
+        }
+    }
+
+    async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        match self.inner.commit(batch).await {
+            // A second batch for a version under the current token is kept:
+            // its first scope loads as a typed conflict at that version.
+            Err(HostStoreError::Conflict {
+                scope,
+                current: Some(version),
+            }) if batch.fence().get() == self.newest.load(Ordering::SeqCst) => {
+                self.conflicted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(scope, version);
+                Ok(())
+            }
+            answer => answer,
+        }
+    }
+}
 
 /// Hands out handles over one store: one realm that outlives its processes.
 struct Shared {
@@ -450,6 +581,28 @@ async fn store_acknowledging_a_superseded_token_fails_only_the_commit_fence_row(
         .expect_err("a store that answers Ok to a commit under a superseded token must fail");
     assert_eq!(failure.chapter(), "host_store");
     assert_eq!(failure.step(), "a_superseded_token_is_refused_at_commit");
+}
+
+#[tokio::test]
+async fn store_listing_its_load_conflicts_per_scope_passes_the_host_store_chapter() {
+    chapters::host_store(&LoadConflicting::factory(true))
+        .await
+        .expect(
+            "a store that loads two batches for one version as a typed conflict and lists the \
+             scope per scope must satisfy the host store chapter",
+        );
+}
+
+#[tokio::test]
+async fn store_failing_the_page_of_a_conflicted_scope_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&LoadConflicting::factory(false))
+        .await
+        .expect_err(
+            "a store that fails a whole listing page for a scope that loads as a typed conflict \
+             must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_conflicted_scope_is_listed_typed");
 }
 
 fn scope(name: &str) -> ScopeRef {

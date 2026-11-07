@@ -7,7 +7,9 @@
 //! the fence again on its own handle, as Core's writer does after a failed
 //! renew. Where the contract lets a store meet an obligation either by
 //! refusing at commit or by resolving at load, the rows accept both; a
-//! commit under a superseded token must be refused at commit (obligation 5).
+//! commit under a superseded token must be refused at commit (obligation 5),
+//! and a scope that loads as a typed conflict must be listed as one, per
+//! scope, never by failing its page (obligation 4).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -19,8 +21,8 @@ use std::time::Duration;
 
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceToken, HostStore, HostStoreError, MAX_BATCH_BYTES,
-    MAX_ROW_BYTES, Row, RowIndex, ScopeHead, ScopeKind, ScopeName, ScopeRef, ScopeUpdate,
-    ScopeVersion, VersionedHead,
+    MAX_ROW_BYTES, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeUpdate, ScopeVersion, VersionedHead,
 };
 
 use crate::factory::HostStoreFactory;
@@ -53,6 +55,7 @@ pub async fn host_store(factory: &dyn HostStoreFactory) -> Result<(), Conformanc
     let writer = takeover_unknown_commit(&mut chapter, writer).await?;
     let writer = an_acquire_decides_the_cut(&mut chapter, writer).await?;
     same_version_twice(&mut chapter, &writer).await?;
+    a_conflicted_scope_is_listed_typed(&mut chapter, &writer).await?;
     retry(&mut chapter, &writer).await?;
     rows_removal_listing(&mut chapter, &writer).await?;
     let writer = reacquire_lists_another_writers_commits(&mut chapter, writer).await?;
@@ -906,7 +909,9 @@ async fn cut_view(
 ) -> Result<CutView, ConformanceFailure> {
     let mut listed = Vec::with_capacity(scopes.len());
     for scope in scopes {
-        let heads = list_all(steps, step, store, scope.kind, ALL_ROWS).await?;
+        let heads = list_all(steps, step, store, scope.kind, ALL_ROWS)
+            .await?
+            .heads;
         listed.push(
             heads
                 .into_iter()
@@ -1141,6 +1146,132 @@ async fn same_version_twice(
     }
 }
 
+/// A scope whose load answers a typed conflict (obligation 4 met at load) is
+/// listed per scope: a listing of its kind names it under `conflicts`, with
+/// the version its load names, ascending commit ids without repeats (or
+/// none), and every other scope of the kind as usual, and never fails the
+/// page for it; listing it again reports the same version and ids. A store
+/// that refuses the second batch at commit, or resolves the pair at load by
+/// a fixed rule ([`same_version_twice`]), holds no such scope, and the row
+/// checks nothing more. A store that resolves the pair only when it folds
+/// its batches runs its fold between and after them
+/// ([`HostStoreFactory::fold_now`]); one with no fold to run here proves its
+/// conflict listing in its own tests.
+async fn a_conflicted_scope_is_listed_typed(
+    chapter: &mut Chapter<'_>,
+    writer: &Writer,
+) -> Result<(), ConformanceFailure> {
+    const STEP: &str = "a_conflicted_scope_is_listed_typed";
+    let steps = chapter.steps;
+    let c = scope_ref(&steps, STEP, ScopeKind::Mob, "conflict-c")?;
+    let n = scope_ref(&steps, STEP, ScopeKind::Mob, "conflict-n")?;
+    let base_id = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            writer,
+            base_id,
+            vec![
+                create(&c, "base", Vec::new()),
+                create(&n, "base", Vec::new()),
+            ],
+        )
+        .await?;
+    let x_id = chapter.mint(STEP)?;
+    chapter
+        .commit(
+            STEP,
+            writer,
+            x_id,
+            vec![update(&c, ScopeVersion::FIRST, Some("x"), Vec::new())],
+        )
+        .await?;
+    chapter.factory.fold_now().await?;
+    let y_id = chapter.mint(STEP)?;
+    let batch_y = batch(
+        &steps,
+        STEP,
+        y_id,
+        writer,
+        vec![update(&c, ScopeVersion::FIRST, Some("y"), Vec::new())],
+    )?;
+    match writer.store.commit(&batch_y).await {
+        Ok(()) => {}
+        // Obligation 4 met at commit: no scope loads as a conflict.
+        Err(HostStoreError::Conflict { scope, current }) if scope == c && current == Some(V2) => {
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(steps.fail(
+                STEP,
+                format!("a second batch for one version must land or answer Conflict on {c} at version 2, got {error}"),
+            ));
+        }
+    }
+    chapter.factory.fold_now().await?;
+    let version = match writer.store.load_head(&c).await {
+        Err(HostStoreError::Conflict {
+            scope,
+            current: Some(version),
+        }) if scope == c => version,
+        Err(HostStoreError::Conflict { scope, current }) => {
+            return Err(steps.fail(
+                STEP,
+                format!("a load of {c} that answers a conflict names the scope and the version that holds the two batches, got {scope} at {current:?}"),
+            ));
+        }
+        // Resolved at load by a fixed rule: same_version_twice checked it.
+        _ => return Ok(()),
+    };
+    let mut first: Option<ScopeConflict> = None;
+    for _ in 0..2 {
+        let listed = list_all(
+            &steps,
+            STEP,
+            writer.store.as_ref(),
+            ScopeKind::Mob,
+            ALL_ROWS,
+        )
+        .await?;
+        let conflict = listed
+            .conflicts
+            .iter()
+            .find(|conflict| conflict.name == c.name)
+            .cloned();
+        steps.ensure(
+            STEP,
+            conflict
+                .as_ref()
+                .is_some_and(|conflict| conflict.version == version),
+            format!("a listing of its kind names {c} under conflicts at version {version}, the version its load names, listed {conflict:?}"),
+        )?;
+        steps.ensure(
+            STEP,
+            listed.heads.iter().any(|entry| entry.name == n.name),
+            format!("a listing that names a conflicted scope lists the other scopes of its kind as usual: {n} is missing"),
+        )?;
+        if let Some(conflict) = &conflict {
+            steps.ensure(
+                STEP,
+                conflict.commit_ids.windows(2).all(|pair| pair[0] < pair[1]),
+                format!(
+                    "a conflict's commit ids are ascending, without repeats: {:?}",
+                    conflict.commit_ids
+                ),
+            )?;
+        }
+        if let Some(first) = &first {
+            steps.ensure(
+                STEP,
+                conflict.as_ref() == Some(first),
+                format!("listing an unchanged conflict again reports the same version and ids: first {first:?}, then {conflict:?}"),
+            )?;
+        }
+        first = conflict;
+    }
+    Ok(())
+}
+
 fn ensure_retry_answer(
     steps: &Steps,
     step: &'static str,
@@ -1228,49 +1359,80 @@ async fn retry(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Conform
     Ok(())
 }
 
+/// One kind's listing: its visible scopes' heads and its conflicted scopes,
+/// each in name order.
+#[derive(Debug, Default)]
+struct KindListing {
+    heads: Vec<ScopeHead>,
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// Every scope of `kind`, page after page of at most `limit` entries across
+/// a page's heads and conflicts: a page with no entry ends the listing, and
+/// names strictly increase across both lists, so each scope is named once,
+/// in one list.
 async fn list_all(
     steps: &Steps,
     step: &'static str,
     store: &dyn HostStore,
     kind: ScopeKind,
     limit: usize,
-) -> Result<Vec<ScopeHead>, ConformanceFailure> {
-    let mut listed = Vec::new();
+) -> Result<KindListing, ConformanceFailure> {
+    let mut listed = KindListing::default();
+    let mut last: Option<ScopeName> = None;
     let mut after: Option<ScopeName> = None;
     for _ in 0..MAX_PAGES {
         let page = steps.wrap(step, store.list_heads(kind, after.as_ref(), limit).await)?;
+        let entries = page.heads.len() + page.conflicts.len();
         steps.ensure(
             step,
-            page.heads.len() <= limit,
+            entries <= limit,
             format!(
-                "a {kind} page holds at most {limit} heads, held {}",
-                page.heads.len()
+                "a {kind} page holds at most {limit} entries across its heads and conflicts, held {entries}"
             ),
         )?;
-        if page.heads.is_empty() {
+        if entries == 0 {
             steps.ensure(
                 step,
                 page.next.is_none(),
                 format!(
-                    "a {kind} page with no heads ends the listing, next was {:?}",
+                    "a {kind} page with no entries ends the listing, next was {:?}",
                     page.next
                 ),
             )?;
             return Ok(listed);
         }
-        for entry in page.heads {
-            if let Some(last) = listed.last() {
+        let heads: Vec<&ScopeName> = page.heads.iter().map(|entry| &entry.name).collect();
+        let conflicts: Vec<&ScopeName> = page
+            .conflicts
+            .iter()
+            .map(|conflict| &conflict.name)
+            .collect();
+        for names in [&heads, &conflicts] {
+            steps.ensure(
+                step,
+                names.windows(2).all(|pair| pair[0] < pair[1]),
+                format!(
+                    "a {kind} page lists its heads and its conflicts each in name order: {names:?}"
+                ),
+            )?;
+        }
+        let mut names: Vec<&ScopeName> = heads.into_iter().chain(conflicts).collect();
+        names.sort();
+        for name in names {
+            if let Some(last) = &last {
                 steps.ensure(
                     step,
-                    entry.name > last.name,
+                    name > last,
                     format!(
-                        "a {kind} listing names every scope once, in name order: {} came after {}",
-                        entry.name, last.name
+                        "a {kind} listing names every scope once, in one list, in name order: {name} came after {last}"
                     ),
                 )?;
             }
-            listed.push(entry);
+            last = Some(name.clone());
         }
+        listed.heads.extend(page.heads);
+        listed.conflicts.extend(page.conflicts);
         match page.next {
             None => return Ok(listed),
             Some(next) => after = Some(next),
@@ -1476,7 +1638,11 @@ async fn rows_and_removal(
     let sessions = list_all(&steps, STEP, store, ScopeKind::Session, ALL_ROWS).await?;
     steps.ensure(
         STEP,
-        sessions.iter().all(|entry| entry.name != q.name),
+        sessions.heads.iter().all(|entry| entry.name != q.name)
+            && sessions
+                .conflicts
+                .iter()
+                .all(|conflict| conflict.name != q.name),
         format!("a deleted scope is not listed: {q}"),
     )
 }
@@ -1548,7 +1714,9 @@ async fn listing(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Confo
 
     let visible: Vec<&str> = expected.keys().map(String::as_str).collect();
     for limit in [16, 1_000] {
-        let listed = list_all(&steps, STEP, store, ScopeKind::Record, limit).await?;
+        let listed = list_all(&steps, STEP, store, ScopeKind::Record, limit)
+            .await?
+            .heads;
         let names_listed: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
         steps.ensure(
             STEP,
@@ -1587,7 +1755,9 @@ async fn listing(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Confo
         paged == following,
         format!("the 5 records after list-100 must be {following:?}, listed {paged:?}"),
     )?;
-    let listed = list_all(&steps, STEP, store, ScopeKind::Identity, ALL_ROWS).await?;
+    let listed = list_all(&steps, STEP, store, ScopeKind::Identity, ALL_ROWS)
+        .await?
+        .heads;
     let names_listed: Vec<&str> = listed.iter().map(|entry| entry.name.as_str()).collect();
     steps.ensure(
         STEP,
@@ -1652,8 +1822,29 @@ async fn limits(chapter: &mut Chapter<'_>, writer: &Writer) -> Result<(), Confor
     )
 }
 
-/// A listing of the four scope kinds, by kind and name.
-type Listing = BTreeMap<(ScopeKind, ScopeName), VersionedHead>;
+/// What a listing shows of one scope: its visible head, or the conflict its
+/// load answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Listed {
+    Head(VersionedHead),
+    Conflict {
+        version: ScopeVersion,
+        commit_ids: Vec<CommitId>,
+    },
+}
+
+impl Listed {
+    fn head(&self) -> Option<&VersionedHead> {
+        match self {
+            Self::Head(head) => Some(head),
+            Self::Conflict { .. } => None,
+        }
+    }
+}
+
+/// A listing of the four scope kinds, by kind and name: a scope that moves
+/// between the heads and the conflicts is a difference.
+type Listing = BTreeMap<(ScopeKind, ScopeName), Listed>;
 
 /// The kinds the relisting row lists, as Core lists them.
 const KINDS: [ScopeKind; 4] = [
@@ -1669,13 +1860,22 @@ fn relist_limit(kind: ScopeKind) -> usize {
     if kind == ScopeKind::Session { 4 } else { 16 }
 }
 
-fn add_listed(listing: &mut Listing, kind: ScopeKind, heads: Vec<ScopeHead>) {
-    for entry in heads {
-        listing.insert((kind, entry.name), entry.head);
+fn add_listed(listing: &mut Listing, kind: ScopeKind, listed: KindListing) {
+    for entry in listed.heads {
+        listing.insert((kind, entry.name), Listed::Head(entry.head));
+    }
+    for conflict in listed.conflicts {
+        listing.insert(
+            (kind, conflict.name),
+            Listed::Conflict {
+                version: conflict.version,
+                commit_ids: conflict.commit_ids,
+            },
+        );
     }
 }
 
-/// Every head of the four kinds, one kind after another.
+/// Every scope of the four kinds, one kind after another.
 async fn list_kinds_in_turn(
     steps: &Steps,
     step: &'static str,
@@ -1683,14 +1883,14 @@ async fn list_kinds_in_turn(
 ) -> Result<Listing, ConformanceFailure> {
     let mut listing = Listing::new();
     for kind in KINDS {
-        let heads = list_all(steps, step, store, kind, relist_limit(kind)).await?;
-        add_listed(&mut listing, kind, heads);
+        let listed = list_all(steps, step, store, kind, relist_limit(kind)).await?;
+        add_listed(&mut listing, kind, listed);
     }
     Ok(listing)
 }
 
-/// Every head of the four kinds, the kinds at once on tasks of their own (as
-/// Core lists them), each kind's pages in order.
+/// Every scope of the four kinds, the kinds at once on tasks of their own
+/// (as Core lists them), each kind's pages in order.
 #[cfg(not(target_arch = "wasm32"))]
 async fn list_kinds_at_once(
     steps: &Steps,
@@ -1703,9 +1903,9 @@ async fn list_kinds_at_once(
             let store = Arc::clone(store);
             let steps = *steps;
             tokio::spawn(async move {
-                let heads =
+                let listed =
                     list_all(&steps, step, store.as_ref(), kind, relist_limit(kind)).await?;
-                Ok::<_, ConformanceFailure>((kind, heads))
+                Ok::<_, ConformanceFailure>((kind, listed))
             })
         })
         .collect();
@@ -1713,8 +1913,8 @@ async fn list_kinds_at_once(
     for task in tasks {
         match task.await {
             Ok(listed) => {
-                let (kind, heads) = listed?;
-                add_listed(&mut listing, kind, heads);
+                let (kind, listed) = listed?;
+                add_listed(&mut listing, kind, listed);
             }
             Err(error) => {
                 return Err(steps.fail(step, format!("a listing task ended abnormally: {error}")));
@@ -1724,7 +1924,7 @@ async fn list_kinds_at_once(
     Ok(listing)
 }
 
-/// Every head of the four kinds; one kind after another where the chapter
+/// Every scope of the four kinds; one kind after another where the chapter
 /// spawns no tasks.
 #[cfg(target_arch = "wasm32")]
 async fn list_kinds_at_once(
@@ -1867,10 +2067,12 @@ async fn reacquire_lists_another_writers_commits(
         token: grant.token,
     };
     let relisted = list_kinds_at_once(&steps, STEP, &writer.store).await?;
-    let by_other = |version: ScopeVersion, head: &str| VersionedHead {
-        version,
-        commit_id: c2.clone(),
-        head: head.as_bytes().to_vec(),
+    let by_other = |version: ScopeVersion, head: &str| {
+        Listed::Head(VersionedHead {
+            version,
+            commit_id: c2.clone(),
+            head: head.as_bytes().to_vec(),
+        })
     };
     let mut expected = before.clone();
     expected.insert((ScopeKind::Session, s2.name.clone()), by_other(V2, "b2"));
@@ -1894,7 +2096,9 @@ async fn reacquire_lists_another_writers_commits(
     )?;
     for scope in [&s1, &s2, &s3, &s4, &record, &doomed, &mob] {
         let loaded = steps.wrap(STEP, writer.store.load_head(scope).await)?;
-        let listed = relisted.get(&(scope.kind, scope.name.clone()));
+        let listed = relisted
+            .get(&(scope.kind, scope.name.clone()))
+            .and_then(Listed::head);
         steps.ensure(
             STEP,
             loaded.as_ref() == listed,
@@ -1917,7 +2121,7 @@ async fn reacquire_lists_another_writers_commits(
         )
         .await?;
     let mut sessions = Listing::new();
-    let heads = list_all(
+    let listed = list_all(
         &steps,
         STEP,
         writer.store.as_ref(),
@@ -1925,18 +2129,18 @@ async fn reacquire_lists_another_writers_commits(
         relist_limit(ScopeKind::Session),
     )
     .await?;
-    add_listed(&mut sessions, ScopeKind::Session, heads);
+    add_listed(&mut sessions, ScopeKind::Session, listed);
     let mut expected: Listing = relisted
         .into_iter()
         .filter(|((kind, _), _)| *kind == ScopeKind::Session)
         .collect();
     expected.insert(
         (ScopeKind::Session, s2.name.clone()),
-        VersionedHead {
+        Listed::Head(VersionedHead {
             version: V3,
             commit_id: c3,
             head: b"a3".to_vec(),
-        },
+        }),
     );
     steps.ensure(
         STEP,

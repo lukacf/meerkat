@@ -78,6 +78,15 @@ pub trait HostStoreFactory: Send + Sync {
     /// ([`HostStore::fence_timing`]) had passed with no renew: advance the
     /// store's clock, or wait the lease out.
     async fn lapse_fence_leases(&self) -> Result<(), ConformanceFailure>;
+
+    /// Fold the realm's batches now, for a store that resolves two batches
+    /// at one version only when it folds them (compaction): the chapter's
+    /// conflict row runs it between and after the pair. The default does
+    /// nothing; a store with no fold to run proves its conflict listing in
+    /// its own tests.
+    async fn fold_now(&self) -> Result<(), ConformanceFailure> {
+        Ok(())
+    }
 }
 
 /// Adapter turning an async closure into a [`SessionStoreFactory`].

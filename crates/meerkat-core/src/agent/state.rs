@@ -24250,6 +24250,114 @@ mod tests {
         }
     }
 
+    /// A hard interrupt drops the run future in its model call, and the
+    /// session cancels the dropped run (`cancel_dropped_run`), which is
+    /// synchronous. The run's end still ends its run-scoped grants: the
+    /// session's task ends them through the gate right after the cancel
+    /// (`end_dropped_run_tool_grants`), once. Before a dropped run ended,
+    /// that ends nothing.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn a_dropped_run_ends_its_run_scoped_grants() {
+        /// A session's grants that record the runs they are asked about.
+        #[derive(Default)]
+        struct RecordingGrants {
+            boundary_runs: Mutex<Vec<Option<crate::RunId>>>,
+            ended_runs: Mutex<Vec<crate::RunId>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for RecordingGrants {
+            async fn open_names(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                run_id: Option<&crate::RunId>,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.boundary_runs.lock().unwrap().push(run_id.cloned());
+                Ok(crate::types::ToolNameSet::new())
+            }
+
+            async fn admit_call(
+                &self,
+                _gated: &crate::tool_grant::GatedToolTable,
+                _call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                Err(crate::tool_grant::ToolGrantRefusal::Required)
+            }
+
+            async fn end_run(
+                &self,
+                run_id: &crate::RunId,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                self.ended_runs.lock().unwrap().push(run_id.clone());
+                Ok(())
+            }
+        }
+
+        let grants = Arc::new(RecordingGrants::default());
+        let gate = crate::tool_grant::ToolGrantGate::new(
+            grants.clone() as Arc<dyn crate::tool_grant::SessionToolGrants>,
+            crate::tool_grant::GatedToolTable::new(
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
+            ),
+        );
+        let dispatcher = Arc::new(
+            crate::ExecutionPolicyGatedDispatcher::new(
+                Arc::new(NoTools),
+                crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+            )
+            .with_tool_grant_gate(gate.clone()),
+        );
+        let client = Arc::new(NeverAnsweringLlmClient {
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_tool_visibility_owner(explicit_test_visibility_owner())
+            .with_tool_grant_gate(gate)
+            .build_standalone(Arc::clone(&client), dispatcher, Arc::new(NoopStore))
+            .await;
+        agent.end_dropped_run_tool_grants().await;
+        assert!(
+            grants.ended_runs.lock().unwrap().is_empty(),
+            "no run was dropped yet"
+        );
+        {
+            let run = agent.run("the dropped run".to_string().into());
+            tokio::pin!(run);
+            let in_call = async {
+                while client.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::select! {
+                biased;
+                _ = &mut run => panic!("the model call never answers"),
+                () = in_call => {}
+            }
+        }
+        let _ = agent.cancel_dropped_run();
+        agent.end_dropped_run_tool_grants().await;
+        agent.end_dropped_run_tool_grants().await;
+
+        let boundary_runs = grants.boundary_runs.lock().unwrap().clone();
+        let ended_runs = grants.ended_runs.lock().unwrap().clone();
+        let run_id = boundary_runs
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .expect("the dropped run read its grants at its boundary");
+        assert_eq!(
+            ended_runs,
+            vec![run_id],
+            "the dropped run's end ends its run-scoped grants, once: boundaries \
+             {boundary_runs:?}"
+        );
+    }
+
     /// A model call naming a gated tool that its closed gate hides passes the
     /// visibility precheck to the dispatch gate, the gated name's one refusal
     /// site. The grants are adjudicated exactly once, and that adjudication

@@ -8326,6 +8326,49 @@ mod tests {
             );
         }
 
+        /// A request whose duration the host refuses (zero, or longer than
+        /// the maximum lifetime) answers the typed request refusal
+        /// `invalid_window`, as a grant with the same window does, and holds
+        /// nothing.
+        #[tokio::test]
+        async fn a_request_with_an_invalid_duration_is_a_typed_refusal() {
+            let temp = tempfile::tempdir().unwrap();
+            let (router, _runtime) = persistent_router(temp.path()).await;
+            let session_id = shell_gated_session(&router).await;
+            for duration_ms in [0_u64, 100 * 24 * 60 * 60 * 1000] {
+                let params = serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": duration_ms,
+                });
+                for method in ["tool_grants/grant", "tool_grants/request"] {
+                    let refused = call(&router, method, params.clone()).await;
+                    let failure = refused.error.as_ref().unwrap_or_else(|| {
+                        panic!("{method} for {duration_ms} ms is refused: {refused:?}")
+                    });
+                    assert_eq!(failure.code, error::INVALID_PARAMS, "{method}: {failure:?}");
+                    let data = failure.data.as_ref().unwrap_or_else(|| {
+                        panic!(
+                            "{method} for {duration_ms} ms: the refusal carries typed data: \
+                             {failure:?}"
+                        )
+                    });
+                    assert_eq!(
+                        data["kind"], "tool_grant_request_refused",
+                        "{method}: {data}"
+                    );
+                    assert_eq!(
+                        data["tool_grant_request_refusal"]["kind"], "invalid_window",
+                        "{method}: {data}"
+                    );
+                }
+            }
+            assert!(
+                listed(&router, &session_id, true).await.is_empty(),
+                "nothing was issued or held"
+            );
+        }
+
         /// While it runs the executor of their kind, `rkat-rpc` takes its
         /// agents' grant requests: each names the realm's agent (the stock
         /// composition's executor) as its requester and is held for the
@@ -9914,6 +9957,99 @@ mod tests {
                     .iter()
                     .all(|grant| grant["status"] != "active"),
                 "the ended identity holds no live grant"
+            );
+        }
+
+        /// A grant request is asked for one life of a member identity. Its
+        /// member retires, and a new member takes the same name in the same
+        /// mob incarnation before a person approves the request. The
+        /// approval issues nothing: it is refused `subject_ended`, the new
+        /// member holds no grant asked for the earlier one, and the
+        /// request's notice, with no member of its life left, ends failed
+        /// instead of reaching the new member.
+        #[tokio::test]
+        async fn a_request_for_a_retired_member_never_reaches_its_successor() {
+            use meerkat_core::approval::ApprovalConsentDeliveryState;
+            use meerkat_core::approval::decision::{DecisionId, DecisionPhase};
+
+            let rig = decision_rig().await;
+            let runtime = Arc::clone(&rig.router.runtime);
+            create_mob(&rig, "successor", shell_gated_role()).await;
+            spawn(&rig, "successor", "worker-1", None).await;
+            let requested = ok(
+                &rig,
+                "tool_grants/request",
+                serde_json::json!({
+                    "subject": identity_subject("successor", "worker-1"),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 600_000,
+                }),
+                "the first member's grant is requested",
+            )
+            .await;
+            let decision_id = DecisionId::new(
+                requested["decision"]["decision_id"]
+                    .as_str()
+                    .expect("the decision id"),
+            )
+            .expect("decision id");
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "successor", "agent_identity": "worker-1"}),
+                "the first member retires",
+            )
+            .await;
+            spawn(&rig, "successor", "worker-1", None).await;
+
+            super::tool_grant_rpc::approve_as_a_person(&runtime, &decision_id);
+            let settled = until("the approval is executed or refused", || async {
+                runtime.nudge_tool_grant_request_executor();
+                runtime
+                    .decision_service()
+                    .get(&decision_id)
+                    .ok()
+                    .filter(|row| {
+                        matches!(
+                            row.state.phase,
+                            DecisionPhase::Executed | DecisionPhase::ExecutionRefused
+                        )
+                    })
+            })
+            .await;
+            let live: Vec<_> = list_identity(&rig, "successor", "worker-1", false)
+                .await
+                .into_iter()
+                .filter(|grant| grant["status"] == "active")
+                .collect();
+            assert!(
+                live.is_empty(),
+                "the new member holds a grant asked for the retired one: {live:?} \
+                 (decision {:?}, refusal {:?})",
+                settled.state.phase,
+                settled.execution_refusal
+            );
+            assert_eq!(
+                settled
+                    .execution_refusal
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some("subject_ended"),
+                "{settled:?}"
+            );
+            let receipt = until("the request's notice settles", || async {
+                runtime.nudge_tool_grant_request_executor();
+                runtime
+                    .decision_service()
+                    .get(&decision_id)
+                    .ok()
+                    .and_then(|row| row.notice_receipt)
+            })
+            .await;
+            assert!(
+                matches!(receipt, ApprovalConsentDeliveryState::Failed { .. }),
+                "the notice reaches no member of a later life: {receipt:?}"
             );
         }
     }

@@ -2446,18 +2446,12 @@ async fn an_agent_held_request_names_the_agent_as_requester() {
             }
         );
 
-        // A replayed call answers the decision it held; another call is
-        // another request.
+        // A replayed call answers the decision it held.
         let replayed = grants
             .request_grant(ask("call-1"))
             .await
             .expect("the replay answers");
         assert_eq!(replayed.decision_id, receipt.decision_id, "{backend:?}");
-        let another = grants
-            .request_grant(ask("call-2"))
-            .await
-            .expect("another request");
-        assert_ne!(another.decision_id, receipt.decision_id, "{backend:?}");
         assert!(
             machine
                 .list_tool_grants(&ToolGrantSubject::session(session_id.clone()), None)
@@ -2466,6 +2460,112 @@ async fn an_agent_held_request_names_the_agent_as_requester() {
                 .grants
                 .is_empty(),
             "{backend:?}: nothing is issued"
+        );
+    }
+}
+
+/// An agent that asks again for a target its subject already has an open
+/// or approved window request for is answered with that request, so the
+/// approver's queue holds one request per target. Another target is another
+/// request, and once the request ended a new call holds a new one.
+#[tokio::test]
+async fn an_agents_repeated_request_for_a_target_answers_its_open_request() {
+    fn ask<'a>(
+        target: &'a ToolGrantTarget,
+        run_id: &'a RunId,
+        call_id: &'a str,
+    ) -> ToolGrantAgentRequest<'a> {
+        ToolGrantAgentRequest {
+            target,
+            duration: REQUESTED_FOR,
+            reason: Some("rotate the logs"),
+            run_id,
+            call_id,
+        }
+    }
+
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let session_id = SessionId::new();
+        let bindings = machine
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("bindings prepare");
+        let grants = Arc::clone(
+            bindings
+                .tool_grants()
+                .expect("the runtime carries the session's grants"),
+        );
+        let decisions = DurableDecisionService::with_clock(
+            Arc::new(InMemoryDecisionStore::new()),
+            Arc::clone(&clock) as Arc<dyn DecisionClock>,
+        );
+        machine.set_tool_grant_request_host(Some(ToolGrantRequestHost {
+            decisions: decisions.clone(),
+            policy: ToolGrantRequestPolicy::default(),
+            requester: agent_requester(),
+        }));
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: shell_family(),
+        };
+        let deploy = ToolGrantTarget::Tool {
+            name: ToolName::from("deploy"),
+        };
+        let run_id = RunId::new();
+
+        let first = grants
+            .request_grant(ask(&shell, &run_id, "call-1"))
+            .await
+            .expect("the request is held");
+        let again = grants
+            .request_grant(ask(&shell, &run_id, "call-2"))
+            .await
+            .expect("the second ask answers");
+        assert_eq!(
+            again.decision_id, first.decision_id,
+            "{backend:?}: one open request per target"
+        );
+        let other = grants
+            .request_grant(ask(&deploy, &run_id, "call-3"))
+            .await
+            .expect("another target");
+        assert_ne!(
+            other.decision_id, first.decision_id,
+            "{backend:?}: another target is another request"
+        );
+
+        decisions
+            .withdraw(
+                &first.decision_id,
+                &meerkat_runtime::decision::DecisionWithdrawer::Host,
+            )
+            .expect("the host withdraws the first request");
+        let after = grants
+            .request_grant(ask(&shell, &run_id, "call-4"))
+            .await
+            .expect("a new request");
+        assert_ne!(
+            after.decision_id, first.decision_id,
+            "{backend:?}: an ended request is asked anew"
+        );
+        assert_eq!(after.phase, DecisionPhase::Open, "{backend:?}");
+        let open = machine
+            .list_tool_grant_requests(
+                &decisions,
+                &ToolGrantSubject::session(session_id.clone()),
+                false,
+            )
+            .expect("the requests")
+            .into_iter()
+            .map(|(decision, _)| decision.decision_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            open,
+            BTreeSet::from([other.decision_id.clone(), after.decision_id.clone()]),
+            "{backend:?}: one open request for each target"
         );
     }
 }

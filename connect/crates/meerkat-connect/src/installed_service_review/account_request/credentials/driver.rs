@@ -560,4 +560,96 @@ mod tests {
             );
         }
     }
+
+    /// Admits every write: a person whose administration stays current.
+    struct Admitted;
+    impl meerkat_core::AdministrationEntry for Admitted {
+        fn enter(&self) -> Result<meerkat_core::EnteredAdministration, AdministrationEntryRefusal> {
+            Ok(meerkat_core::EnteredAdministration::admitted())
+        }
+    }
+
+    /// Two logins answer credential installs on one realm at the same moment,
+    /// both reviewed at the same configuration generation. Each holds its own
+    /// owner of the realm's own document, as two sessions or two processes
+    /// do, and installs as the realm installation owner does: the reviewed
+    /// generation is checked under the document's locks at the write's entry.
+    /// Exactly one install wins; the other is told the configuration changed
+    /// under it and wrote nothing; the winner's server is kept; and the other
+    /// login reviews again and installs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_logins_installing_on_one_realm_at_once_one_wins_and_the_other_conflicts() {
+        use meerkat_core::McpRealmPersistTarget;
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::realm::RealmOptions {
+            context_root: directory.path().to_owned(),
+            state_root: Some(directory.path().join("state")),
+            user_config_root: Some(directory.path().join("home")),
+        }
+        .resolve("forge-concurrent")
+        .unwrap();
+        let server =
+            |name: &str| McpServerConfig::stdio(name, "/bin/true", Vec::new(), Default::default());
+        let names = |servers: &[McpServerConfig]| {
+            servers
+                .iter()
+                .map(|server| server.name.clone())
+                .collect::<Vec<_>>()
+        };
+        let (_, reviewed) = crate::realm::read_own_mcp_config(&storage).await.unwrap();
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let install = |name: &'static str| {
+            let runtime = crate::realm::own_config_runtime(&storage).unwrap();
+            let start = start.clone();
+            let config = server(name);
+            tokio::spawn(async move {
+                start.wait().await;
+                McpRealmPersistTarget::new(&runtime)
+                    .add_entered(config, Some(reviewed), &Admitted)
+                    .await
+                    .map(|snapshot| snapshot.generation)
+                    .map_err(GatewayRealmMcpError::from)
+            })
+        };
+        let (first, second) = (install("service-a"), install("service-b"));
+        let results = [
+            ("service-a", first.await.unwrap()),
+            ("service-b", second.await.unwrap()),
+        ];
+        let winners = results
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one of two concurrent installs wins: {results:?}"
+        );
+        let winner = winners[0];
+        let (loser, refused) = results
+            .into_iter()
+            .find(|(name, _)| *name != winner)
+            .unwrap();
+        let mut reply = pending_reply();
+        reply.persistence.install.state = install_failure(refused.unwrap_err());
+        let value = assert_incomplete_projection(&reply);
+        assert_eq!(
+            value["persistence"]["install"],
+            json!({"state": "conflict"}),
+            "the login whose install lost is told the configuration changed under it"
+        );
+        // No lost update: the winner's server is kept, nothing of the other's
+        // was written, and the document moved exactly once.
+        let (servers, generation) = crate::realm::read_own_mcp_config(&storage).await.unwrap();
+        assert_eq!(generation, reviewed + 1);
+        assert_eq!(names(&servers), [winner]);
+        // The other login reviews again and installs.
+        McpRealmPersistTarget::new(&crate::realm::own_config_runtime(&storage).unwrap())
+            .add_entered(server(loser), Some(generation), &Admitted)
+            .await
+            .unwrap();
+        let (servers, _) = crate::realm::read_own_mcp_config(&storage).await.unwrap();
+        assert_eq!(names(&servers), [winner, loser]);
+    }
 }

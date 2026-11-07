@@ -10,9 +10,10 @@
 //! produces at the `append_batch` boundary:
 //!
 //! 1. identical-batch redelivery (a flush whose success reply was lost);
-//! 2. compound redelivery: the failed batch plus events that arrived after
-//!    the failure, in one batch (`flush_batch` restores the failed events and
-//!    appends the new arrivals);
+//! 2. compound redelivery: the failed events plus events that arrived after
+//!    the failure, in requests of at most `batch_size` events, oldest first
+//!    (`flush_batch` keeps a refused request and every later event buffered
+//!    in order, so one request can carry both);
 //! 3. suffix redelivery with a gap: after the retry buffer exceeds its cap,
 //!    the oldest events are dropped and only a suffix is redelivered — the
 //!    store must persist what it is given without erroring on the gap.
@@ -48,8 +49,8 @@ pub async fn event_log(factory: &dyn EventLogStoreFactory) -> Result<(), Conform
     assert_exactly_once(&steps, step, &rows, &["evt-1", "evt-2", "evt-3"])?;
 
     // --- compound post-failure redelivery -------------------------------------
-    // The exact shape `flush_batch` produces after a failed flush: the failed
-    // events plus everything that arrived since, in one batch.
+    // A shape `flush_batch` produces after a failed flush: the failed events
+    // plus events that arrived since, in one request of at most `batch_size`.
     let step = "compound_retry_batch_exactly_once";
     let compound = vec![
         fixtures::persisted_event("evt-1", 1),

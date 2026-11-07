@@ -162,6 +162,15 @@ pub struct GovernedConnection {
     /// This pipe's part of R3 human consent, when the host composed one: its
     /// operator decides on it through `approval/consent_decide`.
     consent: Option<Arc<stock_consent::StdioConsentSurface>>,
+    /// The pipe's operator for durable decisions, when the host named one:
+    /// the connection's decision operator is built from it when the
+    /// connection starts.
+    #[cfg(unix)]
+    decision_approver: Option<meerkat_core::approval::consent::AuthenticatedApprover>,
+    /// The connection's operator for durable decisions: `decision/list`
+    /// presents to it and `decision/decide` decides as it.
+    #[cfg(unix)]
+    decisions: Option<Arc<crate::handlers::decision::operator::DecisionOperator>>,
     /// The exact target each session was last bound to by this connection,
     /// retained for its attachment controls.
     bound: std::sync::Mutex<std::collections::HashMap<meerkat_core::SessionId, NativeWorkTarget>>,
@@ -191,17 +200,63 @@ impl GovernedConnection {
             association,
             binder: None,
             consent: None,
+            #[cfg(unix)]
+            decision_approver: None,
+            #[cfg(unix)]
+            decisions: None,
             bound: std::sync::Mutex::default(),
         })
     }
 
+    /// Serve durable decisions on this pipe to its operator `approver`, who
+    /// must carry the pipe's own authentication scope: `decision/list`
+    /// presents the decisions of each listed page the operator acts for, and
+    /// `decision/decide` decides as the operator. The approver ids the
+    /// operator acts for are the host's configuration as the pipe started
+    /// (`[governance.decisions]`); a change reaches the pipe at its next
+    /// start.
+    #[cfg(unix)]
+    pub(crate) fn serve_decisions_as(
+        &mut self,
+        approver: meerkat_core::approval::consent::AuthenticatedApprover,
+    ) {
+        self.decision_approver = Some(approver);
+    }
+
     /// The connection closed: its pipe's consent scope retires here, at the
     /// close boundary, so no eligibility observed for the pipe stays current
-    /// while the connection's handlers and sessions drain.
+    /// while the connection's handlers and sessions drain. So does its
+    /// operator for durable decisions.
     pub(crate) fn close(&self) {
         if let Some(consent) = &self.consent {
             consent.retire();
         }
+        #[cfg(unix)]
+        if let Some(decisions) = &self.decisions {
+            decisions.close();
+        }
+    }
+
+    /// Whether this pipe serves durable decisions to its operator.
+    #[cfg(unix)]
+    fn serves_decisions(&self) -> bool {
+        self.decisions.is_some()
+    }
+
+    #[cfg(not(unix))]
+    fn serves_decisions(&self) -> bool {
+        false
+    }
+
+    /// The pipe's operator for durable decisions, or the unsupported refusal
+    /// of a pipe that has none.
+    #[cfg(unix)]
+    fn decision_operator(
+        &self,
+    ) -> Result<&crate::handlers::decision::operator::DecisionOperator, RpcError> {
+        self.decisions
+            .as_deref()
+            .ok_or_else(|| crate::session_runtime::runtime_driver_error_to_rpc(unsupported()))
     }
 
     /// Live `mcp/add` needs the scoped destination its control is joined to.
@@ -684,8 +739,18 @@ where
     #[cfg(not(feature = "mcp"))]
     let _ = mcp_attachment_identity_key_custody;
     let runtime = Arc::new(runtime);
-    let server = RpcServer::new(reader, writer, runtime.clone(), config_store)?
-        .with_governed_connection(Arc::new(connection), tools)?;
+    let server = RpcServer::new(reader, writer, runtime.clone(), config_store)?;
+    // The pipe's operator for durable decisions presents through this
+    // connection's own notices, each written before it is recorded.
+    #[cfg(unix)]
+    if let Some(approver) = connection.decision_approver.take() {
+        connection.decisions = crate::handlers::decision::operator::DecisionOperator::new(
+            approver,
+            server.acknowledged_notification_sender(),
+        )
+        .map(Arc::new);
+    }
+    let server = server.with_governed_connection(Arc::new(connection), tools)?;
     Ok((server, runtime))
 }
 
@@ -750,6 +815,12 @@ pub(crate) async fn dispatch(
                             .consent
                             .is_some()
                             .then_some(crate::router::CONSENT_DECIDE_METHOD),
+                    )
+                    .chain(connection.serves_decisions().then_some("decision/list"))
+                    .chain(
+                        connection
+                            .serves_decisions()
+                            .then_some(crate::router::DECISION_DECIDE_METHOD),
                     )
                     .map(str::to_string)
                     .collect(),
@@ -893,6 +964,21 @@ pub(crate) async fn dispatch(
                     runtime.clone(),
                     event,
                 ))
+            }
+            // The pipe's operator for durable decisions: a list presents the
+            // listed page's decisions it acts for before it answers, and a
+            // decide decides as the operator, in the pipe's scope.
+            #[cfg(unix)]
+            "decision/list" if connection.serves_decisions() => {
+                let operator = connection.decision_operator()?;
+                Ok(operator.handle_list(id.clone(), params, runtime).await)
+            }
+            #[cfg(unix)]
+            crate::router::DECISION_DECIDE_METHOD if connection.serves_decisions() => {
+                let operator = connection.decision_operator()?;
+                Ok(operator
+                    .handle_decide(id.clone(), params, runtime.clone())
+                    .await)
             }
             _ => Err(crate::session_runtime::runtime_driver_error_to_rpc(
                 unsupported(),

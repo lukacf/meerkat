@@ -16,6 +16,7 @@ import hmac
 import html
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -134,6 +135,9 @@ OIDC_MAX_ID_TOKEN = 16 * 1024
 OIDC_MAX_CALLBACK_QUERY = 8 * 1024
 # Code exchanges at the provider running at once, across every sign-in.
 OIDC_EXCHANGES = 8
+# One sign-in step's calls to the provider (its discovery document, the code
+# exchange and its keys) share this one deadline.
+OIDC_SIGN_IN_SECONDS = 20
 OIDC_ISSUER_FILE = "console-oidc-issuer"
 OIDC_KEY_FILE = "console-oidc-signing.pem"
 _FRONT_ISSUER = re.compile(r"urn:forge-console:[a-f0-9]{32}")
@@ -710,9 +714,10 @@ def _new_signing_key():
 def _front_identity(root):
     """The front's own OIDC issuer, ES256 signing key and public JWK.
 
-    Both are made once per installation in private state. The issuer is a
-    random name, never an address, so the console's people keep their keys
-    when the front moves; a changed issuer record is refused, not replaced.
+    Both are made once per installation in private state and never replaced.
+    The issuer is a random name, never an address, so the console's people
+    keep their keys when the front moves; a malformed issuer record is
+    refused.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -752,6 +757,22 @@ class _OidcRefused(Exception):
 
 class _OidcUnavailable(Exception):
     """The identity provider could not be reached or used."""
+
+
+class _OidcMalformed(Exception):
+    """The identity provider answered with content the front cannot read."""
+
+
+class _OidcTimeout(Exception):
+    """The identity provider did not answer within the sign-in step's deadline."""
+
+
+def _oidc_origin(url):
+    """The origin of a provider URL oidc_url_issue admitted, as a CSP source."""
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    return (parsed.scheme + "://" + ("[" + host + "]" if ":" in host else host)
+            + ("" if parsed.port is None else f":{parsed.port}"))
 
 
 @dataclass(frozen=True)
@@ -1458,12 +1479,28 @@ class ConsoleFront:
                 raise ValueError("Request too large.")
         return bytes(body)
 
-    def _login_response(self, now, client, *, error=None, status_code=200):
-        from starlette.responses import HTMLResponse, Response
-        issued = sum(1 for nonce, address in self._login_token_clients.items()
-                     if address == client and nonce in self.login_tokens)
-        if len(self.login_tokens) >= LOGIN_FORMS or issued >= LOGIN_FORMS_PER_CLIENT:
-            return Response("Try again shortly.", status_code=429)
+    async def _login_response(self, now, client, *, error=None, status_code=200):
+        from starlette.responses import HTMLResponse
+        form_action = "'self'"
+        if self.oidc is not None:
+            # The form's start answers with a redirect to the provider, which
+            # Chromium checks against this page's form-action too: the policy
+            # names the front and exactly the authorization endpoint's origin.
+            try:
+                discovery = await self._oidc_bounded(self._oidc_discovery_document())
+            except (_OidcUnavailable, _OidcMalformed, _OidcTimeout) as trouble:
+                return self._oidc_trouble(trouble, "This Console could not use its identity provider just now. "
+                                          "Try again shortly; if it keeps failing, tell the Console's operator.")
+            form_action += " " + _oidc_origin(discovery["authorization_endpoint"])
+        # A full table refuses no one: the address's oldest form goes first,
+        # then the oldest of all, so one caller behind a shared address
+        # cannot hold everyone else's sign-in off.
+        issued = [nonce for nonce, address in self._login_token_clients.items()
+                  if address == client and nonce in self.login_tokens]
+        if len(issued) >= LOGIN_FORMS_PER_CLIENT:
+            self._drop_login_form(issued[0])
+        if len(self.login_tokens) >= LOGIN_FORMS:
+            self._drop_login_form(next(iter(self.login_tokens)))
         nonce = secrets.token_urlsafe(32)
         self.login_tokens[nonce] = now + 300
         self._login_token_clients[nonce] = client
@@ -1472,8 +1509,13 @@ class ConsoleFront:
                                 status_code=status_code)
         response.set_cookie(self.cookie + "_login", nonce, httponly=True, samesite="strict", max_age=300,
                             secure=self._secure_cookie, path="/")
-        response.headers.update({"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"})
+        response.headers.update({"Cache-Control": "no-store", "Content-Security-Policy":
+            f"default-src 'none'; style-src 'unsafe-inline'; form-action {form_action}; frame-ancestors 'none'"})
         return response
+
+    def _drop_login_form(self, nonce):
+        self.login_tokens.pop(nonce, None)
+        self._login_token_clients.pop(nonce, None)
 
     def _sign_in_held(self, account, client, now):
         """Whether recent failures hold this account or this client address."""
@@ -1571,13 +1613,31 @@ class ConsoleFront:
                     if len(body) > OIDC_MAX_DOCUMENT:
                         raise _OidcUnavailable("The identity provider's answer is too large.")
                 status = response.status_code
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL):
             raise _OidcUnavailable("The identity provider could not be reached.") from None
         try:
             value = json.loads(bytes(body).decode("utf-8"), object_pairs_hook=_frontend_object)
         except (ValueError, UnicodeError, RecursionError):
             value = None
         return status, value
+
+    async def _oidc_bounded(self, step):
+        """A sign-in step's provider calls, awaited under their one overall deadline."""
+        try:
+            async with asyncio.timeout(OIDC_SIGN_IN_SECONDS):
+                return await step
+        except TimeoutError:
+            raise _OidcTimeout() from None
+
+    def _oidc_trouble(self, trouble, unavailable):
+        """The page for a provider that could not be used: late, unreadable or unavailable."""
+        if isinstance(trouble, _OidcTimeout):
+            return self._oidc_refusal(504, "The identity provider did not answer in time. Try again shortly; "
+                                      "if it keeps failing, tell the Console's operator.")
+        if isinstance(trouble, _OidcMalformed):
+            return self._oidc_refusal(502, "The identity provider sent an answer this Console could not read. "
+                                      "If it keeps happening, tell the Console's operator.")
+        return self._oidc_refusal(503, unavailable)
 
     async def _oidc_discovery_document(self):
         cached = self._oidc_discovery
@@ -1649,19 +1709,25 @@ class ConsoleFront:
         if self._sign_in_held(None, client, now):
             return Response("Too many sign-in attempts from this address. Try again in one minute.",
                             status_code=429)
-        self._oidc_pending = {state: pending for state, pending in self._oidc_pending.items()
-                              if pending.expires > now}
-        if (len(self._oidc_pending) >= LOGIN_FORMS
-                or sum(1 for pending in self._oidc_pending.values() if pending.client == client)
-                >= LOGIN_FORMS_PER_CLIENT):
-            return Response("Try again shortly.", status_code=429)
         try:
-            discovery = await self._oidc_discovery_document()
-        except _OidcUnavailable:
-            return self._oidc_refusal(503, "This Console could not use its identity provider just now. Try again "
-                                      "shortly; if it keeps failing, tell the Console's operator.")
+            discovery = await self._oidc_bounded(self._oidc_discovery_document())
+        except (_OidcUnavailable, _OidcMalformed, _OidcTimeout) as trouble:
+            return self._oidc_trouble(trouble, "This Console could not use its identity provider just now. Try "
+                                      "again shortly; if it keeps failing, tell the Console's operator.")
         if self._closing:
             return Response("The Console is stopping.", status_code=503)
+        # A full table refuses no new sign-in: the address's oldest pending
+        # sign-in goes first, then the oldest of all, so one caller behind a
+        # shared address cannot hold everyone else's off. A flood can still
+        # make pending sign-ins expire early; a rate-limiting proxy in front
+        # of the Console bounds it.
+        self._oidc_pending = {state: pending for state, pending in self._oidc_pending.items()
+                              if pending.expires > now}
+        started = [state for state, pending in self._oidc_pending.items() if pending.client == client]
+        if len(started) >= LOGIN_FORMS_PER_CLIENT:
+            del self._oidc_pending[started[0]]
+        if len(self._oidc_pending) >= LOGIN_FORMS:
+            del self._oidc_pending[next(iter(self._oidc_pending))]
         state, nonce, binding = (secrets.token_urlsafe(32) for _ in range(3))
         verifier = secrets.token_urlsafe(64)
         # A sign-in over this browser's live login ends that login when it opens.
@@ -1721,11 +1787,11 @@ class ConsoleFront:
         self._record_failure(None, client, now)
         self._oidc_exchanges += 1
         try:
-            principal, subject = await self._oidc_person(code, pending)
+            principal, subject = await self._oidc_bounded(self._oidc_person(code, pending))
         except _OidcRefused as refused:
             return self._oidc_refusal(refused.status, refused.message)
-        except _OidcUnavailable:
-            return self._oidc_refusal(503, "The identity provider could not confirm this sign-in just now.")
+        except (_OidcUnavailable, _OidcMalformed, _OidcTimeout) as trouble:
+            return self._oidc_trouble(trouble, "The identity provider could not confirm this sign-in just now.")
         finally:
             self._oidc_exchanges -= 1
         self._forget_failure(None, client, now)
@@ -1755,8 +1821,13 @@ class ConsoleFront:
         if status != 200 or not isinstance(id_token, str) or not 1 <= len(id_token) <= OIDC_MAX_ID_TOKEN:
             raise _OidcRefused(401, "The identity provider did not confirm this sign-in.")
         # Only the ID token is read; the provider's other tokens are dropped here.
-        claims = await self._oidc_verified_claims(id_token, pending.nonce)
-        return self._oidc_admitted(claims)
+        try:
+            claims = await self._oidc_verified_claims(id_token, pending.nonce)
+            return self._oidc_admitted(claims)
+        except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
+            # Signed content none of the checks can read, such as a claim
+            # that is not text: the provider's answer is malformed.
+            raise _OidcMalformed() from None
 
     async def _oidc_verified_claims(self, id_token, nonce):
         import jwt
@@ -1766,6 +1837,8 @@ class ConsoleFront:
         except jwt.PyJWTError:
             raise refused from None
         alg, kid = header.get("alg"), header.get("kid")
+        if not isinstance(alg, str):
+            raise _OidcMalformed()
         if alg not in OIDC_ALGORITHMS or kid is not None and (not isinstance(kid, str) or len(kid) > 256):
             raise refused
         key = await self._oidc_signing_key(alg, kid)
@@ -1779,7 +1852,8 @@ class ConsoleFront:
             raise refused from None
         now = time.time()
         def moment(value):
-            return isinstance(value, (int, float)) and not isinstance(value, bool)
+            # A time is a finite number; Python's json reads Infinity and NaN too.
+            return type(value) is int or type(value) is float and math.isfinite(value)
         if (not moment(claims["exp"]) or not moment(claims["iat"]) or claims["exp"] + OIDC_SKEW_SECONDS <= now
                 or claims["iat"] > now + OIDC_SKEW_SECONDS
                 or "nbf" in claims and (not moment(claims["nbf"]) or claims["nbf"] > now + OIDC_SKEW_SECONDS)):
@@ -1890,7 +1964,7 @@ class ConsoleFront:
                                          if key in self.login_tokens}
             client = request.client.host if request.client is not None else ""
             if request.method == "GET":
-                return self._login_response(now, client)
+                return await self._login_response(now, client)
             if request.method != "POST" or request.headers.get("origin") != self.origin:
                 return Response("Login requires a same-origin form.", status_code=403)
             try:
@@ -1903,7 +1977,7 @@ class ConsoleFront:
             nonce = form.get("nonce", "")
             if (not nonce or nonce != request.cookies.get(self.cookie + "_login")
                     or not self.login_tokens.pop(nonce, None)):
-                return self._login_response(now, client, error=("This sign-in form expired. Sign in again."
+                return await self._login_response(now, client, error=("This sign-in form expired. Sign in again."
                     if self.oidc is not None else "This sign-in form expired. Enter your Console password again."),
                     status_code=403)
             self._login_token_clients.pop(nonce, None)
@@ -1928,7 +2002,7 @@ class ConsoleFront:
             finally:
                 self._password_checks -= 1
             if not opened:
-                return self._login_response(now, client, error=self._login_refusal(), status_code=401)
+                return await self._login_response(now, client, error=self._login_refusal(), status_code=401)
             self._forget_failure(key, client, now)
             if self._closing:
                 return Response("The Console is stopping.", status_code=503)

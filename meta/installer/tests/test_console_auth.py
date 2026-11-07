@@ -729,12 +729,14 @@ async def test_invalid_nonce_retry_preserves_one_hundred_live_token_cap(tmp_path
             assert len(live_tokens) == 100
             reply = await client.post("/login", data={"nonce": "unknown-nonce", "password": "correct-password-canary"},
                                       headers={"Origin": front.origin})
-            assert reply.status_code == 429 and "set-cookie" not in reply.headers
-            assert front.login_tokens == live_tokens and front.sessions == {}
+            # A retry with an unknown form gets a fresh form, and the cap holds:
+            # the address's oldest form goes, so a full table refuses no one.
+            assert reply.status_code == 403 and front.sessions == {}
+            assert len(front.login_tokens) == 100 and next(iter(live_tokens)) not in front.login_tokens
             assert front.cookie not in client.cookies and observed == [] and delivered == []
-            assert (await client.get("/login")).status_code == 429
+            assert (await client.get("/login")).status_code == 200 and len(front.login_tokens) == 100
             assert (await client.post("/console/rpc", json={}, headers={"Origin": front.origin})).status_code == 401
-            assert front.login_tokens == live_tokens and observed == [] and delivered == []
+            assert observed == [] and delivered == []
     finally:
         await front.close()
 

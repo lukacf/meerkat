@@ -1,6 +1,7 @@
 """Declared local Console authentication rules, without private I/O or runtime work."""
 from __future__ import annotations
 
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -23,6 +24,7 @@ CONSOLE_ALLOWED_EMAILS = "CONSOLE_ALLOWED_EMAILS"
 MAX_ALLOWED_EMAILS = 100
 OIDC_SOURCE_KEYS = frozenset({"authentication", "issuer", "client_id", "client_secret"})
 OIDC_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_OIDC_HOST = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*")
 # The console's live access file: its Access panel writes here, in private
 # state, never to the package's config/access.toml.
 CONSOLE_ACCESS_FILE = ".mobkit/console-access.toml"
@@ -33,19 +35,33 @@ def oidc_url_issue(value, *, loopback_http=True, query=False):
 
     https, or plain http to this computer's loopback for a provider that runs
     here; never credentials or a fragment, and a query only where allowed.
+    The address is a host name or an IP address, with a port only as its
+    number, written as the URL reaches it: so the URL is usable as written,
+    and its origin can be named in the sign-in page's policy.
     """
+    exact = "Use the identity provider's exact https URL."
     if (not isinstance(value, str) or not value.isascii() or not 8 <= len(value) <= 512
             or any(ord(char) < 33 or ord(char) == 127 for char in value)):
-        return "Use the identity provider's exact https URL."
+        return exact
     try:
         parsed = urlsplit(value)
-        host = parsed.hostname
+        host, port = parsed.hostname, parsed.port
     except ValueError:
-        return "Use the identity provider's exact https URL."
+        return exact + " Its port must be a number from 1 to 65535."
     if (not host or parsed.username is not None or parsed.password is not None
             or parsed.query and not query or parsed.fragment
             or parsed.scheme != "https" and not (loopback_http and parsed.scheme == "http" and host in OIDC_LOOPBACK_HOSTS)):
         return "Use the identity provider's exact https URL, without a query, fragment or credentials."
+    if ":" in host:
+        try:
+            named = "%" not in host and ipaddress.IPv6Address(host) is not None
+        except ValueError:
+            named = False
+        address = "[" + host + "]"
+    else:
+        named, address = _OIDC_HOST.fullmatch(host) is not None, host
+    if not named or port == 0 or parsed.netloc.lower() != address + ("" if port is None else f":{port}"):
+        return exact + " Its address is a host name or IP address, with a port only as a number from 1 to 65535."
     return None
 
 

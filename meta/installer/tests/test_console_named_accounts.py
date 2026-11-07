@@ -478,7 +478,11 @@ async def test_login_forms_and_sessions_are_bounded_per_address_and_per_account(
         async with browser(app, console, "192.0.2.10") as busy, browser(app, console, "192.0.2.20") as other:
             for _ in range(100):
                 assert (await busy.get("/login")).status_code == 200
-            assert (await busy.get("/login")).status_code == 429
+            oldest = next(iter(console.login_tokens))
+            # A full address refuses no form: its oldest form goes instead, so
+            # one caller cannot hold off everyone who shares its address.
+            assert (await busy.get("/login")).status_code == 200
+            assert oldest not in console.login_tokens and len(console.login_tokens) == 100
             # Another address still gets a sign-in form.
             assert (await other.get("/login")).status_code == 200
         for _ in range(3):

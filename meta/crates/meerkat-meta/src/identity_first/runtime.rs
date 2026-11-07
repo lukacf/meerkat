@@ -20581,6 +20581,78 @@ mod wake_refusal_classifier_tests {
         Ok(())
     }
 
+    /// The bridge's form of a member Core holds Broken because its host
+    /// refused the build its wake restored it with.
+    fn host_refused_wake(session_id: &SessionId) -> BridgeError {
+        // RED: the bridge had no typed form of the host's refusal; it
+        // answered the Broken member's final restore failure.
+        BridgeError::ResumeRejected {
+            kind: ResumeRejectionKind::MemberRestoreFailed,
+            session_id: session_id.clone(),
+            detail: format!(
+                "ensure_member_live: member agent-alpha failed to restore session {session_id}: \
+                 the host's build gate refused the member"
+            ),
+        }
+    }
+
+    /// The bridge's form of a create its host refused.
+    fn host_refused_create() -> BridgeError {
+        // RED: the bridge had no typed form of the host's refusal.
+        BridgeError::Mob("create_session: the host's build gate refused the member".to_string())
+    }
+
+    /// The host's typed build refusal is the identity's `HostRejectedBuild`
+    /// refusal, from the bridge's typed form alone: on a wake (the door's,
+    /// and a delivery's through the admission seam) and on a create, with a
+    /// reason that names no callback. Text alone is never the host's
+    /// refusal: a mob error carrying the old callback rendering is retryable.
+    ///
+    /// RED before the bridge typed the refusal and the probe went: the typed
+    /// forms did not exist, and the callback text was read as the host's
+    /// refusal.
+    #[test]
+    fn the_hosts_typed_build_refusal_is_host_rejected_build_with_no_text_match()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let session_id = SessionId::new();
+        let woken = classify(Some(&session_id), host_refused_wake(&session_id))?;
+        assert!(
+            matches!(woken.error, IdentityRuntimeError::HostRejectedBuild { .. }),
+            "the door's wake: {:?}",
+            woken.error
+        );
+        assert!(woken.recorded.is_none(), "never recorded");
+        let delivered = admission_phase_error(
+            &keeper()?,
+            BridgeAdmissionError::from(host_refused_wake(&session_id)),
+        );
+        assert!(
+            matches!(delivered, IdentityRuntimeError::HostRejectedBuild { .. }),
+            "a delivery's wake: {delivered:?}"
+        );
+        assert!(
+            deterministic_build_rejection_reason(&host_refused_create()).is_some(),
+            "a refused create is the host's build refusal"
+        );
+        let text_only = BridgeError::Mob(
+            "spawn_member: callback/build_agent failed: callback error: gate refused".to_string(),
+        );
+        assert!(
+            deterministic_build_rejection_reason(&text_only).is_none(),
+            "text alone is never the host's build refusal"
+        );
+        let classified = classify(Some(&session_id), text_only)?;
+        assert!(
+            matches!(
+                classified.error,
+                IdentityRuntimeError::IdentityWakeRetryable { .. }
+            ),
+            "{:?}",
+            classified.error
+        );
+        Ok(())
+    }
+
     /// A host adoption and an unreadable history answer their own codes, and neither is
     /// a recorded wake refusal.
     #[test]

@@ -8097,6 +8097,91 @@ comms = true
         assert!(bridge.state.lock().await.pending.is_empty());
     }
 
+    /// The host's error answer to `callback/build_agent` refuses the build
+    /// typed, on both build paths: structured data of Meta's own kind with
+    /// the host's reason, beside the message operators read. A callback that
+    /// never completed (its transport closed) stays the retryable tool
+    /// failure it was.
+    ///
+    /// RED before the builder typed the answer: the host's refusal was a
+    /// tool failure whose text carried it.
+    #[tokio::test(start_paused = true)]
+    async fn the_hosts_build_refusal_is_typed_on_both_build_paths() {
+        for taking_tools in [false, true] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
+            let builder = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut build = Box::pin(async {
+                if taking_tools {
+                    builder.build_agent_taking_tools(&mut req, event_tx).await
+                } else {
+                    builder.build_agent(&req, event_tx).await
+                }
+            });
+            assert!(futures::poll!(&mut build).is_pending());
+            let request: Value =
+                serde_json::from_str(&stdout_rx.recv().await.expect("callback request"))
+                    .expect("callback JSON");
+            builder
+                .bridge
+                .route_callback_response(json!({
+                    "id": request["id"], "error": {"message": "the host's gate refused the member"},
+                }))
+                .await;
+            let Err(error) = build.await else {
+                panic!("taking_tools={taking_tools}: the host's refusal fails the build");
+            };
+            let SessionError::FailedWithData { message, data } = &error else {
+                panic!("taking_tools={taking_tools}: the refusal is typed: {error:?}");
+            };
+            assert_eq!(data["kind"], "meta_host_rejected_build", "{data}");
+            assert_eq!(
+                data["reason"], "the host's gate refused the member",
+                "{data}"
+            );
+            assert!(
+                message.contains("the host's gate refused the member"),
+                "{message}"
+            );
+
+            let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+            let closed = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            closed.bridge.close().await;
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let failed = if taking_tools {
+                closed.build_agent_taking_tools(&mut req, event_tx).await
+            } else {
+                closed.build_agent(&req, event_tx).await
+            };
+            let Err(error) = failed else {
+                panic!("taking_tools={taking_tools}: a closed transport fails the build");
+            };
+            assert!(
+                matches!(error, SessionError::Agent(_)),
+                "taking_tools={taking_tools}: a transport failure stays the tool failure: {error:?}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn callback_reliable_notification_reports_blocked_and_closed_stdout() {
         let (stdout_tx, mut stdout_rx) = mpsc::channel(1);

@@ -2421,6 +2421,29 @@ fn production_code(source: &str) -> String {
     String::from_utf8_lossy(&kept).into_owned()
 }
 
+/// [`production_code`] with its comments and strings kept: the source text
+/// outside its test modules.
+fn production_text(source: &str) -> String {
+    const TEST_GATE: &[u8] = b"#[cfg(test)]";
+    let code = code_only(source);
+    let raw = source.as_bytes();
+    let mut kept = Vec::with_capacity(raw.len());
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(start) = find_from(&code, TEST_GATE, at) {
+        match test_module_end(&code, start + TEST_GATE.len()) {
+            Some(end) => {
+                kept.extend_from_slice(&raw[copied..start]);
+                copied = end;
+                at = end;
+            }
+            None => at = start + 1,
+        }
+    }
+    kept.extend_from_slice(&raw[copied..]);
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
 /// `source` with every comment and every string, raw string and character
 /// literal blanked to spaces (newlines kept), byte for byte: what is left is
 /// the code, at the same offsets.
@@ -4737,6 +4760,47 @@ fn the_door_keeps_no_copy_of_core_s_host_preparation() {
                 !production.contains(name),
                 "{file} names `{name}`: Core's host preparation is Core's, answered from its \
                  typed wake refusal"
+            );
+        }
+    }
+}
+
+/// Source guard: no text probe of the host's build answer remains. The
+/// host's refusal is read from its typed form (the gateway builder's
+/// structured data, the bridge's typed refusal), on the wake path too: the
+/// identity runtime, its bridge and the unified runtime's surface name
+/// neither the gateway's callback rendering nor a probe of it.
+///
+/// RED before the probe went: `is_host_rejected_build_error` matched the
+/// gateway's callback rendering.
+#[test]
+fn no_text_probe_of_the_hosts_build_answer_remains() {
+    let sources = [
+        ("identity_first/runtime.rs", include_str!("../runtime.rs")),
+        (
+            "identity_first/runtime/declare.rs",
+            include_str!("declare.rs"),
+        ),
+        (
+            "identity_first/runtime/build_preparation.rs",
+            include_str!("build_preparation.rs"),
+        ),
+        ("identity_first/bridge.rs", include_str!("../bridge.rs")),
+        (
+            "unified_runtime/http.rs",
+            include_str!("../../unified_runtime/http.rs"),
+        ),
+    ];
+    for (file, source) in sources {
+        let production = production_text(source);
+        assert!(
+            !production.trim().is_empty(),
+            "{file}: no production text was read"
+        );
+        for probe in ["is_host_rejected_build_error", "callback/build_agent"] {
+            assert!(
+                !production.contains(probe),
+                "{file} names `{probe}`: the host's build refusal is read typed, never from text"
             );
         }
     }

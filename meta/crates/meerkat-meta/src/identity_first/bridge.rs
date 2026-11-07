@@ -13658,6 +13658,152 @@ mod tests {
         Ok(())
     }
 
+    /// The host's typed refusal of a member's build, as the gateway's session
+    /// builder carries it: structured data of Meta's own kind, and a message
+    /// that names no callback.
+    fn host_refused_build() -> meerkat_mob::MobError {
+        meerkat_mob::MobError::SessionError(meerkat_core::service::SessionError::FailedWithData {
+            message: "the host's build gate refused the member".to_string(),
+            data: serde_json::json!({
+                "kind": "meta_host_rejected_build",
+                "reason": "the host's build gate refused the member",
+            }),
+        })
+    }
+
+    /// A member Core holds Broken because its wake's build failed for
+    /// `cause`: its restore failure keeps the cause's structured data.
+    fn broken_for(
+        cause: &meerkat_mob::MobError,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> meerkat_mob::MobError {
+        meerkat_mob::MobError::MemberRestoreFailed {
+            member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
+            session_id: Some(session_id.clone()),
+            reason: format!("failed to restore durable session '{session_id}': {cause}"),
+            hold: None,
+            cause_data: cause.structured_data(),
+        }
+    }
+
+    /// A bridge error's form as these rows read it: its variant, and a
+    /// rejected resume's kind.
+    fn bridge_form(error: &BridgeError) -> String {
+        match error {
+            BridgeError::ResumeRejected { kind, .. } => format!("ResumeRejected/{kind:?}"),
+            other => format!("{other:?}")
+                .split([' ', '('])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+        }
+    }
+
+    /// The host's typed refusal of a member's build is typed on every bridge
+    /// path, read from its data's kind and never from text: a refused create
+    /// and a refused resume on the resume door are `HostRejectedBuild`,
+    /// through meerkat-mob's shared failure wrappers too; a member Core holds
+    /// Broken for it is the resume refusal of kind `HostRejectedBuild`, on
+    /// the door's wake and on a delivery's alike, and the delivery's crosses
+    /// into `BridgeAdmissionError` unchanged.
+    ///
+    /// RED before the bridge read the kind: the refused builds were mob
+    /// text, and the Broken member the final restore failure.
+    #[test]
+    fn the_hosts_typed_build_refusal_is_typed_on_every_bridge_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:gated")?;
+        let member = member_id_for_identity(&identity);
+        let session_id = meerkat_core::types::SessionId::new();
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let refused = host_refused_build();
+        let shared = meerkat_mob::MobError::SharedLifecycleFailure(Arc::new(host_refused_build()));
+        for (door, error) in [
+            ("create", spawn_bridge_error("create_session", &refused)),
+            (
+                "shared create",
+                spawn_bridge_error("create_session", &shared),
+            ),
+            (
+                "resume door",
+                resume_rejected(&identity, &session_id, &refused, "resume"),
+            ),
+        ] {
+            assert_eq!(
+                bridge_form(&error),
+                "HostRejectedBuild",
+                "{door}: {error:?}"
+            );
+        }
+        let woken = classify_reload_mob_error(
+            "ensure_member_live",
+            &member,
+            broken_for(&refused, &session_id),
+            &deadline,
+        );
+        assert_eq!(
+            bridge_form(&woken),
+            "ResumeRejected/HostRejectedBuild",
+            "the door's wake: {woken:?}"
+        );
+        let delivered =
+            classify_submit_mob_error(&member, broken_for(&refused, &session_id), &deadline);
+        assert_eq!(
+            bridge_form(&delivered),
+            "ResumeRejected/HostRejectedBuild",
+            "a delivery's wake: {delivered:?}"
+        );
+        let BridgeAdmissionError::ResumeRejected { kind, .. } =
+            BridgeAdmissionError::from(delivered)
+        else {
+            return Err(
+                "a delivery's refusal crosses the admission seam as a resume refusal".into(),
+            );
+        };
+        assert_eq!(format!("{kind:?}"), "HostRejectedBuild");
+        Ok(())
+    }
+
+    /// A member Core holds Broken because provider authentication refused its
+    /// wake's build keeps the typed provider-auth data in its restore failure,
+    /// and the bridge answers it as the Broken member it is (the final restore
+    /// failure), never as the host's build refusal: Meta reads only its own
+    /// kind from that data. A pin: it holds on both sides of that read.
+    #[test]
+    fn a_broken_members_provider_auth_cause_is_never_the_hosts_build_refusal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = AgentIdentity::parse("domain:keyless")?;
+        let member = member_id_for_identity(&identity);
+        let session_id = meerkat_core::types::SessionId::new();
+        let deadline = ActorAdmissionDeadline::new(Duration::from_secs(1));
+        let provider_auth = meerkat_mob::MobError::SessionError(
+            meerkat_core::service::SessionError::provider_auth_failure(
+                meerkat_core::service::SessionProviderAuthFailure {
+                    kind: meerkat_core::AuthErrorKind::MissingSecret,
+                    provider: meerkat_core::Provider::Anthropic,
+                    realm_id: None,
+                    binding_id: None,
+                },
+            ),
+        );
+        let woken = classify_reload_mob_error(
+            "ensure_member_live",
+            &member,
+            broken_for(&provider_auth, &session_id),
+            &deadline,
+        );
+        let delivered =
+            classify_submit_mob_error(&member, broken_for(&provider_auth, &session_id), &deadline);
+        for (path, error) in [("the door's wake", woken), ("a delivery's wake", delivered)] {
+            assert_eq!(
+                bridge_form(&error),
+                "ResumeRejected/MemberRestoreFailed",
+                "{path}: {error:?}"
+            );
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Bounded actor admission
     // -----------------------------------------------------------------------

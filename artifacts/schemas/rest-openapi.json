@@ -4627,6 +4627,95 @@
               "expected_member"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V7 host-addressed record of a placed member's operator-instruction\nsnapshot in its session on the host.",
+            "properties": {
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "record_member_instruction_target",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "member": {
+                "$ref": "#/components/schemas/BridgeMemberIncarnation",
+                "description": "The member's exact incarnation on the host. Its mob and identity own\nthe recorded target."
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              },
+              "target": {
+                "$ref": "#/components/schemas/BridgeInstructionTarget"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "member",
+              "target"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "V7 host-addressed release of a retired placed member's\noperator-instruction target, once no member holds its session.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "binding_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "command": {
+                "const": "release_member_instruction_target",
+                "type": "string"
+              },
+              "epoch": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "member_session_id": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "protocol_version": {
+                "$ref": "#/components/schemas/BridgeProtocolVersion"
+              },
+              "supervisor": {
+                "$ref": "#/components/schemas/BridgePeerSpec"
+              }
+            },
+            "required": [
+              "command",
+              "supervisor",
+              "epoch",
+              "binding_generation",
+              "protocol_version",
+              "mob_id",
+              "agent_identity",
+              "member_session_id"
+            ],
+            "type": "object"
           }
         ],
         "title": "BridgeCommand"
@@ -5370,6 +5459,51 @@
         "description": "Per-process incarnation reported by a member host.\n\nThe host mints this once per actor boot. It is an authenticated observation\ntrigger, not a host-owned authority fact: a controller that observes a new\nvalue re-realizes its own durable routing intent because member peer-trust\nrows are process-local.",
         "title": "BridgeHostRuntimeIncarnation",
         "type": "string"
+      },
+      "BridgeInstructionTarget": {
+        "additionalProperties": false,
+        "description": "A member's whole operator-instruction snapshot at one mob generation:\nevery record of the mob, with its body where the record is Active for\nthe member (none where it is revoked or does not select the member).",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/BridgeInstructionTargetSlot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "generation",
+          "slots"
+        ],
+        "type": "object"
+      },
+      "BridgeInstructionTargetSlot": {
+        "additionalProperties": false,
+        "description": "One slot of a [`BridgeInstructionTarget`].",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "$ref": "#/components/schemas/InstructionRevision"
+          },
+          "slot": {
+            "$ref": "#/components/schemas/InstructionSlot"
+          }
+        },
+        "required": [
+          "slot",
+          "revision"
+        ],
+        "type": "object"
       },
       "BridgeLiveControlOutcome": {
         "description": "Per-verb result of `ControlMemberLiveChannel` — mirrors the typed\nstatuses the local live command results carry.",
@@ -6311,6 +6445,27 @@
               "fork_instruction_refused"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "A placed member's session refused an operator-instruction record or\nrelease (V7 `RecordMemberInstructionTarget`,\n`ReleaseMemberInstructionTarget`) for a reason in the closed refusal\nvocabulary. The mob blocks the member's delivery for\n`owned_by_session`, `owned_by_other_mob`, `slot_managed_by_activation`\nand `durability_unavailable`, and retries it for any other.",
+            "properties": {
+              "instruction_target_refused": {
+                "properties": {
+                  "code": {
+                    "$ref": "#/components/schemas/InstructionSetErrorCode"
+                  }
+                },
+                "required": [
+                  "code"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "instruction_target_refused"
+            ],
+            "type": "object"
           }
         ],
         "title": "BridgeRejectionCause"
@@ -7129,6 +7284,54 @@
             "properties": {
               "result": {
                 "const": "member_visible_tools",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::RecordMemberInstructionTarget`].",
+            "properties": {
+              "disposition": {
+                "$ref": "#/components/schemas/InstructionRecordDisposition"
+              },
+              "result": {
+                "const": "member_instruction_target_recorded",
+                "type": "string"
+              },
+              "target_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "result",
+              "disposition",
+              "target_generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Reply to [`BridgeCommand::ReleaseMemberInstructionTarget`].",
+            "properties": {
+              "disposition": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstructionReleaseDisposition"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result": {
+                "const": "member_instruction_target_released",
                 "type": "string"
               }
             },
@@ -11886,6 +12089,36 @@
         "description": "Application or issuer namespace for one instruction artifact family.",
         "type": "string"
       },
+      "InstructionRecordDisposition": {
+        "description": "What a mob's record did to the member session's target.",
+        "oneOf": [
+          {
+            "const": "recorded",
+            "description": "The snapshot replaced the target.",
+            "type": "string"
+          },
+          {
+            "const": "already_recorded",
+            "description": "The session already recorded this generation or a later one: a\nrepeated delivery writes nothing.",
+            "type": "string"
+          }
+        ]
+      },
+      "InstructionReleaseDisposition": {
+        "description": "What a release by a member's mob did to the member session's target.",
+        "oneOf": [
+          {
+            "const": "released",
+            "description": "The mob's target is now empty and unowned; the next fresh run start\nrevokes what the mob had in effect.",
+            "type": "string"
+          },
+          {
+            "const": "already_unowned",
+            "description": "No owner held the target: a repeated release writes nothing.",
+            "type": "string"
+          }
+        ]
+      },
       "InstructionRevision": {
         "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
         "format": "uint64",
@@ -11918,6 +12151,45 @@
           "key",
           "revision_id",
           "content_sha256"
+        ],
+        "type": "object"
+      },
+      "InstructionSetErrorCode": {
+        "description": "The closed vocabulary of operator-instruction write refusals, as hosts\nand SDKs read it.",
+        "enum": [
+          "invalid_request",
+          "digest_mismatch",
+          "stale_revision",
+          "revision_conflict",
+          "unknown_slot",
+          "slot_limit_exceeded",
+          "body_too_large",
+          "active_set_budget_exceeded",
+          "owned_by_mob",
+          "owned_by_session",
+          "owned_by_other_mob",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "mob_terminal",
+          "malformed_instruction_history",
+          "prepared_authorization_required"
+        ],
+        "type": "string"
+      },
+      "InstructionSlot": {
+        "additionalProperties": false,
+        "description": "One standing instruction's name: the issuer partition and the key.\n\nOrdered by namespace bytes, then key bytes: the order every rendered\nsequence uses.",
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/components/schemas/InstructionNamespace"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
         ],
         "type": "object"
       },

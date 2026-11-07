@@ -762,6 +762,52 @@ fn the_realm_is_lost_once_and_for_good() {
     }
 }
 
+// The open installed its grant and its listing then failed: the realm is
+// never served. A renew failure stops the writer, and its re-acquire is
+// refused: there is no baseline to compare a fresh listing with. The fact
+// is accepted in every opened phase and refused unopened or lost.
+#[test]
+fn a_realm_whose_open_listing_failed_never_reacquires() {
+    let mut authority = authority_in(Phase::Live);
+    let recorded = apply(&mut authority, Input::OpenListingFailed);
+    assert!(effects(&recorded).is_empty());
+    assert_eq!(authority.state().lifecycle_phase, Phase::Live);
+    apply(
+        &mut authority,
+        renew(WriterFenceRenewOutcome::Failed, OPENED, OPENED, true),
+    );
+    assert_eq!(authority.state().lifecycle_phase, Phase::Stopped);
+    let before = authority.state().clone();
+    assert_refused(
+        &apply(&mut authority, Input::BeginReacquire),
+        WriterFenceRefusal::OpenListingFailed,
+    );
+    assert_eq!(authority.state(), &before, "the refusal changes nothing");
+
+    for phase in [
+        Phase::Stopped,
+        Phase::Acquiring,
+        Phase::Proving,
+        Phase::Resuming,
+        Phase::WaitingOut,
+    ] {
+        let mut authority = authority_in(phase);
+        let recorded = apply(&mut authority, Input::OpenListingFailed);
+        assert!(effects(&recorded).is_empty(), "{phase:?}");
+        assert_eq!(authority.state().lifecycle_phase, phase);
+    }
+    let mut unopened = authority_in(Phase::Unopened);
+    assert_refused(
+        &apply(&mut unopened, Input::OpenListingFailed),
+        WriterFenceRefusal::NotOpened,
+    );
+    let mut lost = authority_in(Phase::Lost);
+    assert_refused(
+        &apply(&mut lost, Input::OpenListingFailed),
+        WriterFenceRefusal::Lost,
+    );
+}
+
 #[test]
 fn every_input_in_every_phase_is_total_and_only_mutates_where_intended() {
     let inputs: [(&str, fn() -> Input); 11] = [

@@ -4073,6 +4073,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "Poison",
                         "PoisonUnopened",
                         "PoisonLost",
+                        "OpenListingFailedLive",
+                        "OpenListingFailedStopped",
+                        "OpenListingFailedAcquiring",
+                        "OpenListingFailedProving",
+                        "OpenListingFailedResuming",
+                        "OpenListingFailedWaitingOut",
+                        "OpenListingFailedUnopened",
+                        "OpenListingFailedLost",
                     ])
                     .effects(&[
                         "WriterOpened",
@@ -4202,6 +4210,22 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ])
                         .effects(&["WriterStopped", "AcquireRequested"])
                         .invariants(&["own_grant_is_above_the_token"]),
+                ),
+                scenario(
+                    "writer_fence_open_listing_failed",
+                    "host_store_writer_fence_machine.rs::a_realm_whose_open_listing_failed_never_reacquires records that the open's listing failed in every opened phase, refuses it unopened or lost, and refuses every later re-acquire",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "OpenListingFailedLive",
+                            "OpenListingFailedStopped",
+                            "OpenListingFailedAcquiring",
+                            "OpenListingFailedProving",
+                            "OpenListingFailedResuming",
+                            "OpenListingFailedWaitingOut",
+                            "OpenListingFailedUnopened",
+                            "OpenListingFailedLost",
+                        ])
+                        .effects(&["RequestRefused"]),
                 ),
                 scenario(
                     "writer_fence_unknown_holders",

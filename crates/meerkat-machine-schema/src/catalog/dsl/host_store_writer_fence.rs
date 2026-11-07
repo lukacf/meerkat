@@ -266,6 +266,9 @@ pub enum WriterFenceRefusal {
     NoRenewInFlight,
     /// The writer lost the realm: every input refuses until a reopen.
     Lost,
+    /// The open's listing failed: the realm is never served, and no
+    /// re-acquire lists against a baseline the open never installed.
+    OpenListingFailed,
 }
 
 machine! {
@@ -363,6 +366,8 @@ machine! {
             ListingChecked { outcome: Enum<WriterFenceListingOutcome>, token: u64 },
             // A commit answered fenced out, or an adapter broke a rule.
             Poison { cause: Enum<WriterFenceLostCause> },
+            // The open's listing failed.
+            OpenListingFailed,
         }
 
         effect HostStoreWriterFenceEffect {
@@ -1073,6 +1078,35 @@ machine! {
         // The first cause stands.
         transition PoisonLost {
             on input Poison { cause }
+            guard "lost" { self.lifecycle_phase == Phase::Lost }
+            update {}
+            to Lost
+            emit RequestRefused { reason: WriterFenceRefusal::Lost }
+        }
+
+        // ------------------------------------------------------------------
+        // OpenListingFailed
+        // The open's listing failed: its realm is never served, and no
+        // re-acquire may list against a baseline the open never installed.
+        // ------------------------------------------------------------------
+
+        transition OpenListingFailed {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input OpenListingFailed
+            update {}
+            to Live
+        }
+
+        transition OpenListingFailedUnopened {
+            on input OpenListingFailed
+            guard "unopened" { self.lifecycle_phase == Phase::Unopened }
+            update {}
+            to Unopened
+            emit RequestRefused { reason: WriterFenceRefusal::NotOpened }
+        }
+
+        transition OpenListingFailedLost {
+            on input OpenListingFailed
             guard "lost" { self.lifecycle_phase == Phase::Lost }
             update {}
             to Lost

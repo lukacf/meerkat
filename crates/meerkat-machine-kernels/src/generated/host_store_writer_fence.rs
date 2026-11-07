@@ -539,6 +539,8 @@ pub mod inputs {
     pub struct Poison {
         pub cause: WriterFenceLostCause,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OpenListingFailed {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -551,6 +553,7 @@ pub enum Input {
     LeaseEnded(inputs::LeaseEnded),
     ListingChecked(inputs::ListingChecked),
     Poison(inputs::Poison),
+    OpenListingFailed(inputs::OpenListingFailed),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -563,6 +566,7 @@ impl Input {
             Self::LeaseEnded(_) => InputKind::LeaseEnded,
             Self::ListingChecked(_) => InputKind::ListingChecked,
             Self::Poison(_) => InputKind::Poison,
+            Self::OpenListingFailed(_) => InputKind::OpenListingFailed,
         }
     }
 }
@@ -576,6 +580,7 @@ pub enum InputKind {
     LeaseEnded,
     ListingChecked,
     Poison,
+    OpenListingFailed,
 }
 
 pub mod effects {
@@ -738,6 +743,14 @@ pub enum TransitionId {
     Poison,
     PoisonUnopened,
     PoisonLost,
+    OpenListingFailedLive,
+    OpenListingFailedStopped,
+    OpenListingFailedAcquiring,
+    OpenListingFailedProving,
+    OpenListingFailedResuming,
+    OpenListingFailedWaitingOut,
+    OpenListingFailedUnopened,
+    OpenListingFailedLost,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

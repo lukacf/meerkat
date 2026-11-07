@@ -726,6 +726,62 @@ PoisonLost(cause) ==
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
+OpenListingFailedLive ==
+    /\ phase = "Live"
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedAcquiring ==
+    /\ phase = "Acquiring"
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedProving ==
+    /\ phase = "Proving"
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedResuming ==
+    /\ phase = "Resuming"
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedWaitingOut ==
+    /\ phase = "WaitingOut"
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedUnopened ==
+    /\ phase = "Unopened"
+    /\ phase' = "Unopened"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+OpenListingFailedLost ==
+    /\ phase = "Lost"
+    /\ phase' = "Lost"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
 Next ==
     \/ (phase = "Unopened") /\ \E arg_token \in 0..2 : Open(arg_token)
     \/ (phase = "Live") /\ \E arg_token \in 0..2 : OpenAgainLive(arg_token)
@@ -808,6 +864,14 @@ Next ==
     \/ (phase = "Live" \/ phase = "Stopped" \/ phase = "Acquiring" \/ phase = "Proving" \/ phase = "Resuming" \/ phase = "WaitingOut") /\ \E cause \in WriterFenceLostCauseValues : Poison(cause)
     \/ (phase = "Unopened") /\ \E cause \in WriterFenceLostCauseValues : PoisonUnopened(cause)
     \/ (phase = "Lost") /\ \E cause \in WriterFenceLostCauseValues : PoisonLost(cause)
+    \/ OpenListingFailedLive
+    \/ OpenListingFailedStopped
+    \/ OpenListingFailedAcquiring
+    \/ OpenListingFailedProving
+    \/ OpenListingFailedResuming
+    \/ OpenListingFailedWaitingOut
+    \/ OpenListingFailedUnopened
+    \/ OpenListingFailedLost
     \/ TerminalStutter
 
 unopened_holds_nothing == (IF (phase # "Unopened") THEN TRUE ELSE ((token = 0) /\ (granted = None) /\ (own_grant = None) /\ (timed_out = 0) /\ (waited_holder = None) /\ ~(writer_stopped)))

@@ -745,3 +745,229 @@ async fn an_untrusted_entry_never_runs_whatever_the_run_overrides() {
         }
     }
 }
+
+/// What the host computes over the user file at `file`.
+fn file_digest(file: &Path) -> HookSourceDigest {
+    HookSourceDigest::of(&std::fs::read(file).unwrap())
+}
+
+/// A project file that parses but states no hooks is still read, so it is
+/// decided once, with the digest of the bytes read.
+#[tokio::test]
+async fn a_project_file_stating_no_hooks_is_decided_once() {
+    let (_temp, base, project) = fixture();
+    write_project_hooks(&project, vec![]);
+    let read = host_digest(&project);
+    let trust = RecordedTrust::new([]);
+
+    let run = build_and_run(&base, &project, Some(Arc::clone(&trust))).await;
+
+    assert_eq!(trust.asked(), vec![(project_file(&project), read)]);
+    assert_eq!(
+        run.tool.0.load(Ordering::SeqCst),
+        1,
+        "nothing guards the tool"
+    );
+    assert!(refused_hooks(&run.events).is_empty());
+}
+
+/// The user file is put to the trust too: an untrusted one runs none of its
+/// hooks, and the tool its guardrail guards stays blocked.
+#[tokio::test]
+async fn an_untrusted_user_file_runs_nothing() {
+    let (_temp, base, project) = fixture();
+    std::fs::create_dir_all(&project).unwrap();
+    let user_root = base.join("user");
+    let user_file = user_root.join(".rkat").join("config.toml");
+    let marker = base.join("user-planted-entered");
+    write_hooks(&user_file, vec![marker_guardrail("user-planted", &marker)]);
+    let trust = RecordedTrust::new([]);
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        Some(&user_root),
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert_eq!(
+        trust.asked(),
+        vec![(user_file.clone(), file_digest(&user_file))]
+    );
+    assert!(!marker.exists(), "the untrusted user hook never ran");
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 0, "its tool is blocked");
+    assert_eq!(
+        refused_hooks(&run.events),
+        vec![(HookId::new("user-planted"), untrusted_source())]
+    );
+}
+
+/// Every build is judged again: a later build of the same factory (a
+/// session resumed or woken later, a fork, a helper or a member) refuses a
+/// hook written after an earlier build trusted the file.
+#[tokio::test]
+async fn a_later_build_of_the_same_factory_is_judged_again() {
+    let (_temp, base, project) = fixture();
+    let marker = base.join("planted-later-entered");
+    write_project_hooks(&project, vec![]);
+    let trust = RecordedTrust::new([(project_file(&project), host_digest(&project))]);
+    let factory = factory_for(
+        &base,
+        &project,
+        None,
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+        None,
+    );
+
+    let first = run_on(&factory, HookRunOverrides::default()).await;
+    assert_eq!(first.outcome.as_deref(), Ok("continued"));
+    assert_eq!(first.tool.0.load(Ordering::SeqCst), 1);
+
+    write_project_hooks(&project, vec![marker_guardrail("planted", &marker)]);
+    let planted = host_digest(&project);
+    let later = run_on(&factory.clone(), HookRunOverrides::default()).await;
+
+    assert_eq!(later.outcome.as_deref(), Ok("continued"));
+    assert!(
+        !marker.exists(),
+        "the later build never ran the planted hook"
+    );
+    assert_eq!(
+        later.tool.0.load(Ordering::SeqCst),
+        0,
+        "its tool is blocked"
+    );
+    assert_eq!(
+        refused_hooks(&later.events),
+        vec![(HookId::new("planted"), untrusted_source())]
+    );
+    let asked = trust.asked();
+    assert_eq!(
+        asked.len(),
+        2,
+        "each build decided the file once: {asked:?}"
+    );
+    assert_eq!(asked[1], (project_file(&project), planted));
+}
+
+/// A [`RecordedTrust`] that runs `during` once, while it decides: a write
+/// that lands while the host decides.
+struct WritingWhileDeciding {
+    trust: Arc<RecordedTrust>,
+    during: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl HookSourceTrust for WritingWhileDeciding {
+    fn decide(&self, source: HookSource<'_>) -> HookSourceDecision {
+        if let Some(during) = self.during.lock().unwrap().take() {
+            during();
+        }
+        self.trust.decide(source)
+    }
+}
+
+/// A write that lands while the host decides changes nothing that runs: the
+/// build runs the hooks of the bytes it put to the host, and only those.
+#[tokio::test]
+async fn a_write_during_the_decision_does_not_change_what_runs() {
+    let (_temp, base, project) = fixture();
+    let early = base.join("early-hook-entered");
+    let late = base.join("late-hook-entered");
+    write_project_hooks(&project, vec![marker_guardrail("early", &early)]);
+    let judged = host_digest(&project);
+    let late_project = project.clone();
+    let late_marker = late.clone();
+    let trust = Arc::new(WritingWhileDeciding {
+        trust: RecordedTrust::new([(project_file(&project), judged)]),
+        during: Mutex::new(Some(Box::new(move || {
+            write_project_hooks(&late_project, vec![marker_guardrail("late", &late_marker)]);
+        }))),
+    });
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        None,
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert_eq!(trust.trust.asked(), vec![(project_file(&project), judged)]);
+    assert_ne!(host_digest(&project), judged, "the write landed");
+    assert!(early.exists(), "the hook of the decided bytes ran");
+    assert!(
+        !late.exists(),
+        "a hook written during the decision never ran"
+    );
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 1);
+    assert!(refused_hooks(&run.events).is_empty());
+}
+
+/// An untrusted project entry identical to an entry of the trusted user file
+/// is the user's own entry, and runs.
+#[tokio::test]
+async fn an_identical_user_entry_runs_from_an_untrusted_project() {
+    let (_temp, base, project) = fixture();
+    let user_root = base.join("user");
+    let user_file = user_root.join(".rkat").join("config.toml");
+    let marker = base.join("shared-hook-entered");
+    let entry = marker_guardrail("shared", &marker);
+    write_project_hooks(&project, vec![entry.clone()]);
+    write_hooks(&user_file, vec![entry]);
+    let trust = RecordedTrust::new([(user_file.clone(), file_digest(&user_file))]);
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        Some(&user_root),
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert_eq!(trust.asked().len(), 2, "both files are decided");
+    assert!(marker.exists(), "the user's own definition ran");
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 1);
+    assert!(refused_hooks(&run.events).is_empty());
+}
+
+/// The same id with another definition is the untrusted project's entry: it
+/// is refused, and the user's entry of that id does not run either (the
+/// project entry shadows it by id), so the guarded tool stays blocked.
+#[tokio::test]
+async fn a_same_id_with_another_definition_is_refused() {
+    let (_temp, base, project) = fixture();
+    let user_root = base.join("user");
+    let user_file = user_root.join(".rkat").join("config.toml");
+    let project_marker = base.join("project-shared-entered");
+    let user_marker = base.join("user-shared-entered");
+    write_project_hooks(&project, vec![marker_guardrail("shared", &project_marker)]);
+    write_hooks(&user_file, vec![marker_guardrail("shared", &user_marker)]);
+    let trust = RecordedTrust::new([(user_file.clone(), file_digest(&user_file))]);
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        Some(&user_root),
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert!(
+        !project_marker.exists(),
+        "the project's definition never ran"
+    );
+    assert!(
+        !user_marker.exists(),
+        "the user's entry of that id is shadowed"
+    );
+    assert_eq!(
+        run.tool.0.load(Ordering::SeqCst),
+        0,
+        "the tool stays blocked"
+    );
+    assert_eq!(
+        refused_hooks(&run.events),
+        vec![(HookId::new("shared"), untrusted_source())]
+    );
+}

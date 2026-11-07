@@ -442,9 +442,13 @@ class ConsoleScenario:
         pass
 
     def check_final_artifacts(self, directory, report):
-        # The software prompt was answered in the Console by the fixture
-        # person: its stored decision must name that person.
-        check_answered_software_decision(directory, report)
+        # The harness hands its case report. A case that already failed keeps
+        # its own refusal; a passed case holds the journey's own report under
+        # console_journey. The software prompt was answered in the Console by
+        # the fixture person: its stored decision must name that person.
+        if report.get("status") != "passed":
+            return
+        check_answered_software_decision(directory, report["console_journey"])
 
     def original_request(self):
         return self.v.ACQUISITION_REQUEST

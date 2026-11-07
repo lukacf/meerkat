@@ -162,6 +162,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 + first_service.strong_count()
                 + first_store.strong_count()
         };
+        // A host close does not yet guarantee that the grant store's lease is released at once.
         let deadline = tokio::time::Instant::now() + WAIT;
         while held() > 0 {
             assert!(

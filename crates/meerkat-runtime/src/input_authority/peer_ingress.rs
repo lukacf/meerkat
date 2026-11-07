@@ -8,6 +8,12 @@
 //! then checks the binding ([`super::check_bound_original`]) before ordinary
 //! admission decides it again against current owners
 //! (`NativeWorkAuthorizationHost::authenticate_association`).
+//!
+//! An in-process delivery that governed work sent also carries the origin of
+//! that work ([`super::GovernedPeerOrigin`]): its requester, the sending agent
+//! and its works. A binding of such a delivery keeps that requester, and Core
+//! refuses one that does not, so peers keep the original requester. Core's
+//! own binder of such deliveries is [`super::OriginalRequesterPeerBinder`].
 
 use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation;
@@ -25,8 +31,11 @@ use crate::input_admission_custody::NativeInputAdmissionCustody;
 
 /// Where a governed peer delivery came from, as Core established it before it
 /// asks the installed binder to bind the delivery. Facts only: nothing here is
-/// an authority, a grant, or a requester the host may adopt as the
-/// receiver's. The host derives the receiver's authority from its own owners.
+/// an authority or a grant, and the host derives the receiver's authority
+/// from its own owners. The one requester here is a governed origin's
+/// ([`PeerIngressCommsOrigin::governed_origin`]): the original requester of
+/// the work that sent the delivery, which a binding must keep and Core
+/// checks it keeps. No other fact names a requester.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerIngressOrigin {
@@ -76,6 +85,16 @@ pub struct PeerIngressCommsOrigin {
     /// For a response (progress or terminal): the request it answers.
     pub in_reply_to: Option<InteractionId>,
     pub claim: PeerIngressClaimKind,
+    /// The governed work the delivery was sent under, when its sender is an
+    /// in-process sender that carried one ([`super::GovernedPeerOrigin`]).
+    /// `None` for every other delivery: a network delivery, one from an
+    /// ungoverned sender, a plain event. Core sets it from what the
+    /// in-process lane carried, never from the envelope. A binding of a
+    /// delivery with an origin keeps its requester, names the sending agent
+    /// as its ingress actor and every work of the sending work as a
+    /// contributor; Core refuses any other as malformed
+    /// ([`super::BoundOriginalPin::GovernedDelivery`]).
+    pub governed_origin: Option<super::GovernedPeerOrigin>,
 }
 
 /// How Core holds a comms delivery while it binds it.
@@ -277,6 +296,54 @@ pub enum PeerIngressBindRefusal {
     NotReady(meerkat_core::authorization::ControllerReadinessFailure),
     /// The host could not be read now. Pending, as `NotReady`.
     Unavailable(String),
+    /// The binder's verdict for a typed cause ([`PeerIngressBindDenial`]):
+    /// this delivery is never admitted for this receiver. Terminal, as
+    /// `Denied`.
+    Refused(PeerIngressBindDenial),
+}
+
+/// Why a binder that keeps the original requester
+/// ([`super::OriginalRequesterPeerBinder`]) refused a delivery for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PeerIngressBindDenial {
+    /// The delivery carries no origin Core established for a governed
+    /// sender (a network delivery, an ungoverned in-process sender), or a
+    /// sending work the receiver cannot name in one realm and ingress
+    /// domain.
+    OriginUnverifiable,
+    /// The host holds no basis on which the receiver serves the requester
+    /// through peers.
+    NoPeerServiceBasis,
+    /// An original of the sending work has a host-policy or service-mandate
+    /// basis, which narrows no work that names it: the receiver could not be
+    /// held to the requester's ceiling.
+    SenderBasisUnbounded,
+    /// The sending work names more works than one association may name as
+    /// its contributors.
+    ContributorBoundExceeded,
+    /// The host already holds another association enrolled for this
+    /// delivery's original; the first stands.
+    EnrollmentConflict,
+}
+
+impl PeerIngressBindDenial {
+    /// The denial's stable snake_case name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OriginUnverifiable => "origin_unverifiable",
+            Self::NoPeerServiceBasis => "no_peer_service_basis",
+            Self::SenderBasisUnbounded => "sender_basis_unbounded",
+            Self::ContributorBoundExceeded => "contributor_bound_exceeded",
+            Self::EnrollmentConflict => "enrollment_conflict",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerIngressBindDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The trusted host's binder of governed peer deliveries: on a governed
@@ -290,7 +357,10 @@ pub enum PeerIngressBindRefusal {
 /// signature the listener verified, an in-process sender, or the bridge's
 /// bound supervisor so established), and never for a plain external event,
 /// which has no sender. The request carries facts only; none of them is a
-/// grant, and a sender's own tool authority is never the receiver's.
+/// grant, and a sender's own tool authority is never the receiver's. An
+/// in-process delivery that governed work sent carries that work's origin
+/// ([`PeerIngressCommsOrigin::governed_origin`]): its requester is the one
+/// requester the request names, and the binding keeps it.
 ///
 /// Contract:
 /// - Bounded. Core awaits the binder holding no drain, session, runtime or
@@ -334,6 +404,11 @@ pub enum PeerIngressBindRefusal {
 ///   [`PeerIngressBinding::with_admission_custody`], settled exactly once
 ///   (`NotAdmitted` for every refusal of Core's own), or, without custody,
 ///   from the runtime's own record of the delivery's input.
+/// - A delivery with a governed origin is bound under the origin's
+///   requester, with the sending agent as ingress actor and every work of
+///   the sending work as a contributor; Core refuses any other binding of it
+///   as malformed. [`super::OriginalRequesterPeerBinder`] binds such
+///   deliveries and meets this contract for them.
 /// - A supervisor delivery is bound under the receiving member's own
 ///   owner-derived association; the supervisor is a relay fact, never a
 ///   requester with member-to-member authority.

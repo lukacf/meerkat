@@ -924,8 +924,7 @@ async fn a_deploy_stop_past_its_bound_settles_the_run_expired(backend: Backend) 
     if let Err(error) = check_graceful_stop(&row) {
         panic!("{error}");
     }
-    // The bound, measured from the input's admission before the stop,
-    // passes before the next start.
+    // The bound, measured from the stop, passes before the next start.
     tokio::time::sleep(max_age + Duration::from_secs(1)).await;
     let restarted = restart_workers(
         &row.store,
@@ -1213,9 +1212,8 @@ async fn a_stop_before_the_resume_repairs_the_tail(backend: Backend) {
 /// The stop marks of a kept run clear when it resumes. A deploy stop
 /// with a 30-second requeue bound keeps a run in round 1; a restart well
 /// inside the bound resumes it; that incarnation is killed in round 3, and
-/// the next restart comes after the bound has passed since the input's
-/// admission. The run resumes again, at round 3: it is not settled as
-/// expired.
+/// the next restart comes after the bound has passed since that first stop.
+/// The run resumes again, at round 3: it is not settled as expired.
 async fn a_resumed_runs_stop_marks_do_not_expire_it_later(backend: Backend) {
     let harness = Harness::new(backend);
     let bound = Duration::from_secs(30);
@@ -1249,8 +1247,7 @@ async fn a_resumed_runs_stop_marks_do_not_expire_it_later(backend: Backend) {
     .unwrap_or_else(|failure| panic!("{failure}"));
     let _ = std::fs::remove_file(root.join(RESUMED_KILL));
 
-    // The bound passes, measured from the input's admission before the
-    // first stop.
+    // The bound passes, measured from the first stop.
     let waited = stopped_at.elapsed();
     if waited < bound + Duration::from_secs(1) {
         tokio::time::sleep((bound + Duration::from_secs(1)).saturating_sub(waited)).await;

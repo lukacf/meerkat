@@ -414,8 +414,8 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   cancelled and fails the run, which is closed as interrupted with its
   committed rounds kept; retire, destroy, reset and unregister abandon
   them; a graceful unregister that keeps queued work leaves the run to resume
-  at the next start, unless a bound input is older than the stop's max age
-  by then.
+  at the next start, unless the stop's max age has passed since the stop by
+  then.
 - Not resumed, closed as interrupted with content kept: a bound input already
   settled, a retired runtime, or a run with no bound inputs (direct and
   machine-service turns). A run settled without resuming (a stop first, a
@@ -450,9 +450,10 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   with per-round commits in flight like a crash: the turn stops at once
   (work since the last round commit is redone), its inputs stay bound with
   waiters answered `requeued_across_stop`, and the run continues at the next
-  open, before the kept queued prompts; if a bound input is older than
-  `max_age` (from admission; unregister: no default, 1 ms to 24 h; mob:
-  15 min default) at that start, the inputs end `requeue_expired` instead
+  open, before the kept queued prompts; if more than `max_age` (counted
+  from the stop, not from admission; unregister: no default, 1 ms to 24 h;
+  mob: 15 min default) has passed at that start, the inputs end
+  `requeue_expired` instead
   and the run is closed as interrupted, its committed rounds kept. No
   Requeue, an explicit stop/cancel, retire, destroy, reset, a requeue stop
   that meets a steer being written into the turn, or a session without

@@ -1219,7 +1219,9 @@ schedule's sender). A reply meant for that person alone reaches them in that
 thread when it is `person`, and as an item of their attention list when it
 is `shared` (see `meta/console/attention`); nothing is appended to a shared
 conversation. A send that names no person (an open console's caller, a
-service, a token that names no person) has no private reply route.
+service, a token that names no person) has no private reply route, and
+neither has a send whose `user_input` frame a host's payload policy redacted
+(the redaction takes the `thread` with it).
 
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 

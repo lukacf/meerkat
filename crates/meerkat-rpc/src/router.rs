@@ -8711,7 +8711,9 @@ mod tests {
         /// A renewal is a second grant of the same identity and
         /// target, issued while the first is live. Both list as active, a
         /// call is admitted throughout, and once both have ended the call is
-        /// refused (the expired grant explains it first).
+        /// refused `tool_grant_expired`: when several ended grants cover a
+        /// call, the service's `refusal_rank` lets an expired grant explain
+        /// it before a revoked one.
         #[tokio::test]
         async fn a_renewal_overlaps_the_identity_grant_it_renews() {
             let mut rig = rig().await;
@@ -8803,6 +8805,345 @@ mod tests {
                 recreated.grant_refusal(),
                 Some(meerkat_core::tool_grant::TOOL_GRANT_REVOKED_CODE),
                 "the new member inherits nothing: {recreated:?}"
+            );
+        }
+
+        /// The mob's handle, as its host's surface holds it.
+        async fn mob_handle(rig: &Rig, mob_id: &str) -> meerkat_mob::MobHandle {
+            rig.router
+                .runtime
+                .mob_state()
+                .expect("the mob surface")
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("the mob runs")
+        }
+
+        /// The session `identity`'s member holds now.
+        async fn member_session(rig: &Rig, mob_id: &str, identity: &str) -> SessionId {
+            rig.router
+                .runtime
+                .mob_state()
+                .expect("the mob surface")
+                .mob_resolve_bridge_session_id(
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::AgentIdentity::from(identity),
+                )
+                .await
+                .expect("the member's session resolves")
+                .expect("the member holds a session")
+        }
+
+        /// Declare `identity` an identity entry of the `worker` role, in a
+        /// partial roster: the apply seats its member.
+        async fn declare_entry(rig: &Rig, mob_id: &str, identity: &str) {
+            let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", identity);
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            let outcome = mob_handle(rig, mob_id)
+                .await
+                .apply_declared_roster(meerkat_mob::DeclaredRoster::partial([
+                    meerkat_mob::DeclaredEntry::new(spec),
+                ]))
+                .await
+                .expect("the declared apply runs");
+            assert!(
+                matches!(
+                    outcome
+                        .entries
+                        .get(&meerkat_mob::AgentIdentity::from(identity)),
+                    Some(
+                        meerkat_mob::DeclaredEntryOutcome::Seated { .. }
+                            | meerkat_mob::DeclaredEntryOutcome::Embodied { .. }
+                    )
+                ),
+                "the apply seats the entry: {:?}",
+                outcome.entries
+            );
+        }
+
+        /// Adopt `identity`'s member as a store-owned identity of the `worker`
+        /// role, over the session it holds: declared with the role's named
+        /// profile, or with `profile_override`, an exact portable profile.
+        /// Waits until the identity's member converges on the declaration.
+        async fn adopt_identity(
+            rig: &Rig,
+            mob_id: &str,
+            identity: &str,
+            profile_override: Option<serde_json::Value>,
+        ) {
+            use meerkat_mob::identity::{
+                AdoptMemberIdentityDeclaration, DesiredExecution, DesiredSessionAuthorityPolicy,
+                DesiredSessionTarget, IdentityAdoptionId, IdentityAdoptionOutcome,
+                IdentityAdoptionPrecondition, IdentityConvergenceMode, IdentityConvergenceStatus,
+                IdentityDeclarationScopeId, IdentityProfileMemberDeclaration,
+                IdentityReconcileDecision, IdentityStoredObservation, IdentityWiringCustody,
+            };
+
+            let mob = meerkat_mob::MobId::from(mob_id);
+            let agent = meerkat_mob::AgentIdentity::from(identity);
+            let session_id = member_session(rig, mob_id, identity).await;
+            let adoption = AdoptMemberIdentityDeclaration {
+                mob_id: mob.clone(),
+                agent_identity: agent.clone(),
+                request_id: IdentityAdoptionId::new(format!("adopt-{identity}"))
+                    .expect("adoption id"),
+                precondition: IdentityAdoptionPrecondition::ExpectedAbsent,
+                declaration_scope: IdentityDeclarationScopeId::new("member-grant-rows")
+                    .expect("declaration scope"),
+                declaration_revision: 1,
+                session: DesiredSessionTarget {
+                    session_id: session_id.clone(),
+                    lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+                    lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+                    authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+                },
+                member: IdentityProfileMemberDeclaration {
+                    profile_name: meerkat_mob::ProfileName::from("worker"),
+                    profile_override: profile_override.map(|profile| {
+                        serde_json::from_value(profile).expect("a portable profile")
+                    }),
+                    model_override: None,
+                    external_addressable_override: None,
+                    context: None,
+                    labels: None,
+                    additional_instructions: None,
+                    system_prompt_override: None,
+                    tool_access_policy: None,
+                    auth_binding: None,
+                    budget_limits: None,
+                    runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+                    required_env_keys: Vec::new(),
+                    required_local_callback_tools: Vec::new(),
+                    execution: DesiredExecution::ControllingSession,
+                },
+                wiring_custody: IdentityWiringCustody::ExternalManaged,
+                owned_wiring: std::collections::BTreeSet::new(),
+                convergence: IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+            };
+            let mob_state = rig.router.runtime.mob_state().expect("the mob surface");
+            let adopted = mob_state
+                .mob_adopt_member_identity_declaration(&mob, adoption)
+                .await
+                .expect("the member's identity is adopted");
+            assert!(
+                matches!(
+                    adopted.adoption,
+                    IdentityAdoptionOutcome::Adopted {
+                        desired_revision: 1
+                    }
+                ),
+                "{:?}",
+                adopted.adoption
+            );
+            tokio::time::timeout(PROBE_BOUND, async {
+                loop {
+                    if let IdentityStoredObservation::Valid(IdentityConvergenceStatus {
+                        decision: Some(IdentityReconcileDecision::Converged),
+                        ..
+                    }) = mob_state
+                        .mob_identity_convergence_status(&mob, &agent)
+                        .await
+                        .expect("the identity's convergence reads")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the adopted identity converges within the bound");
+        }
+
+        /// A mob reset ends the grants of every identity the mob held,
+        /// a worker's and an identity entry's alike, before its epoch begins:
+        /// the reset keeps the mob's incarnation, so both names declared again
+        /// after it would otherwise match the old grants. Neither new member
+        /// is admitted by them, and the list shows them ended.
+        #[tokio::test]
+        async fn a_mob_reset_ends_the_grants_of_its_identity_entries() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-grants", shell_gated_role()).await;
+            spawn(&rig, "reset-grants", "worker-1", None).await;
+            declare_entry(&rig, "reset-grants", "entry-1").await;
+            let mut grants = Vec::new();
+            for identity in ["worker-1", "entry-1"] {
+                let grant = grant_identity_shell(&rig, "reset-grants", identity, 600_000).await;
+                let admitted = probe(&mut rig, "reset-grants", identity).await;
+                assert_eq!(
+                    admitted.grant_refusal(),
+                    None,
+                    "the identity grant opens shell for {identity}: {admitted:?}"
+                );
+                grants.push((identity, grant));
+            }
+
+            ok(
+                &rig,
+                "mob/lifecycle",
+                serde_json::json!({"mob_id": "reset-grants", "action": "reset"}),
+                "the mob resets",
+            )
+            .await;
+            spawn(&rig, "reset-grants", "worker-1", None).await;
+            declare_entry(&rig, "reset-grants", "entry-1").await;
+
+            for (identity, grant) in grants {
+                let all = list_identity(&rig, "reset-grants", identity, true).await;
+                assert_eq!(all.len(), 1, "{identity}: {all:?}");
+                assert_eq!(all[0]["grant_id"], grant["grant_id"], "{identity}");
+                assert_eq!(
+                    all[0]["status"], "revoked",
+                    "the reset ended {identity}'s grant: {all:?}"
+                );
+                let declared_again = probe(&mut rig, "reset-grants", identity).await;
+                assert_eq!(
+                    declared_again.grant_refusal(),
+                    Some(meerkat_core::tool_grant::TOOL_GRANT_REVOKED_CODE),
+                    "{identity} declared again inherits nothing: {declared_again:?}"
+                );
+            }
+        }
+
+        /// An identity declared with its role's named profile is built
+        /// from the role's definition, as a worker of the role is: its gate is
+        /// the role's current gate, its own, so the gated family whose switch
+        /// is off is mounted closed. A call needs a grant, and an identity
+        /// grant opens it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_identity_of_a_gated_profile_mounts_the_gated_family_closed() {
+            let mut rig = rig().await;
+            create_mob(&rig, "identity-gate", shell_gated_role()).await;
+            spawn(&rig, "identity-gate", "worker-1", None).await;
+            adopt_identity(&rig, "identity-gate", "worker-1", None).await;
+
+            let gate = mob_handle(&rig, "identity-gate")
+                .await
+                .member_grant_gate(&meerkat_mob::AgentIdentity::from("worker-1"))
+                .await
+                .expect("the identity's gate resolves");
+            assert_eq!(
+                gate.gated,
+                meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"),
+                "the role's gate is the identity's own: {gate:?}"
+            );
+            assert!(gate.not_mounted.is_empty(), "{gate:?}");
+
+            let refused = probe(&mut rig, "identity-gate", "worker-1").await;
+            assert_eq!(
+                refused.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the gated family is mounted closed: {refused:?}"
+            );
+            grant_identity_shell(&rig, "identity-gate", "worker-1", 600_000).await;
+            let admitted = probe(&mut rig, "identity-gate", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "the identity grant opens it: {admitted:?}"
+            );
+        }
+
+        /// An identity declared with its own exact profile
+        /// (`profile_override`) keeps the role-entries rule, as a member
+        /// spawned with its own profile does: the role's gated family its
+        /// profile leaves off is not mounted, so nothing of it is gated.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_identity_with_a_profile_override_gets_role_entries_only() {
+            let mut rig = rig().await;
+            create_mob(&rig, "identity-override", shell_gated_role()).await;
+            spawn(&rig, "identity-override", "worker-1", None).await;
+            adopt_identity(
+                &rig,
+                "identity-override",
+                "worker-1",
+                Some(serde_json::json!({
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic",
+                    "tools": {"comms": true},
+                    "external_addressable": true,
+                    "runtime_mode": "turn_driven",
+                })),
+            )
+            .await;
+
+            let gate = mob_handle(&rig, "identity-override")
+                .await
+                .member_grant_gate(&meerkat_mob::AgentIdentity::from("worker-1"))
+                .await
+                .expect("the identity's gate resolves");
+            assert!(gate.gated.is_empty(), "{gate:?}");
+            assert_eq!(
+                gate.not_mounted,
+                meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"),
+                "the role's family is a role entry its profile does not mount: {gate:?}"
+            );
+            let probed = probe(&mut rig, "identity-override", "worker-1").await;
+            assert_eq!(
+                probed.grant_refusal(),
+                None,
+                "shell is not mounted, so no grant is asked for: {probed:?}"
+            );
+        }
+
+        /// The resume row on the wire: a member whose session recorded
+        /// its family disabled (built before its gate named the family) is
+        /// resumed with the family mounted closed, not refused as a disabled
+        /// gated family and never mounted open. A call with no grant is
+        /// refused `tool_grant_required`, and an identity grant opens it.
+        #[tokio::test]
+        async fn a_member_resume_mounts_its_gated_family_over_a_recorded_disable() {
+            let mut rig = rig().await;
+            create_mob(&rig, "gated-resume", shell_gated_role()).await;
+            spawn(
+                &rig,
+                "gated-resume",
+                "worker-1",
+                Some(serde_json::json!({"shell": false})),
+            )
+            .await;
+            let first = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                first.grant_refusal(),
+                None,
+                "the first build leaves shell off and records it disabled: {first:?}"
+            );
+            let session_id = member_session(&rig, "gated-resume", "worker-1").await;
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "gated-resume", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "gated-resume",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                    "launch_mode": {
+                        "mode": "resume",
+                        "bridge_session_id": session_id.to_string(),
+                    },
+                }),
+                "the member resumes its session under the gated role",
+            )
+            .await;
+
+            let refused = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                refused.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the resumed member mounts shell closed: {refused:?}"
+            );
+            grant_identity_shell(&rig, "gated-resume", "worker-1", 600_000).await;
+            let admitted = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "an identity grant opens it: {admitted:?}"
             );
         }
     }

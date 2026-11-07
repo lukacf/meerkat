@@ -377,14 +377,6 @@ pub enum MemberWakeRefusal {
     /// The member's host has preparation pending for it: a first-boot row
     /// it has not carried out, or a role move it has not declared.
     HostPreparationPending,
-    /// The member's host asked to retry its build preparation
-    /// ([`crate::MemberBuildPreparationRefusal::Retryable`]): its wakes are
-    /// refused until the host retries it
-    /// ([`crate::MobHandle::resolve_member_build_preparation`]) or the mob's
-    /// own retry timer does. On the wire (its token, the peer-message
-    /// refusal) it is `host_preparation_pending`, as before.
-    #[serde(rename = "host_preparation_pending", skip_deserializing)]
-    BuildPreparationRetry,
     /// The member's restore could not proceed now and keeps its authority:
     /// its durable resume gate was unavailable, a lifecycle operation on its
     /// session (the takeover of its attachment) was still in flight, or the
@@ -400,6 +392,14 @@ pub enum MemberWakeRefusal {
     AdmissionClosed,
     /// The mob's actor exited while the wake waited.
     MobUnavailable,
+    /// The member's host asked to retry its build preparation
+    /// ([`crate::MemberBuildPreparationRefusal::Retryable`]): its wakes are
+    /// refused until the host retries it
+    /// ([`crate::MobHandle::resolve_member_build_preparation`]) or the mob's
+    /// own retry timer does. On the wire (its token, the peer-message
+    /// refusal) it is `host_preparation_pending`, as before.
+    #[serde(rename = "host_preparation_pending", skip_deserializing)]
+    BuildPreparationRetry,
 }
 
 impl MemberWakeRefusal {

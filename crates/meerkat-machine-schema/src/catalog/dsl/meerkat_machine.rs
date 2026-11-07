@@ -2484,8 +2484,9 @@ pub enum InputAbandonReason {
     ToolProcessInterrupted,
     /// A graceful stop kept the input queued for the next start
     /// (`ClassifyStopInputDisposition` answered `Retain`), and the next start
-    /// found it older than that stop's max age, so it ended without running.
-    /// Resolves to the public `Abandoned` class.
+    /// came more than that stop's max age after the stop, so the input ended
+    /// without running. The shell decides the expiry from the stop's time;
+    /// the machine holds no clock. Resolves to the public `Abandoned` class.
     RequeueExpired,
     /// The input's resume was refused, so it ended without running: the run
     /// it was bound to was resumable after a restart and the host's resume

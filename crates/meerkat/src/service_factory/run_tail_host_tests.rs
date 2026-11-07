@@ -1206,10 +1206,10 @@ async fn a_claim_drive_proves_nothing_against_its_own_runtimes_registration_whol
 // The run of a prompt a graceful stop kept, cut by a power cut.
 // ---------------------------------------------------------------------------
 
-/// The max age of the graceful stop that keeps the prompt. It spans the
-/// prompt's admission, the stop, host 1's shutdown, the file copy and host 2's
-/// open up to its pre-serve age check, so a slow runner still runs the prompt
-/// inside it; the start after the power cut waits it out, idle.
+/// The max age of the graceful stop that keeps the prompt. It spans the stop,
+/// host 1's shutdown, the file copy and host 2's open up to its pre-serve age
+/// check, so a slow runner still runs the prompt inside it; the start after
+/// the power cut waits it out, idle.
 const KEPT_PROMPT_MAX_AGE: Duration = Duration::from_secs(30);
 
 /// The kept prompt's row, as `start`'s runtime store holds it.
@@ -1230,13 +1230,13 @@ async fn kept_prompt_row(
 /// disposition), and the next start, inside the stop's max age, runs it as an
 /// ordinary run, run B. The power goes out while run B waits on the model
 /// after its tool round's commit, and the next host opens the session once
-/// the stop's max age, counted from the prompt's admission, has passed. Run B
-/// resumes from its tail: it is the prompt's own run, which started, not a run
-/// the stop kept, so its crash is an ordinary one, not an expired stop. Run
-/// B's start cleared the stop's mark from the prompt, so the power cut left
-/// none. RED before: the mark stayed on the prompt while run B was open, and
-/// the host ended run B's input as `RequeueExpired` and closed run B as
-/// interrupted instead of resuming it.
+/// the stop's max age, counted from the stop, has passed. Run B resumes from
+/// its tail: it is the prompt's own run, which started, not a run the stop
+/// kept, so its crash is an ordinary one, not an expired stop. Run B's start
+/// cleared the stop's mark from the prompt, so the power cut left none. RED
+/// before: the mark stayed on the prompt while run B was open, and the host
+/// ended run B's input as `RequeueExpired` and closed run B as interrupted
+/// instead of resuming it.
 async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_age(
     head_canonical: bool,
 ) {
@@ -1291,13 +1291,6 @@ async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_a
     assert!(unregistered, "the graceful stop ends the registration");
     first.service.try_shutdown().await.expect("shutdown");
     let stopped = kept_prompt_row(&first, &id, &kept).await;
-    let admitted_at = stopped
-        .state
-        .persisted_input
-        .as_ref()
-        .expect("the kept prompt keeps its payload")
-        .header()
-        .timestamp;
     let max_age_ms =
         u64::try_from(KEPT_PROMPT_MAX_AGE.as_millis()).expect("the max age fits in milliseconds");
     assert_eq!(
@@ -1309,6 +1302,11 @@ async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_a
         (InputLifecycleState::Queued, None, Some(max_age_ms)),
         "the stop keeps the prompt queued and marked for the next start"
     );
+    let stopped_at = stopped
+        .state
+        .stop_requeue
+        .expect("the stop marks the prompt it keeps")
+        .stopped_at;
 
     // The next start, inside the max age, runs the prompt: run B commits its
     // tool round and waits on the model.
@@ -1326,7 +1324,7 @@ async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_a
             reason: meerkat_runtime::InputAbandonReason::RequeueExpired,
         }),
         "timing precondition: host 2 must open the session inside the stop's max age, counted \
-         from the prompt's admission; it opened later and expired the prompt instead of running it"
+         from the stop; it opened later and expired the prompt instead of running it"
     );
     tokio::time::timeout(DEADLINE, run_b_client.entered.acquire())
         .await
@@ -1353,8 +1351,9 @@ async fn the_run_of_a_kept_prompt_resumes_after_a_power_cut_past_the_stops_max_a
         "the power cut leaves the prompt bound to run B"
     );
 
-    // The next host opens the session once the stop's max age has passed.
-    let past_the_max_age = admitted_at
+    // The next host opens the session once the stop's max age has passed,
+    // counted from the stop.
+    let past_the_max_age = stopped_at
         + chrono::Duration::from_std(KEPT_PROMPT_MAX_AGE + Duration::from_millis(500))
             .expect("the max age is a chrono duration");
     if let Ok(wait) = (past_the_max_age - chrono::Utc::now()).to_std() {

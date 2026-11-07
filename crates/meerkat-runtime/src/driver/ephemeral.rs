@@ -5291,11 +5291,13 @@ impl EphemeralRuntimeDriver {
     /// queued prompt, or an input of a run marked resumable and not resumed
     /// yet, which stays Staged or Applied and bound to its run) keeps its
     /// phase and payload and is durably marked with the stop's time and max
-    /// age. An input it keeps (the rollback of a materialization that never
-    /// served keeps every input its registration recovered, but the inputs
-    /// bound to a run marked resumable whose stop was asked) stays exactly
-    /// as the store holds it, with no mark. Every other input ends as
-    /// stopped. Returns the retained and kept inputs.
+    /// age, which replace a mark an earlier stop left: its requeue age counts
+    /// from this stop. An input it keeps (the rollback of a materialization
+    /// that never served keeps every input its registration recovered, but
+    /// the inputs bound to a run marked resumable whose stop was asked) stays
+    /// exactly as the store holds it: this stop adds no mark, and a mark an
+    /// earlier stop left stays. Every other input ends as stopped. Returns
+    /// the retained and kept inputs.
     ///
     /// `retained_before_exit` is the set the classifier retained before the
     /// executor's exit, for which no runless carrier was staged. The stop
@@ -9388,9 +9390,9 @@ mod tests {
     }
 
     /// The stop's mark stays on a kept input until it runs or expires, so
-    /// every attachment that still finds it queued checks its age again: a
-    /// check within the bound leaves it queued and marked, and a later one,
-    /// past the bound, selects it for expiry.
+    /// every attachment that still finds it queued checks its age, counted
+    /// from the stop, again: a check within the bound leaves it queued and
+    /// marked, and a later one, past the bound, selects it for expiry.
     #[tokio::test]
     async fn every_attachment_that_finds_a_kept_input_queued_checks_its_age_again() {
         let (mut driver, durable_id, _, _) =
@@ -9406,15 +9408,14 @@ mod tests {
             driver.stop_non_terminal_inputs(&before_exit).unwrap(),
             vec![durable_id.clone()]
         );
-        let admitted_at = driver
+        let stopped_at = driver
             .ledger
             .get(&durable_id)
-            .and_then(|state| state.persisted_input.as_ref())
-            .expect("a kept input keeps its payload")
-            .header()
-            .timestamp;
+            .and_then(|state| state.stop_requeue)
+            .expect("the stop marks the input it keeps")
+            .stopped_at;
 
-        let within = admitted_at + chrono::Duration::milliseconds(900_000);
+        let within = stopped_at + chrono::Duration::milliseconds(900_000);
         assert!(crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty());
         assert!(
             driver
@@ -9427,7 +9428,7 @@ mod tests {
             driver.input_phase(&durable_id),
             Some(InputLifecycleState::Queued)
         );
-        let past = admitted_at + chrono::Duration::milliseconds(900_001);
+        let past = stopped_at + chrono::Duration::milliseconds(900_001);
         assert_eq!(
             crate::input_state::expired_stop_requeued_inputs(&driver, past),
             vec![durable_id]

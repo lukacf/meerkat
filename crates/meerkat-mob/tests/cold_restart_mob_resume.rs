@@ -9808,7 +9808,7 @@ async fn a_sticky_fallback_after_a_deploy_stop_past_its_bound_acknowledges() {
     drop(service_1);
     drop(runtime_store_1);
 
-    // The bound passes, measured from the input's admission.
+    // The bound passes, measured from the stop that kept the run.
     sleep(max_age + Duration::from_secs(1)).await;
 
     // Lifetime 2: the kept run is settled as expired and its tail repaired;
@@ -13062,8 +13062,8 @@ async fn a_members_kept_run_settled_past_its_bound_ends_with_one_run_failed(
         ),
     )
     .await;
-    // The bound, measured from the input's admission, passes before the
-    // next start.
+    // The bound, measured from the stop that kept the run, passes before
+    // the next start.
     sleep(max_age + Duration::from_secs(1)).await;
 
     let client_2 = Arc::new(HoldingToolLoopClient::new(0));

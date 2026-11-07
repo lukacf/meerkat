@@ -88,6 +88,22 @@ durable-identity marker.
 identity whose member you keep: a member with both legacy marks that the
 roster does not list is retired by that apply.
 
+### A kept input's max age counts from the stop
+
+The max age of a graceful stop that keeps queued work
+(`UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown's
+`RequeueMaxAge`; every default graceful shutdown uses 15 minutes) now counts
+from the stop that kept an input, not from the input's admission. The next
+start runs a kept input, or resumes a run the stop suspended, unless more
+than `max_age` has passed since that stop; a later graceful stop that keeps
+the input again counts from its own time. 0.9.10 counted from the admission,
+so every run admitted more than 15 minutes before a graceful restart ended
+`requeue_expired`, however short the restart.
+
+**Do:** nothing, unless you relied on `max_age` to limit how old an input may
+be when it runs: a kept input now runs after a restart shorter than
+`max_age`, whenever it was admitted.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

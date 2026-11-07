@@ -1368,21 +1368,17 @@ mod tests {
         }))
         .expect("model list");
         let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
-        for id in ["no-endpoints"] {
-            let offering = snapshot.model(id).expect("listed model");
-            assert_eq!(
-                offering.route_for(Provider::OpenAI),
-                Some(CopilotEndpoint::ChatCompletions),
-                "{id}"
-            );
-            assert_eq!(
-                offering.route_for(Provider::Gemini),
-                Some(CopilotEndpoint::ChatCompletions),
-                "{id}"
-            );
-            assert_eq!(offering.route_for(Provider::Anthropic), None, "{id}");
-            assert_eq!(offering.protocol_provider(), Some(Provider::OpenAI), "{id}");
-        }
+        let absent = snapshot.model("no-endpoints").expect("listed model");
+        assert_eq!(
+            absent.route_for(Provider::OpenAI),
+            Some(CopilotEndpoint::ChatCompletions)
+        );
+        assert_eq!(
+            absent.route_for(Provider::Gemini),
+            Some(CopilotEndpoint::ChatCompletions)
+        );
+        assert_eq!(absent.route_for(Provider::Anthropic), None);
+        assert_eq!(absent.protocol_provider(), Some(Provider::OpenAI));
         let unspoken = snapshot.model("unspoken-endpoints").expect("listed model");
         assert_eq!(unspoken.route_for(Provider::OpenAI), None);
         assert_eq!(unspoken.protocol_provider(), None);

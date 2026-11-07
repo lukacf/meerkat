@@ -284,13 +284,19 @@ them.
   owned fork's result merges into the source member exactly once, and an
   existing member keeps the request, its executor input and its answer in
   its own session. A blocked hand-back on the unbound channel settles
-  Cancelled in the machine, as does blocked work the close finds. A
-  delegation the channel loop had not claimed yet when a retirement
-  cancelled the loop is cancelled at the close in the machine instead of
-  staying admitted with no schedule (it cannot run: its control payload
-  never arrived). A start deferred after its spoken request was committed
-  (a busy source at the fork cut, or a WorkGraph claim refusal) keeps that
-  commit for its retry; the retry committed the request again, the session
+  Cancelled in the machine, as do blocked work the close finds and a
+  blocked hand-back recorded while the channel was still bound once it is
+  reconciled after the close: a requeue needs the channel's binding, so
+  nothing could serve it again. Restart recovery
+  (`ReconcileRevokedLiveDelegationWorkerAfterRestart`) settles the same
+  way: a delegation whose worker handed its item back blocked now settles
+  Cancelled after a restart, where it stayed Blocked before. A delegation
+  the channel loop had not claimed yet when a retirement cancelled the loop
+  is cancelled at the close in the machine instead of staying admitted with
+  no schedule (it cannot run: its control payload never arrived). A start
+  deferred after its spoken request was committed (a busy source at the
+  fork cut, or a WorkGraph claim refusal) now keeps that commit for its
+  retry; before, the retry committed the request again, the session
   refused, and the request was retired. Affects 0.8.41 through 0.9.10.
 
 - `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5

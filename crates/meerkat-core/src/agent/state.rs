@@ -5941,6 +5941,22 @@ where
                         }
                     )
                 });
+        // The order the compactions were staged in: the session lists its
+        // intents in that order, while the runtime store's outbox names their
+        // projections in its own (digest) order. Their completions, and the
+        // snapshots their folds inserted, publish in staging order, so the
+        // published entry sequences strictly increase.
+        let staging_order = self
+            .session
+            .compaction_projection_intents()
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "failed to read the session's compaction projection intents: {error}"
+                ))
+            })?
+            .into_iter()
+            .map(|intent| intent.projection)
+            .collect::<Vec<_>>();
         let mut next_session = self.session.clone();
         let mut completed_intents = Vec::new();
         for projection in projections {
@@ -5965,6 +5981,12 @@ where
                 completed_intents.push(intent);
             }
         }
+        completed_intents.sort_by_key(|intent| {
+            staging_order
+                .iter()
+                .position(|projection| *projection == intent.projection)
+                .unwrap_or(usize::MAX)
+        });
         self.session = next_session;
         self.tool_application_observations
             .refresh(self.session.messages());

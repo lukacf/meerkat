@@ -566,7 +566,12 @@ impl PlanningCase {
         .expect("ordinary host owners must acknowledge the exact context inputs");
         let mut inputs = BTreeSet::new();
         for effect in effects {
-            assert_eq!(effect.attempt, 1);
+            // A concurrent authorization change can refuse a delivery attempt
+            // before admission. Its owner then reconciles that attempt
+            // NotApplied (no input row) and claims a new attempt for the same
+            // retained input, so the succeeded attempt can be a later one.
+            // The input count below checks the single admission.
+            assert!(effect.attempt >= 1);
             let Some(toolkit_store::EffectOutcome::Succeeded { receipt }) = effect.outcome else {
                 panic!("automatic native admission receipt required")
             };
@@ -859,7 +864,9 @@ impl PlanningCase {
         for effect in deliveries {
             if automatic {
                 assert_eq!(effect.status, toolkit_store::EffectStatus::Succeeded);
-                assert_eq!(effect.attempt, 1);
+                // A refused attempt is reconciled NotApplied and retried with
+                // the same input (see await_automatic_context_deliveries).
+                assert!(effect.attempt >= 1);
                 assert!(matches!(
                     &effect.outcome,
                     Some(toolkit_store::EffectOutcome::Succeeded { .. })

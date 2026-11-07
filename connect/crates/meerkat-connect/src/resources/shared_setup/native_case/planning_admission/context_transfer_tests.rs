@@ -187,7 +187,9 @@ async fn exercise(
             .filter(|row| row.intent.kind == "setup_workflow_delivery")
         {
             assert_eq!(effect.status, toolkit_store::EffectStatus::Succeeded);
-            assert_eq!(effect.attempt, 1);
+            // A refused attempt is reconciled NotApplied and retried with the
+            // same input (see await_automatic_context_deliveries).
+            assert!(effect.attempt >= 1);
         }
         assert_eq!(item(&planning, ta).await, initial_a);
         assert_eq!(item(&planning, tb).await, initial_b);

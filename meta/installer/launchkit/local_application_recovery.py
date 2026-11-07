@@ -425,9 +425,11 @@ def recover_local_build(registry, guide_id, build_id):
         operator = console_operator(access)
     except ValueError:
         operator = None
+    from .forge_application_host import protected_source_matches
     if (host._blueprint != blueprint or operator != host._console_subject
             or selected_files.get("config/mob.toml") != host._definition.encode("utf-8")
-            or any(selected_files.get(name) != pin.read() for name, pin in host._protected)):
+            or not all(protected_source_matches(host, name, selected_files.get(name), pin.read())
+                       for name, pin in host._protected)):
         raise CustodyError("The original protected source differs from the independently accepted Build.")
     for root, observation in observed:
         _require_build_observation(root, observation)

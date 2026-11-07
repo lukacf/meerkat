@@ -22,6 +22,7 @@ import re
 import secrets
 import socket
 import stat
+import sys
 import tempfile
 import time
 from types import MappingProxyType
@@ -310,8 +311,12 @@ def console_access_file(root):
 
     The console's Access panel writes its edits here and never to the
     package's `config/access.toml`, which Forge keeps checking byte for byte.
-    The first start copies that file once (exclusive create, 0600, synced);
-    later starts and updates leave the live copy as the console wrote it.
+    The first start copies that file once; later starts and updates leave the
+    live copy as the console wrote it. The copy is published only complete:
+    written to a private temporary file, synced, then linked into place. An
+    empty live copy can only be a seed a crash cut short (the console's own
+    saves always write), and it would load as access control off, so it is
+    seeded again.
     """
     root = Path(root)
     source = root / "config/access.toml"
@@ -325,20 +330,34 @@ def console_access_file(root):
         raise ValueError("The console's state directory must be owned by this user and writable by no one else.")
     live = root / CONSOLE_ACCESS_FILE
     try:
-        descriptor = os.open(live, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:
         info = live.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-            raise ValueError("The console's live access file must be an owned ordinary file.") from None
-        return live
+            raise ValueError("The console's live access file must be an owned ordinary file.")
+        if info.st_size:
+            return live
+        print("WARN: The console's live access file was empty, left by a start that stopped while copying it. "
+              "It is copied again from config/access.toml.", file=sys.stderr)
+    content = source.read_bytes()
+    temporary = directory / (".console-access." + secrets.token_hex(8) + ".pending")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as output:
-            output.write(source.read_bytes())
+            output.write(content)
             output.flush()
             os.fsync(output.fileno())
-    except BaseException:
-        live.unlink(missing_ok=True)
-        raise
+        if info is None:
+            try:
+                os.link(temporary, live, follow_symlinks=False)
+            except FileExistsError:
+                # Another start published its complete copy first.
+                pass
+        else:
+            os.replace(temporary, live)
+    finally:
+        temporary.unlink(missing_ok=True)
     handle = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(handle)
@@ -989,6 +1008,27 @@ class ConsoleFront:
                     self._controller_review_pending = None
         login.controller_review_start = asyncio.create_task(start())
         login.controller_review_start.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
+
+    async def _ensure_controller_review(self, login):
+        """Start the review for this login if no start created it yet.
+
+        A check already running for another login is waited for first; when
+        it finds no administrator, this login's own check runs.
+        """
+        for _ in range(2):
+            if self._controller_review_created or self._closing:
+                return
+            pending = self._controller_review_pending
+            if pending is None:
+                self._queue_controller_review(login)
+                task = login.controller_review_start
+                if task is not None:
+                    await asyncio.gather(asyncio.shield(task), return_exceptions=True)
+                return
+            task = pending.controller_review_start
+            if task is None:
+                return
+            await asyncio.gather(asyncio.shield(task), return_exceptions=True)
 
     async def close(self):
         if self._close_task is None:
@@ -1800,6 +1840,15 @@ class ConsoleFront:
             return refusal("approver_unauthenticated", 403)
         if self._controller_review_failure:
             return refusal(self._controller_review_failure, 409)
+        if suffix == "/state" and not self._controller_review_created:
+            # The start at sign-in may not have run: the console could not
+            # tell then, or another person's check held it. Opening the
+            # review tries again for this login.
+            await self._ensure_controller_review(login)
+            if not self._login_current(login):
+                return refusal("invalid_binding", 401)
+            if self._controller_review_failure:
+                return refusal(self._controller_review_failure, 409)
         owner = self._controller_review_owner
         if owner is None or not owner.is_current():
             return refusal("unavailable", 409)

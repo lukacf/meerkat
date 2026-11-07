@@ -369,6 +369,45 @@ def _console_presentation_only(previous, candidate):
 
 CONSOLE_AUTHENTICATION_PATH = "application/console.json"
 MAX_CONSOLE_AUTHENTICATION_BYTES = 4096
+SHARED_CONSOLE_ACCOUNT = {"authentication": "local-password"}
+NAMED_CONSOLE_ACCOUNTS = {"authentication": "local-accounts"}
+# What a later Build of a source pinned with one shared account declares: the
+# bytes every new source writes.
+NAMED_CONSOLE_ACCOUNTS_SOURCE = '{"authentication":"local-accounts"}\n'
+
+
+def _console_choice(content):
+    """The Console authentication choice in these bytes, bounded strict JSON, or None."""
+    if not isinstance(content, bytes) or len(content) > MAX_CONSOLE_AUTHENTICATION_BYTES:
+        return None
+    def unique(pairs):
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("Duplicate Console authentication keys.")
+        return dict(pairs)
+    try:
+        return json.loads(content.decode("utf-8"), object_pairs_hook=unique)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def console_named_accounts_move(before, after):
+    """Whether Console authentication bytes make the one change an update may make.
+
+    Exactly one shared account (`local-password`) before, named accounts
+    (`local-accounts`) after. Every caller also keeps the declared private
+    fields and the access file byte for byte, so the installation's own
+    account, its private values and its operator stay the same.
+    """
+    return _console_choice(before) == SHARED_CONSOLE_ACCOUNT and _console_choice(after) == NAMED_CONSOLE_ACCOUNTS
+
+
+def named_console_accounts_source(pinned):
+    """What a later Build of this pinned Console source declares, when that differs.
+
+    A source pinned with one shared account declares named accounts in every
+    later Build; any other pinned source is kept as it is (None).
+    """
+    return NAMED_CONSOLE_ACCOUNTS_SOURCE if _console_choice(pinned) == SHARED_CONSOLE_ACCOUNT else None
 
 
 def _console_named_accounts_transition(previous, candidate):
@@ -380,23 +419,9 @@ def _console_named_accounts_transition(previous, candidate):
     private values and its operator are the same; nothing else about the
     Console's authentication changes in an update.
     """
-    def choice(files):
-        entry = files.get(CONSOLE_AUTHENTICATION_PATH)
-        if (not isinstance(entry, tuple) or len(entry) != 2 or not isinstance(entry[0], bytes)
-                or type(entry[1]) is not int or len(entry[0]) > MAX_CONSOLE_AUTHENTICATION_BYTES):
-            return None
-        def unique(pairs):
-            if len({key for key, _ in pairs}) != len(pairs):
-                raise ValueError("Duplicate Console authentication keys.")
-            return dict(pairs)
-        try:
-            return json.loads(entry[0].decode("utf-8"), object_pairs_hook=unique), entry[1]
-        except (ValueError, UnicodeError, RecursionError):
-            return None
-    before, after = choice(previous), choice(candidate)
-    return (before is not None and after is not None and before[1] == after[1] == 0o644
-            and before[0] == {"authentication": "local-password"}
-            and after[0] == {"authentication": "local-accounts"}
+    before, after = previous.get(CONSOLE_AUTHENTICATION_PATH), candidate.get(CONSOLE_AUTHENTICATION_PATH)
+    return (all(isinstance(entry, tuple) and len(entry) == 2 for entry in (before, after))
+            and before[1] == after[1] == 0o644 and console_named_accounts_move(before[0], after[0])
             and "application/configuration.json" in previous
             and all(previous.get(name) == candidate.get(name)
                     for name in ("application/configuration.json", "config/access.toml")))

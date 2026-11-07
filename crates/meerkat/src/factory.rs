@@ -13312,6 +13312,51 @@ mod tests {
         assert_eq!(threshold(&config, Some(128_000), None), 42_000);
     }
 
+    /// An explicit compaction threshold, from the configuration or a
+    /// per-build override, is bounded by the selected account's prompt limit
+    /// (the byte cap's rule): a prompt over that limit is refused whatever the
+    /// threshold, so a higher value could only fail the session later. A value
+    /// under the limit, or one with no account limit, keeps its value, and the
+    /// model's own window still does not bound it.
+    #[test]
+    fn an_explicit_threshold_above_the_account_prompt_limit_is_lowered_to_it() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 150_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let registry = config
+            .model_registry(meerkat_models::canonical())
+            .expect("registry");
+        let threshold = |config: &Config, account, build_override| {
+            model_aware_compaction_config(
+                config,
+                &registry,
+                Provider::OpenAI,
+                "gpt-5.5",
+                build_override,
+                account,
+            )
+            .auto_compact_threshold
+        };
+        assert_eq!(threshold(&config, Some(128_000), None), 128_000);
+        assert_eq!(threshold(&config, Some(200_000), None), 150_000);
+        assert_eq!(threshold(&config, None, None), 150_000);
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(200_000)),
+            128_000,
+            "a per-build override above the account limit is lowered too"
+        );
+        assert_eq!(
+            threshold(&config, Some(128_000), std::num::NonZeroU64::new(9_000)),
+            9_000
+        );
+        config.compaction.auto_compact_threshold = 2_000_000;
+        assert_eq!(
+            threshold(&config, None, None),
+            2_000_000,
+            "the model's own window does not bound an explicit threshold"
+        );
+    }
+
     #[test]
     fn explicit_compaction_threshold_is_preserved() {
         let mut config = Config::default();

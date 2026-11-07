@@ -3,85 +3,56 @@
 //! A member placed on another host is built there from its portable spec,
 //! which carries its profile's MCP servers, and that host satisfies their
 //! credentials on its own side: a personal server there would run on the
-//! host's own account, the fallback personal accounts never take. So a spawn
-//! that places a member on another host is refused when its profile declares
-//! a personal server ([`PersonalAccountRefusal::Unsupported`] with
-//! [`UnsupportedPersonalServer::HostedElsewhere`]), and so is the rebuild of
-//! such a member. The guard runs among the spawn customizers of every mob a
-//! composition with personal servers builds from its definition, which Core
-//! asks for every spawn and rebuild but the replay of a spec it already
-//! admitted.
+//! host's own account, the fallback personal accounts never take. Core's
+//! placed spawn shows the profile it resolved (the definition's inline
+//! profile, the realm profile its role names, or the spawn's own override
+//! profile) to its spawn customizers before it compiles or sends anything
+//! ([`SpawnMemberCustomizer::check_placed_profile`]), on every placed spawn
+//! and rebuild. The guard refuses a profile that declares a server under a
+//! personal server's name, whatever its shape
+//! ([`PersonalAccountRefusal::Unsupported`] with
+//! [`UnsupportedPersonalServer::HostedElsewhere`]). It reads the
+//! composition's personal accounts when it is asked, so it can sit in the
+//! spawn customizers of every mob a composition builds from its spec and in
+//! the agent mob tools' child customizer slot, for every mob an agent
+//! creates, before the composition names its personal servers.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use meerkat_mob::{
-    MobDefinition, MobError, Profile, ProfileName, ResumedMemberView, SpawnCustomizationContext,
-    SpawnMemberCustomizer, SpawnMemberSpec,
+    MobError, Profile, SpawnCustomizationContext, SpawnMemberCustomizer, SpawnMemberSpec,
 };
 
-use super::{
-    McpAccountsConfig, PersonalAccountRefusal, PersonalMcpAccounts, UnsupportedPersonalServer,
-};
+use super::build::PersonalAccountsSlot;
+use super::{PersonalAccountRefusal, UnsupportedPersonalServer};
 
-/// The spawn customizer [`PersonalMcpAccounts::placement_guard`] builds.
+/// The spawn customizer [`PlacementGuard::customizer`] builds.
 pub(crate) struct PlacementGuard {
-    config: Arc<McpAccountsConfig>,
-    /// The first personal server each inline profile of the definition
-    /// declares.
-    profiles: BTreeMap<ProfileName, String>,
-}
-
-impl PersonalMcpAccounts {
-    /// The guard refusing a member placed on another host whose profile, in
-    /// `definition` or overridden by its spawn, declares a personal server
-    /// (see the module docs).
-    pub(crate) fn placement_guard(&self, definition: &MobDefinition) -> PlacementGuard {
-        let profiles = definition
-            .profiles
-            .iter()
-            .filter_map(|(name, binding)| {
-                let server = first_personal_server(&self.config, binding.as_inline()?)?;
-                Some((name.clone(), server))
-            })
-            .collect();
-        PlacementGuard {
-            config: Arc::clone(&self.config),
-            profiles,
-        }
-    }
-}
-
-fn first_personal_server(config: &McpAccountsConfig, profile: &Profile) -> Option<String> {
-    profile
-        .tools
-        .mcp_servers
-        .iter()
-        .map(|server| &server.name)
-        .find(|name| config.is_personal(name))
-        .cloned()
+    accounts: PersonalAccountsSlot,
 }
 
 impl PlacementGuard {
-    /// The refusal of `spec`, when it places a member on another host whose
-    /// profile declares a personal server.
-    pub(crate) fn refusal(&self, spec: &SpawnMemberSpec) -> Option<PersonalAccountRefusal> {
-        spec.placement.as_ref()?;
-        let server = match &spec.override_profile {
-            Some(profile) => first_personal_server(&self.config, profile),
-            None => self.profiles.get(&spec.role_name).cloned(),
-        }?;
+    /// The guard over the personal accounts `accounts` holds (or comes to
+    /// hold), as a spawn customizer.
+    pub(crate) fn customizer(accounts: PersonalAccountsSlot) -> Arc<dyn SpawnMemberCustomizer> {
+        Arc::new(Self { accounts })
+    }
+
+    /// The refusal of a placed spawn whose resolved `profile` declares a
+    /// server under a personal server's name.
+    fn refusal(&self, profile: &Profile) -> Option<PersonalAccountRefusal> {
+        let accounts = self.accounts.accounts()?;
+        let server = profile
+            .tools
+            .mcp_servers
+            .iter()
+            .map(|server| &server.name)
+            .find(|name| accounts.config().is_personal(name))?
+            .clone();
         Some(PersonalAccountRefusal::Unsupported {
             server,
             reason: UnsupportedPersonalServer::HostedElsewhere,
         })
-    }
-
-    fn check(&self, spec: &SpawnMemberSpec) -> Result<(), MobError> {
-        match self.refusal(spec) {
-            Some(refusal) => Err(MobError::WiringError(refusal.to_string())),
-            None => Ok(()),
-        }
     }
 }
 
@@ -89,17 +60,19 @@ impl SpawnMemberCustomizer for PlacementGuard {
     fn customize_spawn(
         &self,
         _ctx: &SpawnCustomizationContext,
-        spec: &mut SpawnMemberSpec,
+        _spec: &mut SpawnMemberSpec,
     ) -> Result<(), MobError> {
-        self.check(spec)
+        Ok(())
     }
 
-    fn customize_resume(
+    fn check_placed_profile(
         &self,
         _ctx: &SpawnCustomizationContext,
-        _durable: &ResumedMemberView,
-        spec: &mut SpawnMemberSpec,
+        profile: &Profile,
     ) -> Result<(), MobError> {
-        self.check(spec)
+        match self.refusal(profile) {
+            Some(refusal) => Err(MobError::WiringError(refusal.to_string())),
+            None => Ok(()),
+        }
     }
 }

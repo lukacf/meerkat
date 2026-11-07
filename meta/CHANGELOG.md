@@ -136,8 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   suspends their accounts in the side chats they opened before it. Only a
   streamable HTTP server whose account the person proves at sign-in can be
   personal; connector OAuth, stdio servers and environment tokens stay
-  system level. A member placed on another host is refused when its profile
-  declares a personal server, since that host would serve it with its own
+  system level. A member placed on another host is refused when the profile
+  it resolves (one of the mob definition's, a realm profile, its own, or a
+  profile of a child mob an agent creates) declares a server under a
+  personal server's name, since that host would serve it with its own
   credentials.
 - Rust: `McpAccountsConfig`, `McpAccountMode`, `McpServerAccounts`,
   `McpAccountsConfigError`, `PersonalMcpAccounts`,

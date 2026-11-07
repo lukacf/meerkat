@@ -580,9 +580,11 @@ accounts = "personal"
   every build.
 - **Hosts.** A member placed on another host is built there from its
   profile's MCP servers, which that host would serve with its own
-  credentials. Placing a member whose profile declares a personal server is
-  refused (`personal_accounts_unsupported`), and so is the rebuild of such a
-  member.
+  credentials. Placing a member whose profile declares a server under a
+  personal server's name, in any shape, is refused
+  (`personal_accounts_unsupported`), and so is the rebuild of such a member,
+  whichever profile it resolves: one of the mob definition's, a realm
+  profile, the spawn's own, or a profile of a child mob an agent creates.
 
 Each refusal reaches the model as the tool call's policy denial, whose code
 is the refusal's kind.

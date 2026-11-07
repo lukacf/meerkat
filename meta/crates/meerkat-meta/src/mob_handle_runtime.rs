@@ -3299,6 +3299,7 @@ fn install_agent_mob_tools(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     delivery: MobRuntimeDelivery,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<InstalledAgentMobTools, MobRuntimeDeliveryError> {
     // Child mobs start process-bound: a durable child root is applied at the
     // bootstrap boundary, so a caller can still opt out before any path opens.
@@ -3312,6 +3313,7 @@ fn install_agent_mob_tools(
         council_store.clone(),
         forked_participant_store.clone(),
         restore,
+        personal_accounts,
     )?;
     let (state, overrides, llm_slot, console_spawn_sink, identity_runtime) =
         install_agent_mob_tools_with(
@@ -3323,6 +3325,7 @@ fn install_agent_mob_tools(
             None,
             &delivery,
             None,
+            personal_accounts,
         )?;
     let install = AgentMobToolsInstall {
         slot,
@@ -3347,8 +3350,29 @@ fn install_agent_mob_tools(
     ))
 }
 
+/// The child mobs' one host customizer slot: `binding` (a member auth
+/// binding's customizer) when there is one; then the refusal of a personal
+/// MCP server on a member placed on another host, which reads the
+/// composition's personal accounts when it is asked
+/// (`crate::personal_accounts::placement`); then the runtime-plane guard,
+/// which runs last as it must.
+fn child_host_customizer(
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
+    binding: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+) -> Arc<dyn meerkat_mob::SpawnMemberCustomizer> {
+    let placement =
+        crate::personal_accounts::placement::PlacementGuard::customizer(personal_accounts.clone());
+    crate::identity_first::ComposedSpawnMemberCustomizer::over(
+        Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+            binding, placement,
+        )),
+        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
+    )
+}
+
 /// The unshared agent mob-tool state with its explicit stores, before any
 /// child root, child policy or realm-profile overlay is applied.
+#[allow(clippy::too_many_arguments)]
 fn new_agent_mob_state(
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -3363,6 +3387,7 @@ fn new_agent_mob_state(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     restore: AgentMobRestore,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<meerkat_mob_mcp::MobMcpState, MobRuntimeDeliveryError> {
     // Forward the workgraph service so agent-spawned child mobs
     // (delegate / mob_spawn_member) inherit apply-time attention overlays.
@@ -3376,12 +3401,11 @@ fn new_agent_mob_state(
     // root mob does.
     .with_member_restore_policy(restore.policy)
     .with_resume_restore_concurrency(restore.concurrency)
-    // Child mobs refuse runtime-plane member identities like the root mob.
-    // The child application tool policy, which runs after it, never changes
-    // a member's identity or labels.
-    .with_child_spawn_member_customizer(
-        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-    );
+    // Child mobs refuse a personal MCP server on a member placed on another
+    // host, and runtime-plane member identities, like the root mob. The
+    // child application tool policy, which runs after them, never changes a
+    // member's identity, labels or profile.
+    .with_child_spawn_member_customizer(child_host_customizer(personal_accounts, None));
     // Explicit stores are installed before any persistent child root: the
     // native root upgrades only stores still at their default, so these stay
     // the host's choice.
@@ -3410,6 +3434,7 @@ fn install_agent_mob_tools_with(
     existing_slots: Option<(SharedConsoleSpawnSinkSlot, SharedIdentityRuntimeSlot)>,
     delivery: &MobRuntimeDelivery,
     replaced: Option<meerkat::ContinuationBindingGeneration>,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<
     (
         Arc<meerkat_mob_mcp::MobMcpState>,
@@ -3436,22 +3461,20 @@ fn install_agent_mob_tools_with(
     if let Some(hook) = child_policy.registration_hook {
         state = state.with_member_runtime_registration_hook(hook);
     }
-    // The child mobs' one host customizer slot holds the runtime-plane guard
-    // every agent mob-tool state starts with (`new_agent_mob_state`). With a
-    // member auth binding it holds the binding's customizer, then the guard,
-    // which runs last as it must, so child-mob members build with the
-    // binding too.
+    // The child mobs' one host customizer slot holds the placement guard and
+    // the runtime-plane guard every agent mob-tool state starts with
+    // (`new_agent_mob_state`). With a member auth binding it holds the
+    // binding's customizer before them, the runtime-plane guard still last as
+    // it must, so child-mob members build with the binding too.
     if let Some(binding) = child_policy.member_auth_binding.clone() {
         let binding_customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer> = Arc::new(
             crate::native_realm::MemberAuthBindingCustomizer::new(binding)
                 .with_recorded_form(child_policy.member_auth_binding_recorded.clone()),
         );
-        state = state.with_child_spawn_member_customizer(
-            crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                Some(binding_customizer),
-                crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-            ),
-        );
+        state = state.with_child_spawn_member_customizer(child_host_customizer(
+            personal_accounts,
+            Some(binding_customizer),
+        ));
     }
     // The definition overlay wraps whatever profile store the state holds:
     // with a durable child root that is the native durable store, so authored
@@ -7347,6 +7370,7 @@ impl MobBootstrapSpec {
             None,
             self.storage.forked_participant_store().cloned(),
             delivery,
+            &self.personal_accounts_slot,
         )?;
         self.agent_mob_mcp_state = Some(agent_mob_mcp_state);
         self.implicit_delegate_retirement_overrides = Some(implicit_delegate_retirement_overrides);
@@ -7677,6 +7701,7 @@ impl MobBootstrapSpec {
             council_store,
             forked_participant_store.clone(),
             restore,
+            &self.personal_accounts_slot,
         )
         .map_err(MobRuntimeError::Delivery)?;
         if let Some(durable) = &durable {
@@ -7700,6 +7725,7 @@ impl MobBootstrapSpec {
                 existing_slots,
                 &install.delivery,
                 Some(replaced),
+                &self.personal_accounts_slot,
             )
             .map_err(MobRuntimeError::Delivery)?;
         self.agent_mob_mcp_state = Some(state);
@@ -8401,6 +8427,7 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -9060,6 +9087,7 @@ impl MobBootstrapSpec {
             },
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.durable_runtime_store = Some(durable_runtime_store);
@@ -9484,6 +9512,7 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -10602,9 +10631,10 @@ impl MobRuntime {
         let mob_id = spec.definition.id.clone();
         // A member placed on another host never carries a personal MCP
         // server of this composition (`crate::personal_accounts::placement`).
-        let personal_placement_guard = spec.personal_accounts_slot.accounts().map(|accounts| {
-            Arc::new(accounts.placement_guard(&spec.definition))
-                as Arc<dyn meerkat_mob::SpawnMemberCustomizer>
+        let personal_placement_guard = spec.personal_accounts_slot.accounts().map(|_| {
+            crate::personal_accounts::placement::PlacementGuard::customizer(
+                spec.personal_accounts_slot.clone(),
+            )
         });
         let agent_mob_mcp_state = spec.agent_mob_mcp_state.clone();
         let implicit_delegate_retirement_overrides =

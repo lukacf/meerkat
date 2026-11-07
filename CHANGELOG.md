@@ -699,10 +699,10 @@ them.
 - `meerkat-mob`: a member placed on a member host before 0.9.11, or on a
   governed one, is not born with its snapshot. Its spawn-time first turn (an
   initial message or an autonomous kickoff) runs without its mob's operator
-  instructions, and the snapshot reaches it only by delivery after the spawn
-  (on such a host the member is then blocked, see above). The same holds
-  when the snapshot does not fit the bridge's frame together with the
-  materialize.
+  instructions, and its delivery after the spawn then blocks it
+  `member_host_unsupported` (see above). A snapshot that does not fit the
+  bridge's frame together with the materialize is not carried either; on a
+  0.9.11 member host its delivery records it after the spawn.
 
 ## [0.9.10] - 2026-11-04
 

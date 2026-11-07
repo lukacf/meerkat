@@ -1337,8 +1337,9 @@ session while it is live and store-only while it is dormant, never waking
 it. A placed member's session is on its member host, which records the
 snapshot there over the supervisor bridge. A member placed by a spawn that
 mints its session on a 0.9.11 member host is born with the snapshot, so its
-first turn has the instructions; on an older or a governed member host its
-first turn runs without them, and the snapshot follows by delivery. A member host that runs a
+first turn has the instructions; on an older or a governed member host it
+is born without them, and its delivery then blocks it as follows. A member
+host that runs a
 release before 0.9.11 refuses that, nothing is recorded, and the member
 reads `blocked` with reason `member_host_unsupported` until its host runs
 0.9.11 and a write selects it again. A governed member host refuses the

@@ -1608,8 +1608,9 @@ by a spawn that mints its session on a 0.9.11 member host is born with its
 snapshot too: the mob asks the host's features once for the spawn, the
 host records the snapshot in the session it mints, and the member's first
 turn (its initial message or kickoff) already has the instructions. On an
-older or a governed member host the member's first turn runs without them,
-and the snapshot follows by delivery. In a mob whose
+older or a governed member host the member is born without them: its
+first turn runs without the instructions, and its delivery then blocks it
+`member_host_unsupported`, as follows. In a mob whose
 hosts run different releases, a placed member whose member host runs a
 release before 0.9.11 is reported blocked (`member_host_unsupported`): its
 host refuses the record before any effect, nothing is recorded, and the

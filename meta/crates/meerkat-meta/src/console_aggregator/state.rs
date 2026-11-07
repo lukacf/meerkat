@@ -5,20 +5,19 @@ pub enum SendState {
     Requested,
     AcceptedPersisted,
     Dispatching,
-    /// A governed send whose bind answered bound: its input is being
-    /// submitted, so it ends delivered or failed and is never held.
-    Submitted,
     Delivered,
     DeliveryFailed,
+    /// A governed send whose bind answered bound: its input is being
+    /// submitted, so it ends delivered or failed and is never held. It
+    /// comes between `Dispatching` and the settled states; it is declared
+    /// last so the earlier variants keep their discriminants.
+    Submitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendTransition {
     PersistAccepted,
     StartDispatch,
-    /// A governed dispatch's bind answered bound, before its input is
-    /// submitted.
-    MarkSubmitted,
     MarkDelivered,
     MarkDeliveryFailed,
     /// A governed dispatch held past its door's budget submitted nothing:
@@ -26,6 +25,9 @@ pub enum SendTransition {
     /// key dispatches it again. Only a dispatch before its submission is
     /// held.
     MarkHeld,
+    /// A governed dispatch's bind answered bound, before its input is
+    /// submitted.
+    MarkSubmitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -42,13 +42,14 @@ impl From<&str> for ConsoleCursor {
 pub enum ConsoleFrameStatus {
     Accepted,
     Dispatching,
-    /// A governed send's bind answered bound and its input is being
-    /// submitted: from here it is delivered or fails, and is never held.
-    Submitted,
     Delivered,
     DeliveryFailed,
     Completed,
     Redacted,
+    /// A governed send's bind answered bound and its input is being
+    /// submitted: from here it is delivered or fails, and is never held.
+    /// Declared last so the earlier variants keep their discriminants.
+    Submitted,
 }
 
 impl ConsoleFrameStatus {

@@ -5,7 +5,9 @@
 \* The declared apply records a host's roster as identity entries
 \* (DeclareIdentityEntry, one arm per verdict of identity_entry_verdict),
 \* seals a complete roster (SealDeclaredRoster: an unlisted Declared entry is
-\* marked while its member is seated, or removed when it is not), and keeps
+\* marked while its member is seated; the seal ends no entry itself, and is
+\* refused while an unseated Declared entry it does not list remains, which
+\* the one-entry unlist, UnlistIdentityEntry, ends first), and keeps
 \* every entry seated or unseated with a typed cause. The end of a
 \* retirement the seal did not start keeps the entry unseated, owed a seat
 \* (hosted on its first use when its incarnation was hosted elsewhere), with
@@ -17,7 +19,7 @@
 \* otherwise; a role hold ends only when the member's own role is declared
 \* or a rotation terminal commits another role, and never outlives its
 \* entry (every end of the entry ends it: its member's retirement end, live,
-\* replayed or in a destroy, the seal's removal of an unseated entry and a
+\* replayed or in a destroy, the unlist of an unseated entry and a
 \* reset). The generated ci profile has no identities, so these arms
 \* hold there only vacuously. This module keeps
 \* the generated model unchanged, extends member_residency_audit for its
@@ -29,7 +31,9 @@
 \*     archived session was built under, or another with the migration from
 \*     it declared or not) and seated on its archived session (the revive)
 \*     or, its record let go (ForgetArchivedSession), on a fresh one; the seal
-\*     over every desired set, the replay of an unlisted retirement's mark,
+\*     over every desired set (refused while member 1's unseated entry is
+\*     unlisted), the one-entry unlist of member 1, the replay of an
+\*     unlisted retirement's mark,
 \*     the listing of a marked member, the build seed's composition authority
 \*     (a candidate composition declares and seals nothing) and the mob's
 \*     forced destroy. The run holds no reset, so an entry is seated on a
@@ -241,18 +245,30 @@ DeclareOneArm(id, s) == Cardinality({i \in 1..15 : DeclareEnabled(id, s)[i]}) = 
 \* Every arm of the seal of one desired set, in every lifecycle phase.
 SealArm(d) ==
     \/ SealDeclaredRosterSealed(d)
+    \/ SealDeclaredRosterRefused(d)
     \/ SealDeclaredRosterNonAuthoritative(d)
     \/ SealDeclaredRosterMobNotRunningStopped(d)
     \/ SealDeclaredRosterMobNotRunningCompleted(d)
     \/ SealDeclaredRosterMobNotRunningDestroyed(d)
 
 SealOneArm(d) ==
-    Cardinality({i \in 1..5 :
+    Cardinality({i \in 1..6 :
         << ENABLED SealDeclaredRosterSealed(d),
+           ENABLED SealDeclaredRosterRefused(d),
            ENABLED SealDeclaredRosterNonAuthoritative(d),
            ENABLED SealDeclaredRosterMobNotRunningStopped(d),
            ENABLED SealDeclaredRosterMobNotRunningCompleted(d),
            ENABLED SealDeclaredRosterMobNotRunningDestroyed(d) >>[i]}) = 1
+
+\* Every arm of the one-entry unlist of a roster-owned identity, in the
+\* Running and Stopped phases the runs that drive it reach.
+UnlistArm(id) ==
+    \/ UnlistIdentityEntryRetiring(id)
+    \/ UnlistIdentityEntryRemoved(id)
+    \/ UnlistIdentityEntryDeferred(id)
+    \/ UnlistIdentityEntryNotADeclaredEntry(id)
+    \/ UnlistIdentityEntryNonAuthoritative(id)
+    \/ UnlistIdentityEntryMobNotRunningStopped(id)
 
 \* Every arm of the legacy adoption, in the run's phases, over the shell's
 \* raw observations: the spawn row's durable-identity marker (m) and
@@ -412,10 +428,12 @@ A2MarkFor(rid) ==
     \/ RecoverIdentityEntryRetiringStaleRunning(Id2, rid)
 A2Mark == \E rid \in {Rid1, Rid2} : A2MarkFor(rid)
 
-\* The declaration, seal, record release and adoption steps of both runs.
+\* The declaration, seal, unlist, record release and adoption steps of both
+\* runs.
 ApplyIdentitySteps ==
     \/ \E id \in {Id1, Id2}, s \in ApplyShapes : DeclareArm(id, s)
     \/ \E d \in SUBSET {Id1, Id2} : SealArm(d)
+    \/ \E id \in {Id1, Id2} : UnlistArm(id)
     \/ AForget
     \/ A2Adopt
 
@@ -425,6 +443,7 @@ ApplyNext ==
     \/ ASeed
     \/ \E s \in ApplyShapes : DeclareArm(Id1, s)
     \/ \E d \in SUBSET {Id1} : SealArm(d)
+    \/ UnlistArm(Id1)
     \/ AAuthorize
     \/ \E inc \in AIncarnations : AOpen(inc) \/ ASeat(inc) \/ ARetire(inc) \/ AArchive(inc)
     \/ AAbort
@@ -485,12 +504,13 @@ AuditMarkReplayExactlyOne ==
                     ENABLED RecoverIdentityEntryRetiringStaleRunning(Id2, rid) >>[i]}) = 1
 
 \* A Declared entry leaves the entries only at the end of the
-\* retirement the seal marked, at the seal itself when it is unseated, at a
-\* destroy or at a mob reset.
+\* retirement the seal marked, at the one-entry unlist of the entry when it
+\* is unseated (the seal ends no entry itself), at a destroy or at a mob
+\* reset.
 AuditEntryLeavesBySealDestroyOrReset ==
     [][\A id \in LeftEntries :
          \/ id \in identity_entry_retiring
-         \/ \E d \in SUBSET {Id1, Id2} : SealDeclaredRosterSealed(d)
+         \/ UnlistIdentityEntryRemoved(id)
          \/ destroy_admitted
          \/ phase' = "Destroyed"
          \/ ResetToRunning
@@ -657,11 +677,18 @@ AuditWitnessFreshAfterForget ==
     /\ Unseated(Id1) = Some("SeatOwed")
     /\ Record(Id1) = None
     /\ ASeat(AFresh)
-\* The seal removes an unseated entry it does not list.
-AuditWitnessSealRemovesUnseated ==
+\* The seal is refused while an unseated entry it does not list remains,
+\* and changes nothing.
+AuditWitnessSealRefusesUnseated ==
     /\ Id1 \in Entries
     /\ Id1 \in DOMAIN identity_entry_unseated
-    /\ SealDeclaredRosterSealed({})
+    /\ SealDeclaredRosterRefused({})
+    /\ Id1 \in DOMAIN identity_entry_origins'
+\* The one-entry unlist ends an unseated entry at once.
+AuditWitnessUnlistEndsUnseated ==
+    /\ Id1 \in Entries
+    /\ Id1 \in DOMAIN identity_entry_unseated
+    /\ UnlistIdentityEntryRemoved(Id1)
     /\ Id1 \notin DOMAIN identity_entry_origins'
 \* The replay of an unlisted retirement marks the entry.
 AuditWitnessReplayMarked ==
@@ -704,13 +731,13 @@ AuditWitnessPreflightAdmitsMembers == Id2 \in DOMAIN identity_to_runtime /\ Admi
 \* The reset after member 2's retirement ended with its entry kept unseated
 \* and its archived session recorded: the reset ends the entry.
 AuditWitnessResetEndsRetiredEntry == Id2 \in Entries /\ Record(Id2) # None /\ ResetToRunning
-\* A role hold never outlives its entry: a complete seal that does not list
-\* a held unseated entry removes the entry and ends its role hold, and so
-\* does a reset over one.
-AuditWitnessSealEndsRoleHold ==
+\* A role hold never outlives its entry: the one-entry unlist of a held
+\* unseated entry removes the entry and ends its role hold, and so does a
+\* reset over one.
+AuditWitnessUnlistEndsRoleHold ==
     /\ Id1 \in DOMAIN identity_entry_unseated
     /\ Cause(Id1) = Some("RoleMigrationUndeclared")
-    /\ SealDeclaredRosterSealed({})
+    /\ UnlistIdentityEntryRemoved(Id1)
     /\ Id1 \notin DOMAIN identity_entry_origins'
     /\ CauseNext(Id1) = None
 AuditWitnessResetEndsRoleHold ==
@@ -738,7 +765,8 @@ NotAuditWitnessRelistedAfterUnlist == [][~AuditWitnessRelistedAfterUnlist]_vars
 NotAuditWitnessRevived == [][~AuditWitnessRevived]_vars
 NotAuditWitnessRetiredEntryKept == [][~AuditWitnessRetiredEntryKept]_vars
 NotAuditWitnessFreshAfterForget == [][~AuditWitnessFreshAfterForget]_vars
-NotAuditWitnessSealRemovesUnseated == [][~AuditWitnessSealRemovesUnseated]_vars
+NotAuditWitnessSealRefusesUnseated == [][~AuditWitnessSealRefusesUnseated]_vars
+NotAuditWitnessUnlistEndsUnseated == [][~AuditWitnessUnlistEndsUnseated]_vars
 NotAuditWitnessReplayMarked == [][~AuditWitnessReplayMarked]_vars
 NotAuditWitnessListedAgainUnmarked == [][~AuditWitnessListedAgainUnmarked]_vars
 NotAuditWitnessResumeRoleHeld == [][~AuditWitnessResumeRoleHeld]_vars
@@ -752,7 +780,7 @@ NotAuditWitnessResetEndsEntries == [][~AuditWitnessResetEndsEntries]_vars
 NotAuditWitnessDestroyEndsEntries == [][~AuditWitnessDestroyEndsEntries]_vars
 NotAuditWitnessPreflightAdmitsMembers == [][~AuditWitnessPreflightAdmitsMembers]_vars
 NotAuditWitnessResetEndsRetiredEntry == [][~AuditWitnessResetEndsRetiredEntry]_vars
-NotAuditWitnessSealEndsRoleHold == [][~AuditWitnessSealEndsRoleHold]_vars
+NotAuditWitnessUnlistEndsRoleHold == [][~AuditWitnessUnlistEndsRoleHold]_vars
 NotAuditWitnessResetEndsRoleHold == [][~AuditWitnessResetEndsRoleHold]_vars
 NotAuditWitnessReplayEndsRoleHold == [][~AuditWitnessReplayEndsRoleHold]_vars
 

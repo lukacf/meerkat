@@ -80,8 +80,10 @@
 #   the role its archived session was built under or another, with the
 #   migration from it declared or not) and revived on its archived session
 #   or, its record let go, seated on a fresh one; the seal over every
-#   desired set, the replay of an unlisted mark, the unmark on listing, a
-#   candidate composition and the forced destroy. legacy: a legacy member, a
+#   desired set (refused while an unseated entry it does not list remains),
+#   the one-entry unlist, the replay of an unlisted mark, the unmark on
+#   listing, a candidate composition and the forced destroy. legacy: a
+#   legacy member, a
 #   worker until adopted, unlisted and retired to every copy of the plain
 #   end (live or after its runtime retired, running or stopped, or the
 #   replay of its retirement, its session archived or not, its incarnation
@@ -112,7 +114,8 @@
 #   placed_entry_custody_is_hosted_on_first_use,
 #   role_hold_belongs_to_an_entry), exactly one arm answering
 #   every declaration, seal, mark replay and apply opening, a Declared entry
-#   leaving only at the seal's retirement end, the seal, a destroy or a
+#   leaving only at the seal's retirement end, the one-entry unlist of an
+#   unseated entry, a destroy or a
 #   reset, a candidate composition changing nothing, no wake opening an
 #   attempt for a member with a host preparation cause, the host's carry-out
 #   never ending a role hold, a declaration never replacing a first-boot
@@ -397,8 +400,10 @@ apply_covered_actions=(
   DeclareIdentityEntryRefusedNonAuthoritative
   DeclareIdentityEntryMobNotRunningDestroyed
   SealDeclaredRosterSealed
+  SealDeclaredRosterRefused
   SealDeclaredRosterNonAuthoritative
   SealDeclaredRosterMobNotRunningDestroyed
+  UnlistIdentityEntryRemoved
   RecoverIdentityEntryRetiringMarkedRunning
   ForgetArchivedSession
 )
@@ -1060,12 +1065,13 @@ for witness in \
   "lifecycle:Action property:WorkerPreservingArchive" \
   "apply:Action property:RelistedAfterUnlist" \
   "apply:Action property:Revived" "apply:Action property:RetiredEntryKept" \
-  "apply:Action property:FreshAfterForget" "apply:Action property:SealRemovesUnseated" \
+  "apply:Action property:FreshAfterForget" "apply:Action property:SealRefusesUnseated" \
+  "apply:Action property:UnlistEndsUnseated" \
   "apply:Action property:ReplayMarked" "apply:Action property:CandidateRefused" \
   "apply:Action property:HostAdopted" "apply:Action property:InFlight" \
   "apply:Action property:DestroyEndsEntries" "apply:Action property:ListedAgainUnmarked" \
   "apply:Action property:ResumeRoleHeld" "apply:Action property:ResumeRoleMigrationOwed" \
-  "apply:Action property:SeatKeepsRoleHold" "apply:Action property:SealEndsRoleHold" \
+  "apply:Action property:SeatKeepsRoleHold" "apply:Action property:UnlistEndsRoleHold" \
   "legacy:Action property:AdoptedThenUnlisted" "legacy:Action property:NameHeldByWorker" \
   "legacy:Action property:ResetEndsEntries" "legacy:Action property:UnlistedEndStopped" \
   "legacy:Action property:UnlistedEndRetired" "legacy:Action property:UnlistedReplayEnd" \
@@ -1455,6 +1461,13 @@ PY
 drop_guard("SealDeclaredRosterSealed", "composition_authority")
 PY
 
+  # The seal ends no entry itself, and answers its refusal while an
+  # unseated Declared entry it does not list remains: with that guard
+  # dropped, it seals beside its refusal.
+  mutate apply seal_beside_refusal "Invariant AuditSealExactlyOne" <<'PY'
+drop_guard("SealDeclaredRosterSealed", "unlist_entry_verdict(TRUE,")
+PY
+
   # A seat that holds an entry's custody binds another session than the
   # identity's archived one.
   mutate apply seat_takes_other_session "Action property AuditSeatTakesArchivedSession" <<'PY'
@@ -1498,10 +1511,10 @@ PY
 drop_guard("DeclareIdentityEntryRefusedHostAdopted", '"RefusedHostAdopted")')
 PY
 
-  # The seal removes a held unseated entry it does not list and keeps the
-  # entry's role hold.
-  mutate apply seal_keeps_role_hold "Invariant role_hold_belongs_to_an_entry" <<'PY'
-keep_var("SealDeclaredRosterSealed", "member_host_preparation_causes")
+  # The one-entry unlist removes a held unseated entry and keeps the
+  # entry's role hold (the seal ends no entry itself).
+  mutate apply unlist_keeps_role_hold "Invariant role_hold_belongs_to_an_entry" <<'PY'
+keep_var("UnlistIdentityEntryRemoved", "member_host_preparation_causes")
 PY
 
   # The unlisted end keeps its mark on the stopped copy, on both copies

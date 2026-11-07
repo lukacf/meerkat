@@ -97,9 +97,10 @@ async fn a_closed_stock_realm_reopens_governed_while_its_grant_owner_is_still_he
     drop(service);
     // The machine itself (and the realm's execution custody) is gone before
     // the reopen: only the held grant owner outlives the close.
-    let machine = Arc::downgrade(&machine);
+    let closed_machine = Arc::downgrade(&machine);
+    drop(machine);
     let deadline = Instant::now() + Duration::from_secs(30);
-    while machine.upgrade().is_some() {
+    while closed_machine.upgrade().is_some() {
         assert!(
             Instant::now() < deadline,
             "the closed realm's machine drops"

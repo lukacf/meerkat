@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Every Toolkit binder answers Meta's typed bind contract: definite refusals
+  are typed (`denied`, `closed`, `unavailable`; the two capture doors answer
+  `withheld`). The shared original binder and the helper submission and
+  preparation answer "not now" at a held source collection only before their
+  attempt's first durable write; past it they keep their shipped outcome. The
+  helper preparation's own wait-and-bind-again loop is removed: Meta's send
+  loop waits outside the identity's lock.
+- The peer ingress binder answers its pending deliveries without waiting
+  inside its bind, and records the peer source record as its attempt's first
+  durable effect.
+
 ## [0.9.10] - 2026-11-05
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10

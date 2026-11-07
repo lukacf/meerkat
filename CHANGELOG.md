@@ -35,6 +35,45 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat_core::protected_section`: protected sections, the places where code
+  must not wait because its caller holds what other actors need: a governed
+  bind under the identity's lifecycle lock, the governed entry, native
+  admission reads, the historical admission callback and a host's store
+  transaction. A debug build panics when code inside one waits outside a
+  listed known wait (`assert_may_wait`, `known_wait`). An asynchronous section
+  carries its attempt's effect mark (`note_effect`, `effect_recorded`,
+  `within_marked`, `effect_mark`, `EffectMark::enter` for a blocking writer
+  the attempt hands work to) and its decision point (`note_decided`); the
+  write witness `assert_effect_marked` reports a durable write inside a
+  governed bind attempt that neither passed its decision point nor recorded an
+  effect. Release builds check nothing.
+- `authorization::NotNowWait` and `OwnerChangeChurn::wait_until_clear`: a
+  "not now" answer's wait, bounded by the caller's deadline;
+  `ControllerReadinessFailure::SourceHeld` and `PreparationStale`, and
+  `ControllerReadinessFailure::as_str`.
+- `meerkat_authorization_contracts::work_association::AssociationDigest`
+  (`ASSOCIATION_DIGEST_VERSION`, `AssociationDigestError`) and
+  `InputAuthorityAssociation::digest`: a versioned digest of an association's
+  canonical bytes, re-exported by `meerkat-runtime`.
+- `MeerkatMachine::governed_input_by_key`: read a governed submission's
+  outcome by its raw idempotency key and its association, through Core's own
+  key qualification (a deduplicated submission answers with its canonical
+  input).
+- `PeerIngressBindRequest::not_now_waiter` (`PeerIngressWaiter`): a peer
+  binder waits out a "not now" inside its bind, outside every protected
+  section, within the request's deadline.
+
+### Changed
+
+- A volatile peer delivery whose binding stays pending is offered again with
+  backoff within the owner-change bound, then dropped with a warning, instead
+  of being dropped at its first pending answer. A durable claim keeps its
+  path.
+- A durable grant change (`LocalGrantAuthority`) calls the write witness
+  (debug builds only).
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

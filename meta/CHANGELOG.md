@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- `GovernedInputBinder::bind` is replaced by `try_bind`, which answers
+  `Ok(BoundGovernedInput)`, `Err(GovernedBindError::Refused(GovernedBindRefusal))`
+  or `Err(GovernedBindError::NotNow(GovernedNotNow))`, and `wait_budget`
+  (default: Core's owner-change bound). A send's one loop waits out "not now"
+  answers outside the identity's lifecycle lock, then binds again with fresh
+  facts, within the door's budget.
+- `GovernedInputError::Bind` is removed. Added `Refused(GovernedBindRefusal)`
+  (kinds `denied`, `closed`, `unavailable`, `withheld`) and
+  `Held(GovernedHold)` (every bind answered "not now" until the budget ended;
+  nothing was submitted). `AdmissionUnresolved` gains
+  `receipt: Option<Box<GovernedSubmissionReceipt>>`.
+- `SendTransition::MarkHeld`: a held governed Console dispatch returns its
+  send from `Dispatching` to `AcceptedPersisted`.
+
+### Added
+
+- `GovernedSubmissionReceipt` (`GOVERNED_SUBMISSION_RECEIPT_VERSION`): an
+  opaque, versioned locator of one governed submission, read by key through
+  Core; not evidence of admission.
+- Structured error data kinds: `governed_input_refused`, `governed_input_held`
+  (JSON-RPC -32052, retryable, with `condition`, `waited_ms`, `binds`,
+  `input_id`, `submitted: false`) and `governed_admission_unresolved` (with
+  the receipt). The Python and TypeScript SDKs raise
+  `IdentityHistoryUnavailableError` for the held kind, with `kind` exposed.
+- `ConsoleLogStore::update_send_frame_hold` (default: unsupported; the
+  in-memory and SQLite stores implement it) and
+  `MetaConsoleAggregator::mark_interaction_delivery_held`.
+
+### Changed
+
+- A governed Console send whose every bind answered "not now" until its
+  door's budget ended is held, not failed: its `user_input` frame stays
+  `accepted` and records `delivery_hold` (`condition`, `waited_ms`, `binds`,
+  `retryable`), emitted as a frame update. A replay of the same send
+  dispatches the same input again (the governed input's id now derives from
+  the send's frame) and clears the hold. A held steer answers HTTP 503
+  `governed_input_held` (Console JSON-RPC -32052); a refused one answers 409
+  `governed_input_refused` with the refusal's kind (it was 500
+  `internal_error`).
+- The Console UI shows a held send ("Message held: nothing was delivered yet.
+  Send it again.") until a dispatch clears the hold.
+- A governed Console send verifies its human again at every bind, a bind after
+  a wait included, and a shutdown ends a send's wait at once.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

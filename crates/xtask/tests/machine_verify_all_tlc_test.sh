@@ -1255,20 +1255,23 @@ fi
 
 # The durable decision record (DurableDecisionMachine: one decision's sealed
 # binding, its attested decision, the execution permit and the executed
-# fact, expiry, withdrawal and the requester notice an ended decision owes)
-# is model-checked by a hand-written audit over the generated model: every
-# input in every phase, through one wrapper per arm, under every generated
-# invariant plus twelve step properties (terminals latch; approvals and
-# rejections attested; execution only from Approved with the held binding;
-# expiry only at the deadline and, for an approved decision, only without
-# an outstanding permit or by its release; withdrawal only while open by the
-# requester or the host; the sealed binding never changes; the notice owed
-# once at the end; no permit at or after the deadline; a release clears the
-# permit; a human decision decided only when observed at or after its first
-# presentation, and refused for the order only before it) and two state
-# invariants (an owner's commit stays settleable; the first presentation
-# time is the earliest). It requires every wrapper to fire, fifteen
-# witnesses reached and refuses twenty-four seeded defects (--mutants). 6
+# fact, expiry, withdrawal, the requester notice an ended decision owes, and
+# an executed decision's cleanup and its one reply) is model-checked by a
+# hand-written audit over the generated model: every input in every phase,
+# through one wrapper per arm, under every generated invariant plus sixteen
+# step properties (terminals latch; approvals and rejections attested;
+# execution only from Approved with the held binding; expiry only at the
+# deadline and, for an approved decision, only without an outstanding permit
+# or by its release; withdrawal only while open by the requester or the
+# host; the sealed binding never changes; the notice owed once at the end;
+# no permit at or after the deadline; a release clears the permit; a human
+# decision decided only when observed at or after its first presentation,
+# and refused for the order only before it; a permit only for an approver
+# still current; a cleanup opened only under a permit and settled only after
+# the end; one reply settled) and two state invariants (an owner's commit
+# stays settleable; the first presentation time is the earliest). It
+# requires every wrapper to fire, twenty witnesses reached and refuses
+# thirty-three seeded defects (--mutants; a thirty-fourth from 7 steps). 6
 # steps reach every witness. It runs alone in shard audits-j.
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then

@@ -3,10 +3,12 @@
 //! Restricted paths use an empty private mount view, not content-only Landlock
 //! grants. No host procfs is exposed: every confined launch gets a new pid
 //! namespace and a fresh procfs of that namespace at `/proc`, which shows only
-//! the launch's own processes (a toolchain needs `/proc/self/exe`). This
-//! module owns no permission policy or child supervisor; it adapts the
-//! retained requirement and transfers the one spawned child into NativeChild,
-//! whose PID relays the launch's pid 1.
+//! the launch's own processes (a toolchain needs `/proc/self/exe`), and only
+//! their task entries (`subset=pid`). This module owns no permission policy
+//! or child supervisor; it adapts the retained requirement and transfers the
+//! one spawned child into NativeChild, whose PID relays the launch: its pid 1
+//! is a small init of the backend's (`enter_init`), and the command runs
+//! under it as pid 2.
 //!
 //! Every granted path is canonical, with one exception: a read-only literal
 //! file grant may name a symbolic link as its final component
@@ -109,6 +111,10 @@ enum SetupStep {
     ParentDeathSignal = 23,
     ProcTarget = 24,
     ProcMount = 25,
+    Init = 26,
+    InitDescriptors = 27,
+    InitSignals = 28,
+    CommandDeathSignal = 29,
 }
 
 impl SetupStep {
@@ -318,9 +324,9 @@ impl LinuxPolicy {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         if pid == 0 {
-            // `apply` forks again into the new pid namespace; this child
-            // then only relays that grandchild's status, so the probe reads
-            // the grandchild's setup outcome here.
+            // `apply` forks again into the new pid namespace, and its pid 1
+            // forks the command; this child then only relays their status,
+            // so the probe reads the setup outcome of both here.
             let status = match self.apply(bound, &mut sources) {
                 Ok(()) => 0,
                 Err(failure) => failure.step.probe_status(),
@@ -373,7 +379,7 @@ impl LinuxPolicy {
     fn apply(&self, bound: &[Bound], sources: &mut [i32]) -> Result<(), SetupFailure> {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
-        {
+        let status = {
             // The new pid namespace is owned by the new user namespace, which
             // is what lets the launch mount a procfs of it below.
             raw(unsafe {
@@ -388,9 +394,10 @@ impl LinuxPolicy {
             write_file(c"/proc/self/setgroups", b"deny").map_err(SetupStep::Setgroups.failed())?;
             write_file(c"/proc/self/uid_map", &self.uid_map).map_err(SetupStep::UidMap.failed())?;
             write_file(c"/proc/self/gid_map", &self.gid_map).map_err(SetupStep::GidMap.failed())?;
-            // Returns only in pid 1 of the new pid namespace; the caller's
-            // process becomes its relay and never returns from here.
-            enter_pid_namespace()?;
+            // Returns only in pid 1 of the new pid namespace, with the write
+            // end of the status pipe to the relay; the caller's process
+            // becomes the relay and never returns from here.
+            let status = enter_pid_namespace()?;
             // Private propagation precedes every bind or filesystem mutation.
             raw(unsafe {
                 libc::mount(
@@ -450,7 +457,11 @@ impl LinuxPolicy {
                     c"/tmp/proc".as_ptr(),
                     c"proc".as_ptr(),
                     libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
-                    std::ptr::null(),
+                    // Task entries only (`/proc/<pid>`, `self`,
+                    // `thread-self`): no `net`, `sys`, `cpuinfo` or any other
+                    // host-global state. No network namespace is created, so
+                    // `/proc/net` would be the host's even with IP denied.
+                    c"subset=pid".as_ptr().cast(),
                 )
             })
             .map_err(SetupStep::ProcMount.failed())?;
@@ -468,7 +479,8 @@ impl LinuxPolicy {
             .map_err(SetupStep::StageRemount.failed())?;
             raw(unsafe { libc::chroot(c"/tmp".as_ptr()) }).map_err(SetupStep::Chroot.failed())?;
             raw(unsafe { libc::chdir(c"/".as_ptr()) }).map_err(SetupStep::EnterChroot.failed())?;
-        }
+            status
+        };
         // Namespaced root may not regain capabilities at exec.
         {
             const LOCKED_NO_ROOT_OR_AMBIENT: libc::c_ulong = 1 | 2 | 4 | 8 | 32 | 64 | 128;
@@ -515,6 +527,9 @@ impl LinuxPolicy {
             libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC)
         })
         .map_err(SetupStep::CloseRange.failed())?;
+        // Returns only in the command, pid 2; pid 1 becomes its init and
+        // never returns from here.
+        enter_init(status)?;
         let program = libc::sock_fprog {
             len: self.filter.len() as u16,
             filter: self.filter.as_ptr().cast_mut(),
@@ -531,29 +546,59 @@ impl LinuxPolicy {
     }
 }
 
-// The one fork of the confinement backend, for the capability probe and for
-// the launch's entry into its pid namespace. Allocation-free.
+// The one fork of the confinement backend, for the capability probe, the
+// launch's entry into its pid namespace and that namespace's init forking
+// the command. Allocation-free.
 fn fork_confined() -> libc::pid_t {
-    // A launch site of the confinement backend: the capability probe and the
-    // pid namespace's first process.
+    // A launch site of the confinement backend: the capability probe, the
+    // pid namespace's init and the confined command under it.
     #[allow(clippy::disallowed_methods)]
     unsafe {
         libc::fork()
     }
 }
 
+// The catchable signals a process group's teardown sends (process_lifecycle
+// and the MCP connection signal the whole group): the relay ignores them, so
+// a group SIGTERM leaves it running and the command its grace.
+const RELAY_IGNORED: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT];
+
+// The asynchronous signals init ignores, so a handler inherited from the
+// host process never runs in it. The command and every process it starts
+// share the relay's process group (setpgid and setsid are refused), so a
+// group signal reaches them directly and init forwards nothing: a forward
+// would deliver the signal twice, and a program that takes a second SIGINT
+// or SIGTERM as "stop now" would lose its grace.
+const INIT_IGNORED: [libc::c_int; 12] = [
+    libc::SIGHUP,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGTERM,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+    libc::SIGPIPE,
+    libc::SIGALRM,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+    libc::SIGWINCH,
+];
+
 // Between fork and exec, after `unshare(CLONE_NEWPID)`, which moves only the
 // caller's future children: forks pid 1 of the new pid namespace and returns
-// only there. The caller (the child `Command::spawn` returns, or the probe's
-// child) becomes the relay (`relay`) and never returns.
+// only there, with the write end of the status pipe (see `init`). The
+// caller (the child `Command::spawn` returns, or the probe's child) becomes
+// the relay (`relay`) and never returns.
 //
 // Kill semantics: NativeChild signals SIGKILL to the relay only. Pid 1 has
 // PR_SET_PDEATHSIG(SIGKILL) on the relay, and the death of a pid namespace's
 // pid 1 kills every process in that namespace, so the whole launch dies with
-// the relay. The process group std sets on the relay is inherited.
+// the relay. Pid 1 is our init (`enter_init`), not the command, so the
+// command cannot clear that death signal. The process group std sets on the
+// relay is inherited.
 //
 // Allocation-free raw syscalls only.
-fn enter_pid_namespace() -> Result<(), SetupFailure> {
+fn enter_pid_namespace() -> Result<i32, SetupFailure> {
     // Pid 1 cannot see the relay through getppid() (it lives in the parent
     // pid namespace), so the relay holds the write end of this pipe until it
     // ends: a hang-up on the read end, seen after the death signal is armed,
@@ -562,22 +607,32 @@ fn enter_pid_namespace() -> Result<(), SetupFailure> {
     raw(unsafe { libc::pipe2(alive.as_mut_ptr(), libc::O_CLOEXEC) })
         .map_err(SetupStep::PidNamespace.failed())?;
     let [watch, hold] = alive;
+    // Init writes the command's wait status here (see `init`).
+    let mut status = [-1; 2];
+    if let Err(errno) = raw(unsafe { libc::pipe2(status.as_mut_ptr(), libc::O_CLOEXEC) }) {
+        unsafe {
+            libc::close(watch);
+            libc::close(hold);
+        }
+        return Err(SetupStep::PidNamespace.failed()(errno));
+    }
+    let [status_read, status_write] = status;
     let pid = fork_confined();
     if pid == -1 {
         let failure = SetupFailure {
             step: SetupStep::PidNamespace,
             errno: errno(),
         };
-        unsafe {
-            libc::close(watch);
-            libc::close(hold);
+        for descriptor in [watch, hold, status_read, status_write] {
+            unsafe { libc::close(descriptor) };
         }
         return Err(failure);
     }
     if pid != 0 {
-        relay(pid, hold);
+        relay(pid, hold, status_read);
     }
     raw(unsafe { libc::close(hold) }).map_err(SetupStep::ParentDeathSignal.failed())?;
+    raw(unsafe { libc::close(status_read) }).map_err(SetupStep::ParentDeathSignal.failed())?;
     raw(unsafe {
         libc::prctl(
             libc::PR_SET_PDEATHSIG,
@@ -609,43 +664,181 @@ fn enter_pid_namespace() -> Result<(), SetupFailure> {
         });
     }
     raw(unsafe { libc::close(watch) }).map_err(SetupStep::ParentDeathSignal.failed())?;
+    Ok(status_write)
+}
+
+// Closes every descriptor but those in `keep`, which is ascending.
+// Allocation-free; false when a close_range call failed.
+fn close_all_but(keep: &[i32]) -> bool {
+    let mut low = 0_u32;
+    for &descriptor in keep {
+        let Ok(descriptor) = u32::try_from(descriptor) else {
+            return false;
+        };
+        if descriptor < low {
+            return false;
+        }
+        if descriptor > low
+            && unsafe { libc::syscall(libc::SYS_close_range, low, descriptor - 1, 0_u32) } == -1
+        {
+            return false;
+        }
+        low = descriptor + 1;
+    }
+    unsafe { libc::syscall(libc::SYS_close_range, low, u32::MAX, 0_u32) != -1 }
+}
+
+// Pid 1, once setup is done and before the seccomp filter: forks the command
+// as pid 2 and returns only there. Pid 1 becomes the namespace's init
+// (`init`) and never returns.
+//
+// Init installs no seccomp filter: the filter refuses kill(2), which init's
+// cleanup of its command needs. That leaves no authority the command lacks.
+// Init is our own code, with no new privileges, inside the user, mount, IPC
+// and pid namespaces and the chroot, its capabilities dropped and locked;
+// the only descriptor it keeps is the write end of the status pipe to the
+// relay. It is not dumpable, so the command can open neither its
+// `/proc/1/mem` nor its `/proc/1/fd` (the command holds no capability in the
+// user namespace that would override that), and the filter refuses the
+// command kill(2) and ptrace(2).
+fn enter_init(status: i32) -> Result<(), SetupFailure> {
+    raw(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) })
+        .map_err(SetupStep::Init.failed())?;
+    raw(unsafe { libc::prctl(libc::PR_SET_NAME, c"meerkat-init".as_ptr(), 0, 0, 0) })
+        .map_err(SetupStep::Init.failed())?;
+    // A host SIGCHLD left at SIG_IGN would reap the command before init's
+    // wait. The command's exec keeps the default.
+    if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+        return Err(SetupStep::Init.failed()(errno()));
+    }
+    let pid = fork_confined();
+    if pid == -1 {
+        return Err(SetupStep::Init.failed()(errno()));
+    }
+    if pid != 0 {
+        init(pid, status);
+    }
+    raw(unsafe { libc::close(status) }).map_err(SetupStep::CommandDeathSignal.failed())?;
+    // Init's own death already kills the namespace; this keeps the command
+    // from outliving init by even a scheduling slice.
+    raw(unsafe {
+        libc::prctl(
+            libc::PR_SET_PDEATHSIG,
+            libc::SIGKILL as libc::c_ulong,
+            0,
+            0,
+            0,
+        )
+    })
+    .map_err(SetupStep::CommandDeathSignal.failed())?;
     Ok(())
 }
 
-// The relay: closes every descriptor but `hold` (std's exec-error pipe among
-// them, so `Command::spawn` returns once pid 1 execs or reports its setup
-// failure through its own copy), waits for pid 1 and ends the way it ended:
-// its exit code, or its terminating signal raised again on the relay.
+// The namespace's init: closes every descriptor but `status` (std's
+// exec-error pipe among them, so `Command::spawn` returns once the command
+// execs or reports its setup failure through its own copy), ignores the
+// asynchronous signals (`INIT_IGNORED`), reaps every process of the
+// namespace, and ends once the command does. Init cannot end the way the
+// command did when that was a signal: a pid namespace's init does not get a
+// signal it raises on itself without a handler. So it writes the command's
+// raw wait status to the relay through `status` and exits with its exit
+// code, or 128 plus its terminating signal; the relay ends with the status
+// it reads (`relay`). Init's exit kills the rest of the namespace.
 // Allocation-free raw syscalls only; it never returns into std's exec.
-fn relay(child: libc::pid_t, hold: i32) -> ! {
-    // std's stdio sits at 0..=2, so `hold` is at least 3.
-    let closed = match (hold as libc::c_uint).checked_sub(1) {
-        Some(below) => unsafe {
-            libc::syscall(libc::SYS_close_range, 0_u32, below, 0_u32) != -1
-                && libc::syscall(libc::SYS_close_range, below + 2, u32::MAX, 0_u32) != -1
-        },
-        None => false,
+fn init(command: libc::pid_t, status: i32) -> ! {
+    let closed = close_all_but(&[status]);
+    if !closed {
+        // Cannot release std's error pipe: end the launch rather than leave
+        // spawn blocked on it while the command runs.
+        unsafe { libc::kill(command, libc::SIGKILL) };
+    }
+    let mut ignored = true;
+    for signal in INIT_IGNORED {
+        ignored &= unsafe { libc::signal(signal, libc::SIG_IGN) } != libc::SIG_ERR;
+    }
+    if !ignored {
+        unsafe { libc::kill(command, libc::SIGKILL) };
+    }
+    let mut wait_status = 0;
+    loop {
+        let reaped = unsafe { libc::waitpid(-1, &raw mut wait_status, 0) };
+        if reaped == command {
+            break;
+        }
+        if reaped == -1 && errno() != libc::EINTR {
+            // Lost the command: nothing left to relay.
+            unsafe { libc::_exit(SetupStep::Init.probe_status()) };
+        }
+    }
+    if !closed {
+        unsafe { libc::_exit(SetupStep::InitDescriptors.probe_status()) };
+    }
+    if !ignored {
+        unsafe { libc::_exit(SetupStep::InitSignals.probe_status()) };
+    }
+    let bytes = wait_status.to_ne_bytes();
+    loop {
+        let written = unsafe { libc::write(status, bytes.as_ptr().cast(), bytes.len()) };
+        if written != -1 || errno() != libc::EINTR {
+            break;
+        }
+    }
+    let code = if libc::WIFSIGNALED(wait_status) {
+        128 + libc::WTERMSIG(wait_status)
+    } else {
+        libc::WEXITSTATUS(wait_status)
     };
+    unsafe { libc::_exit(code) }
+}
+
+// The relay: ignores a process group's catchable termination signals
+// (`RELAY_IGNORED`), closes every descriptor but `hold` and `status` (std's
+// exec-error pipe among them, so `Command::spawn` returns once the command
+// execs or reports its setup failure through its own copy), waits for pid 1
+// and ends the way the command ended: the wait status init wrote to
+// `status`, or pid 1's own when init wrote none (a setup failure before the
+// command, or init killed): its exit code, or its terminating signal raised
+// again on the relay. Allocation-free raw syscalls only; it never returns
+// into std's exec.
+fn relay(child: libc::pid_t, hold: i32, status: i32) -> ! {
+    // Nothing can signal the relay before this: `Command::spawn` returns,
+    // and with it the relay's PID, only after the command's exec.
+    for signal in RELAY_IGNORED {
+        unsafe { libc::signal(signal, libc::SIG_IGN) };
+    }
+    let closed = close_all_but(&[hold.min(status), hold.max(status)]);
     if !closed {
         // Cannot release std's error pipe: end the launch rather than leave
         // spawn blocked on it while the target runs.
         unsafe { libc::kill(child, libc::SIGKILL) };
     }
-    let mut status = 0;
+    let mut wait_status = 0;
     loop {
-        if unsafe { libc::waitpid(child, &raw mut status, 0) } == child {
+        if unsafe { libc::waitpid(child, &raw mut wait_status, 0) } == child {
             break;
         }
         if errno() != libc::EINTR {
             // Lost the only child: nothing left to relay.
-            unsafe { libc::_exit(PROBE_STEP_STATUS_BASE + SetupStep::PidNamespace as i32) };
+            unsafe { libc::_exit(SetupStep::PidNamespace.probe_status()) };
         }
     }
     if !closed {
-        unsafe { libc::_exit(PROBE_STEP_STATUS_BASE + SetupStep::PidNamespace as i32) };
+        unsafe { libc::_exit(SetupStep::PidNamespace.probe_status()) };
     }
-    if libc::WIFSIGNALED(status) {
-        let signal = libc::WTERMSIG(status);
+    // Init and every process that could hold the write end are gone with
+    // the namespace, so this read ends.
+    let mut bytes = [0_u8; 4];
+    let read = loop {
+        let read = unsafe { libc::read(status, bytes.as_mut_ptr().cast(), bytes.len()) };
+        if read != -1 || errno() != libc::EINTR {
+            break read;
+        }
+    };
+    if read == bytes.len() as isize {
+        wait_status = i32::from_ne_bytes(bytes);
+    }
+    if libc::WIFSIGNALED(wait_status) {
+        let signal = libc::WTERMSIG(wait_status);
         unsafe {
             // The relay's own death by the signal must not dump core.
             let none = libc::rlimit {
@@ -662,7 +855,7 @@ fn relay(child: libc::pid_t, hold: i32) -> ! {
             libc::_exit(128 + signal);
         }
     }
-    unsafe { libc::_exit(libc::WEXITSTATUS(status)) }
+    unsafe { libc::_exit(libc::WEXITSTATUS(wait_status)) }
 }
 
 fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), ConfinementRefusal> {
@@ -1348,6 +1541,17 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         code.push(jump(equal, syscall as u32, 0, 1));
         code.push(statement(ret, refuse));
     }
+    // The command's parent-death signal on init is moot (init's death kills
+    // the namespace), but it is not the command's to change: a launch that
+    // could clear one could clear the other. Every other prctl option stays
+    // allowed. The kernel reads the option as an int: the low word decides.
+    code.extend([
+        jump(equal, libc::SYS_prctl as u32, 0, 4),
+        statement(load, 16),
+        jump(equal, libc::PR_SET_PDEATHSIG as u32, 0, 1),
+        statement(ret, refuse),
+        statement(ret, allow),
+    ]);
     // The host and target do not share filesystem/IPC views, but retain
     // kernel PID numbers. Never let a PID-targeted mutator reach another
     // process. Pid zero means this task and preserves ordinary local setup.
@@ -2709,7 +2913,8 @@ mod tests {
     }
 
     /// The procfs is that of the launch's own pid namespace: it lists only
-    /// the launch's processes, and its pid 1 is the launched command.
+    /// the launch's processes, its pid 1 is the backend's init, and the
+    /// launched command is pid 2.
     #[test]
     fn the_confined_procfs_shows_only_the_launchs_own_processes() {
         let Some((_temp, work, policy)) = confined_workspace() else {
@@ -2721,7 +2926,7 @@ mod tests {
                     policy,
                     shell(
                         &work,
-                        "cat /proc/1/comm; ls /proc | grep -c '^[0-9][0-9]*$'",
+                        "cat /proc/1/comm; echo $$; ls /proc | grep -c '^[0-9][0-9]*$'",
                     ),
                     SpawnIo::default(),
                     None,
@@ -2734,15 +2939,62 @@ mod tests {
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         let mut lines = stdout.lines();
-        assert_eq!(lines.next(), Some("sh"), "{stdout}");
+        assert_eq!(lines.next(), Some("meerkat-init"), "{stdout}");
+        assert_eq!(lines.next(), Some("2"), "{stdout}");
         let visible: u32 = lines.next().unwrap().parse().unwrap();
-        // The shell, ls and grep at most: no host process is listed.
-        assert!((1..=3).contains(&visible), "{stdout}");
+        // Init, the shell, ls and grep at most: no host process is listed.
+        assert!((2..=4).contains(&visible), "{stdout}");
+    }
+
+    /// The procfs holds task entries only: no `/proc/net` (the host's, with
+    /// no network namespace), `/proc/sys`, `/proc/cpuinfo` or other global
+    /// state, while the per-task files a toolchain reads stay.
+    #[test]
+    fn the_confined_procfs_holds_task_entries_only() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        let output = runtime()
+            .block_on(async {
+                spawn(
+                    policy,
+                    shell(
+                        &work,
+                        "ls /proc; echo END; cat /proc/self/status | head -1; \
+                         test ! -e /proc/net && echo NO-NET; \
+                         test -r /proc/self/maps && test -r /proc/self/cgroup && \
+                         test -d /proc/self/fd && echo TASK-FILES",
+                    ),
+                    SpawnIo::default(),
+                    None,
+                )
+                .unwrap()
+                .wait_with_output()
+                .await
+            })
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (listing, rest) = stdout.split_once("END\n").unwrap();
+        let entries: Vec<&str> = listing.split_whitespace().collect();
+        for global in ["net", "sys", "cpuinfo", "meminfo", "kallsyms", "mounts"] {
+            assert!(!entries.contains(&global), "{global} in {entries:?}");
+        }
+        assert!(entries.contains(&"self"), "{entries:?}");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| ["self", "thread-self"].contains(entry)
+                    || entry.bytes().all(|byte| byte.is_ascii_digit())),
+            "{entries:?}"
+        );
+        let rest: Vec<&str> = rest.lines().collect();
+        assert_eq!(rest, ["Name:\tcat", "NO-NET", "TASK-FILES"], "{stdout}");
     }
 
     /// Killing the custody PID (the relay) ends the whole launch: pid 1 of
-    /// the namespace dies by its parent-death signal and takes its
-    /// descendants with it.
+    /// the namespace (the init) dies by its parent-death signal and takes
+    /// the command and its descendants with it.
     #[test]
     fn killing_the_custody_pid_ends_every_process_of_the_launch() {
         let Some((_temp, work, policy)) = confined_workspace() else {
@@ -2763,9 +3015,15 @@ mod tests {
                 init.len() == 1
             }));
             let init = init[0];
+            let mut command = Vec::new();
+            assert!(poll_until(|| {
+                command = children(init);
+                command.len() == 1
+            }));
+            let command = command[0];
             let mut sleeper = Vec::new();
             assert!(poll_until(|| {
-                sleeper = children(init);
+                sleeper = children(command);
                 sleeper.len() == 1
             }));
             let sleeper = sleeper[0];
@@ -2775,7 +3033,9 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(2));
             use std::os::unix::process::ExitStatusExt;
             assert_eq!(status.signal(), Some(libc::SIGKILL));
-            assert!(poll_until(|| !running(init) && !running(sleeper)));
+            assert!(poll_until(|| {
+                !running(init) && !running(command) && !running(sleeper)
+            }));
         });
     }
 
@@ -2802,7 +3062,8 @@ mod tests {
     }
 
     /// The relay ends the way the launched command ended: its exit code, or
-    /// its terminating signal.
+    /// its terminating signal, which init relays through its status pipe;
+    /// and init's own death by a signal.
     #[test]
     fn the_custody_pid_relays_the_launchs_exit_code_and_signal() {
         let Some((_temp, work, policy)) = confined_workspace() else {
@@ -2822,10 +3083,36 @@ mod tests {
             .unwrap();
             assert_eq!(status.code(), Some(7));
 
-            // Inside the sandbox kill(2) is refused and a pid namespace's
-            // pid 1 ignores unhandled signals from its own namespace, so the
-            // host signals pid 1 directly: SIGKILL from an ancestor namespace
-            // is always delivered. The relay itself is not signalled.
+            // Inside the sandbox kill(2) is refused, so the host signals the
+            // command (pid 2) directly. The relay itself is not signalled.
+            let mut child = spawn(
+                Arc::clone(&policy),
+                shell(&work, "sleep 60; :"),
+                SpawnIo::default(),
+                None,
+            )
+            .unwrap();
+            let relay = child.id().unwrap();
+            let mut init = Vec::new();
+            assert!(poll_until(|| {
+                init = children(relay);
+                init.len() == 1
+            }));
+            let mut command = Vec::new();
+            assert!(poll_until(|| {
+                command = children(init[0]);
+                command.len() == 1
+            }));
+            assert_eq!(
+                unsafe { libc::kill(command[0] as libc::pid_t, libc::SIGTERM) },
+                0
+            );
+            let status = child.wait().await.unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
+            assert_eq!(status.code(), None);
+
+            // SIGKILL from an ancestor namespace always reaches pid 1, the
+            // init, which then writes no status: the relay ends by init's.
             let mut child = spawn(
                 policy,
                 shell(&work, "sleep 60; :"),
@@ -2847,6 +3134,161 @@ mod tests {
             assert_eq!(status.signal(), Some(libc::SIGKILL));
             assert_eq!(status.code(), None);
         });
+    }
+
+    /// A process group's SIGTERM (the engine's teardown signals the whole
+    /// group) leaves the relay and init running: the command gets the TERM
+    /// once, directly as a member of the group, runs its handler to the end,
+    /// and the relay reports its exit code, not a SIGKILL.
+    #[test]
+    fn a_group_sigterm_leaves_the_command_its_grace() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        runtime().block_on(async {
+            let child = spawn(
+                policy,
+                shell(
+                    &work,
+                    "trap 'echo TERM-SEEN' TERM; sleep 30 & wait; sleep 0.3; exit 3",
+                ),
+                SpawnIo::default(),
+                None,
+            )
+            .unwrap();
+            let relay = child.id().unwrap();
+            let mut init = Vec::new();
+            assert!(poll_until(|| {
+                init = children(relay);
+                init.len() == 1
+            }));
+            let mut command = Vec::new();
+            assert!(poll_until(|| {
+                command = children(init[0]);
+                command.len() == 1
+            }));
+            // The trap is set once the background sleep runs.
+            assert!(poll_until(|| children(command[0]).len() == 1));
+            assert_eq!(
+                unsafe { libc::killpg(relay as libc::pid_t, libc::SIGTERM) },
+                0
+            );
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(3), "{output:?}");
+            assert_eq!(output.stdout, b"TERM-SEEN\n");
+        });
+    }
+
+    /// The command cannot clear its parent-death signal (the filter refuses
+    /// the option), and even a command that could would still end with the
+    /// relay: its init, pid 1, holds the death signal on the relay.
+    #[test]
+    fn a_command_that_clears_its_death_signal_still_dies_with_the_relay() {
+        let Some((_temp, work, policy)) = confined_workspace() else {
+            return;
+        };
+        if !Path::new("/usr/bin/python3").exists() {
+            println!("SKIPPED: no /usr/bin/python3 in the baseline view");
+            return;
+        }
+        let launch = ProcessLaunchSpec::new(
+            PathBuf::from("/usr/bin/python3"),
+            vec![
+                "-c".into(),
+                "import ctypes, sys, time\n\
+                 libc = ctypes.CDLL(None, use_errno=True)\n\
+                 print(libc.prctl(1, 0, 0, 0, 0), ctypes.get_errno(), flush=True)\n\
+                 time.sleep(60)"
+                    .into(),
+            ],
+            work,
+            Default::default(),
+        )
+        .unwrap();
+        runtime().block_on(async {
+            let mut child = spawn(policy, launch, SpawnIo::default(), None).unwrap();
+            let relay = child.id().unwrap();
+            let mut init = Vec::new();
+            assert!(poll_until(|| {
+                init = children(relay);
+                init.len() == 1
+            }));
+            let mut command = Vec::new();
+            assert!(poll_until(|| {
+                command = children(init[0]);
+                command.len() == 1
+            }));
+            let command = command[0];
+            let mut stdout = child.stdout.take().unwrap();
+            let mut line = [0_u8; 16];
+            use tokio::io::AsyncReadExt;
+            let read = tokio::time::timeout(Duration::from_secs(5), stdout.read(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&line[..read], format!("-1 {}\n", libc::EPERM).as_bytes());
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+            assert!(poll_until(|| !running(init[0]) && !running(command)));
+        });
+    }
+
+    /// prctl(PR_SET_PDEATHSIG) is refused whatever its signal; every other
+    /// prctl option stays allowed.
+    #[test]
+    fn seccomp_refuses_only_the_death_signal_among_prctl_options() {
+        let Some(architecture) = native_audit_arch() else {
+            return;
+        };
+        let refuse = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        for ip in [false, true] {
+            let program = filter(architecture, ip);
+            let prctl = |option: libc::c_int, argument: u64| {
+                run_filter(
+                    &program,
+                    architecture,
+                    libc::SYS_prctl as u32,
+                    [u64::from(option as u32), argument, 0, 0, 0, 0],
+                )
+            };
+            for signal in [0, libc::SIGKILL, libc::SIGTERM] {
+                assert_eq!(
+                    prctl(libc::PR_SET_PDEATHSIG, u64::from(signal as u32)),
+                    refuse
+                );
+            }
+            // The kernel takes the option as an int.
+            assert_eq!(
+                run_filter(
+                    &program,
+                    architecture,
+                    libc::SYS_prctl as u32,
+                    [(1 << 32) | libc::PR_SET_PDEATHSIG as u64, 0, 0, 0, 0, 0],
+                ),
+                refuse
+            );
+            for option in [
+                libc::PR_GET_PDEATHSIG,
+                libc::PR_SET_NAME,
+                libc::PR_SET_NO_NEW_PRIVS,
+                libc::PR_SET_SECCOMP,
+                libc::PR_GET_DUMPABLE,
+            ] {
+                assert_eq!(prctl(option, 0), libc::SECCOMP_RET_ALLOW, "option {option}");
+            }
+            // The rules after the prctl rule are still reached.
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_mount as u32, [0; 6]),
+                refuse
+            );
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_getpid as u32, [0; 6]),
+                libc::SECCOMP_RET_ALLOW
+            );
+        }
     }
 
     /// With IP, a Unix stream or seqpacket pair (std's spawn error channel)

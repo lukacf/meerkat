@@ -56,20 +56,29 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
     );
     assert!(!marker.exists(), "target ran before host release");
     // Custody's PID relays one process: pid 1 of the launch's own pid
-    // namespace, which holds the gate and then becomes the target.
+    // namespace, the backend's init, whose one child, pid 2, holds the gate
+    // and then becomes the target.
     #[cfg(target_os = "linux")]
     {
-        let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
-        let children: Vec<&str> = children.split_whitespace().collect();
-        assert_eq!(children.len(), 1, "{children:?}");
-        let status = std::fs::read_to_string(format!("/proc/{}/status", children[0])).unwrap();
-        let namespaced = status
-            .lines()
-            .find_map(|line| line.strip_prefix("NSpid:"))
-            .unwrap()
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        assert_eq!(namespaced, [children[0], "1"]);
+        let only_child = |pid: &str| {
+            let children =
+                std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
+            let children: Vec<String> = children.split_whitespace().map(str::to_owned).collect();
+            assert_eq!(children.len(), 1, "{children:?}");
+            let status = std::fs::read_to_string(format!("/proc/{}/status", children[0])).unwrap();
+            let namespaced = status
+                .lines()
+                .find_map(|line| line.strip_prefix("NSpid:"))
+                .unwrap()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            (children[0].clone(), namespaced)
+        };
+        let (init, namespaced) = only_child(&pid.to_string());
+        assert_eq!(namespaced, [init.as_str(), "1"]);
+        let (target, namespaced) = only_child(&init);
+        assert_eq!(namespaced, [target.as_str(), "2"]);
     }
     writer.write_all(b"host-release\n").unwrap();
     drop(writer);
@@ -79,7 +88,7 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     #[cfg(target_os = "linux")]
-    assert_eq!(output.stdout, b"1");
+    assert_eq!(output.stdout, b"2");
     #[cfg(not(target_os = "linux"))]
     assert_eq!(output.stdout, pid.to_string().as_bytes());
     assert_eq!(std::fs::read(marker).unwrap(), b"ran");

@@ -813,13 +813,11 @@ async fn baseline_supports_declared_shell_commands_and_spawn_preserves_pid() {
                 .and_then(|value| value.parse::<u32>().ok())
         })
         .expect("probe pid");
-    // Custody's PID relays the target, which runs as pid 1 of the launch's
-    // own pid namespace: the exec chain keeps that PID through every exec.
+    // Custody's PID relays the target, which runs as pid 2 of the launch's
+    // own pid namespace, under the backend's init: the exec chain keeps that
+    // PID through every exec.
     assert_ne!(launched_pid, final_pid);
-    assert_eq!(
-        final_pid, 1,
-        "exec chain must retain the pid namespace's leader PID"
-    );
+    assert_eq!(final_pid, 2, "exec chain must retain the target's PID");
 }
 
 #[tokio::test]

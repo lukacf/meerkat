@@ -2937,6 +2937,42 @@ async fn a_label_naming_another_identity_never_marks_a_member() {
     );
 }
 
+/// A legacy label marks a member only when it names the member's own
+/// identity: the label `mk--worker-1` names the identity `mk--worker-1`,
+/// seated as `mk--mk--worker-1`, never the member `worker-1`. A declared
+/// apply that lists `worker-1`, a raw member with that label and no
+/// durable-identity marker, refuses the name `NameHeldByWorker` and leaves
+/// the member as it is.
+///
+/// RED (`RED-F2-decoded-label.patch`): decode the label as if it were a
+/// member id: the label names `worker-1`, the member is a legacy member, and
+/// the apply adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_member_labelled_with_another_identity_is_refused() {
+    let mob = ApplyMob::new("apply-marker-label-other").await;
+    mob.handle
+        .spawn_spec(identity_labelled("worker-1", "mk--worker-1"))
+        .await
+        .expect("a host's raw member, labelled with another identity");
+    let session = mob.session("worker-1").await;
+
+    let outcome = mob
+        .apply(DeclaredRoster::partial([declared("worker-1")]))
+        .await;
+    assert!(
+        matches!(
+            answer(&outcome, "worker-1"),
+            DeclaredEntryOutcome::Refused {
+                refusal: DeclaredEntryRefusal::NameHeldByWorker
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(mob.is_member("worker-1").await, "the member keeps serving");
+    assert_eq!(mob.standing("worker-1"), None, "it is no entry");
+    assert_eq!(mob.session("worker-1").await, session);
+}
+
 /// A member a legacy host seated under its identity before identity
 /// entries existed (its spawn row carries the durable-identity marker and
 /// the legacy label naming it), whose identity the roster dropped before the

@@ -327,7 +327,11 @@ them.
   names no member. A declared apply that listed such a member without the
   durable-identity marker, a member labelled with an identity no member id
   can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
-  member of that name could not have it adopted.
+  member of that name could not have it adopted. This lifts the 0.9.10
+  known limitation that legacy adoption compared a member's
+  `agent_identity` label with the member id, so a legacy member whose
+  member id is an escaped form of its name was not adopted through the
+  label.
 
 - `meerkat-mcp`: retained attachment controls are released when the
   router's close begins (`McpRouterAdapter::begin_close`), so a router whose

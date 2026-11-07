@@ -1649,10 +1649,15 @@ async fn a_failed_document_batch_refuses_that_document_until_the_realm_reopens()
             .write("cursor/mob-a", Some(b"second".to_vec()))
             .await
             .expect_err("the store fails the batch");
+        // Its outcome stays unknown past the retry budget: the typed stop,
+        // whose last answer is the store's.
         assert!(
             matches!(
                 failed.spi(),
-                Some(SpiError::Host(HostStoreError::Unavailable(_)))
+                Some(SpiError::UnsettledPastRetryBudget {
+                    last: HostStoreError::Unavailable(_),
+                    ..
+                })
             ),
             "{failed}"
         );

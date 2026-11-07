@@ -144,28 +144,46 @@ pub async fn resolve_layered_hooks_config(
 /// Layered hooks with the convention file each file entry comes from.
 pub(crate) struct LayeredHooks {
     pub(crate) config: HooksConfig,
-    /// Each layered entry a convention file states: its id, the file, and
-    /// whether the user file states the same definition.
-    file_entries: Vec<(meerkat_core::HookId, std::path::PathBuf, bool)>,
-    user_file: Option<std::path::PathBuf>,
+    /// Each layered entry a convention file states: its id, the file as
+    /// read, and whether the user file states the same definition.
+    file_entries: Vec<(meerkat_core::HookId, ReadHookSource, bool)>,
+    /// The user file as read, when it was.
+    user_file: Option<ReadHookSource>,
+}
+
+/// A convention file the layering read: its path and the digest of the
+/// bytes its hooks were parsed from.
+#[derive(Clone)]
+struct ReadHookSource {
+    path: std::path::PathBuf,
+    sha256: crate::HookSourceDigest,
+}
+
+impl ReadHookSource {
+    fn as_source(&self) -> crate::HookSource<'_> {
+        crate::HookSource {
+            path: &self.path,
+            sha256: self.sha256,
+        }
+    }
 }
 
 impl LayeredHooks {
     /// The layered entries whose definition comes from a file `untrusted`
-    /// names, unless a trusted user file states the same definition (it is
-    /// then that file's entry).
+    /// refuses (judged over the bytes the layering read), unless a trusted
+    /// user file states the same definition (it is then that file's entry).
     pub(crate) fn untrusted_entries(
         &self,
-        untrusted: impl Fn(&Path) -> bool,
+        untrusted: impl Fn(crate::HookSource<'_>) -> bool,
     ) -> Vec<meerkat_core::HookId> {
         let user_trusted = self
             .user_file
-            .as_deref()
-            .is_some_and(|user| !untrusted(user));
+            .as_ref()
+            .is_some_and(|user| !untrusted(user.as_source()));
         self.file_entries
             .iter()
             .filter(|(_, source, user_duplicate)| {
-                untrusted(source) && !(*user_duplicate && user_trusted)
+                untrusted(source.as_source()) && !(*user_duplicate && user_trusted)
             })
             .map(|(id, _, _)| id.clone())
             .collect()
@@ -173,28 +191,26 @@ impl LayeredHooks {
 }
 
 /// [`resolve_layered_hooks_config`], keeping the convention file of each
-/// file entry.
+/// file entry with the digest of the bytes read.
 pub(crate) async fn resolve_layered_hooks(
     context_root: Option<&Path>,
     user_config_root: Option<&Path>,
     active_config: &Config,
 ) -> LayeredHooks {
-    let mut user_entries = Vec::new();
-    let mut context_entries = Vec::new();
     let user_cfg_path = user_config_root.map(|root| root.join(".rkat").join("config.toml"));
     let project_cfg_path = context_root.map(|root| root.join(".rkat").join("config.toml"));
 
-    if let Some(user_cfg_path) = &user_cfg_path
-        && let Ok(Some(cfg)) = read_hooks_config_from(user_cfg_path).await
-    {
-        user_entries = cfg.entries;
+    let mut user = None;
+    if let Some(user_cfg_path) = user_cfg_path {
+        user = read_hooks_config_from(user_cfg_path).await;
     }
-
-    if let Some(project_cfg_path) = &project_cfg_path
-        && let Ok(Some(cfg)) = read_hooks_config_from(project_cfg_path).await
-    {
-        context_entries = cfg.entries;
+    let mut context = None;
+    if let Some(project_cfg_path) = project_cfg_path {
+        context = read_hooks_config_from(project_cfg_path).await;
     }
+    let user_entries = user
+        .as_ref()
+        .map_or(&[][..], |(cfg, _)| cfg.entries.as_slice());
 
     let active_hooks = &active_config.hooks;
     let mut layered = HooksConfig {
@@ -212,10 +228,10 @@ pub(crate) async fn resolve_layered_hooks(
             layered.entries.push(entry.clone());
         }
     }
-    for entry in &context_entries {
-        if seen_ids.insert(entry.id.clone()) {
-            layered.entries.push(entry.clone());
-            if let Some(source) = &project_cfg_path {
+    if let Some((cfg, source)) = &context {
+        for entry in &cfg.entries {
+            if seen_ids.insert(entry.id.clone()) {
+                layered.entries.push(entry.clone());
                 file_entries.push((
                     entry.id.clone(),
                     source.clone(),
@@ -224,10 +240,10 @@ pub(crate) async fn resolve_layered_hooks(
             }
         }
     }
-    for entry in &user_entries {
-        if seen_ids.insert(entry.id.clone()) {
-            layered.entries.push(entry.clone());
-            if let Some(source) = &user_cfg_path {
+    if let Some((cfg, source)) = &user {
+        for entry in &cfg.entries {
+            if seen_ids.insert(entry.id.clone()) {
+                layered.entries.push(entry.clone());
                 file_entries.push((entry.id.clone(), source.clone(), false));
             }
         }
@@ -236,25 +252,40 @@ pub(crate) async fn resolve_layered_hooks(
     LayeredHooks {
         config: layered,
         file_entries,
-        user_file: user_cfg_path,
+        user_file: user.map(|(_, source)| source),
     }
 }
 
-async fn read_hooks_config_from(path: &Path) -> Result<Option<HooksConfig>, std::io::Error> {
-    if !tokio::fs::try_exists(path).await? {
-        return Ok(None);
-    }
+/// The hooks of the convention file at `path` and the file as read: one
+/// read, whose bytes are both hashed and parsed. An absent, unreadable or
+/// unparseable file states no hooks.
+async fn read_hooks_config_from(path: std::path::PathBuf) -> Option<(HooksConfig, ReadHookSource)> {
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!("Failed to read hooks config at {}: {}", path.display(), err);
+            return None;
+        }
+    };
+    let sha256 = crate::HookSourceDigest::of(&bytes);
     let mut parsed = Config::default();
-    let path_buf = path.to_path_buf();
-    match parsed.merge_file(&path_buf).await {
-        Ok(()) => Ok(Some(parsed.hooks)),
+    let merged = std::str::from_utf8(&bytes)
+        .map_err(|err| err.to_string())
+        .and_then(|content| {
+            parsed
+                .merge_toml_str(content)
+                .map_err(|err| err.to_string())
+        });
+    match merged {
+        Ok(()) => Some((parsed.hooks, ReadHookSource { path, sha256 })),
         Err(err) => {
             tracing::warn!(
                 "Failed to parse hooks config at {}: {}",
                 path.display(),
                 err
             );
-            Ok(None)
+            None
         }
     }
 }

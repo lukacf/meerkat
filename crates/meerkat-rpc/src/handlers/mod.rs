@@ -8,6 +8,7 @@ pub mod capabilities;
 #[cfg(feature = "comms")]
 pub mod comms;
 pub mod config;
+pub mod decision;
 // Runtime-backed external-event convenience handler.
 pub mod event;
 pub mod help;

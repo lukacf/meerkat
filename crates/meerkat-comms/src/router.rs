@@ -744,6 +744,7 @@ impl Router {
         peer: &TrustEntry,
         envelope: Envelope,
         dest: PeerId,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<SendOutcome, SendError> {
         let registry = InprocRegistry::global();
         let envelope_id = envelope.id;
@@ -767,6 +768,7 @@ impl Router {
                     envelope.kind,
                     self.require_peer_auth,
                     park_bound,
+                    governed_origin,
                 )
                 .await
                 .map_err(|err| map_inproc_send_error(err, dest, envelope_id))?,
@@ -778,6 +780,7 @@ impl Router {
                     envelope.kind,
                     self.require_peer_auth,
                     park_bound,
+                    governed_origin,
                 )
                 .await
                 .map_err(|err| map_inproc_send_error(err, dest, envelope_id))?,
@@ -863,6 +866,22 @@ impl Router {
         envelope_id: Uuid,
         kind: MessageKind,
         content_taint: Option<SendTaintOverride>,
+    ) -> Result<SendOutcome, SendError> {
+        self.send_with_id_and_origin(dest, envelope_id, kind, content_taint, None)
+            .await
+    }
+
+    /// [`Self::send_with_id`] for governed work: an in-process delivery also
+    /// carries `governed_origin`, the process-local origin of the work it was
+    /// sent under, to the receiver's queue unchanged. A delivery over a
+    /// socket carries none: the origin is never serialized.
+    pub(crate) async fn send_with_id_and_origin(
+        &self,
+        dest: PeerId,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        content_taint: Option<SendTaintOverride>,
+        governed_origin: Option<meerkat_core::GovernedSendOrigin>,
     ) -> Result<SendOutcome, SendError> {
         // An exact correlated endpoint is the authority for precisely one
         // Response and therefore takes precedence over a potentially stale
@@ -967,7 +986,8 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => match &dest_entry {
                     ResolvedDest::Trusted(peer) => {
-                        self.send_inproc_in_namespace(peer, envelope, dest).await
+                        self.send_inproc_in_namespace(peer, envelope, dest, governed_origin)
+                            .await
                     }
                     ResolvedDest::Declared(_) => {
                         Err(SendError::Transport(TransportError::InvalidAddress(
@@ -987,7 +1007,8 @@ impl Router {
                 ))),
                 PeerAddr::Inproc(_) => match &dest_entry {
                     ResolvedDest::Trusted(peer) => {
-                        self.send_inproc_in_namespace(peer, envelope, dest).await
+                        self.send_inproc_in_namespace(peer, envelope, dest, governed_origin)
+                            .await
                     }
                     ResolvedDest::Declared(_) => {
                         Err(SendError::Transport(TransportError::InvalidAddress(

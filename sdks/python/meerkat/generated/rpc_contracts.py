@@ -166,6 +166,9 @@ from .types import (
     MobIdParams,
     MobIngressInteractionParams,
     MobIngressInteractionResult,
+    MobInstructionStatusParams,
+    MobInstructionStatusResult,
+    MobInstructionWriteResult,
     MobLifecycleParams,
     MobLifecycleResult,
     MobListMembersMatchingParams,
@@ -201,6 +204,7 @@ from .types import (
     MobRetireResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
+    MobRevokeInstructionParams,
     MobRevokeScopesParams,
     MobRevokeScopesResult,
     MobRotateSupervisorResult,
@@ -208,6 +212,7 @@ from .types import (
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
+    MobSetInstructionParams,
     MobSnapshotResult,
     MobSpawnHelperParams,
     MobSpawnManyParams,
@@ -243,6 +248,7 @@ from .types import (
     ReadyWorkFilter,
     RealmIdParams,
     RestoreSessionTranscriptRevisionParams,
+    RevokeSessionInstructionParams,
     RevokeToolGrantParams,
     RevokeToolGrantResult,
     RewriteSessionTranscriptParams,
@@ -262,12 +268,16 @@ from .types import (
     SessionForkResult,
     SessionInputStateParams,
     SessionInputStateResult,
+    SessionInstructionStatusParams,
+    SessionInstructionStatusResult,
+    SessionInstructionWriteResult,
     SessionPeerResponseTerminalParams,
     SessionStreamCloseParams,
     SessionStreamCloseResult,
     SessionStreamOpenParams,
     SessionStreamOpenResult,
     SessionTranscriptRewriteResult,
+    SetSessionInstructionParams,
     SkillListResponse,
     StopRunParams,
     StopRunResult,
@@ -548,6 +558,30 @@ class RpcRequest(Protocol):
         params: ReadInstructionActivationsParams,
         /,
     ) -> Awaitable[InstructionActivationReadPage]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/set_instruction"],
+        params: SetSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/revoke_instruction"],
+        params: RevokeSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/instruction_status"],
+        params: SessionInstructionStatusParams,
+        /,
+    ) -> Awaitable[SessionInstructionStatusResult]: ...
 
     @overload
     def __call__(
@@ -1372,6 +1406,30 @@ class RpcRequest(Protocol):
         params: MobAppendSystemContextParams,
         /,
     ) -> Awaitable[MobAppendSystemContextResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/set_instruction"],
+        params: MobSetInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/revoke_instruction"],
+        params: MobRevokeInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/instruction_status"],
+        params: MobInstructionStatusParams,
+        /,
+    ) -> Awaitable[MobInstructionStatusResult]: ...
 
     @overload
     def __call__(

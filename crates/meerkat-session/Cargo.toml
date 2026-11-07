@@ -45,7 +45,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 meerkat-core = { workspace = true, features = ["test-support"] }
 meerkat-store = { workspace = true, features = ["memory"] }
-meerkat-runtime = { workspace = true, features = ["sqlite-store", "test-support"] }
+meerkat-runtime = { workspace = true, features = ["sqlite-store", "test-support", "local-authorization"] }
 
 [features]
 default = []

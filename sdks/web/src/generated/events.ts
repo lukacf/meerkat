@@ -423,10 +423,44 @@ export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_v
 
 export type InputId = string;
 
+export interface InstructionActiveRef {
+  body_bytes: number;
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+}
+
+export type InstructionChange = {
+  body_bytes: number;
+  change: "activate";
+  content_sha256: InstructionContentDigest;
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  supersedes?: InstructionRevision | null;
+} | {
+  change: "revoke";
+  key: InstructionKey;
+  namespace: InstructionNamespace;
+  revision: InstructionRevision;
+  revokes: InstructionRevision;
+};
+
+export type InstructionContentDigest = string;
+
+export type InstructionEntryKind = "delta" | "snapshot";
+
+export type InstructionKey = string;
+
 export interface InstructionKeyRef {
   key: string;
   namespace: string;
 }
+
+export type InstructionNamespace = string;
+
+export type InstructionRevision = number;
 
 export type InteractionFailureReason = {
   kind: "cancelled";
@@ -1581,6 +1615,16 @@ export interface ToolResultsBoundedForRequestEvent {
   type: "tool_results_bounded_for_request";
 }
 
+export interface OperatorInstructionsAppliedEvent {
+  active?: InstructionActiveRef[];
+  changes?: InstructionChange[];
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  run_id?: RunId | null;
+  session_id: SessionId;
+  type: "operator_instructions_applied";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1634,7 +1678,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "live_channel_closed",
   "request_reasoning_lowered",
   "run_resumed",
-  "tool_results_bounded_for_request"
+  "tool_results_bounded_for_request",
+  "operator_instructions_applied"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1692,4 +1737,5 @@ export type AgentEvent =
   HookLaunchRefusedEvent |
   RequestReasoningLoweredEvent |
   RunResumedEvent |
-  ToolResultsBoundedForRequestEvent;
+  ToolResultsBoundedForRequestEvent |
+  OperatorInstructionsAppliedEvent;

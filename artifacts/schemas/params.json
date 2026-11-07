@@ -2982,6 +2982,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -33428,6 +33481,81 @@
     "title": "MobIngressInteractionParams",
     "type": "object"
   },
+  "MobInstructionStatusParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/instruction_status`: the mob's records\n(optionally one namespace or slot) and one page of members (optionally\none member or one profile).",
+    "properties": {
+      "agent_identity": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "key": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "limit": {
+        "description": "1 to 200 members; absent reads 100.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "offset": {
+        "description": "Members to skip, in identity order.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "profile": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "mob_id"
+    ],
+    "title": "MobInstructionStatusParams",
+    "type": "object"
+  },
   "MobLifecycleParams": {
     "$defs": {
       "WireMobLifecycleAction": {
@@ -37179,6 +37307,49 @@
     "title": "MobRevokeHostParams",
     "type": "object"
   },
+  "MobRevokeInstructionParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/revoke_instruction`: revoke one slot at a higher\nrevision. The record keeps its target.",
+    "properties": {
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      }
+    },
+    "required": [
+      "mob_id",
+      "namespace",
+      "key",
+      "revision"
+    ],
+    "title": "MobRevokeInstructionParams",
+    "type": "object"
+  },
   "MobRevokeScopesParams": {
     "$defs": {
       "WireControlScope": {
@@ -37253,6 +37424,129 @@
       "mob_id"
     ],
     "title": "MobRunParams",
+    "type": "object"
+  },
+  "MobSetInstructionParams": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "WireInstructionTarget": {
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Every member of the mob.",
+            "properties": {
+              "kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The members of one profile.",
+            "properties": {
+              "kind": {
+                "const": "profile",
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "profile"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One member.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/set_instruction`: one slot's body at a revision,\nfor the members the target selects.",
+    "properties": {
+      "body": {
+        "description": "The exact UTF-8 body, at most 256 KiB.",
+        "type": "string"
+      },
+      "content_sha256": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The body's digest as the caller computed it; one that is not the\nbody's is refused (`digest_mismatch`)."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision",
+        "description": "Strictly increasing per slot within the mob."
+      },
+      "target": {
+        "$ref": "#/$defs/WireInstructionTarget"
+      }
+    },
+    "required": [
+      "mob_id",
+      "namespace",
+      "key",
+      "revision",
+      "body",
+      "target"
+    ],
+    "title": "MobSetInstructionParams",
     "type": "object"
   },
   "MobSpawnHelperParams": {
@@ -41724,6 +42018,49 @@
     "title": "RestoreSessionTranscriptRevisionParams",
     "type": "object"
   },
+  "RevokeSessionInstructionParams": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/revoke_instruction`: revoke one session-owned\nslot at a higher revision.",
+    "properties": {
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "namespace",
+      "key",
+      "revision"
+    ],
+    "title": "RevokeSessionInstructionParams",
+    "type": "object"
+  },
   "RevokeToolGrantParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
@@ -45130,6 +45467,21 @@
     ],
     "title": "SessionInputStateSelector"
   },
+  "SessionInstructionStatusParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/instruction_status`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "SessionInstructionStatusParams",
+    "type": "object"
+  },
   "SessionPeerResponseTerminalParams": {
     "$defs": {
       "PeerCorrelationId": {
@@ -45220,6 +45572,70 @@
       "session_id"
     ],
     "title": "SessionStreamOpenParams",
+    "type": "object"
+  },
+  "SetSessionInstructionParams": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/set_instruction`: one session-owned write of\na slot's body at a revision.",
+    "properties": {
+      "body": {
+        "description": "The exact UTF-8 body, at most 256 KiB.",
+        "type": "string"
+      },
+      "content_sha256": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The body's digest as the caller computed it; one that is not the\nbody's is refused (`digest_mismatch`)."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision",
+        "description": "Strictly increasing per slot within the session."
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "namespace",
+      "key",
+      "revision",
+      "body"
+    ],
+    "title": "SetSessionInstructionParams",
     "type": "object"
   },
   "SkillsParams": {

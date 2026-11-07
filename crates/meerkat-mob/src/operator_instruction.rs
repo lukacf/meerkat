@@ -556,3 +556,240 @@ pub struct MemberInstructionStatus {
     /// member's turns.
     pub live_channel_open: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Wire forms
+// ---------------------------------------------------------------------------
+
+impl OperatorInstructionTarget {
+    /// The target as the RPC wire carries it.
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::WireInstructionTarget {
+        match self {
+            Self::Mob => meerkat_contracts::WireInstructionTarget::Mob,
+            Self::Profile { profile } => meerkat_contracts::WireInstructionTarget::Profile {
+                profile: profile.as_str().to_owned(),
+            },
+            Self::Member { agent_identity } => meerkat_contracts::WireInstructionTarget::Member {
+                agent_identity: agent_identity.as_str().to_owned(),
+            },
+        }
+    }
+
+    /// The target a wire request names.
+    #[must_use]
+    pub fn from_wire(target: meerkat_contracts::WireInstructionTarget) -> Self {
+        match target {
+            meerkat_contracts::WireInstructionTarget::Mob => Self::Mob,
+            meerkat_contracts::WireInstructionTarget::Profile { profile } => Self::Profile {
+                profile: ProfileName::from(profile),
+            },
+            meerkat_contracts::WireInstructionTarget::Member { agent_identity } => Self::Member {
+                agent_identity: AgentIdentity::from(agent_identity),
+            },
+        }
+    }
+}
+
+impl OperatorInstructionReceipt {
+    /// The receipt as the RPC wire carries it.
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::MobInstructionWriteResult {
+        meerkat_contracts::MobInstructionWriteResult {
+            mob_id: self.mob_id.as_str().to_owned(),
+            namespace: self.slot.namespace.clone(),
+            key: self.slot.key.clone(),
+            revision: self.revision,
+            disposition: match self.disposition {
+                OperatorInstructionDisposition::Committed => {
+                    meerkat_contracts::WireMobInstructionDisposition::Committed
+                }
+                OperatorInstructionDisposition::Duplicate => {
+                    meerkat_contracts::WireMobInstructionDisposition::Duplicate
+                }
+            },
+            generation: self.generation,
+            matched_members: self.matched_members,
+        }
+    }
+}
+
+impl OperatorInstructionStatusPage {
+    /// The page as the RPC wire carries it.
+    #[must_use]
+    pub fn to_wire(&self) -> meerkat_contracts::MobInstructionStatusResult {
+        meerkat_contracts::MobInstructionStatusResult {
+            mob_id: self.mob_id.as_str().to_owned(),
+            generation: self.generation,
+            desired: self
+                .desired
+                .iter()
+                .map(OperatorInstructionRecordStatus::to_wire)
+                .collect(),
+            members: self
+                .members
+                .iter()
+                .map(MemberInstructionStatus::to_wire)
+                .collect(),
+            next_offset: self.next_offset.map(wire_count),
+        }
+    }
+}
+
+/// A count or index as the wire carries it.
+fn wire_count(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+impl OperatorInstructionRecordStatus {
+    fn to_wire(&self) -> meerkat_contracts::WireInstructionRecord {
+        meerkat_contracts::WireInstructionRecord {
+            namespace: self.slot.namespace.clone(),
+            key: self.slot.key.clone(),
+            revision: self.revision,
+            effect: self.effect,
+            target: self.target.to_wire(),
+            content_sha256: self.content_sha256.clone(),
+            body_bytes: self.body_bytes,
+        }
+    }
+}
+
+impl MemberInstructionResidency {
+    fn to_wire(self) -> meerkat_contracts::WireInstructionResidency {
+        match self {
+            Self::Live => meerkat_contracts::WireInstructionResidency::Live,
+            Self::Dormant => meerkat_contracts::WireInstructionResidency::Dormant,
+            Self::Unborn => meerkat_contracts::WireInstructionResidency::Unborn,
+        }
+    }
+}
+
+impl MemberInstructionBlockReason {
+    fn to_wire(self) -> meerkat_contracts::WireInstructionBlockReason {
+        match self {
+            Self::MemberHostUnsupported => {
+                meerkat_contracts::WireInstructionBlockReason::MemberHostUnsupported
+            }
+            Self::SlotManagedByActivation => {
+                meerkat_contracts::WireInstructionBlockReason::SlotManagedByActivation
+            }
+            Self::DurabilityUnavailable => {
+                meerkat_contracts::WireInstructionBlockReason::DurabilityUnavailable
+            }
+            Self::OwnedBySession => meerkat_contracts::WireInstructionBlockReason::OwnedBySession,
+            Self::OwnedByOtherMob => meerkat_contracts::WireInstructionBlockReason::OwnedByOtherMob,
+        }
+    }
+}
+
+impl MemberInstructionPendingReason {
+    fn to_wire(self) -> meerkat_contracts::WireInstructionPendingReason {
+        match self {
+            Self::AwaitingRunStart => {
+                meerkat_contracts::WireInstructionPendingReason::AwaitingRunStart
+            }
+            Self::LeadingPrefixOnlyLowering => {
+                meerkat_contracts::WireInstructionPendingReason::LeadingPrefixOnlyLowering
+            }
+            Self::LoweringUnavailable => {
+                meerkat_contracts::WireInstructionPendingReason::LoweringUnavailable
+            }
+            Self::SessionUnborn => meerkat_contracts::WireInstructionPendingReason::SessionUnborn,
+            Self::DeliveryOwed => meerkat_contracts::WireInstructionPendingReason::DeliveryOwed,
+        }
+    }
+}
+
+impl MemberInstructionSlotView {
+    fn to_wire(self) -> meerkat_contracts::WireInstructionSlotView {
+        meerkat_contracts::WireInstructionSlotView {
+            revision: self.revision,
+            effect: self.effect,
+        }
+    }
+}
+
+impl MemberInstructionEffectiveSlot {
+    fn to_wire(&self) -> meerkat_contracts::WireInstructionEffectiveSlot {
+        meerkat_contracts::WireInstructionEffectiveSlot {
+            revision: self.revision,
+            effect: self.effect,
+            entry_sequence: self.entry_sequence,
+            kind: self.kind,
+            run_id: self.run_id.clone(),
+            message_index: wire_count(self.message_index),
+        }
+    }
+}
+
+impl MemberInstructionSlotState {
+    fn to_wire(self) -> meerkat_contracts::WireInstructionSlotState {
+        match self {
+            Self::Effective => meerkat_contracts::WireInstructionSlotState::Effective,
+            Self::Pending { reason } => meerkat_contracts::WireInstructionSlotState::Pending {
+                reason: reason.to_wire(),
+            },
+            Self::Blocked { reason } => meerkat_contracts::WireInstructionSlotState::Blocked {
+                reason: reason.to_wire(),
+            },
+            Self::NotTargeted => meerkat_contracts::WireInstructionSlotState::NotTargeted,
+        }
+    }
+}
+
+impl MemberInstructionStatus {
+    fn to_wire(&self) -> meerkat_contracts::WireMemberInstructionStatus {
+        meerkat_contracts::WireMemberInstructionStatus {
+            agent_identity: self.agent_identity.as_str().to_owned(),
+            profile: self.profile.as_str().to_owned(),
+            residency: self.residency.to_wire(),
+            delivery: meerkat_contracts::WireMemberInstructionDelivery {
+                recorded_generation: self.delivery.recorded_generation,
+                state: match &self.delivery.state {
+                    MemberInstructionDeliveryState::Current => {
+                        meerkat_contracts::WireMemberInstructionDeliveryState::Current
+                    }
+                    MemberInstructionDeliveryState::Owed {
+                        generation,
+                        last_failure,
+                    } => meerkat_contracts::WireMemberInstructionDeliveryState::Owed {
+                        generation: *generation,
+                        last_failure: last_failure.clone(),
+                    },
+                    MemberInstructionDeliveryState::Blocked { reason } => {
+                        meerkat_contracts::WireMemberInstructionDeliveryState::Blocked {
+                            reason: reason.to_wire(),
+                        }
+                    }
+                },
+            },
+            slots: self
+                .slots
+                .iter()
+                .map(|slot| meerkat_contracts::WireMemberInstructionSlot {
+                    namespace: slot.slot.namespace.clone(),
+                    key: slot.slot.key.clone(),
+                    desired: slot.desired.to_wire(),
+                    recorded: slot.recorded.map(MemberInstructionSlotView::to_wire),
+                    effective: slot
+                        .effective
+                        .as_ref()
+                        .map(MemberInstructionEffectiveSlot::to_wire),
+                    state: slot.state.to_wire(),
+                })
+                .collect(),
+            effective_read: match &self.effective_read {
+                MemberInstructionEffectiveRead::Ok => {
+                    meerkat_contracts::WireInstructionEffectiveRead::Ok
+                }
+                MemberInstructionEffectiveRead::Unreadable { reason } => {
+                    meerkat_contracts::WireInstructionEffectiveRead::Unreadable {
+                        reason: reason.clone(),
+                    }
+                }
+            },
+            live_channel_open: self.live_channel_open,
+        }
+    }
+}

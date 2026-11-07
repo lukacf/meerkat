@@ -51,6 +51,11 @@ import type {
   TurnOptions,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
+import type {
+  InstructionWriteOptions,
+  SessionInstructionStatus,
+  SessionInstructionWriteResult,
+} from "./instructions.js";
 import type { EventStream } from "./streaming.js";
 import type { EventSubscription } from "./subscription.js";
 
@@ -204,6 +209,34 @@ export class Session {
     options?: InstructionActivationReadOptions,
   ): Promise<InstructionActivationReadPage> {
     return this._client.instructionActivations(this._id, options);
+  }
+
+  /**
+   * Record one operator instruction of this session: the slot's body at a
+   * revision, applied at the session's next fresh run start.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    options?: InstructionWriteOptions,
+  ): Promise<SessionInstructionWriteResult> {
+    return this._client.setSessionInstruction(this._id, namespace, key, revision, body, options);
+  }
+
+  /** Revoke one operator instruction of this session at a higher revision. */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<SessionInstructionWriteResult> {
+    return this._client.revokeSessionInstruction(this._id, namespace, key, revision);
+  }
+
+  /** Read this session's committed operator-instruction state. */
+  async instructionStatus(): Promise<SessionInstructionStatus> {
+    return this._client.sessionInstructionStatus(this._id);
   }
 
   async restoreTranscriptRevision(

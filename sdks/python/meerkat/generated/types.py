@@ -1214,6 +1214,111 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
 
+# The closed vocabulary of operator-instruction write refusals, as hosts
+# and SDKs read it.
+InstructionSetErrorCode = Literal['invalid_request', 'digest_mismatch', 'stale_revision', 'revision_conflict', 'unknown_slot', 'slot_limit_exceeded', 'body_too_large', 'active_set_budget_exceeded', 'owned_by_mob', 'owned_by_session', 'owned_by_other_mob', 'slot_managed_by_activation', 'durability_unavailable', 'mob_terminal', 'malformed_instruction_history', 'prepared_authorization_required']
+
+# Whether a slot's body applies: `Active`, or `Absent` (revoked, or not
+# targeted at this agent).
+InstructionEffect = Literal['absent', 'active']
+
+# Whether an entry carries the changes since the previous entry (appended
+# at a fresh run start) or the whole active set (a compaction fold).
+InstructionEntryKind = Literal['delta', 'snapshot']
+
+# Wire payload for WireInstructionPendingReason.
+WireInstructionPendingReason = Literal['awaiting_run_start', 'leading_prefix_only_lowering', 'lowering_unavailable', 'session_unborn', 'delivery_owed']
+
+# Wire payload for WireInstructionBlockReason.
+WireInstructionBlockReason = Literal['member_host_unsupported', 'slot_managed_by_activation', 'durability_unavailable', 'owned_by_session', 'owned_by_other_mob']
+
+# Wire payload for WireInstructionResidency.
+WireInstructionResidency = Literal['live', 'dormant', 'unborn']
+
+# Wire payload for WireInstructionLowering.
+WireInstructionLowering = Literal['mid_conversation', 'leading_prefix_only', 'unavailable']
+
+# What a session-owned write or revoke did.
+WireSessionInstructionDisposition = Literal['recorded', 'duplicate']
+
+# What a mob operator-instruction write or revoke did.
+WireMobInstructionDisposition = Literal['committed', 'duplicate']
+
+# Which members of a mob an operator instruction targets: every member, the
+# members of one profile, or one member. A target is a predicate over the
+# roster: a profile or member that does not exist yet selects nobody until
+# it does.
+class WireInstructionTargetMob(TypedDict, total=False):
+    kind: Required[Literal['mob']]
+
+class WireInstructionTargetProfile(TypedDict, total=False):
+    kind: Required[Literal['profile']]
+    profile: Required[str]
+
+class WireInstructionTargetMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    kind: Required[Literal['member']]
+
+WireInstructionTarget = WireInstructionTargetMob | WireInstructionTargetProfile | WireInstructionTargetMember
+
+# A slot's state for one member or session.
+class WireInstructionSlotStateEffective(TypedDict, total=False):
+    state: Required[Literal['effective']]
+
+class WireInstructionSlotStatePending(TypedDict, total=False):
+    reason: Required[WireInstructionPendingReason]
+    state: Required[Literal['pending']]
+
+class WireInstructionSlotStateBlocked(TypedDict, total=False):
+    reason: Required[WireInstructionBlockReason]
+    state: Required[Literal['blocked']]
+
+class WireInstructionSlotStateNotTargeted(TypedDict, total=False):
+    state: Required[Literal['not_targeted']]
+
+WireInstructionSlotState = WireInstructionSlotStateEffective | WireInstructionSlotStatePending | WireInstructionSlotStateBlocked | WireInstructionSlotStateNotTargeted
+
+# Who owns a session's recorded operator-instruction target.
+class WireInstructionTargetOwnerUnowned(TypedDict, total=False):
+    kind: Required[Literal['unowned']]
+
+class WireInstructionTargetOwnerSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+
+class WireInstructionTargetOwnerMob(TypedDict, total=False):
+    agent_identity: Required[str]
+    kind: Required[Literal['mob']]
+    mob_id: Required[str]
+
+WireInstructionTargetOwner = WireInstructionTargetOwnerUnowned | WireInstructionTargetOwnerSession | WireInstructionTargetOwnerMob
+
+# A member's delivery state.
+class WireMemberInstructionDeliveryStateCurrent(TypedDict, total=False):
+    state: Required[Literal['current']]
+
+class WireMemberInstructionDeliveryStateOwed(TypedDict, total=False):
+    generation: Required[int]
+    last_failure: NotRequired[Optional[str]]
+    state: Required[Literal['owed']]
+
+class WireMemberInstructionDeliveryStateBlocked(TypedDict, total=False):
+    reason: Required[WireInstructionBlockReason]
+    state: Required[Literal['blocked']]
+
+WireMemberInstructionDeliveryState = WireMemberInstructionDeliveryStateCurrent | WireMemberInstructionDeliveryStateOwed | WireMemberInstructionDeliveryStateBlocked
+
+# Whether a member's committed session state could be read. An unreadable
+# member keeps its row with the reason; nothing of its session is
+# reported, and the page still answers.
+class WireInstructionEffectiveReadOk(TypedDict, total=False):
+    status: Required[Literal['ok']]
+
+class WireInstructionEffectiveReadUnreadable(TypedDict, total=False):
+    reason: Required[str]
+    status: Required[Literal['unreadable']]
+
+WireInstructionEffectiveRead = WireInstructionEffectiveReadOk | WireInstructionEffectiveReadUnreadable
+
 @dataclass
 class ActivateInstructionParams:
     """Request payload for `session/activate_instruction`."""
@@ -2082,6 +2187,200 @@ the next page while more rows may follow."""
     rows: list[WireToolGrantAuditRow]
     next_sequence: Optional[int] = None
     unreadable: Optional[list[WireUnreadableToolGrantAuditRow]] = None
+
+
+@dataclass
+class InstructionSetErrorData:
+    """The `data` of a JSON-RPC error that refuses an operator-instruction write
+or read: its code in the closed refusal vocabulary."""
+    instruction_set_code: InstructionSetErrorCode
+
+
+@dataclass
+class WireInstructionSlotView:
+    """A slot's revision and effect."""
+    effect: InstructionEffect
+    revision: int
+
+
+@dataclass
+class WireInstructionEffectiveSlot:
+    """The committed entry that put a slot's state in effect in a session."""
+    effect: InstructionEffect
+    entry_sequence: int
+    kind: InstructionEntryKind
+    message_index: int
+    revision: int
+    run_id: Optional[RunId] = None
+
+
+@dataclass
+class WireSessionInstructionSlot:
+    """One slot of a session: its recorded target and the entry in effect."""
+    key: str
+    namespace: str
+    state: WireInstructionSlotState
+    effective: Optional[WireInstructionEffectiveSlot] = None
+    recorded: Optional[WireInstructionSlotView] = None
+
+
+@dataclass
+class SetSessionInstructionParams:
+    """Request payload for `session/set_instruction`: one session-owned write of
+a slot's body at a revision."""
+    body: str
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class RevokeSessionInstructionParams:
+    """Request payload for `session/revoke_instruction`: revoke one session-owned
+slot at a higher revision."""
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+
+
+@dataclass
+class SessionInstructionStatusParams:
+    """Request payload for `session/instruction_status`."""
+    session_id: str
+
+
+@dataclass
+class SessionInstructionWriteResult:
+    """Response payload for `session/set_instruction` and
+`session/revoke_instruction`, returned once the target is durable in the
+session document. The change applies at the session's next fresh run
+start."""
+    disposition: WireSessionInstructionDisposition
+    key: str
+    namespace: str
+    revision: int
+    session_id: str
+    target_generation: int
+
+
+@dataclass
+class SessionInstructionStatusResult:
+    """Response payload for `session/instruction_status`: the session's
+committed operator-instruction state, read without materializing it."""
+    entry_sequence: int
+    owner: WireInstructionTargetOwner
+    session_id: str
+    slots: list[WireSessionInstructionSlot]
+    target_generation: int
+    lowering: Optional[WireInstructionLowering] = None
+
+
+@dataclass
+class WireInstructionRecord:
+    """One desired record of a mob."""
+    effect: InstructionEffect
+    key: str
+    namespace: str
+    revision: int
+    target: WireInstructionTarget
+    body_bytes: Optional[int] = None
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class WireMemberInstructionSlot:
+    """One slot of one mob member."""
+    desired: WireInstructionSlotView
+    key: str
+    namespace: str
+    state: WireInstructionSlotState
+    effective: Optional[WireInstructionEffectiveSlot] = None
+    recorded: Optional[WireInstructionSlotView] = None
+
+
+@dataclass
+class WireMemberInstructionDelivery:
+    """A member's delivery facts."""
+    state: WireMemberInstructionDeliveryState
+    recorded_generation: Optional[int] = None
+
+
+@dataclass
+class WireMemberInstructionStatus:
+    """One member's operator-instruction status."""
+    agent_identity: str
+    delivery: WireMemberInstructionDelivery
+    effective_read: WireInstructionEffectiveRead
+    live_channel_open: bool
+    profile: str
+    residency: WireInstructionResidency
+    slots: list[WireMemberInstructionSlot]
+
+
+@dataclass
+class MobSetInstructionParams:
+    """Request payload for `mob/set_instruction`: one slot's body at a revision,
+for the members the target selects."""
+    body: str
+    key: str
+    mob_id: str
+    namespace: str
+    revision: int
+    target: WireInstructionTarget
+    content_sha256: Optional[str] = None
+
+
+@dataclass
+class MobRevokeInstructionParams:
+    """Request payload for `mob/revoke_instruction`: revoke one slot at a higher
+revision. The record keeps its target."""
+    key: str
+    mob_id: str
+    namespace: str
+    revision: int
+
+
+@dataclass
+class MobInstructionStatusParams:
+    """Request payload for `mob/instruction_status`: the mob's records
+(optionally one namespace or slot) and one page of members (optionally
+one member or one profile)."""
+    mob_id: str
+    agent_identity: Optional[str] = None
+    key: Optional[str] = None
+    limit: Optional[int] = None
+    namespace: Optional[str] = None
+    offset: Optional[int] = None
+    profile: Optional[str] = None
+
+
+@dataclass
+class MobInstructionWriteResult:
+    """Response payload for `mob/set_instruction` and `mob/revoke_instruction`,
+returned once the committed record is durable in the mob's journal.
+Delivery to the members is asynchronous: `mob/instruction_status` reports
+it."""
+    disposition: WireMobInstructionDisposition
+    generation: int
+    key: str
+    matched_members: int
+    mob_id: str
+    namespace: str
+    revision: int
+
+
+@dataclass
+class MobInstructionStatusResult:
+    """Response payload for `mob/instruction_status`. Reads the committed session
+documents and never wakes or materializes a member."""
+    desired: list[WireInstructionRecord]
+    generation: int
+    members: list[WireMemberInstructionStatus]
+    mob_id: str
+    next_offset: Optional[int] = None
 
 
 # Private host/gateway execution declaration for a callback tool.

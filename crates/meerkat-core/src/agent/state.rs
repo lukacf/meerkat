@@ -5556,6 +5556,25 @@ where
                                         "compaction event stream receiver dropped before CompactionCompleted"
                                     );
                                 }
+                                // The snapshot entry the fold inserted is in
+                                // the session's transcript now: observe it
+                                // (the session's instruction read stays the
+                                // authority).
+                                if let Some(entry) = instruction_fold
+                                    .as_ref()
+                                    .and_then(crate::session::InstructionFold::snapshot)
+                                    .and_then(|row| row.instruction_entry.as_ref())
+                                {
+                                    let _ = crate::event_tap::tap_emit(
+                                        &self.event_tap,
+                                        event_tx.as_ref(),
+                                        AgentEvent::operator_instructions_applied(
+                                            self.session.id().clone(),
+                                            entry,
+                                        ),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
@@ -6710,8 +6729,9 @@ where
             run_id
         };
         // The run started: an operator-instruction entry its run start
-        // applied names a run that ran.
-        self.note_operator_instruction_run_started();
+        // applied names a run that ran. The entry's observation is published
+        // once the run's start is.
+        let operator_instructions_applied = self.note_operator_instruction_run_started();
         // A provisional receipt belongs to exactly one run. Clear any
         // zero-checkpoint predecessor synchronously once the fresh run
         // identity is known, before the first suspension point, so service
@@ -6784,6 +6804,12 @@ where
                     self.emit_run_started_event(input, event_tx.as_ref()).await;
                 }
             }
+        }
+        // The delta entry this run's start appended is in its model context
+        // from its first request: observe it (the session's instruction read
+        // stays the authority).
+        if let Some(applied) = operator_instructions_applied {
+            let _ = crate::event_tap::tap_emit(&self.event_tap, event_tx.as_ref(), *applied).await;
         }
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {

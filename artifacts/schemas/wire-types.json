@@ -2212,6 +2212,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4179,6 +4232,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -4194,6 +4376,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -28197,6 +28389,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -30294,6 +30539,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -30309,6 +30683,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -43110,6 +43494,59 @@
               "run_id",
               "results",
               "axis"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
             ],
             "type": "object"
           }
@@ -59506,6 +59943,59 @@
               "run_id",
               "results",
               "axis"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
             ],
             "type": "object"
           }
@@ -84040,6 +84530,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -101295,6 +101838,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -103326,6 +103922,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -103341,6 +104066,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -113156,6 +113891,88 @@
       "status"
     ],
     "title": "InjectSystemContextResult",
+    "type": "object"
+  },
+  "InstructionEffect": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+    "enum": [
+      "absent",
+      "active"
+    ],
+    "title": "InstructionEffect",
+    "type": "string"
+  },
+  "InstructionEntryKind": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+    "enum": [
+      "delta",
+      "snapshot"
+    ],
+    "title": "InstructionEntryKind",
+    "type": "string"
+  },
+  "InstructionSetErrorCode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The closed vocabulary of operator-instruction write refusals, as hosts\nand SDKs read it.",
+    "enum": [
+      "invalid_request",
+      "digest_mismatch",
+      "stale_revision",
+      "revision_conflict",
+      "unknown_slot",
+      "slot_limit_exceeded",
+      "body_too_large",
+      "active_set_budget_exceeded",
+      "owned_by_mob",
+      "owned_by_session",
+      "owned_by_other_mob",
+      "slot_managed_by_activation",
+      "durability_unavailable",
+      "mob_terminal",
+      "malformed_instruction_history",
+      "prepared_authorization_required"
+    ],
+    "title": "InstructionSetErrorCode",
+    "type": "string"
+  },
+  "InstructionSetErrorData": {
+    "$defs": {
+      "InstructionSetErrorCode": {
+        "description": "The closed vocabulary of operator-instruction write refusals, as hosts\nand SDKs read it.",
+        "enum": [
+          "invalid_request",
+          "digest_mismatch",
+          "stale_revision",
+          "revision_conflict",
+          "unknown_slot",
+          "slot_limit_exceeded",
+          "body_too_large",
+          "active_set_budget_exceeded",
+          "owned_by_mob",
+          "owned_by_session",
+          "owned_by_other_mob",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "mob_terminal",
+          "malformed_instruction_history",
+          "prepared_authorization_required"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The `data` of a JSON-RPC error that refuses an operator-instruction write\nor read: its code in the closed refusal vocabulary.",
+    "properties": {
+      "instruction_set_code": {
+        "$ref": "#/$defs/InstructionSetErrorCode"
+      }
+    },
+    "required": [
+      "instruction_set_code"
+    ],
+    "title": "InstructionSetErrorData",
     "type": "object"
   },
   "InterruptResult": {
@@ -129707,6 +130524,620 @@
       "latest_event_cursor"
     ],
     "title": "MobIngressInteractionResult",
+    "type": "object"
+  },
+  "MobInstructionStatusResult": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionEffectiveRead": {
+        "description": "Whether a member's committed session state could be read. An unreadable\nmember keeps its row with the reason; nothing of its session is\nreported, and the page still answers.",
+        "oneOf": [
+          {
+            "properties": {
+              "status": {
+                "const": "ok",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "const": "unreadable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionEffectiveSlot": {
+        "description": "The committed entry that put a slot's state in effect in a session.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "entry_sequence": {
+            "description": "The entry's sequence: strictly increasing per session.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind",
+            "description": "A delta appended at a run start, or a compaction's snapshot."
+          },
+          "message_index": {
+            "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry."
+          }
+        },
+        "required": [
+          "revision",
+          "effect",
+          "entry_sequence",
+          "kind",
+          "message_index"
+        ],
+        "type": "object"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      },
+      "WireInstructionRecord": {
+        "description": "One desired record of a mob.",
+        "properties": {
+          "body_bytes": {
+            "description": "The body's UTF-8 length while the record is Active.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "content_sha256": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The body's digest while the record is Active."
+          },
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "target": {
+            "$ref": "#/$defs/WireInstructionTarget"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "effect",
+          "target"
+        ],
+        "type": "object"
+      },
+      "WireInstructionResidency": {
+        "enum": [
+          "live",
+          "dormant",
+          "unborn"
+        ],
+        "type": "string"
+      },
+      "WireInstructionSlotState": {
+        "description": "A slot's state for one member or session.",
+        "oneOf": [
+          {
+            "description": "The desired state is in effect.",
+            "properties": {
+              "state": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The desired state is not in effect yet.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionPendingReason"
+              },
+              "state": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+            "properties": {
+              "state": {
+                "const": "not_targeted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionSlotView": {
+        "description": "A slot's revision and effect.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "effect"
+        ],
+        "type": "object"
+      },
+      "WireInstructionTarget": {
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Every member of the mob.",
+            "properties": {
+              "kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The members of one profile.",
+            "properties": {
+              "kind": {
+                "const": "profile",
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "profile"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One member.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberInstructionDelivery": {
+        "description": "A member's delivery facts.",
+        "properties": {
+          "recorded_generation": {
+            "description": "The generation the member's session recorded, as the mob knows it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/WireMemberInstructionDeliveryState"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "WireMemberInstructionDeliveryState": {
+        "description": "A member's delivery state.",
+        "oneOf": [
+          {
+            "description": "The member's session recorded its current snapshot.",
+            "properties": {
+              "state": {
+                "const": "current",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member is owed the snapshot at `generation`.",
+            "properties": {
+              "generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_failure": {
+                "description": "The last retryable failure of the member's delivery.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "const": "owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked until a write selects it again or it\nis seated again.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberInstructionSlot": {
+        "description": "One slot of one mob member.",
+        "properties": {
+          "desired": {
+            "$ref": "#/$defs/WireInstructionSlotView",
+            "description": "The member's view of the mob's record."
+          },
+          "effective": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionEffectiveSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The committed entry that put the slot in effect."
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "recorded": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionSlotView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The member session's recorded target for the slot."
+          },
+          "state": {
+            "$ref": "#/$defs/WireInstructionSlotState"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "desired",
+          "state"
+        ],
+        "type": "object"
+      },
+      "WireMemberInstructionStatus": {
+        "description": "One member's operator-instruction status.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "delivery": {
+            "$ref": "#/$defs/WireMemberInstructionDelivery"
+          },
+          "effective_read": {
+            "$ref": "#/$defs/WireInstructionEffectiveRead"
+          },
+          "live_channel_open": {
+            "description": "A live channel is open on the member's session. Operator instructions\ndo not reach a live channel: they apply to the member's turns.",
+            "type": "boolean"
+          },
+          "profile": {
+            "type": "string"
+          },
+          "residency": {
+            "$ref": "#/$defs/WireInstructionResidency"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/$defs/WireMemberInstructionSlot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_identity",
+          "profile",
+          "residency",
+          "delivery",
+          "slots",
+          "effective_read",
+          "live_channel_open"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/instruction_status`. Reads the committed session\ndocuments and never wakes or materializes a member.",
+    "properties": {
+      "desired": {
+        "description": "The mob's records, sorted by slot.",
+        "items": {
+          "$ref": "#/$defs/WireInstructionRecord"
+        },
+        "type": "array"
+      },
+      "generation": {
+        "description": "The mob's operator-instruction generation.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "members": {
+        "description": "One page of members, in identity order.",
+        "items": {
+          "$ref": "#/$defs/WireMemberInstructionStatus"
+        },
+        "type": "array"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "next_offset": {
+        "description": "The offset of the next page, when there is one.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "mob_id",
+      "generation",
+      "desired",
+      "members"
+    ],
+    "title": "MobInstructionStatusResult",
+    "type": "object"
+  },
+  "MobInstructionWriteResult": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "WireMobInstructionDisposition": {
+        "description": "What a mob operator-instruction write or revoke did.",
+        "enum": [
+          "committed",
+          "duplicate"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `mob/set_instruction` and `mob/revoke_instruction`,\nreturned once the committed record is durable in the mob's journal.\nDelivery to the members is asynchronous: `mob/instruction_status` reports\nit.",
+    "properties": {
+      "disposition": {
+        "$ref": "#/$defs/WireMobInstructionDisposition"
+      },
+      "generation": {
+        "description": "The mob's operator-instruction generation after the write.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "matched_members": {
+        "description": "How many current members the record's target selects; a target that\nnames a missing profile or member shows zero.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      }
+    },
+    "required": [
+      "mob_id",
+      "namespace",
+      "key",
+      "revision",
+      "disposition",
+      "generation",
+      "matched_members"
+    ],
+    "title": "MobInstructionWriteResult",
     "type": "object"
   },
   "MobLifecycleResult": {
@@ -156736,6 +158167,403 @@
     "title": "SessionForkResult",
     "type": "object"
   },
+  "SessionInstructionStatusResult": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionEffectiveSlot": {
+        "description": "The committed entry that put a slot's state in effect in a session.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "entry_sequence": {
+            "description": "The entry's sequence: strictly increasing per session.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind",
+            "description": "A delta appended at a run start, or a compaction's snapshot."
+          },
+          "message_index": {
+            "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry."
+          }
+        },
+        "required": [
+          "revision",
+          "effect",
+          "entry_sequence",
+          "kind",
+          "message_index"
+        ],
+        "type": "object"
+      },
+      "WireInstructionLowering": {
+        "enum": [
+          "mid_conversation",
+          "leading_prefix_only",
+          "unavailable"
+        ],
+        "type": "string"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      },
+      "WireInstructionSlotState": {
+        "description": "A slot's state for one member or session.",
+        "oneOf": [
+          {
+            "description": "The desired state is in effect.",
+            "properties": {
+              "state": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The desired state is not in effect yet.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionPendingReason"
+              },
+              "state": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+            "properties": {
+              "state": {
+                "const": "not_targeted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionSlotView": {
+        "description": "A slot's revision and effect.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "effect"
+        ],
+        "type": "object"
+      },
+      "WireInstructionTargetOwner": {
+        "description": "Who owns a session's recorded operator-instruction target.",
+        "oneOf": [
+          {
+            "description": "No owner holds a target.",
+            "properties": {
+              "kind": {
+                "const": "unowned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The session's own host writes the target slot by slot.",
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A mob delivers its member's whole snapshot; only the mob writes it.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "mob",
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireSessionInstructionSlot": {
+        "description": "One slot of a session: its recorded target and the entry in effect.",
+        "properties": {
+          "effective": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionEffectiveSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The committed entry that put the slot in effect."
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "recorded": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionSlotView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The session's recorded target for the slot."
+          },
+          "state": {
+            "$ref": "#/$defs/WireInstructionSlotState"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "state"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `session/instruction_status`: the session's\ncommitted operator-instruction state, read without materializing it.",
+    "properties": {
+      "entry_sequence": {
+        "description": "The highest entry sequence the session minted.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "lowering": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInstructionLowering"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "How the session's model lowers entries, when its service can tell."
+      },
+      "owner": {
+        "$ref": "#/$defs/WireInstructionTargetOwner"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "slots": {
+        "description": "Every slot the target or an entry names, sorted by slot.",
+        "items": {
+          "$ref": "#/$defs/WireSessionInstructionSlot"
+        },
+        "type": "array"
+      },
+      "target_generation": {
+        "description": "The generation of the recorded target.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "owner",
+      "target_generation",
+      "entry_sequence",
+      "slots"
+    ],
+    "title": "SessionInstructionStatusResult",
+    "type": "object"
+  },
+  "SessionInstructionWriteResult": {
+    "$defs": {
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "WireSessionInstructionDisposition": {
+        "description": "What a session-owned write or revoke did.",
+        "enum": [
+          "recorded",
+          "duplicate"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `session/set_instruction` and\n`session/revoke_instruction`, returned once the target is durable in the\nsession document. The change applies at the session's next fresh run\nstart.",
+    "properties": {
+      "disposition": {
+        "$ref": "#/$defs/WireSessionInstructionDisposition"
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "target_generation": {
+        "description": "The generation of the session's recorded target after the write.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "namespace",
+      "key",
+      "revision",
+      "disposition",
+      "target_generation"
+    ],
+    "title": "SessionInstructionWriteResult",
+    "type": "object"
+  },
   "SessionStreamCloseResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `session/stream_close`.",
@@ -168100,6 +169928,59 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction's\nrewrite is in the session (for a staged memory projection, before the\nruntime commits it). A restart before the entry is durable (the run's\nfirst checkpoint, or the projection's commit) applies the changes\nagain at the next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -170105,6 +171986,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -170120,6 +172130,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -180909,6 +182929,528 @@
     "title": "WireInputTerminalOutcome",
     "type": "string"
   },
+  "WireInstructionBlockReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "member_host_unsupported",
+      "slot_managed_by_activation",
+      "durability_unavailable",
+      "owned_by_session",
+      "owned_by_other_mob"
+    ],
+    "title": "WireInstructionBlockReason",
+    "type": "string"
+  },
+  "WireInstructionEffectiveRead": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether a member's committed session state could be read. An unreadable\nmember keeps its row with the reason; nothing of its session is\nreported, and the page still answers.",
+    "oneOf": [
+      {
+        "properties": {
+          "status": {
+            "const": "ok",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "const": "unreadable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireInstructionEffectiveRead"
+  },
+  "WireInstructionEffectiveSlot": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The committed entry that put a slot's state in effect in a session.",
+    "properties": {
+      "effect": {
+        "$ref": "#/$defs/InstructionEffect"
+      },
+      "entry_sequence": {
+        "description": "The entry's sequence: strictly increasing per session.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "$ref": "#/$defs/InstructionEntryKind",
+        "description": "A delta appended at a run start, or a compaction's snapshot."
+      },
+      "message_index": {
+        "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      },
+      "run_id": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RunId"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The run whose start applied the entry."
+      }
+    },
+    "required": [
+      "revision",
+      "effect",
+      "entry_sequence",
+      "kind",
+      "message_index"
+    ],
+    "title": "WireInstructionEffectiveSlot",
+    "type": "object"
+  },
+  "WireInstructionLowering": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "mid_conversation",
+      "leading_prefix_only",
+      "unavailable"
+    ],
+    "title": "WireInstructionLowering",
+    "type": "string"
+  },
+  "WireInstructionPendingReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "awaiting_run_start",
+      "leading_prefix_only_lowering",
+      "lowering_unavailable",
+      "session_unborn",
+      "delivery_owed"
+    ],
+    "title": "WireInstructionPendingReason",
+    "type": "string"
+  },
+  "WireInstructionRecord": {
+    "$defs": {
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "WireInstructionTarget": {
+        "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Every member of the mob.",
+            "properties": {
+              "kind": {
+                "const": "mob",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The members of one profile.",
+            "properties": {
+              "kind": {
+                "const": "profile",
+                "type": "string"
+              },
+              "profile": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "profile"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "One member.",
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One desired record of a mob.",
+    "properties": {
+      "body_bytes": {
+        "description": "The body's UTF-8 length while the record is Active.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "content_sha256": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The body's digest while the record is Active."
+      },
+      "effect": {
+        "$ref": "#/$defs/InstructionEffect"
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      },
+      "target": {
+        "$ref": "#/$defs/WireInstructionTarget"
+      }
+    },
+    "required": [
+      "namespace",
+      "key",
+      "revision",
+      "effect",
+      "target"
+    ],
+    "title": "WireInstructionRecord",
+    "type": "object"
+  },
+  "WireInstructionResidency": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "live",
+      "dormant",
+      "unborn"
+    ],
+    "title": "WireInstructionResidency",
+    "type": "string"
+  },
+  "WireInstructionSlotState": {
+    "$defs": {
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A slot's state for one member or session.",
+    "oneOf": [
+      {
+        "description": "The desired state is in effect.",
+        "properties": {
+          "state": {
+            "const": "effective",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The desired state is not in effect yet.",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/WireInstructionPendingReason"
+          },
+          "state": {
+            "const": "pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The member's delivery is blocked.",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/WireInstructionBlockReason"
+          },
+          "state": {
+            "const": "blocked",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+        "properties": {
+          "state": {
+            "const": "not_targeted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireInstructionSlotState"
+  },
+  "WireInstructionSlotView": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A slot's revision and effect.",
+    "properties": {
+      "effect": {
+        "$ref": "#/$defs/InstructionEffect"
+      },
+      "revision": {
+        "$ref": "#/$defs/InstructionRevision"
+      }
+    },
+    "required": [
+      "revision",
+      "effect"
+    ],
+    "title": "WireInstructionSlotView",
+    "type": "object"
+  },
+  "WireInstructionTarget": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Which members of a mob an operator instruction targets: every member, the\nmembers of one profile, or one member. A target is a predicate over the\nroster: a profile or member that does not exist yet selects nobody until\nit does.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Every member of the mob.",
+        "properties": {
+          "kind": {
+            "const": "mob",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The members of one profile.",
+        "properties": {
+          "kind": {
+            "const": "profile",
+            "type": "string"
+          },
+          "profile": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "profile"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "One member.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "member",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "agent_identity"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireInstructionTarget"
+  },
+  "WireInstructionTargetOwner": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who owns a session's recorded operator-instruction target.",
+    "oneOf": [
+      {
+        "description": "No owner holds a target.",
+        "properties": {
+          "kind": {
+            "const": "unowned",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The session's own host writes the target slot by slot.",
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A mob delivers its member's whole snapshot; only the mob writes it.",
+        "properties": {
+          "agent_identity": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "mob",
+            "type": "string"
+          },
+          "mob_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "mob_id",
+          "agent_identity"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireInstructionTargetOwner"
+  },
   "WireLiveAdapterErrorCode": {
     "$defs": {
       "WireLiveConfigRejectionReason": {
@@ -188431,6 +190973,804 @@
     "title": "WireMemberHistoryPageBody",
     "type": "object"
   },
+  "WireMemberInstructionDelivery": {
+    "$defs": {
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireMemberInstructionDeliveryState": {
+        "description": "A member's delivery state.",
+        "oneOf": [
+          {
+            "description": "The member's session recorded its current snapshot.",
+            "properties": {
+              "state": {
+                "const": "current",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member is owed the snapshot at `generation`.",
+            "properties": {
+              "generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_failure": {
+                "description": "The last retryable failure of the member's delivery.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "const": "owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked until a write selects it again or it\nis seated again.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A member's delivery facts.",
+    "properties": {
+      "recorded_generation": {
+        "description": "The generation the member's session recorded, as the mob knows it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "state": {
+        "$ref": "#/$defs/WireMemberInstructionDeliveryState"
+      }
+    },
+    "required": [
+      "state"
+    ],
+    "title": "WireMemberInstructionDelivery",
+    "type": "object"
+  },
+  "WireMemberInstructionDeliveryState": {
+    "$defs": {
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A member's delivery state.",
+    "oneOf": [
+      {
+        "description": "The member's session recorded its current snapshot.",
+        "properties": {
+          "state": {
+            "const": "current",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The member is owed the snapshot at `generation`.",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_failure": {
+            "description": "The last retryable failure of the member's delivery.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "const": "owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "generation"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The member's delivery is blocked until a write selects it again or it\nis seated again.",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/WireInstructionBlockReason"
+          },
+          "state": {
+            "const": "blocked",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "reason"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireMemberInstructionDeliveryState"
+  },
+  "WireMemberInstructionSlot": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionEffectiveSlot": {
+        "description": "The committed entry that put a slot's state in effect in a session.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "entry_sequence": {
+            "description": "The entry's sequence: strictly increasing per session.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind",
+            "description": "A delta appended at a run start, or a compaction's snapshot."
+          },
+          "message_index": {
+            "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry."
+          }
+        },
+        "required": [
+          "revision",
+          "effect",
+          "entry_sequence",
+          "kind",
+          "message_index"
+        ],
+        "type": "object"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      },
+      "WireInstructionSlotState": {
+        "description": "A slot's state for one member or session.",
+        "oneOf": [
+          {
+            "description": "The desired state is in effect.",
+            "properties": {
+              "state": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The desired state is not in effect yet.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionPendingReason"
+              },
+              "state": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+            "properties": {
+              "state": {
+                "const": "not_targeted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionSlotView": {
+        "description": "A slot's revision and effect.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "effect"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One slot of one mob member.",
+    "properties": {
+      "desired": {
+        "$ref": "#/$defs/WireInstructionSlotView",
+        "description": "The member's view of the mob's record."
+      },
+      "effective": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInstructionEffectiveSlot"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The committed entry that put the slot in effect."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "recorded": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInstructionSlotView"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The member session's recorded target for the slot."
+      },
+      "state": {
+        "$ref": "#/$defs/WireInstructionSlotState"
+      }
+    },
+    "required": [
+      "namespace",
+      "key",
+      "desired",
+      "state"
+    ],
+    "title": "WireMemberInstructionSlot",
+    "type": "object"
+  },
+  "WireMemberInstructionStatus": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionEffectiveRead": {
+        "description": "Whether a member's committed session state could be read. An unreadable\nmember keeps its row with the reason; nothing of its session is\nreported, and the page still answers.",
+        "oneOf": [
+          {
+            "properties": {
+              "status": {
+                "const": "ok",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "const": "unreadable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionEffectiveSlot": {
+        "description": "The committed entry that put a slot's state in effect in a session.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "entry_sequence": {
+            "description": "The entry's sequence: strictly increasing per session.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind",
+            "description": "A delta appended at a run start, or a compaction's snapshot."
+          },
+          "message_index": {
+            "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry."
+          }
+        },
+        "required": [
+          "revision",
+          "effect",
+          "entry_sequence",
+          "kind",
+          "message_index"
+        ],
+        "type": "object"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      },
+      "WireInstructionResidency": {
+        "enum": [
+          "live",
+          "dormant",
+          "unborn"
+        ],
+        "type": "string"
+      },
+      "WireInstructionSlotState": {
+        "description": "A slot's state for one member or session.",
+        "oneOf": [
+          {
+            "description": "The desired state is in effect.",
+            "properties": {
+              "state": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The desired state is not in effect yet.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionPendingReason"
+              },
+              "state": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+            "properties": {
+              "state": {
+                "const": "not_targeted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionSlotView": {
+        "description": "A slot's revision and effect.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "effect"
+        ],
+        "type": "object"
+      },
+      "WireMemberInstructionDelivery": {
+        "description": "A member's delivery facts.",
+        "properties": {
+          "recorded_generation": {
+            "description": "The generation the member's session recorded, as the mob knows it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/$defs/WireMemberInstructionDeliveryState"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "type": "object"
+      },
+      "WireMemberInstructionDeliveryState": {
+        "description": "A member's delivery state.",
+        "oneOf": [
+          {
+            "description": "The member's session recorded its current snapshot.",
+            "properties": {
+              "state": {
+                "const": "current",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member is owed the snapshot at `generation`.",
+            "properties": {
+              "generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "last_failure": {
+                "description": "The last retryable failure of the member's delivery.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "const": "owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked until a write selects it again or it\nis seated again.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireMemberInstructionSlot": {
+        "description": "One slot of one mob member.",
+        "properties": {
+          "desired": {
+            "$ref": "#/$defs/WireInstructionSlotView",
+            "description": "The member's view of the mob's record."
+          },
+          "effective": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionEffectiveSlot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The committed entry that put the slot in effect."
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "recorded": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireInstructionSlotView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The member session's recorded target for the slot."
+          },
+          "state": {
+            "$ref": "#/$defs/WireInstructionSlotState"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "desired",
+          "state"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One member's operator-instruction status.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "delivery": {
+        "$ref": "#/$defs/WireMemberInstructionDelivery"
+      },
+      "effective_read": {
+        "$ref": "#/$defs/WireInstructionEffectiveRead"
+      },
+      "live_channel_open": {
+        "description": "A live channel is open on the member's session. Operator instructions\ndo not reach a live channel: they apply to the member's turns.",
+        "type": "boolean"
+      },
+      "profile": {
+        "type": "string"
+      },
+      "residency": {
+        "$ref": "#/$defs/WireInstructionResidency"
+      },
+      "slots": {
+        "items": {
+          "$ref": "#/$defs/WireMemberInstructionSlot"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "agent_identity",
+      "profile",
+      "residency",
+      "delivery",
+      "slots",
+      "effective_read",
+      "live_channel_open"
+    ],
+    "title": "WireMemberInstructionStatus",
+    "type": "object"
+  },
   "WireMemberLaunchMode": {
     "$defs": {
       "WireForkContext": {
@@ -189424,6 +192764,16 @@
     ],
     "title": "WireMobError",
     "type": "object"
+  },
+  "WireMobInstructionDisposition": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a mob operator-instruction write or revoke did.",
+    "enum": [
+      "committed",
+      "duplicate"
+    ],
+    "title": "WireMobInstructionDisposition",
+    "type": "string"
   },
   "WireMobLifecycleFailure": {
     "$defs": {
@@ -197961,6 +201311,243 @@
       "provider"
     ],
     "title": "WireSessionInfo",
+    "type": "object"
+  },
+  "WireSessionInstructionDisposition": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a session-owned write or revoke did.",
+    "enum": [
+      "recorded",
+      "duplicate"
+    ],
+    "title": "WireSessionInstructionDisposition",
+    "type": "string"
+  },
+  "WireSessionInstructionSlot": {
+    "$defs": {
+      "InstructionEffect": {
+        "description": "Whether a slot's body applies: `Active`, or `Absent` (revoked, or not\ntargeted at this agent).",
+        "enum": [
+          "absent",
+          "active"
+        ],
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "RunId": {
+        "description": "Unique identifier for a run (a single execution of the agent loop).\n\nCore emits this in `RunEvent` and tracks it across the run lifecycle.",
+        "type": "string"
+      },
+      "WireInstructionBlockReason": {
+        "enum": [
+          "member_host_unsupported",
+          "slot_managed_by_activation",
+          "durability_unavailable",
+          "owned_by_session",
+          "owned_by_other_mob"
+        ],
+        "type": "string"
+      },
+      "WireInstructionEffectiveSlot": {
+        "description": "The committed entry that put a slot's state in effect in a session.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "entry_sequence": {
+            "description": "The entry's sequence: strictly increasing per session.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind",
+            "description": "A delta appended at a run start, or a compaction's snapshot."
+          },
+          "message_index": {
+            "description": "The entry row's index in the transcript; a compaction can change it,\nthe entry sequence stays.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry."
+          }
+        },
+        "required": [
+          "revision",
+          "effect",
+          "entry_sequence",
+          "kind",
+          "message_index"
+        ],
+        "type": "object"
+      },
+      "WireInstructionPendingReason": {
+        "enum": [
+          "awaiting_run_start",
+          "leading_prefix_only_lowering",
+          "lowering_unavailable",
+          "session_unborn",
+          "delivery_owed"
+        ],
+        "type": "string"
+      },
+      "WireInstructionSlotState": {
+        "description": "A slot's state for one member or session.",
+        "oneOf": [
+          {
+            "description": "The desired state is in effect.",
+            "properties": {
+              "state": {
+                "const": "effective",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The desired state is not in effect yet.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionPendingReason"
+              },
+              "state": {
+                "const": "pending",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The member's delivery is blocked.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireInstructionBlockReason"
+              },
+              "state": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing selects the agent for the slot and nothing of it is in effect.",
+            "properties": {
+              "state": {
+                "const": "not_targeted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireInstructionSlotView": {
+        "description": "A slot's revision and effect.",
+        "properties": {
+          "effect": {
+            "$ref": "#/$defs/InstructionEffect"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "revision",
+          "effect"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One slot of a session: its recorded target and the entry in effect.",
+    "properties": {
+      "effective": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInstructionEffectiveSlot"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The committed entry that put the slot in effect."
+      },
+      "key": {
+        "$ref": "#/$defs/InstructionKey"
+      },
+      "namespace": {
+        "$ref": "#/$defs/InstructionNamespace"
+      },
+      "recorded": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireInstructionSlotView"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The session's recorded target for the slot."
+      },
+      "state": {
+        "$ref": "#/$defs/WireInstructionSlotState"
+      }
+    },
+    "required": [
+      "namespace",
+      "key",
+      "state"
+    ],
+    "title": "WireSessionInstructionSlot",
     "type": "object"
   },
   "WireSessionMessage": {

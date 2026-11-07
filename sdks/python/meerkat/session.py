@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .generated.types import CommsSendResult, StopRunResult
+from .instructions import SessionInstructionStatus, SessionInstructionWriteResult
 from .types import (
     ContentBlock,
     ForkInstructionPolicy,
@@ -453,6 +454,39 @@ class Session:
             offset=offset,
             limit=limit,
         )
+
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        *,
+        content_sha256: str | None = None,
+    ) -> SessionInstructionWriteResult:
+        """Record one operator instruction of this session: the slot's body
+        at a revision, applied at the session's next fresh run start."""
+        return await self._client.set_session_instruction(  # noqa: SLF001
+            self._id,
+            namespace,
+            key,
+            revision,
+            body,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self, namespace: str, key: str, revision: int
+    ) -> SessionInstructionWriteResult:
+        """Revoke one operator instruction of this session at a higher
+        revision."""
+        return await self._client.revoke_session_instruction(  # noqa: SLF001
+            self._id, namespace, key, revision
+        )
+
+    async def instruction_status(self) -> SessionInstructionStatus:
+        """Read this session's committed operator-instruction state."""
+        return await self._client.session_instruction_status(self._id)  # noqa: SLF001
 
     async def subscribe_events(self) -> EventSubscription:
         """Open a standalone session-wide event subscription."""

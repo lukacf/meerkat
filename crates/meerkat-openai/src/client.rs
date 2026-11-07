@@ -2398,12 +2398,6 @@ impl OpenAiClient {
                     Self::apply_image_output_options(obj, &plan.output);
                     Self::apply_openai_image_provider_params(obj, &plan.provider_params, false);
                 }
-                OpenAiImagesApiRequestShape::DallE => {
-                    obj.insert(
-                        "response_format".to_string(),
-                        serde_json::Value::String("b64_json".to_string()),
-                    );
-                }
             }
         }
         let endpoint = format!("{}{}", self.base_url, endpoint_path);
@@ -5839,7 +5833,7 @@ mod tests {
             "requires_scoped_override": false,
             "provider_plan": {
                 "tool_name": "image_generation",
-                "model": "gpt-image-2",
+                "model": "gpt-image-2.6-sunburst",
                 "output": {
                     "size": "landscape1536x1024",
                     "quality": "low",
@@ -6025,7 +6019,7 @@ mod tests {
         let body = bodies.first().expect("captured OpenAI image request");
         assert_eq!(body["model"], "gpt-4.1-mini");
         assert_eq!(body["tools"][0]["type"], "image_generation");
-        assert_eq!(body["tools"][0]["model"], "gpt-image-2");
+        assert_eq!(body["tools"][0]["model"], "gpt-image-2.6-sunburst");
         assert_eq!(body["tools"][0]["size"], "1536x1024");
         assert_eq!(body["tools"][0]["quality"], "low");
         assert_eq!(body["tools"][0]["output_format"], "png");
@@ -6235,7 +6229,7 @@ mod tests {
         let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
         let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
         let mut request = image_executor_request_json(images_api_openai_plan_json());
-        request.model = "gpt-image-1".to_string();
+        request.model = "gpt-image-2".to_string();
 
         let output = client.execute_image_generation(request).await?;
 
@@ -6249,7 +6243,7 @@ mod tests {
         );
         let bodies = seen.lock().expect("seen mutex");
         let body = bodies.first().expect("captured OpenAI image request");
-        assert_eq!(body["model"], "gpt-image-1");
+        assert_eq!(body["model"], "gpt-image-2");
         assert_eq!(body["size"], "1536x1024");
         assert_eq!(body["quality"], "low");
         assert_eq!(body["output_format"], "png");
@@ -6327,7 +6321,7 @@ mod tests {
             "example.com"
         );
         assert_eq!(body["tools"][1]["type"], "image_generation");
-        assert_eq!(body["tools"][1]["model"], "gpt-image-2");
+        assert_eq!(body["tools"][1]["model"], "gpt-image-2.6-sunburst");
 
         handle.abort();
         Ok(())

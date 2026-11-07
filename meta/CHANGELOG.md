@@ -224,6 +224,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   progress, where it reported `read_failed`. The Meta SDKs pass the value
   through, as they pass any reason they do not name.
 
+- The incident command center example generates images with
+  `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
+  `RKAT_INCIDENT_IMAGE_MODEL` names another model (was `gpt-image-2`).
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the

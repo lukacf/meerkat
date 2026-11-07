@@ -3995,6 +3995,119 @@ memory = false
         Ok(())
     }
 
+    /// A recorder built inside the mob `main`, so `propose_to_mob` has a mob.
+    fn mob_member_recorder(
+        provider: &Arc<dyn AgentMemoryProvider>,
+        operator_scope: AgentMemoryOperatorScope,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn Error>> {
+        Ok(Arc::new(RecorderToolDispatcher::new(
+            None,
+            MemoryRecorder::new(
+                Arc::clone(provider),
+                AgentMemoryConfig {
+                    operator_scope,
+                    ..AgentMemoryConfig::default()
+                },
+                identity()?,
+                Some("main".to_string()),
+            ),
+        )))
+    }
+
+    /// With operator memory on, `propose_to_mob` never shares a person's own
+    /// `operator_said` fact with the mob: the call is refused with a typed
+    /// tool error (`operator_fact_mob_proposal_refused`) whose message names
+    /// both alternatives, and no proposal and no record holds the fact. The
+    /// agent's own knowledge still goes to the mob, and with operator memory
+    /// off an `operator_said` proposal is filed as before.
+    #[tokio::test]
+    async fn propose_to_mob_never_files_a_persons_operator_said_fact() -> Result<(), Box<dyn Error>>
+    {
+        use crate::memory::StewardStore as _;
+        const FACT: &str = "Alice prefers terse status notes";
+        let operator_said_proposal = serde_json::json!({
+            "action": "propose_to_mob",
+            "title": FACT,
+            "body": format!("{FACT}."),
+            "epistemic": "operator_said",
+        });
+        let dir = tempfile::tempdir()?;
+        let store = SqliteAgentMemoryStore::open(dir.path())?;
+        let provider: Arc<dyn AgentMemoryProvider> = Arc::new(store.clone());
+        let dispatcher = mob_member_recorder(&provider, AgentMemoryOperatorScope::Provisional)?;
+        let alice = console_person("alice")?;
+        let outcome = memory_tool_outcome_for(
+            &dispatcher,
+            operator_said_proposal.clone(),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        let message = match &outcome {
+            Err(meerkat_core::ToolError::ExecutionFailedWithData { message, .. }) => {
+                message.clone()
+            }
+            _ => String::new(),
+        };
+        assert_eq!(
+            typed_refusal("an operator_said mob proposal", outcome),
+            Ok("operator_fact_mob_proposal_refused".to_string()),
+            "propose_to_mob refuses a person's own fact, typed"
+        );
+        assert!(
+            message.contains("\"remember\"") && message.contains("\"propose_to_mob\""),
+            "the message names both alternatives: {message}"
+        );
+        let proposals = store.pending_proposals(DEFAULT_REALM, 16).await?;
+        assert!(
+            proposals.is_empty(),
+            "no proposal holds the person's fact: {proposals:?}"
+        );
+        assert!(
+            identity_records(&provider).await?.is_empty(),
+            "nor does the agent's own memory"
+        );
+        let (text, is_error) = call_memory_tool_for(
+            &dispatcher,
+            serde_json::json!({
+                "action": "propose_to_mob",
+                "title": "Deploys run on Tuesdays",
+                "body": "Deploys run on Tuesdays.",
+            }),
+            Some(meerkat_core::TurnRequester::direct(alice.clone())),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        let mob_titles: Vec<String> = store
+            .pending_proposals(DEFAULT_REALM, 16)
+            .await?
+            .into_iter()
+            .filter(|proposal| matches!(proposal.scope, MemoryScope::Mob { .. }))
+            .map(|proposal| proposal.record.title)
+            .collect();
+        assert_eq!(
+            mob_titles,
+            vec!["Deploys run on Tuesdays".to_string()],
+            "the agent's own knowledge still goes to the mob"
+        );
+        let off_dir = tempfile::tempdir()?;
+        let off_store = SqliteAgentMemoryStore::open(off_dir.path())?;
+        let off_provider: Arc<dyn AgentMemoryProvider> = Arc::new(off_store.clone());
+        let off = mob_member_recorder(&off_provider, AgentMemoryOperatorScope::Off)?;
+        let (text, is_error) = call_memory_tool_for(
+            &off,
+            operator_said_proposal,
+            Some(meerkat_core::TurnRequester::direct(alice)),
+        )
+        .await?;
+        assert!(!is_error, "{text}");
+        assert_eq!(
+            off_store.pending_proposals(DEFAULT_REALM, 16).await?.len(),
+            1,
+            "with operator memory off, the proposal is filed as before"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn memory_tool_reports_quarantine_and_stays_out_of_injection()
     -> Result<(), Box<dyn Error>> {

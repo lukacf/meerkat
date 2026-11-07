@@ -4556,6 +4556,9 @@ mod tests {
         /// past the end of this list ends its turn.
         stops: StdMutex<Vec<meerkat_core::StopReason>>,
         prompts: StdMutex<Vec<String>>,
+        /// A model that answers from what it reads: it sees each prompt and
+        /// may answer it; a prompt it leaves takes the next scripted reply.
+        answer: Option<Box<dyn Fn(&str) -> Option<String> + Send + Sync>>,
     }
 
     impl ScriptedLlm {
@@ -4564,6 +4567,7 @@ mod tests {
                 replies: StdMutex::new(replies),
                 stops: StdMutex::new(Vec::new()),
                 prompts: StdMutex::new(Vec::new()),
+                answer: None,
             }
         }
 
@@ -4574,6 +4578,19 @@ mod tests {
                 replies: StdMutex::new(replies),
                 stops: StdMutex::new(stops),
                 prompts: StdMutex::new(Vec::new()),
+                answer: None,
+            }
+        }
+
+        /// `answer` sees each prompt first; the scripted `replies` answer
+        /// the prompts it leaves.
+        fn answering(
+            answer: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+            replies: Vec<String>,
+        ) -> Self {
+            Self {
+                answer: Some(Box::new(answer)),
+                ..Self::new(replies)
             }
         }
 
@@ -4597,11 +4614,12 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let answered = self.answer.as_ref().and_then(|answer| answer(&prompt));
             self.prompts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(prompt);
-            let reply = {
+            let reply = answered.unwrap_or_else(|| {
                 let mut replies = self
                     .replies
                     .lock()
@@ -4611,7 +4629,7 @@ mod tests {
                 } else {
                     replies.remove(0)
                 }
-            };
+            });
             let stop_reason = {
                 let mut stops = self
                     .stops
@@ -7742,7 +7760,19 @@ mod tests {
 
     /// The same fixture with §7.2 operator routing activated.
     fn build_operator_fixture(replies: Vec<String>, pending_ids: Vec<&str>) -> Fixture {
-        let mut fixture = build_fixture(replies, pending_ids);
+        with_operator_routing(build_fixture(replies, pending_ids))
+    }
+
+    /// The operator-routing fixture over the model `llm`.
+    fn build_operator_fixture_with_llm(llm: ScriptedLlm) -> Fixture {
+        with_operator_routing(build_fixture_with_llm(
+            llm,
+            Vec::new(),
+            Arc::new(TaintedSessionGate),
+        ))
+    }
+
+    fn with_operator_routing(mut fixture: Fixture) -> Fixture {
         let engine = Arc::into_inner(fixture.engine).expect("sole engine handle");
         fixture.engine = Arc::new(engine.with_operator_routing(true));
         fixture
@@ -8215,6 +8245,198 @@ mod tests {
                 .iter()
                 .any(|prompt| prompt.contains("which a dream never reads")),
             "the gather request that names it is unfulfillable: {prompts:#?} {:?}",
+            run.skips
+        );
+    }
+
+    /// The prompts of a dream's gather and consolidate phases: the two that
+    /// show the store.
+    fn gather_and_consolidate_prompts(fixture: &Fixture) -> Vec<String> {
+        fixture
+            .llm
+            .prompts()
+            .into_iter()
+            .filter(|prompt| prompt.contains("STORE OVERVIEW"))
+            .collect()
+    }
+
+    /// A dream never reads a person's pending operator proposal: no gather
+    /// or consolidate prompt shows its title or body. So a model that copies
+    /// every fact a person said that it reads into the agent's own memory,
+    /// uncited, has nothing to copy, and the shared identity scope ends up
+    /// empty. The dream still reads the other pending proposals (control).
+    #[tokio::test]
+    async fn a_dream_never_reads_a_persons_operator_proposals() {
+        const TITLE: &str = "Alice prefers terse status notes";
+        const BODY: &str = "Alice said: keep status notes under three lines.";
+        const MOB_BODY: &str = "Run the smoke suite before every deploy.";
+        let copier = ScriptedLlm::answering(
+            |prompt| {
+                (prompt.contains(TITLE) || prompt.contains(BODY)).then(|| {
+                    json_reply(serde_json::json!({
+                        "requests": [],
+                        "ops": [{
+                            "op": "create", "id": "restated",
+                            "scope": {"kind": "identity", "key": "identity:worker"},
+                            "kind": "preference", "title": TITLE,
+                            "description": "a team convention", "body": BODY,
+                            "rationale": "useful on every turn"
+                        }],
+                        "proposal_verdicts": [], "quarantine_verdicts": [],
+                        "open_loop_escalations": [], "contradictions": [], "working_set": []
+                    }))
+                })
+            },
+            vec![empty_gather(), empty_consolidate()],
+        );
+        let fixture = build_operator_fixture_with_llm(copier);
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let mob = mob_scope();
+        for (scope, title, body) in [(&alice, TITLE, BODY), (&mob, "Deploy checklist", MOB_BODY)] {
+            fixture
+                .store
+                .propose(
+                    scope,
+                    new_record(title, body),
+                    MemoryAuthor::Agent {
+                        identity: "identity:worker".to_string(),
+                    },
+                )
+                .await
+                .expect("propose");
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        let dream_prompts = gather_and_consolidate_prompts(&fixture);
+        assert!(
+            !dream_prompts
+                .iter()
+                .any(|prompt| prompt.contains(TITLE) || prompt.contains(BODY)),
+            "no gather or consolidate prompt shows the person's pending operator proposal: \
+             {dream_prompts:#?}"
+        );
+        assert!(
+            dream_prompts.iter().any(|prompt| prompt.contains(MOB_BODY)),
+            "the dream still reads the other pending proposals: {dream_prompts:#?}"
+        );
+        let shared = scope_titles(&fixture.store, identity_scope("identity:worker")).await;
+        assert!(
+            shared.is_empty(),
+            "the shared identity scope ends up empty: {shared:?} {:?}",
+            run.skips
+        );
+    }
+
+    /// A person's operator proposals are judged in a separate call, whose
+    /// reply the shell applies only as accept, reject or hold of the
+    /// proposal ids that call was given, never as an op: its accept commits
+    /// the person's proposal into their own operator memory, while the ops
+    /// it returns (a restatement into the agent's shared memory, a tombstone
+    /// of the agent's own record) and its verdict on a proposal it was not
+    /// given change nothing.
+    #[tokio::test]
+    async fn operator_proposal_review_writes_nothing_but_its_verdicts() {
+        const TITLE: &str = "Alice prefers terse status notes";
+        const BODY: &str = "Alice said: keep status notes under three lines.";
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:alice".to_string(),
+        };
+        let mob = mob_scope();
+        let fixture = build_operator_fixture(
+            vec![
+                empty_gather(),
+                empty_consolidate(),
+                "OPERATOR-PROPOSALS".to_string(),
+            ],
+            vec![],
+        );
+        seed_active(
+            &fixture.store,
+            "own-record",
+            &identity_scope("identity:worker"),
+            "Deploys run on Tuesdays",
+            "Deploys run on Tuesdays.",
+        )
+        .await;
+        let author = MemoryAuthor::Agent {
+            identity: "identity:worker".to_string(),
+        };
+        let person_proposal = fixture
+            .store
+            .propose(&alice, new_record(TITLE, BODY), author.clone())
+            .await
+            .expect("propose to the person's operator scope");
+        let mob_proposal = fixture
+            .store
+            .propose(
+                &mob,
+                new_record(
+                    "Deploy checklist",
+                    "Run the smoke suite before every deploy.",
+                ),
+                author,
+            )
+            .await
+            .expect("propose to the mob");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies
+                .iter_mut()
+                .find(|r| r.as_str() == "OPERATOR-PROPOSALS")
+                .unwrap() = json_reply(serde_json::json!({
+                "ops": [
+                    {"op": "create", "id": "restated",
+                     "scope": {"kind": "identity", "key": "identity:worker"},
+                     "kind": "preference", "title": TITLE,
+                     "description": "a team convention", "body": BODY,
+                     "rationale": "useful on every turn"},
+                    {"op": "tombstone", "id": "own-record", "rationale": "superseded"}
+                ],
+                "proposal_verdicts": [
+                    {"proposal_id": person_proposal, "verdict": "accept",
+                     "rationale": "the person said it"},
+                    {"proposal_id": mob_proposal, "verdict": "accept",
+                     "rationale": "a shared convention"}
+                ]
+            }));
+        }
+        fixture.engine.note_session_completed();
+        let outcome = fixture.engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        assert_eq!(
+            scope_titles(&fixture.store, alice).await,
+            vec![TITLE.to_string()],
+            "the accept commits the person's proposal into their own operator memory: {:?}",
+            run.skips
+        );
+        assert_eq!(
+            scope_titles(&fixture.store, identity_scope("identity:worker")).await,
+            vec!["Deploys run on Tuesdays".to_string()],
+            "the call writes no op: the shared identity scope holds only the agent's own \
+             record: {:?}",
+            run.skips
+        );
+        let pending = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("pending");
+        assert!(
+            scope_titles(&fixture.store, mob).await.is_empty()
+                && pending
+                    .iter()
+                    .any(|proposal| proposal.proposal_id == mob_proposal
+                        && proposal.status == "pending"),
+            "the call judges only the proposals it was given: {pending:?} {:?}",
             run.skips
         );
     }

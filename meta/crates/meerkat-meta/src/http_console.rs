@@ -1377,10 +1377,10 @@ fn console_whoami_rpc(
 /// no param names whose items are read. Each item is shown as this console
 /// shows the reply's frame in a thread: under its own payload policy and
 /// visibility, and only while the caller may view the agent the request
-/// went to. A console that keeps no attention list answers that the methods
-/// are not found. Dismissing is a console change: a read-only console
-/// refuses it, and the caller is checked again right before the dismissal
-/// is made.
+/// went to, as the live roster describes that agent at the read. A console
+/// that keeps no attention list answers that the methods are not found.
+/// Dismissing is a console change: a read-only console refuses it, and the
+/// caller is checked again right before the dismissal is made.
 async fn console_attention_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,
@@ -1401,19 +1401,29 @@ async fn console_attention_rpc(
     let addressee = auth.human.as_ref().map(console_person_private_owner_key);
     if request.method == crate::rpc::CONSOLE_ATTENTION_METHOD {
         let items = match &addressee {
-            Some(addressee) => match attention.list(addressee, view, &auth.audience).await {
-                Ok(items) => items,
-                Err(error) => {
-                    return response_value(
-                        response_id,
-                        None,
-                        Some(JsonRpcError::new(
-                            -32603,
-                            format!("the attention list could not be read: {error}"),
-                        )),
-                    );
+            Some(addressee) => {
+                // The list decides each item's agent by the caller's audience:
+                // refresh the access attributes the audience reads from the
+                // live roster first, as the RPC dispatch does before any
+                // per-agent decision. This answer comes before that dispatch,
+                // and no earlier read has to have refreshed them.
+                if let Some(runtime) = state.runtime.as_ref() {
+                    prime_access_cache_from_runtime(runtime, &auth.audience.controller()).await;
                 }
-            },
+                match attention.list(addressee, view, &auth.audience).await {
+                    Ok(items) => items,
+                    Err(error) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(JsonRpcError::new(
+                                -32603,
+                                format!("the attention list could not be read: {error}"),
+                            )),
+                        );
+                    }
+                }
+            }
             None => Vec::new(),
         };
         return response_value(

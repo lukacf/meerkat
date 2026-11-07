@@ -497,12 +497,11 @@ async fn a_placed_respawn_checks_its_successor_again_in_the_lane() {
         "no successor joined the roster"
     );
     assert!(
-        fixture
+        !fixture
             .host_binding_record(controlling.mob_id.as_ref())
             .await
             .materialized
-            .get("b2")
-            .is_none(),
+            .contains_key("b2"),
         "no successor runs on the host"
     );
 

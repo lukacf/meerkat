@@ -8996,10 +8996,8 @@ impl MobBootstrapSpec {
         let controller_pin_source: Arc<dyn crate::identity_first::bridge::ControllerPinSource> =
             concrete_session_service.clone();
         let session_service: Arc<dyn MobSessionService> = concrete_session_service;
-        let hook = classifying_personal_servers(
-            refusing_unresolved_document_markers(hook),
-            personal_accounts.as_ref(),
-        );
+        let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(hook, personal_accounts.as_ref());
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,
@@ -9425,10 +9423,8 @@ impl MobBootstrapSpec {
             runtime_adapter.clone(),
             after_create_hook,
         ));
-        let hook = classifying_personal_servers(
-            refusing_unresolved_document_markers(hook),
-            personal_accounts.as_ref(),
-        );
+        let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(hook, personal_accounts.as_ref());
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,

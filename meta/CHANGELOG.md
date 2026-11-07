@@ -177,7 +177,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   items and `meta/console/attention/dismiss` dismisses one; a reply in a
   private conversation is a `private_reply` frame there. A request from an
   open console, a service or a token that names no person has no private
-  reply route. The Console counts the person's items in **Needs you** and
+  reply route. A host's payload policy rewrites an attention item as it
+  rewrites the reply's frame. The Console counts the person's items in
+  **Needs you** and
   lists them in its inbox, where each opens the chat it answers and can be
   dismissed; a private reply reads as the agent's message in the person's
   own conversation.

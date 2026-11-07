@@ -1389,7 +1389,8 @@ An item:
 | `id` | `string` | Opaque and stable; names the item to dismiss it |
 | `created_at_ms` | `integer` | When the item was delivered, in milliseconds since the epoch |
 | `kind` | `string` | `private_reply`: a reply to the caller's own request, made in a conversation that is not private to them. Other kinds may be added; a client shows what it knows and skips the rest |
-| `text` | `string` | The reply |
+| `text` | `string` | The reply, as a host's payload policy keeps the reply's frame; absent when the policy left no text |
+| `redacted` | `boolean` | `true` when a host's payload policy rewrote the reply, as it rewrites the reply's frame; absent otherwise |
 | `origin.identity` | `string` | The agent the request was sent to |
 | `origin.interaction_id` | `string` | The request's interaction |
 | `origin.input_frame_id` | `string` | The request's `user_input` frame |
@@ -1399,8 +1400,13 @@ that thread instead, as a `private_reply` frame (`payload.text`, and
 `payload.in_reply_to` with the request's `interaction_id` and
 `input_frame_id`; the frame's `caused_by_frame_id` is the request's frame),
 which only the caller and the access admins see. A reply is delivered once:
-the same reply again changes nothing. The items are kept in the realm's
-metadata store, as the console audit log is.
+the same reply again changes nothing. A host's payload policy rewrites an
+item as it rewrites the reply's frame, before the item is stored, so no one
+reads more of a reply in the attention list than in a thread. The items are
+kept in the realm's metadata store, as the console audit log is, and are
+never pruned: a dismissed item stays stored, so its reply stays delivered.
+The list grows by one stored item per reply delivered as an item; the audit
+log's bounds do not apply to it.
 
 ### `meta/console/attention/dismiss`
 

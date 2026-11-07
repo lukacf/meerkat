@@ -66,9 +66,14 @@ pub(crate) struct ConsoleReplyOrigin {
 #[non_exhaustive]
 pub(crate) enum ConsoleAttentionContent {
     /// A reply to the person's own request, made in a conversation that is
-    /// not private to them.
+    /// not private to them, kept as a host's payload policy keeps the
+    /// reply's frame: `text` is what the policy left of it (none when it
+    /// left no text), and `redacted` says the policy rewrote it.
     PrivateReply {
-        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        redacted: bool,
         origin: ConsoleReplyOrigin,
     },
 }
@@ -466,8 +471,8 @@ impl ConsoleReplies {
     }
 
     /// The receipt of the reply `reply_id` to the request `reference`, and
-    /// the text it was delivered with (`None` for a frame a host's payload
-    /// policy redacted), if it was delivered.
+    /// the text it was delivered with (`None` for a frame or an item a host's
+    /// payload policy redacted), if it was delivered.
     async fn find(
         &self,
         reference: &ConsoleThreadReference,
@@ -491,8 +496,8 @@ impl ConsoleReplies {
             .await
             .map_err(store_error)?
             .map(|item| {
-                let ConsoleAttentionContent::PrivateReply { text, .. } = &item.content;
-                let text = Some(text.clone());
+                let ConsoleAttentionContent::PrivateReply { text, redacted, .. } = &item.content;
+                let text = (!*redacted).then(|| text.clone().unwrap_or_default());
                 (attention_receipt(&item), text)
             }))
     }
@@ -539,8 +544,20 @@ impl ConsoleReplies {
             .attention
             .as_ref()
             .ok_or(ConsoleReplyError::AttentionUnavailable)?;
+        // Kept as the reply's frame would be: a host's payload policy that
+        // rewrites the frame rewrites the item.
+        let (payload, redacted) = self
+            .aggregator
+            .kept_private_reply(&reference.interaction_id, reply_id, text)
+            .await
+            .map_err(store_error)?
+            .ok_or(ConsoleReplyError::UnknownThread)?;
         let content = ConsoleAttentionContent::PrivateReply {
-            text: text.to_string(),
+            text: payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            redacted,
             origin: ConsoleReplyOrigin {
                 identity: reference.identity.clone(),
                 interaction_id: reference.interaction_id.clone(),

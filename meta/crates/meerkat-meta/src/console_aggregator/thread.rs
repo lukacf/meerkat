@@ -214,6 +214,63 @@ impl MetaConsoleAggregator {
         if !Box::pin(self.member_still_private_to(&record.identity, addressee)).await {
             return Ok(PrivateReplyAppend::ThreadGone);
         }
+        let frame = self.kept_private_reply_frame(&record, dedupe_key, text)?;
+        let outcome = super::append_frame(&self.inner, frame).await?;
+        if outcome.disposition == AppendDisposition::Existing {
+            return Ok(PrivateReplyAppend::Existing(outcome.frame));
+        }
+        let _ = self
+            .inner
+            .event_tx
+            .send(ConsoleTimelineEvent::ConsoleFrame {
+                frame: outcome.frame.clone(),
+            });
+        Ok(PrivateReplyAppend::Appended(outcome.frame))
+    }
+
+    /// The reply `reply_id` to the request with interaction id
+    /// `interaction_id` as it is kept wherever it is delivered: the payload
+    /// of the frame it is appended to its thread as, as a host's payload
+    /// policy leaves it, and whether the policy rewrote it. A reply delivered
+    /// as an attention item is kept in this form too, so no one reads more of
+    /// it there than in a thread. `None` when no send record holds the
+    /// request.
+    pub(crate) async fn kept_private_reply(
+        &self,
+        interaction_id: &str,
+        reply_id: &str,
+        text: &str,
+    ) -> ConsoleLogResult<Option<(Value, bool)>> {
+        let Some(record) = self
+            .inner
+            .store
+            .send_frame_by_interaction(interaction_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let frame = self.kept_private_reply_frame(
+            &record,
+            private_reply_dedupe_key(interaction_id, reply_id),
+            text,
+        )?;
+        Ok(Some((
+            frame.payload,
+            frame.status == ConsoleFrameStatus::Redacted,
+        )))
+    }
+
+    /// The frame `text` is appended to the thread of the request `record`
+    /// recorded as, under `dedupe_key`: a `private_reply` frame of that
+    /// member's conversation, caused by the request's send record and
+    /// carrying its captured member provenance, redacted as the host's
+    /// payload policy redacts it before it is stored.
+    fn kept_private_reply_frame(
+        &self,
+        record: &ConsoleFrame,
+        dedupe_key: String,
+        text: &str,
+    ) -> ConsoleLogResult<NewConsoleFrame> {
         let mut frame = NewConsoleFrame {
             id: None,
             dedupe_key,
@@ -227,7 +284,7 @@ impl MetaConsoleAggregator {
             payload: json!({
                 "text": text,
                 "in_reply_to": {
-                    "interaction_id": reference.interaction_id,
+                    "interaction_id": record.interaction_id,
                     "input_frame_id": record.id,
                 },
             }),
@@ -245,17 +302,7 @@ impl MetaConsoleAggregator {
         };
         let policy = super::capture_host_payload_policy(&self.inner, &record.runtime_key, None)?;
         super::redact_frame(policy.as_ref(), &mut frame);
-        let outcome = super::append_frame(&self.inner, frame).await?;
-        if outcome.disposition == AppendDisposition::Existing {
-            return Ok(PrivateReplyAppend::Existing(outcome.frame));
-        }
-        let _ = self
-            .inner
-            .event_tx
-            .send(ConsoleTimelineEvent::ConsoleFrame {
-                frame: outcome.frame.clone(),
-            });
-        Ok(PrivateReplyAppend::Appended(outcome.frame))
+        Ok(frame)
     }
 
     /// Whether `identity` names a member now, private to the person whose

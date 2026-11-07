@@ -300,6 +300,31 @@ impl PeerCommsEndpoint {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<BridgeReply, String> {
+        self.send_bridge_request(recipient, params).await?;
+        let mut replies = self.collect_bridge_replies(1, timeout).await?;
+        Ok(replies.remove(0))
+    }
+
+    /// Send a bridge command and return once it is sent, without waiting
+    /// for its reply: collect the reply later with
+    /// [`Self::collect_bridge_replies`]. Replies carry no correlation here,
+    /// so a test sends no other waiting command while this one's reply is
+    /// outstanding unless the outstanding one cannot answer before it.
+    pub async fn send_bridge_command_no_wait(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+        command: &BridgeCommand,
+    ) -> Result<(), String> {
+        let params = serde_json::to_value(command)
+            .map_err(|error| format!("serialize bridge command: {error}"))?;
+        self.send_bridge_request(recipient, params).await
+    }
+
+    async fn send_bridge_request(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+        params: serde_json::Value,
+    ) -> Result<(), String> {
         let to =
             meerkat_core::PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let advertised = meerkat_core::comms::PeerAddress::parse(self.runtime.advertised_address())
@@ -331,7 +356,17 @@ impl PeerCommsEndpoint {
         let SendReceipt::PeerRequestSent { .. } = receipt else {
             return Err(format!("unexpected bridge request receipt: {receipt:?}"));
         };
+        Ok(())
+    }
 
+    /// Wait until `count` bridge replies arrived, and answer them in arrival
+    /// order.
+    pub async fn collect_bridge_replies(
+        &self,
+        count: usize,
+        timeout: Duration,
+    ) -> Result<Vec<BridgeReply>, String> {
+        let mut replies = Vec::with_capacity(count);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let inbox_notify = self.runtime.inbox_notify();
@@ -346,15 +381,23 @@ impl PeerCommsEndpoint {
             {
                 if let InteractionContent::Response { result, .. } = &candidate.interaction.content
                 {
-                    return serde_json::from_value::<BridgeReply>(result.clone())
-                        .map_err(|error| format!("decode bridge reply: {error}"));
+                    replies.push(
+                        serde_json::from_value::<BridgeReply>(result.clone())
+                            .map_err(|error| format!("decode bridge reply: {error}"))?,
+                    );
                 }
+            }
+            if replies.len() >= count {
+                return Ok(replies);
             }
             let remaining = deadline
                 .checked_duration_since(tokio::time::Instant::now())
                 .unwrap_or_default();
             if remaining.is_zero() {
-                return Err("timed out waiting for bridge reply".to_string());
+                return Err(format!(
+                    "timed out waiting for bridge reply ({} of {count} arrived)",
+                    replies.len()
+                ));
             }
             let _ = tokio::time::timeout(remaining, &mut notified).await;
         }

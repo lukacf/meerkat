@@ -706,6 +706,8 @@ pub struct FailingOnceSessionService {
     projection_drain_failed_once: AtomicBool,
     recorded_creates: std::sync::Mutex<Vec<RecordedMemberCreate>>,
     recorded_instruction_records: std::sync::Mutex<Vec<RecordedInstructionRecord>>,
+    instruction_record_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    instruction_records_held: AtomicU64,
     keep_durable_tails: AtomicBool,
     withheld_durable_tails: std::sync::Mutex<Option<meerkat_core::service::DurableResumeHold>>,
     fail_durable_tail_settles: AtomicBool,
@@ -816,6 +818,8 @@ impl FailingOnceSessionService {
             projection_drain_failed_once: AtomicBool::new(false),
             recorded_creates: std::sync::Mutex::new(Vec::new()),
             recorded_instruction_records: std::sync::Mutex::new(Vec::new()),
+            instruction_record_gate: std::sync::Mutex::new(None),
+            instruction_records_held: AtomicU64::new(0),
             keep_durable_tails: AtomicBool::new(false),
             withheld_durable_tails: std::sync::Mutex::new(None),
             fail_durable_tail_settles: AtomicBool::new(false),
@@ -893,6 +897,23 @@ impl FailingOnceSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Hold every operator-instruction record at this service until the
+    /// returned gate has a permit for it ([`tokio::sync::Semaphore::add_permits`]).
+    pub fn hold_instruction_records(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    /// How many operator-instruction records reached the gate of
+    /// [`Self::hold_instruction_records`].
+    pub fn instruction_records_held(&self) -> u64 {
+        self.instruction_records_held.load(Ordering::SeqCst)
     }
 
     /// Keep every durable tail at a cold start: the settle answers as the
@@ -1139,6 +1160,22 @@ impl meerkat_mob::MobSessionService for FailingOnceSessionService {
     > {
         let session_id = delivery.session_id().clone();
         let generation = delivery.generation();
+        let gate = self
+            .instruction_record_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let _permit = match gate {
+            Some(gate) => {
+                self.instruction_records_held.fetch_add(1, Ordering::SeqCst);
+                Some(
+                    gate.acquire_owned()
+                        .await
+                        .expect("the instruction record gate stays open"),
+                )
+            }
+            None => None,
+        };
         let result = Arc::clone(&self.inner)
             .record_member_instruction_target(delivery)
             .await;

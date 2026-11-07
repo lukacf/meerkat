@@ -50,9 +50,9 @@ use support::{
     HostDaemonFixture, HostFixtureOptions, PeerCommsEndpoint, REAL_COMMS_TEST_LOCK,
     RecordedInstructionRecord, ScriptedHostPeer, ScriptedV7Mode, bind_then_materialize,
     create_controlling_mob, member_incarnation_from_ack, placed_spawn_spec,
-    raw_release_member_command, scripted_member_client_completing_recorded,
-    spawn_host_daemon_fixture, spawn_peer_comms_endpoint, spawn_scripted_host_peer,
-    supervisor_spec_for_endpoint, wait_until,
+    raw_host_status_command, raw_release_member_command,
+    scripted_member_client_completing_recorded, spawn_host_daemon_fixture,
+    spawn_peer_comms_endpoint, spawn_scripted_host_peer, supervisor_spec_for_endpoint, wait_until,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -952,4 +952,122 @@ async fn a_placed_spawn_asks_its_host_once_and_only_when_its_mob_has_instruction
     );
 
     scripted.shutdown();
+}
+
+/// A release admitted after a record moves the member session's epoch: a
+/// record admitted before it that has not started by then writes nothing
+/// and answers `stale_fence`. The first record is held at the host's session
+/// service, so the second waits behind it in the session's lane while the
+/// member is released and the release of its target is admitted; once the
+/// first record ends, the second is fenced off and the session service never
+/// sees its generation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_admitted_after_a_record_fences_the_record_off() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut options = HostFixtureOptions::named("oi-host-epoch-host").with_member_build();
+    options.record_member_creates = true;
+    let fixture = spawn_host_daemon_fixture(options)
+        .await
+        .expect("spawn member-build host fixture");
+    let probe = spawn_peer_comms_endpoint("oi-host-epoch-supervisor", true, None).await;
+    probe.trust(fixture.host_peer_descriptor()).await;
+    let mob_id = format!("mob-oi-epoch-{}", uuid::Uuid::new_v4().simple());
+    let ack = bind_then_materialize(&probe, &fixture, &mob_id, "b2").await;
+    let member = member_incarnation_from_ack(&fixture, &mob_id, "b2", &ack, 1, 1, 1);
+    let host = fixture.host_peer_descriptor();
+    let service = fixture
+        .failing_create
+        .as_ref()
+        .expect("the fixture wraps its member session service");
+    let gate = service.hold_instruction_records();
+
+    probe
+        .send_bridge_command_no_wait(
+            &host,
+            &record_command(&probe, member.clone(), 1, BridgeProtocolVersion::V7),
+        )
+        .await
+        .expect("send the first record");
+    wait_until(
+        "the first record is held at the session service",
+        || async { service.instruction_records_held() == 1 },
+    )
+    .await;
+    probe
+        .send_bridge_command_no_wait(
+            &host,
+            &record_command(&probe, member, 2, BridgeProtocolVersion::V7),
+        )
+        .await
+        .expect("send the second record");
+    // No record answers before the gate opens, so the next reply is the
+    // member release's.
+    let released = probe
+        .send_bridge_command_raw(
+            &host,
+            &raw_release_member_command(&probe, &mob_id, 1, "b2", 1, 1),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("the host answers the member release");
+    assert!(
+        matches!(released, BridgeReply::MemberReleased(_)),
+        "{released:?}"
+    );
+    probe
+        .send_bridge_command_no_wait(
+            &host,
+            &release_command(&probe, &mob_id, &ack.session_id, BridgeProtocolVersion::V7),
+        )
+        .await
+        .expect("send the target release");
+    // The host serves its commands in order: once it answers a status read
+    // sent after the target release, it has admitted that release.
+    let status = probe
+        .send_bridge_command_raw(
+            &host,
+            &raw_host_status_command(&probe, &mob_id, 1),
+            REPLY_TIMEOUT,
+        )
+        .await
+        .expect("the host answers the status read");
+    assert!(matches!(status, BridgeReply::HostStatus(_)), "{status:?}");
+
+    gate.add_permits(16);
+    let replies = probe
+        .collect_bridge_replies(3, REPLY_TIMEOUT)
+        .await
+        .expect("the two records and the target release answer");
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|reply| matches!(
+                reply,
+                BridgeReply::Rejected {
+                    cause: BridgeRejectionCause::StaleFence,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "the record admitted before the release is fenced off: {replies:?}"
+    );
+    assert!(
+        replies
+            .iter()
+            .any(|reply| matches!(reply, BridgeReply::MemberInstructionTargetReleased(_))),
+        "the target release answers: {replies:?}"
+    );
+    let generations = service
+        .recorded_instruction_records()
+        .into_iter()
+        .map(|record| record.generation)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        generations,
+        vec![1],
+        "only the first record reached the session service: the fenced one wrote nothing"
+    );
+
+    fixture.shutdown().await;
 }

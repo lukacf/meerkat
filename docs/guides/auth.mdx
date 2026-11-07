@@ -221,12 +221,27 @@ OpenAI, Anthropic, and Gemini provider identities; `credential_account =
 AuthMachine lifecycle, status, and logout shared. Meerkat queries the signed-in
 account's `/models` endpoint and rejects a known-unavailable model/dialect
 before dispatch. If discovery is temporarily unavailable, auth still succeeds
-and the request is attempted normally. A known-unavailable error includes the
+and the request is attempted normally. The account's model list is refreshed
+every five minutes off the request path: a request that finds the refresh due
+goes out at once on the current token and the list the account holds, and the
+refresh runs beside it. On the device sign-in's routes, a refresh that fails
+(a network failure, a 5xx, a rate limit, or a 403 that asks for no action on
+the account) keeps the last list and is tried again after 30 seconds, or after
+the listing's `Retry-After`; a 401, or a 403 that asks for an account action,
+refuses the current token: the next request mints a new one, and a listing
+that refuses that one too needs a new sign-in. A token route's listing keeps
+its own rules ([below](#github-copilot-with-a-service-account-token)), applied
+on the request after the refresh. A known-unavailable error includes the
 compatible model IDs observed for that account. An ID outside Meerkat's
 built-in catalog runs when the request names a route of the account: the
 account's model list defines it, protocol and limits included (see
 [GitHub Copilot configured once](#github-copilot-configured-once)); a
-`[models.<id>]` entry for it still works, and wins.
+`[models.<id>]` entry for it still works, and wins. On the Chat Completions
+routes (chat-only OpenAI models and the Gemini models), a response counts as
+complete only once its stream names a finish reason: a stream that ends
+without one, at the end of the body or at `[DONE]`, or that carries a choice
+other than the first, fails as an incomplete response, which the agent loop
+retries, and nothing of it is kept.
 
 The device sign-in's routes send a Copilot token that Meerkat obtains from the
 GitHub sign-in by a token exchange and replaces before it expires. A temporary
@@ -235,7 +250,9 @@ or a GitHub API rate limit) does not fail turns: the current token, minted from
 the current sign-in, keeps serving until it expires, and the exchange is tried
 again after its `Retry-After` (at least a second later), or after 30 seconds
 without one. Once no valid token is left, a turn fails with a retryable error
-(rate limited, server error, network timeout), which the agent loop retries. A
+(rate limited, server error, network timeout), which the agent loop retries;
+when the exchange sent `Retry-After`, every turn until then fails the same way
+without calling the exchange (for at most an hour). A
 token Copilot rejects with a 401 is replaced on its next use, and the
 account's routes stay resolvable. Restoring or waking a session, or building
 one whose output budget is set explicitly or in the configuration, succeeds

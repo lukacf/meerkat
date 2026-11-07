@@ -2227,10 +2227,10 @@ mod tests {
             .await
             .unwrap();
 
-        let published = match store.finalize_compaction_batch_reporting(&projection).await {
-            Ok(records) => records,
-            Err(error) => panic!("the reporting finalization publishes the stage: {error}"),
-        };
+        let published = store
+            .finalize_compaction_batch_reporting(&projection)
+            .await
+            .expect("the reporting finalization publishes the stage");
         let page = store
             .enumerate_scoped(&scope, enumeration(10, 0))
             .await

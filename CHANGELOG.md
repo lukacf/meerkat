@@ -250,10 +250,15 @@ them.
   AuthMachine issued on it (before, the provider's `Observed` or `Refresh`
   error, the verdict dropped), and the resolution answers
   `source_unavailable` for a transient verdict and `user_reauth_required`
-  for a permanent one (before, `refresh_failed` for both). A failure the
-  machine did not classify stays `refresh_failed`. A request still fails as
-  before (`LlmError::AuthenticationFailed`, or the Copilot exchange outage's
-  retryable class).
+  for a permanent one (before, `refresh_failed` for both). AuthMachine's
+  transient verdict also covers a refresh the host refuses on its own side
+  before the provider judges the credential (for example its egress profile
+  refuses the token endpoint, or the token endpoint answers with a
+  redirect), so such a refresh answers `source_unavailable` too, and a mob
+  member whose first wake meets it stays dormant until the host's side is
+  fixed. A failure the machine did not classify stays `refresh_failed`. A
+  request still fails as before (`LlmError::AuthenticationFailed`, or the
+  Copilot exchange outage's retryable class).
 
 ### Added
 

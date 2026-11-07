@@ -75,6 +75,17 @@ const MANAGED_PEER_RECONCILE_CONCURRENCY: usize = 64;
 const RAW_MEMBER_ALIAS_LOCK_SWEEP_MIN: usize = 256;
 const BACKGROUND_WARM_CANCELLED: &str =
     "identity background warm cancelled before session installation";
+
+/// What an embodiment reports beside its answer: the bootstrap generation
+/// it bound itself to, and whether its caller's cancellation ended it before
+/// the member's session was installed. A cancelled embodiment answers an
+/// internal error whose text is [`BACKGROUND_WARM_CANCELLED`]; its callers
+/// read the cancellation here, never from that text.
+#[derive(Debug, Default)]
+pub(crate) struct EmbodimentTrace {
+    pub(crate) bootstrap_generation: Option<u64>,
+    pub(crate) cancelled: bool,
+}
 fn durable_spec_uses_external_binding(spec: &DurableAgentSpec) -> bool {
     matches!(spec.backend, Some(meerkat_mob::MobBackendKind::External))
         || matches!(
@@ -7894,7 +7905,7 @@ impl IdentityRuntime {
         // global generation here is insufficient: a newer reconcile can
         // publish G+1 and win that lock before this future reaches the entry,
         // in which case the materialized spec belongs to G+1, not G.
-        let mut bootstrap_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let mut shutdown = self.foreground_cancel.subscribe();
         let result = self
             .embody_identity(
@@ -7902,7 +7913,7 @@ impl IdentityRuntime {
                 expected_alias,
                 Some(&mut shutdown),
                 None,
-                &mut bootstrap_generation,
+                &mut trace,
                 EmbodimentOverrides {
                     expected_spec_digest,
                     ..EmbodimentOverrides::default()
@@ -7913,10 +7924,8 @@ impl IdentityRuntime {
                 *already_active = outcome.already_active;
             });
         after_inner.await;
-        if matches!(
-            &result,
-            Err(IdentityRuntimeError::Internal(message)) if message == BACKGROUND_WARM_CANCELLED
-        ) {
+        let bootstrap_generation = trace.bootstrap_generation;
+        if trace.cancelled {
             if let Some(generation) = bootstrap_generation {
                 self.mark_bootstrap_materialization_cancelled(identity, Some(generation));
             }
@@ -8272,14 +8281,14 @@ impl IdentityRuntime {
         cancellation: &mut watch::Receiver<bool>,
         generation: u64,
     ) -> Option<Result<(), IdentityRuntimeError>> {
-        let mut bound_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity(
                 identity,
                 None,
                 Some(cancellation),
                 Some(generation),
-                &mut bound_generation,
+                &mut trace,
                 EmbodimentOverrides {
                     off_ready_path: true,
                     ..EmbodimentOverrides::default()
@@ -8287,10 +8296,7 @@ impl IdentityRuntime {
             )
             .await
             .map(|_| ());
-        if matches!(
-            &result,
-            Err(IdentityRuntimeError::Internal(message)) if message == BACKGROUND_WARM_CANCELLED
-        ) {
+        if trace.cancelled {
             return None;
         }
         // A candidate's refusal of a roster change defers the identity to
@@ -8307,7 +8313,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         // A seat the embodiment asks Core for tells its customizer
@@ -8320,7 +8326,7 @@ impl IdentityRuntime {
             expected_alias,
             cancellation,
             expected_bootstrap_generation,
-            bound_bootstrap_generation,
+            trace,
             overrides,
         )
         .await
@@ -9036,7 +9042,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         let result = self
@@ -9045,7 +9051,7 @@ impl IdentityRuntime {
                 expected_alias,
                 cancellation,
                 expected_bootstrap_generation,
-                bound_bootstrap_generation,
+                trace,
                 overrides,
             )
             .await;
@@ -9087,7 +9093,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         cancellation: Option<&mut watch::Receiver<bool>>,
         expected_bootstrap_generation: Option<u64>,
-        bound_bootstrap_generation: &mut Option<u64>,
+        trace: &mut EmbodimentTrace,
         overrides: EmbodimentOverrides<'_>,
     ) -> Result<EmbodimentOutcome, IdentityRuntimeError> {
         let bootstrap_generation = {
@@ -9097,12 +9103,13 @@ impl IdentityRuntime {
                 .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
                 .bootstrap_generation
         };
-        *bound_bootstrap_generation = Some(bootstrap_generation);
+        trace.bootstrap_generation = Some(bootstrap_generation);
         // A background item belongs to one controller generation. If a newer
         // roster pass converged the entry before this item acquired lifecycle
         // authority, treat the old work as cancelled instead of waking the
         // newer spec on behalf of a superseded pass.
         if expected_bootstrap_generation.is_some_and(|expected| expected != bootstrap_generation) {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
@@ -9154,6 +9161,7 @@ impl IdentityRuntime {
             .as_ref()
             .is_some_and(|cancellation| *cancellation.borrow())
         {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
@@ -9169,6 +9177,7 @@ impl IdentityRuntime {
             .as_ref()
             .is_some_and(|cancellation| *cancellation.borrow())
         {
+            trace.cancelled = true;
             return Err(IdentityRuntimeError::Internal(
                 BACKGROUND_WARM_CANCELLED.to_string(),
             ));
@@ -13292,20 +13301,24 @@ impl IdentityRuntime {
                 change.registry.clear_owned(identity, change.operation_id);
             }
         }
-        let mut generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await
             .map(|outcome| outcome.binding);
-        self.mark_bootstrap_materialization_finished(identity, result.as_ref().err(), generation)
-            .await;
+        self.mark_bootstrap_materialization_finished(
+            identity,
+            result.as_ref().err(),
+            trace.bootstrap_generation,
+        )
+        .await;
         change
             .registry
             .finish_owned_build(identity, change.operation_id);
@@ -13617,21 +13630,21 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
     ) -> Result<MemberReloadOutcome, IdentityRuntimeError> {
         let before = self.core_last_binding(identity).await?;
-        let mut bound_generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut bound_generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await;
         self.mark_bootstrap_materialization_finished(
             identity,
             result.as_ref().err(),
-            bound_generation,
+            trace.bootstrap_generation,
         )
         .await;
         let outcome = result?;
@@ -14056,19 +14069,23 @@ impl IdentityRuntime {
             self.settle_lifecycle_retirement(prepared).await;
             self.entries.notify_binding_changed();
         }
-        let mut generation = None;
+        let mut trace = EmbodimentTrace::default();
         let result = self
             .embody_identity_locked(
                 identity,
                 None,
                 None,
                 None,
-                &mut generation,
+                &mut trace,
                 EmbodimentOverrides::default(),
             )
             .await;
-        self.mark_bootstrap_materialization_finished(identity, result.as_ref().err(), generation)
-            .await;
+        self.mark_bootstrap_materialization_finished(
+            identity,
+            result.as_ref().err(),
+            trace.bootstrap_generation,
+        )
+        .await;
         result?;
         // Core's retirement ended the identity's wiring with the member it
         // retired: its managed and topology-controlled edges are wired again

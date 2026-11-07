@@ -93,10 +93,10 @@ rkat run --tools full "Ask one helper to inspect the test failure, then summariz
 A delegate helper is ephemeral: it is retired after its one task, and also when
 the calling turn stops waiting for it first.
 
-Unless its `tooling` supplies a profile, a helper runs on the calling session's
-model and on the provider route the session's build resolved for it (the
-self-hosted server included), so a session on a model outside the catalog, a
-`[models.<id>]` entry or a self-hosted model, delegates like any other.
+Unless its `tooling` supplies a profile, a helper runs on the model and
+provider (and self-hosted server) the calling session was built with, so a
+session on a realm `[models.<id>]` entry or a self-hosted model delegates. The
+helper resolves its own credentials from the realm.
 
 For recurring teams, use explicit mobs instead of a chain of ad hoc delegates.
 
@@ -2136,6 +2136,7 @@ wasm-pack output into that bundle; it does not compile wasm32.
 | External spawn rejected | Verify the external binding includes address, Ed25519 identity, and typed bootstrap token |
 | Flow run missing | Use `mob/flows` first and confirm the `flow_id` exists in the definition |
 | Live open fails | Confirm the member's model has realtime capability and `rkat-rpc --live-ws` is enabled when using RPC audio |
+| `delegate` answers `mob_quarantined` for the session's `implicit-<session id>` mob, cause `unknown_model` | An implicit mob made before implicit mobs named their provider, on a model that has since left the catalog, fails its restore and stays quarantined. With no process serving the realm, remove its store (`mob--implicit-<session id>.db` and its `-wal` and `-shm` files in the realm's state directory); the next `delegate` creates the mob again |
 
 ## See Also
 

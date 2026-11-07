@@ -254,6 +254,12 @@ impl AgentMobToolSurface {
 
     /// Create a new agent mob tool surface.
     ///
+    /// The surface names no provider for `model`, so the implicit mob its
+    /// `delegate` creates validates only for a catalogued model.
+    /// [`AgentMobToolSurfaceFactory`] builds the surface with the provider
+    /// route the agent's build resolved, so a session on a model outside the
+    /// catalog delegates too.
+    ///
     /// # Arguments
     /// * `state` - Shared MobMcpState for mob lifecycle operations
     /// * `implicit_mob_id` - Pre-seeded implicit mob ID (resume case)
@@ -287,6 +293,9 @@ impl AgentMobToolSurface {
     ///
     /// The handle is owned by the agent and updated via `apply_session_effects`.
     /// Mob tools read from it for authorization checks.
+    ///
+    /// Like [`Self::new`], the surface names no provider for `model`; see
+    /// [`AgentMobToolSurfaceFactory`] for one that does.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_effective_authority(
         state: Arc<MobMcpState>,

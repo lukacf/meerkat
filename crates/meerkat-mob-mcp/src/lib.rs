@@ -1233,10 +1233,10 @@ pub struct MobCreateRequest {
     /// [`MobMcpState::mob_create_from_mobpack`]).
     pub owner_bridge_session_id: Option<SessionId>,
     /// Whether this is the owner session's implicit delegation mob, created
-    /// by that session's own runtime path
-    /// ([`MobMcpState::ensure_implicit_mob_for_model`]) under the id it
-    /// derives from the session ([`MobDefinition::implicit`]). Never set for
-    /// a mob a caller names, whatever its id.
+    /// by that session's own runtime path (the implicit-mob ensure its
+    /// `delegate` tool runs) under the id it derives from the session
+    /// ([`MobDefinition::implicit`]). Never set for a mob a caller names,
+    /// whatever its id.
     pub implicit_delegation_mob: bool,
 }
 
@@ -7854,9 +7854,9 @@ impl MobMcpState {
     /// persisted member is rebuilt, mob tools included, inside the persistent
     /// restore, which holds the restore lock; a construction-time lookup that
     /// restored would wait on the restore it is part of. The hint is only a
-    /// hint: every use goes through [`Self::ensure_implicit_mob_for_model`],
-    /// which validates it and otherwise restores and looks the mob up under
-    /// the per-session lock before it would create one.
+    /// hint: every use goes through the implicit-mob ensure, which validates
+    /// it and otherwise restores and looks the mob up under the per-session
+    /// lock before it would create one.
     #[doc(hidden)]
     pub async fn restored_implicit_mob_for_bridge_session(
         &self,

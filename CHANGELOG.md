@@ -151,8 +151,8 @@ them.
   `MobToolsFactory::build_mob_tools` receives, gains the public fields
   `provider: Provider` and `self_hosted_server_id: Option<String>`: the
   provider route the owning agent's build resolved for its `model` (see
-  Fixed). Code that builds it literally must set them; a factory that only
-  receives it is unaffected.
+  Fixed). Code that builds it literally, or destructures it without `..`,
+  must name them; a factory that only reads its fields is unaffected.
 
 ### Added
 

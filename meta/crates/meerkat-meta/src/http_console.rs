@@ -2760,6 +2760,57 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
         self.inner.wait_budget()
     }
 
+    async fn submitting(&self) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting().await
+    }
+
+    fn retain_unresolved(
+        &self,
+        settlement: Box<dyn crate::identity_first::GovernedSettlement>,
+        detail: &str,
+    ) {
+        self.inner.retain_unresolved(settlement, detail);
+    }
+}
+
+/// A governed Console send's binder, for its one frame: when its bind
+/// answered bound, before the input is submitted, the frame moves to
+/// `submitted` (the send machine's `MarkSubmitted`, from `dispatching`), so
+/// a hold is never recorded over a submitted send. A frame that cannot
+/// record it refuses the send: nothing is submitted.
+struct SubmittingSendBinder {
+    inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
+    aggregator: MetaConsoleAggregator,
+    frame_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::identity_first::GovernedInputBinder for SubmittingSendBinder {
+    async fn try_bind(
+        &self,
+        context: &crate::identity_first::GovernedBindContext,
+        input: meerkat_runtime::Input,
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
+        self.inner.try_bind(context, input).await
+    }
+
+    fn wait_budget(&self) -> crate::identity_first::GovernedWaitBudget {
+        self.inner.wait_budget()
+    }
+
+    async fn submitting(&self) -> Result<(), crate::identity_first::GovernedBindRefusal> {
+        self.inner.submitting().await?;
+        self.aggregator
+            .mark_interaction_submitted(&self.frame_id)
+            .await
+            .map_err(|error| {
+                crate::identity_first::GovernedBindRefusal::unavailable(format!(
+                    "the Console could not record the send's submission: {error}"
+                ))
+            })
+    }
+
     fn retain_unresolved(
         &self,
         settlement: Box<dyn crate::identity_first::GovernedSettlement>,
@@ -3039,6 +3090,16 @@ async fn console_send_identity_first_governed(
                 NativeSendObservation::Admitted { .. } => {
                     return aggregator.settle_admitted_send(&frame, &claim).await;
                 }
+                // A submitted send whose input the runtime does not hold, its
+                // dispatch owner gone: the process that bound it stopped
+                // before its input reached the runtime. It is never
+                // dispatched again: it fails, its outcome unknown, and its
+                // sender can send it again.
+                NativeSendObservation::Absent
+                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted =>
+                {
+                    return aggregator.settle_lost_submission(&frame, &claim).await;
+                }
                 // Dispatched again only as a host-human send: keyed by the
                 // send's delivery identity and pinned to the session it
                 // recorded, so the runtime keeps one input and a moved session
@@ -3054,16 +3115,23 @@ async fn console_send_identity_first_governed(
                     aggregator.begin_send_redispatch(&frame, &claim)?;
                     (accepted, Some(claim))
                 }
-                // A governed send held past its budget submitted nothing: a
-                // replay of its key dispatches the same input again, keyed
-                // and identified by its frame.
-                NativeSendObservation::Absent
+                // A governed send held past its budget submitted nothing, and
+                // its hold says so until a dispatch of it begins: the hold is
+                // recorded only on a held answer from the bind loop, before
+                // any submission, and taken before any dispatch again. Short
+                // of evidence that its input was admitted (absent, or unknown:
+                // the send recorded no session, no runtime serves it, the read
+                // failed or ran late), a replay of its key dispatches the same
+                // input again, keyed and identified by its frame. Taking the
+                // hold is a compare-and-set: the replay that takes it
+                // dispatches, one that finds it taken dispatches nothing.
+                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. }
                     if governed.is_some() && frame.payload.get("delivery_hold").is_some() =>
                 {
-                    aggregator.begin_send_redispatch(&frame, &claim)?;
-                    aggregator
-                        .clear_interaction_delivery_hold(&frame.id)
-                        .await?;
+                    aggregator.begin_held_send_redispatch(&frame, &claim)?;
+                    if !aggregator.take_interaction_delivery_hold(&frame.id).await? {
+                        return Ok(accepted);
+                    }
                     (accepted, Some(claim))
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
@@ -3071,6 +3139,24 @@ async fn console_send_identity_first_governed(
                 }
             }
         }
+    };
+
+    // A governed send's dispatch begins (`StartDispatch` from its own
+    // state), and its binder records the send's submission when its bind
+    // answers bound: a hold is recorded only on a dispatch before that.
+    let governed = match governed {
+        Some(inner) => {
+            aggregator
+                .mark_interaction_dispatching(&accepted.input_frame_id)
+                .await?;
+            Some(Arc::new(SubmittingSendBinder {
+                inner,
+                aggregator: aggregator.clone(),
+                frame_id: accepted.input_frame_id.clone(),
+            })
+                as Arc<dyn crate::identity_first::GovernedInputBinder>)
+        }
+        None => None,
     };
 
     if let Some(events) = console_events {

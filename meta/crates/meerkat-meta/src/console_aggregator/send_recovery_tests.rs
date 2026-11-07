@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::send_recovery::{AdmittedInput, SendAdmissionReader, governed_delivery_key};
+use super::send_recovery::{AdmittedInput, SendAdmissionReader, governed_input_id};
 use super::*;
 
 const SESSION: &str = "0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6b";
@@ -68,6 +68,14 @@ impl SendAdmissionReader for EvidenceReader {
                 phase: Some("queued".to_string()),
             }))
     }
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String> {
+        self.admitted_input(session_id, &input_id.to_string()).await
+    }
 }
 
 fn admit(aggregator: &MetaConsoleAggregator, admitted: &[(&str, &str)]) {
@@ -97,6 +105,17 @@ impl SendAdmissionReader for SlowEvidenceReader {
         tokio::time::sleep(self.delay).await;
         self.evidence
             .admitted_input(session_id, idempotency_key)
+            .await
+    }
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String> {
+        tokio::time::sleep(self.delay).await;
+        self.evidence
+            .admitted_input_by_id(session_id, input_id)
             .await
     }
 }
@@ -342,7 +361,8 @@ async fn boot_reconciliation_settles_admitted_sends_only_and_dispatches_nothing(
     let (governed, claim) = fresh(reserve(&aggregator, "k3", "three", &human("u1")).await);
     drop(claim);
     let (owned, owned_claim) = fresh(reserve(&aggregator, "k4", "four", &human("u2")).await);
-    let governed_key = governed_delivery_key(&governed.interaction_id, &governed.input_frame_id);
+    let governed_key =
+        governed_input_id(&governed.interaction_id, &governed.input_frame_id).to_string();
     admit(
         &aggregator,
         &[
@@ -552,5 +572,189 @@ async fn a_hold_is_recorded_only_on_a_send_dispatching_before_its_submission() {
             assert_eq!(after.frame_version, before.frame_version, "{key}");
             assert!(after.payload.get("delivery_hold").is_none(), "{key}");
         }
+    }
+}
+
+/// A send under `key` whose dispatch was held: dispatching, then held, its
+/// frame recording a hold, no dispatch owning it.
+async fn held_send_frame(aggregator: &MetaConsoleAggregator, key: &str) -> String {
+    let (accepted, claim) = fresh(reserve(aggregator, key, "hello", &human("u1")).await);
+    drop(claim);
+    aggregator
+        .mark_interaction_dispatching(&accepted.input_frame_id)
+        .await
+        .expect("the dispatch begins");
+    aggregator
+        .mark_interaction_delivery_held(&accepted.input_frame_id, &held())
+        .await
+        .expect("the hold is recorded");
+    accepted.input_frame_id
+}
+
+/// Takes of one frame's hold from `stores`, all at once: how many got it.
+async fn concurrent_takes(stores: &[Arc<dyn ConsoleLogStore>], frame_id: &str) -> usize {
+    let takers: Vec<_> = stores
+        .iter()
+        .map(|store| {
+            let store = Arc::clone(store);
+            let frame_id = frame_id.to_string();
+            tokio::spawn(async move { store.take_send_frame_hold(&frame_id).await })
+        })
+        .collect();
+    let mut won = 0;
+    for taker in takers {
+        let taken = taker.await.expect("the taker").expect("the take");
+        if let Some(frame) = taken {
+            assert!(frame.payload.get("delivery_hold").is_none(), "{frame:?}");
+            won += 1;
+        }
+    }
+    won
+}
+
+/// Taking a held send's hold is a compare-and-set on the hold, in
+/// both stores. Of concurrent takers exactly one gets the frame, without
+/// its hold; the others, and every take after, get none. In SQLite the
+/// takers hold two connections to one file, as two processes would: the
+/// update changes the row only while it still holds the payload read, hold
+/// included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn taking_a_held_sends_hold_is_a_compare_and_set() {
+    let memory: Arc<dyn ConsoleLogStore> = Arc::new(InMemoryConsoleLogStore::new());
+    let aggregator = MetaConsoleAggregator::new(Arc::clone(&memory));
+    for round in 0..8 {
+        let frame_id = held_send_frame(&aggregator, &format!("memory-{round}")).await;
+        let stores = vec![Arc::clone(&memory); 4];
+        assert_eq!(
+            concurrent_takes(&stores, &frame_id).await,
+            1,
+            "round {round}"
+        );
+        assert!(
+            memory
+                .take_send_frame_hold(&frame_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("console.sqlite3");
+    let first: Arc<dyn ConsoleLogStore> =
+        Arc::new(SqliteConsoleLogStore::open(&path).expect("first connection"));
+    let second: Arc<dyn ConsoleLogStore> =
+        Arc::new(SqliteConsoleLogStore::open(&path).expect("second connection"));
+    let aggregator = MetaConsoleAggregator::new(Arc::clone(&first));
+    for round in 0..8 {
+        let frame_id = held_send_frame(&aggregator, &format!("sqlite-{round}")).await;
+        let stores = vec![
+            Arc::clone(&first),
+            Arc::clone(&second),
+            Arc::clone(&first),
+            Arc::clone(&second),
+        ];
+        assert_eq!(
+            concurrent_takes(&stores, &frame_id).await,
+            1,
+            "round {round}"
+        );
+        assert!(
+            second
+                .take_send_frame_hold(&frame_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+/// The send machine's own state decides a transition in both
+/// stores. A submitted send (its bind answered bound) records no hold;
+/// only a dispatching one is submitted; the SQLite store moves a send only
+/// from the state it read, so of two connections moving one send at once
+/// exactly one moves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submitted_send_records_no_hold_and_moves_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("console.sqlite3");
+    let stores: [Arc<dyn ConsoleLogStore>; 2] = [
+        Arc::new(InMemoryConsoleLogStore::new()),
+        Arc::new(SqliteConsoleLogStore::open(&path).expect("sqlite")),
+    ];
+    for store in stores {
+        let aggregator = MetaConsoleAggregator::new(Arc::clone(&store));
+        let (accepted, claim) =
+            fresh(reserve(&aggregator, "submitted", "hello", &human("u1")).await);
+        drop(claim);
+        assert!(
+            aggregator
+                .mark_interaction_submitted(&accepted.input_frame_id)
+                .await
+                .is_err(),
+            "an accepted send is not submitted before its dispatch begins"
+        );
+        aggregator
+            .mark_interaction_dispatching(&accepted.input_frame_id)
+            .await
+            .expect("the dispatch begins");
+        aggregator
+            .mark_interaction_submitted(&accepted.input_frame_id)
+            .await
+            .expect("the bind answered bound");
+        let before = frame_of(&aggregator, &accepted.input_frame_id).await;
+        assert_eq!(before.status, ConsoleFrameStatus::Submitted);
+        let marked = aggregator
+            .mark_interaction_delivery_held(&accepted.input_frame_id, &held())
+            .await;
+        assert!(
+            marked.is_err(),
+            "a submitted send records no hold: {marked:?}"
+        );
+        let after = frame_of(&aggregator, &accepted.input_frame_id).await;
+        assert_eq!(after.status, ConsoleFrameStatus::Submitted);
+        assert_eq!(after.frame_version, before.frame_version);
+        assert!(after.payload.get("delivery_hold").is_none());
+    }
+
+    let first: Arc<dyn ConsoleLogStore> =
+        Arc::new(SqliteConsoleLogStore::open(&path).expect("first connection"));
+    let second: Arc<dyn ConsoleLogStore> =
+        Arc::new(SqliteConsoleLogStore::open(&path).expect("second connection"));
+    let aggregator = MetaConsoleAggregator::new(Arc::clone(&first));
+    for round in 0..8 {
+        let (accepted, claim) = fresh(
+            reserve(
+                &aggregator,
+                &format!("raced-{round}"),
+                "hello",
+                &human("u1"),
+            )
+            .await,
+        );
+        drop(claim);
+        aggregator
+            .mark_interaction_dispatching(&accepted.input_frame_id)
+            .await
+            .expect("the dispatch begins");
+        let movers: Vec<_> = [&first, &second, &first, &second]
+            .into_iter()
+            .map(|store| {
+                let store = Arc::clone(store);
+                let frame_id = accepted.input_frame_id.clone();
+                tokio::spawn(async move {
+                    store
+                        .transition_send_frame(&frame_id, SendTransition::MarkSubmitted, None)
+                        .await
+                })
+            })
+            .collect();
+        let mut moved = 0;
+        for mover in movers {
+            if mover.await.expect("the mover").expect("the move").is_some() {
+                moved += 1;
+            }
+        }
+        assert_eq!(moved, 1, "round {round}");
     }
 }

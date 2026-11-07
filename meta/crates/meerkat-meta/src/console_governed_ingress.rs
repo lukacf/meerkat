@@ -77,8 +77,9 @@ pub trait ConsoleGovernedIngress: Send + Sync {
     /// [`GovernedInputBinder::wait_budget`], and the send binds again. A send
     /// still answered "not now" when that budget ends (at once for a binder
     /// with no budget) is held, not failed: nothing is submitted, its frame
-    /// stays accepted with a `delivery_hold`, and a replay of its key, while
-    /// the runtime holds no input for it, dispatches the same input again.
+    /// stays accepted with a `delivery_hold`, and a replay of its key
+    /// dispatches the same input again, unless the runtime's evidence shows
+    /// it admitted, which settles it delivered.
     ///
     /// The context is a correlation handle, NOT an authority: its
     /// `idempotency_key` is chosen by the client, so any caller allowed to

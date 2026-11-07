@@ -67,7 +67,7 @@ use crate::unified_runtime::{ConsoleEventStore, UnifiedRuntime};
 pub use query_error::{ConsoleTimelineQueryError, ConsoleTimelineQueryResult};
 pub(crate) use send_recovery::{
     ConsoleSendRecovery, INTERACTIVE_SEND_READ_BOUND, NativeSendObservation, ScopedReservation,
-    SendDispatchClaim,
+    SendDispatchClaim, governed_delivery_key, governed_input_id,
 };
 use send_recovery::{SendDispatchClaims, SendSweepOutcome};
 pub(crate) use send_scope::ConsoleSendScope;
@@ -3143,6 +3143,23 @@ impl MetaConsoleAggregator {
         Ok(state)
     }
 
+    /// A held governed send's replay, as the frame's one dispatch owner,
+    /// reconciled on the send's own hold: whatever the runtime's evidence
+    /// reads short of an admission, it is dispatched again (the caller then
+    /// takes the hold, [`Self::take_interaction_delivery_hold`]).
+    pub(crate) fn begin_held_send_redispatch(
+        &self,
+        frame: &ConsoleFrame,
+        _owner: &SendDispatchClaim,
+    ) -> Result<SendState, ConsoleSendError> {
+        let state = SendState::from_send_frame_status(frame.status)
+            .ok_or(ConsoleSendError::State("not a console send frame"))?;
+        let (state, _effects) = state
+            .reconcile(SendEvidence::Held)
+            .map_err(ConsoleSendError::State)?;
+        Ok(state)
+    }
+
     /// Test seam: every send observation reads `reader`'s admission
     /// evidence, in place of a registered runtime's.
     #[cfg(test)]
@@ -3243,6 +3260,11 @@ impl MetaConsoleAggregator {
             && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
         {
             accepted = self.settle_admitted_send(&frame, &claim).await?;
+        } else if frame.status == ConsoleFrameStatus::Submitted
+            && native == NativeSendObservation::Absent
+            && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
+        {
+            accepted = self.settle_lost_submission(&frame, &claim).await?;
         }
         Ok(Some(ConsoleSendRecovery { accepted, native }))
     }
@@ -3255,7 +3277,9 @@ impl MetaConsoleAggregator {
     /// runs before the gateway serves; a send whose evidence the store did
     /// not answer in time stays unsettled for its sender's recovery, which
     /// waits longer. Evidence only: a send whose input was admitted is
-    /// settled delivered, and nothing is ever dispatched or failed here.
+    /// settled delivered; a submitted send whose input the runtime does not
+    /// hold (the previous process stopped before submitting it) fails, its
+    /// outcome unknown. Nothing is ever dispatched here.
     pub(crate) async fn reconcile_interrupted_sends(&self) -> SendSweepOutcome {
         let deadline = tokio::time::Instant::now() + send_recovery::SEND_SWEEP_DEADLINE;
         let frames = match self
@@ -3286,19 +3310,31 @@ impl MetaConsoleAggregator {
             let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id) else {
                 continue;
             };
-            if matches!(
-                self.observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
-                    .await,
-                NativeSendObservation::Admitted { .. }
-            ) {
-                match self.settle_admitted_send(&frame, &claim).await {
-                    Ok(_) => outcome.delivered += 1,
-                    Err(error) => tracing::warn!(
-                        frame_id = %frame.id,
-                        %error,
-                        "console send reconciliation could not settle an admitted send"
-                    ),
+            match self
+                .observe_native_send(&frame, send_recovery::BOOT_SEND_READ_BOUND)
+                .await
+            {
+                NativeSendObservation::Admitted { .. } => {
+                    match self.settle_admitted_send(&frame, &claim).await {
+                        Ok(_) => outcome.delivered += 1,
+                        Err(error) => tracing::warn!(
+                            frame_id = %frame.id,
+                            %error,
+                            "console send reconciliation could not settle an admitted send"
+                        ),
+                    }
                 }
+                NativeSendObservation::Absent if frame.status == ConsoleFrameStatus::Submitted => {
+                    match self.settle_lost_submission(&frame, &claim).await {
+                        Ok(_) => outcome.lost += 1,
+                        Err(error) => tracing::warn!(
+                            frame_id = %frame.id,
+                            %error,
+                            "console send reconciliation could not settle a lost submission"
+                        ),
+                    }
+                }
+                NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {}
             }
         }
         outcome
@@ -3641,38 +3677,151 @@ impl MetaConsoleAggregator {
     }
 
     /// A governed dispatch held past its door's budget: nothing was
-    /// submitted. The send returns to accepted (`MarkHeld`) and its frame
+    /// submitted (a held answer comes only from the bind loop, before any
+    /// submission). `MarkHeld`, applied to the send's own state: a send
+    /// dispatching before its submission returns to accepted and its frame
     /// records the hold in its `delivery_hold` (the condition, the wait, the
-    /// binds, retryable); a replay of the send's key dispatches it again.
+    /// binds, retryable); a replay of the send's key dispatches it again. A
+    /// send in any other state (submitted, settled, or accepted with no
+    /// dispatch in flight) records no hold: the mark is refused and the frame
+    /// left as it is.
     pub async fn mark_interaction_delivery_held(
         &self,
         input_frame_id: &str,
         hold: &crate::identity_first::GovernedHold,
     ) -> Result<(), ConsoleSendError> {
-        let _ = SendState::Dispatching
-            .apply(SendTransition::MarkHeld)
-            .map_err(ConsoleSendError::State)?;
         let delivery_hold = json!({
             "condition": hold.condition.as_str(),
             "waited_ms": u64::try_from(hold.waited.as_millis()).unwrap_or(u64::MAX),
             "binds": hold.binds,
             "retryable": true,
         });
-        update_send_frame_hold_and_emit(&self.inner, input_frame_id, Some(delivery_hold))
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkHeld,
+            Some(("delivery_hold", delivery_hold)),
+            "a hold is recorded only on a send dispatching before its submission",
+        )
+        .await
+    }
+
+    /// A governed send's dispatch begins: `StartDispatch`, applied to the
+    /// send's own state (accepted).
+    pub(crate) async fn mark_interaction_dispatching(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        self.transition_send(
+            input_frame_id,
+            SendTransition::StartDispatch,
+            None,
+            "only an accepted send starts a dispatch",
+        )
+        .await
+    }
+
+    /// A governed send's bind answered bound, before its input is
+    /// submitted: `MarkSubmitted`, applied to the send's own state
+    /// (dispatching). From here the send is delivered or fails, and is never
+    /// held.
+    pub(crate) async fn mark_interaction_submitted(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkSubmitted,
+            None,
+            "only a dispatching send is submitted",
+        )
+        .await
+    }
+
+    /// Apply `transition` to the send's own state, atomically in the store,
+    /// recording `note`; `refused` when the send machine refuses it from
+    /// the state the frame records (nothing changed).
+    async fn transition_send(
+        &self,
+        input_frame_id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, Value)>,
+        refused: &'static str,
+    ) -> Result<(), ConsoleSendError> {
+        let Some(updated) = self
+            .inner
+            .store
+            .transition_send_frame(input_frame_id, transition, note)
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Err(ConsoleSendError::State(refused));
+        };
+        emit_frame_updated(&self.inner, updated)
             .await
             .map_err(ConsoleSendError::Log)?;
         Ok(())
     }
 
-    /// A held send dispatched again: its hold no longer stands.
-    pub(crate) async fn clear_interaction_delivery_hold(
+    /// Settle a submitted send whose input the runtime does not hold, its
+    /// dispatch owner gone: the process that bound it stopped before its
+    /// input reached the runtime. Its outcome is unknown, so it fails,
+    /// recording why (`delivery_failure`, `outcome_unknown`, retryable), and
+    /// is never dispatched again: its sender can send it again. Only the
+    /// frame's dispatch owner settles it.
+    pub(crate) async fn settle_lost_submission(
         &self,
-        input_frame_id: &str,
-    ) -> Result<(), ConsoleSendError> {
-        update_send_frame_hold_and_emit(&self.inner, input_frame_id, None)
+        frame: &ConsoleFrame,
+        _owner: &SendDispatchClaim,
+    ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
+        let state = SendState::from_send_frame_status(frame.status)
+            .ok_or(ConsoleSendError::State("not a console send frame"))?;
+        let (_failed, _effects) = state
+            .reconcile(SendEvidence::Absent)
+            .map_err(ConsoleSendError::State)?;
+        let Some(updated) = self
+            .inner
+            .store
+            .transition_send_frame(
+                &frame.id,
+                SendTransition::MarkDeliveryFailed,
+                Some((
+                    "delivery_failure",
+                    json!({"reason": "outcome_unknown", "retryable": true}),
+                )),
+            )
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Ok(accepted_from_frame(frame));
+        };
+        let accepted = accepted_from_frame(&updated);
+        emit_frame_updated(&self.inner, updated)
             .await
             .map_err(ConsoleSendError::Log)?;
-        Ok(())
+        Ok(accepted)
+    }
+
+    /// A held send about to be dispatched again takes its hold: a
+    /// compare-and-set, so of concurrent replays exactly one gets `true` and
+    /// dispatches; one that finds the hold taken gets `false` and dispatches
+    /// nothing.
+    pub(crate) async fn take_interaction_delivery_hold(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<bool, ConsoleSendError> {
+        let Some(taken) = self
+            .inner
+            .store
+            .take_send_frame_hold(input_frame_id)
+            .await
+            .map_err(ConsoleSendError::Log)?
+        else {
+            return Ok(false);
+        };
+        emit_frame_updated(&self.inner, taken)
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(true)
     }
 
     /// Whether a live dispatch owns the send frame `frame_id`.
@@ -8327,17 +8476,6 @@ async fn update_frame_status_and_emit(
     status: ConsoleFrameStatus,
 ) -> ConsoleLogResult<Option<ConsoleFrame>> {
     let Some(updated) = inner.store.update_frame_status(frame_id, status).await? else {
-        return Ok(None);
-    };
-    emit_frame_updated(inner, updated).await
-}
-
-async fn update_send_frame_hold_and_emit(
-    inner: &AggregatorInner,
-    frame_id: &str,
-    hold: Option<Value>,
-) -> ConsoleLogResult<Option<ConsoleFrame>> {
-    let Some(updated) = inner.store.update_send_frame_hold(frame_id, hold).await? else {
         return Ok(None);
     };
     emit_frame_updated(inner, updated).await

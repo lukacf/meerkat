@@ -118,39 +118,68 @@ pub(crate) fn governed_delivery_key(interaction_id: &str, input_frame_id: &str) 
     format!("console:{interaction_id}:{input_frame_id}")
 }
 
-/// What the runtime holding a send's recorded session has under the send's
-/// delivery keys.
+/// The namespace of the governed Console input ids, derived from each send's
+/// `console:{interaction}:{frame}` key.
+const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x6d, 0x6f, 0x62, 0x6b, 0x69, 0x74, 0x2d, 0x67, 0x6f, 0x76, 0x2d, 0x69, 0x6e, 0x70, 0x75, 0x74,
+]);
+
+/// A governed console send's own input id, derived from its interaction and
+/// frame: every dispatch of the send submits this input, and a replay reads
+/// the runtime's evidence of it by this id (Core indexes a governed input
+/// under its key as qualified by its association, never under the raw key).
+pub(crate) fn governed_input_id(
+    interaction_id: &str,
+    input_frame_id: &str,
+) -> meerkat_core::lifecycle::InputId {
+    meerkat_core::lifecycle::InputId::from_uuid(uuid::Uuid::new_v5(
+        &CONSOLE_GOVERNED_INPUT_NAMESPACE,
+        governed_delivery_key(interaction_id, input_frame_id).as_bytes(),
+    ))
+}
+
+/// What the runtime holding a send's recorded session holds as the send's
+/// own input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum NativeSendObservation {
-    /// An input was admitted under the send's delivery identity.
+    /// An input was admitted as the send's own.
     Admitted {
         input_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
     },
-    /// No input under either delivery key in the recorded session. A send
-    /// to an externally bound member carries no delivery identity, so for
-    /// it this is not evidence that nothing was delivered.
+    /// The recorded session holds no input as the send's own (under its
+    /// host-human key, nor by its governed input id). A send to an
+    /// externally bound member carries no delivery identity, so for it this
+    /// is not evidence that nothing was delivered.
     Absent,
     /// The evidence could not be read.
     Unknown { cause: String },
 }
 
-/// One stored input the runtime admitted under a delivery key.
+/// One stored input the runtime admitted as a send's own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AdmittedInput {
     pub(crate) input_id: String,
     pub(crate) phase: Option<String>,
 }
 
-/// Durable admission evidence by idempotency key, in one session.
+/// Durable admission evidence in one session: by raw idempotency key (a
+/// host-human send's input is admitted unqualified under its frame id) and
+/// by input id (a governed send's input id derives from its frame).
 #[async_trait::async_trait]
 pub(crate) trait SendAdmissionReader: Send + Sync {
     async fn admitted_input(
         &self,
         session_id: &meerkat_core::types::SessionId,
         idempotency_key: &str,
+    ) -> Result<Option<AdmittedInput>, String>;
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
     ) -> Result<Option<AdmittedInput>, String>;
 }
 
@@ -175,12 +204,50 @@ impl SendAdmissionReader for meerkat_runtime::MeerkatMachine {
                 .and_then(|phase| phase.as_str().map(ToString::to_string)),
         }))
     }
+
+    async fn admitted_input_by_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<AdmittedInput>, String> {
+        use meerkat_runtime::terminal_status::{
+            InputTerminalReceiptObservation, InteractionSelector,
+        };
+        // Live or from the store, without reviving the session. A session
+        // that never admitted anything holds none of this input either.
+        let observed = match self
+            .input_terminal_receipt_observation(
+                session_id,
+                InteractionSelector::InputId(input_id.clone()),
+            )
+            .await
+        {
+            Ok(observed) => observed,
+            Err(meerkat_runtime::RuntimeDriverError::NotFound { .. }) => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(observed.map(|observed| {
+            let phase = match &observed.report {
+                InputTerminalReceiptObservation::Pending { phase, .. } => {
+                    serde_json::to_value(phase)
+                        .ok()
+                        .and_then(|phase| phase.as_str().map(ToString::to_string))
+                }
+                _ => None,
+            };
+            AdmittedInput {
+                input_id: observed.report.input_id().to_string(),
+                phase,
+            }
+        }))
+    }
 }
 
-/// Read a send's admission evidence in the session it recorded, under the
-/// host-human key (the input frame id) and then the governed key, all within
-/// one deadline `bound` from now: evidence the store has not given by then
-/// answers `unknown`, without reading the keys left.
+/// Read a send's admission evidence in the session it recorded: under its
+/// host-human key (the input frame id), then by its governed input id
+/// ([`governed_input_id`]), all within one deadline `bound` from now:
+/// evidence the store has not given by then answers `unknown`, without
+/// reading on.
 pub(crate) async fn observe_native_send(
     reader: &dyn SendAdmissionReader,
     frame: &ConsoleFrame,
@@ -197,12 +264,28 @@ pub(crate) async fn observe_native_send(
             cause: "the send's recorded session id does not parse".to_string(),
         };
     };
-    let mut keys = vec![frame.id.clone()];
-    if let Some(interaction_id) = frame.interaction_id.as_deref() {
-        keys.push(governed_delivery_key(interaction_id, &frame.id));
+    let late = || NativeSendObservation::Unknown {
+        cause: "the admission read did not answer in time".to_string(),
+    };
+    match tokio::time::timeout_at(deadline, reader.admitted_input(&session_id, &frame.id)).await {
+        Ok(Ok(Some(input))) => {
+            return NativeSendObservation::Admitted {
+                input_id: input.input_id,
+                phase: input.phase,
+            };
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(error)) => return NativeSendObservation::Unknown { cause: error },
+        Err(_) => return late(),
     }
-    for key in keys {
-        match tokio::time::timeout_at(deadline, reader.admitted_input(&session_id, &key)).await {
+    if let Some(interaction_id) = frame.interaction_id.as_deref() {
+        let input_id = governed_input_id(interaction_id, &frame.id);
+        match tokio::time::timeout_at(
+            deadline,
+            reader.admitted_input_by_id(&session_id, &input_id),
+        )
+        .await
+        {
             Ok(Ok(Some(input))) => {
                 return NativeSendObservation::Admitted {
                     input_id: input.input_id,
@@ -211,11 +294,7 @@ pub(crate) async fn observe_native_send(
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => return NativeSendObservation::Unknown { cause: error },
-            Err(_) => {
-                return NativeSendObservation::Unknown {
-                    cause: "the admission read did not answer in time".to_string(),
-                };
-            }
+            Err(_) => return late(),
         }
     }
     NativeSendObservation::Absent
@@ -235,6 +314,9 @@ pub(crate) struct ConsoleSendRecovery {
 pub(crate) struct SendSweepOutcome {
     pub(crate) examined: usize,
     pub(crate) delivered: usize,
+    /// Submitted sends whose input the runtime did not hold: failed, their
+    /// outcome unknown.
+    pub(crate) lost: usize,
 }
 
 #[cfg(test)]
@@ -265,6 +347,18 @@ mod tests {
                 return Err(error.clone());
             }
             Ok(self.admitted.get(idempotency_key).cloned())
+        }
+
+        async fn admitted_input_by_id(
+            &self,
+            _session_id: &meerkat_core::types::SessionId,
+            input_id: &meerkat_core::lifecycle::InputId,
+        ) -> Result<Option<AdmittedInput>, String> {
+            self.reads.lock().unwrap().push(format!("id:{input_id}"));
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            Ok(self.admitted.get(&input_id.to_string()).cloned())
         }
     }
 
@@ -318,10 +412,14 @@ mod tests {
 
     const SESSION: &str = "0193f5d1-0b5a-7c3e-9a1f-1c2d3e4f5a6b";
 
+    /// The frame's host-human key first, then the governed send's input id,
+    /// derived from its frame: Core indexes a governed input under its key
+    /// as qualified by its association, never under the raw key.
     #[tokio::test]
-    async fn observation_reads_both_delivery_keys_in_the_recorded_session() {
+    async fn observation_reads_the_frame_key_then_the_governed_input_id() {
         let frame = frame(Some(SESSION));
-        let governed = governed_delivery_key(frame.interaction_id.as_deref().unwrap(), &frame.id);
+        let governed =
+            governed_input_id(frame.interaction_id.as_deref().unwrap(), &frame.id).to_string();
         let host_human = reader(&[("console-frame-1", "input-a")]);
         assert_eq!(
             observe_native_send(&host_human, &frame, INTERACTIVE_SEND_READ_BOUND).await,
@@ -340,7 +438,7 @@ mod tests {
         );
         assert_eq!(
             *governed_reader.reads.lock().unwrap(),
-            vec!["console-frame-1".to_string(), governed]
+            vec!["console-frame-1".to_string(), format!("id:{governed}")]
         );
         assert_eq!(
             observe_native_send(&reader(&[]), &frame, INTERACTIVE_SEND_READ_BOUND).await,
@@ -395,18 +493,30 @@ mod tests {
                 .admitted_input(session_id, idempotency_key)
                 .await
         }
+
+        async fn admitted_input_by_id(
+            &self,
+            session_id: &meerkat_core::types::SessionId,
+            input_id: &meerkat_core::lifecycle::InputId,
+        ) -> Result<Option<AdmittedInput>, String> {
+            tokio::time::sleep(self.delay).await;
+            self.evidence
+                .admitted_input_by_id(session_id, input_id)
+                .await
+        }
     }
 
-    /// One deadline bounds the whole observation, not each key's read: the
-    /// governed key is read with what is left of the bound after the
+    /// One deadline bounds the whole observation, not each read: the
+    /// governed input id is read with what is left of the bound after the
     /// host-human key, and an observation past its deadline answers unknown
     /// without reading on. Each read here takes 6 s and the admission is
-    /// under the governed key, so the second read answers at 12 s: past a
+    /// the governed input, so the second read answers at 12 s: past a
     /// 10 s bound, within a 13 s one.
     #[tokio::test(start_paused = true)]
-    async fn one_deadline_bounds_the_reads_of_both_delivery_keys() {
+    async fn one_deadline_bounds_both_reads() {
         let frame = frame(Some(SESSION));
-        let governed = governed_delivery_key(frame.interaction_id.as_deref().unwrap(), &frame.id);
+        let governed =
+            governed_input_id(frame.interaction_id.as_deref().unwrap(), &frame.id).to_string();
         let slow = DelayedReader {
             evidence: reader(&[(governed.as_str(), "input-b")]),
             delay: Duration::from_secs(6),

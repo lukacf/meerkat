@@ -768,6 +768,14 @@ impl crate::console_aggregator::SendAdmissionReader for UnreadableEvidence {
     ) -> Result<Option<crate::console_aggregator::AdmittedInput>, String> {
         Err("the console store did not answer".to_string())
     }
+
+    async fn admitted_input_by_id(
+        &self,
+        _session_id: &SessionId,
+        _input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<Option<crate::console_aggregator::AdmittedInput>, String> {
+        Err("the console store did not answer".to_string())
+    }
 }
 
 /// A held governed send to `key`: sent while the source is held, its
@@ -836,6 +844,11 @@ async fn a_held_send_that_recorded_no_session_is_dispatched_again_on_replay() {
         other => panic!("a fresh reservation: {other:?}"),
     };
     assert_eq!(accepted.session_id, None, "the send recorded no session");
+    // Its dispatch began, and was held before it submitted anything.
+    aggregator
+        .mark_interaction_dispatching(&accepted.input_frame_id)
+        .await
+        .expect("the dispatch begins");
     aggregator
         .mark_interaction_delivery_held(
             &accepted.input_frame_id,
@@ -1041,7 +1054,9 @@ async fn concurrent_replays_of_a_held_send_dispatch_it_once() {
 /// nothing was submitted. The host reviewed the send for the old session,
 /// so it refuses the new one with its typed refusal and the send fails,
 /// admitted nowhere: the send's input, by its id (derived from its frame),
-/// is on neither session.
+/// is on neither session. The old session is read before the reset, while
+/// it exists (only the held dispatch could have admitted there; the reset
+/// destroys it), the new one after the replay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_held_send_replayed_after_a_reset_dispatches_once_on_the_new_session() {
     let fixture = Arc::new(Fixture::new().await);
@@ -1055,6 +1070,32 @@ async fn a_held_send_replayed_after_a_reset_dispatches_once_on_the_new_session()
         Some(fixture.session_id.to_string()),
         "the held send recorded the member's session"
     );
+    let input_id = crate::console_aggregator::governed_input_id(
+        &accepted.interaction_id,
+        &accepted.input_frame_id,
+    );
+    let not_on = |session: SessionId| {
+        let machine = Arc::clone(&fixture.machine);
+        let input_id = input_id.clone();
+        async move {
+            let observed = machine
+                .input_terminal_receipt_observation(
+                    &session,
+                    meerkat_runtime::terminal_status::InteractionSelector::InputId(
+                        input_id.clone(),
+                    ),
+                )
+                .await;
+            assert!(
+                matches!(
+                    observed,
+                    Ok(None) | Err(meerkat_runtime::RuntimeDriverError::NotFound { .. })
+                ),
+                "the send's input {input_id} is not on {session}: {observed:?}"
+            );
+        }
+    };
+    not_on(fixture.session_id.clone()).await;
     let fresh = runtime
         .reset(&identity)
         .await
@@ -1084,26 +1125,10 @@ async fn a_held_send_replayed_after_a_reset_dispatches_once_on_the_new_session()
     assert!(host.admitted.lock().unwrap().is_empty(), "admitted nowhere");
     let ids = host.ids.lock().unwrap().clone();
     assert!(
-        !ids.is_empty() && ids.iter().all(|id| *id == ids[0]),
-        "every bind was handed the send's one input: {ids:?}"
+        ids.iter().all(|id| *id == input_id),
+        "every bind was handed the send's one input, {input_id}: {ids:?}"
     );
-    for session in [&fixture.session_id, &new_session] {
-        let observed = fixture
-            .machine
-            .input_terminal_receipt_observation(
-                session,
-                meerkat_runtime::terminal_status::InteractionSelector::InputId(ids[0].clone()),
-            )
-            .await;
-        assert!(
-            matches!(
-                observed,
-                Ok(None) | Err(meerkat_runtime::RuntimeDriverError::NotFound { .. })
-            ),
-            "the send's input {} is not on {session}: {observed:?}",
-            ids[0]
-        );
-    }
+    not_on(new_session).await;
 }
 
 /// A governed send whose input was admitted, its frame left
@@ -1255,6 +1280,86 @@ async fn a_submitted_governed_send_records_no_hold() {
         ConsoleFrameStatus::Delivered
     );
     assert_eq!(host.admitted.lock().unwrap().len(), 1, "admitted once");
+}
+
+/// A governed send recorded submitted (its bind answered
+/// bound) whose input never reached the runtime, because the process
+/// stopped between that record and the submission, is settled by a replay
+/// of its key. The runtime holds none of its input and no owner is left to
+/// finish the submission, so it fails, its outcome unknown (its frame's
+/// `delivery_failure`: `outcome_unknown`, retryable), and is never
+/// dispatched again. The frame is built through the Console's own
+/// reservation and send transitions, as such a stop leaves it.
+///
+/// RED with the settlement of a lost submission dropped: the replay answers
+/// the acceptance and the send stays submitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_submitted_send_whose_input_never_reached_the_runtime_fails_on_replay() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "lost-original"));
+    let session = fixture.session_id.to_string();
+    let scope = super::ConsoleSendGovernance::default().scope;
+    let accepted = match aggregator
+        .reserve_identity_first_interaction_scoped(
+            request("lost-original", HUMAN),
+            Some(session.as_str()),
+            &scope,
+        )
+        .await
+        .expect("the Console reserves the send")
+    {
+        crate::console_aggregator::ScopedReservation::Fresh(accepted, claim) => {
+            // The process stopped: the dispatch owner is gone.
+            drop(claim);
+            accepted
+        }
+        other => panic!("a fresh reservation: {other:?}"),
+    };
+    aggregator
+        .mark_interaction_dispatching(&accepted.input_frame_id)
+        .await
+        .expect("the dispatch begins");
+    aggregator
+        .mark_interaction_submitted(&accepted.input_frame_id)
+        .await
+        .expect("the bind answered bound");
+    let binds = bind_count(&host);
+
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("lost-original", HUMAN),
+    )
+    .await
+    .expect("the replay is answered");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::DeliveryFailed,
+        "a lost submission fails"
+    );
+    let frame = aggregator
+        .query_timeline(ConsoleTimelineQuery {
+            identity: Some(accepted.identity.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .frames
+        .into_iter()
+        .find(|frame| frame.id == accepted.input_frame_id)
+        .expect("the send's frame");
+    assert_eq!(
+        frame.payload["delivery_failure"],
+        json!({"reason": "outcome_unknown", "retryable": true}),
+        "{frame:?}"
+    );
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
+    assert!(host.admitted.lock().unwrap().is_empty(), "admitted nowhere");
 }
 
 /// A governed Console steer the host refuses answers its typed

@@ -11135,6 +11135,16 @@ impl IdentityRuntime {
                 GovernedInputError::Unbound,
             ));
         }
+        // The bound input is about to be submitted: a door that records its
+        // send's state records the submission now, outside the protected
+        // section, so nothing can record the send held after this point. A
+        // refusal here submits nothing: the custody is withdrawn.
+        if let Err(refusal) = binder.submitting().await {
+            drop(settlement);
+            return Err(IdentityRuntimeError::GovernedInput(
+                GovernedInputError::Refused(refusal),
+            ));
+        }
         // Where this submission's outcome is read by its key, through Core,
         // when its answer is lost: the raw key and the digest of the exact
         // association it is submitted under.
@@ -11733,16 +11743,17 @@ impl IdentityRuntime {
                 },
             ),
         );
-        let key = format!(
-            "console:{}:{}",
-            accepted.interaction_id, accepted.input_frame_id
+        let key = crate::console_aggregator::governed_delivery_key(
+            &accepted.interaction_id,
+            &accepted.input_frame_id,
         );
         // The send's own input id, derived from its frame and interaction:
-        // a held send dispatched again submits the same input.
-        prompt.header.id = meerkat_core::lifecycle::InputId::from_uuid(uuid::Uuid::new_v5(
-            &CONSOLE_GOVERNED_INPUT_NAMESPACE,
-            key.as_bytes(),
-        ));
+        // a held send dispatched again submits the same input, and a replay
+        // reads the runtime's evidence of it by this id.
+        prompt.header.id = crate::console_aggregator::governed_input_id(
+            &accepted.interaction_id,
+            &accepted.input_frame_id,
+        );
         prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(key));
         let outcome = self
             .send_governed_with_turn_ticket(
@@ -22979,9 +22990,3 @@ mod candidate_deferral_tests {
         );
     }
 }
-
-/// The namespace of the governed Console input ids, derived from each send's
-/// `console:{interaction}:{frame}` key.
-const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x6d, 0x6f, 0x62, 0x6b, 0x69, 0x74, 0x2d, 0x67, 0x6f, 0x76, 0x2d, 0x69, 0x6e, 0x70, 0x75, 0x74,
-]);

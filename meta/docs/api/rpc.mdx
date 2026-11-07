@@ -1229,12 +1229,28 @@ until the door's wait budget ended) submitted nothing: its frame stays
 `binds`, `retryable: true`), and a steer answers `-32052`
 (`governed_input_held`; HTTP `503` on `POST /console/send`). A replay of
 that send dispatches it again, as the same input (its id derives from
-the send), and clears the hold. Any other governed send, and any other
+the send), and takes the hold first, unless the runtime's evidence shows
+its input admitted, which settles it `delivered`. Evidence the replay
+cannot read (the send recorded no session, no runtime serves it, the read
+failed or ran late) does not stop it: the hold is recorded only when a
+dispatch was held before it submitted anything and is taken before any
+dispatch again, so it records that nothing was submitted since. Of two
+replays at once, one takes the hold and dispatches; the other answers
+the acceptance. While a governed send is dispatched its frame records
+`dispatching`, and `submitted` once its host's binder bound it, before the
+input is submitted; from there it is delivered or fails, and is never held.
+A replay of a submitted send whose input the runtime does not hold (the
+process that bound it stopped before submitting it) fails it, its outcome
+unknown (`delivery_failure`: `{reason: "outcome_unknown", retryable: true}`),
+and never dispatches it again: send it again. The runtime's evidence of a
+governed send is read by the send's own input id, a host-human send's under
+its frame id. Any other governed send, and any other
 member's, is settled from evidence only and never dispatched again. A
 replay waits for that evidence as long as
 `meta/console/recover_send` does (below). At
 startup the gateway settles, from evidence only, the unsettled sends among
-the newest console frames whose input was admitted.
+the newest console frames whose input was admitted, and fails, outcome
+unknown, the submitted ones whose input the runtime does not hold.
 
 ### `meta/console/recover_send`
 
@@ -1267,17 +1283,19 @@ frame ids are not lookup keys. The result is the send's acceptance plus
 ```
 
 `native.state` is `admitted` (with the input id and its lifecycle `phase`),
-`absent` (no input under the send's delivery keys in its recorded session; a
-member reached through an external binding carries no delivery key, so for it
-this is not evidence that nothing was delivered), or `unknown` (with a
-`cause`). A send the evidence shows admitted but not yet settled is settled
-`delivered`; nothing is ever dispatched. A key the caller never used, and a
+`absent` (no input of the send's in its recorded session, under its frame id
+for a host-human send or by its own input id for a governed one; a member
+reached through an external binding carries no delivery key, so for it this
+is not evidence that nothing was delivered), or `unknown` (with a `cause`).
+A send the evidence shows admitted but not yet settled is settled
+`delivered`; a submitted send the evidence shows absent fails, its outcome
+unknown (see above); nothing is ever dispatched. A key the caller never used, and a
 key another caller used, both answer `-32001` with `data.kind =
 "send_not_found"`. The REST twin is `POST /console/send/recover`.
 
 Reading the evidence loads the session the send recorded from the runtime's
 durable store, which after a restart can take seconds on a remote store. The
-call waits up to 45 seconds in all for the evidence of both delivery keys,
+call waits up to 45 seconds in all for both reads of the evidence,
 then answers `native.state` `unknown`. A client whose own timeout is shorter
 gives up first: the console and the SDKs' stdio transports wait 60 seconds by
 default, and `console_fetch_timeout_ms`, the bundled console's fetch timeout,

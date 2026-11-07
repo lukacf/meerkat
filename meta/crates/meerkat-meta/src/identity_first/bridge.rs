@@ -3528,6 +3528,16 @@ pub trait GovernedInputBinder: Send + Sync {
         GovernedWaitBudget::Bounded(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND)
     }
 
+    /// Called once, after a bind answered bound and before the bound input
+    /// is submitted: outside the protected section, under the identity's
+    /// lifecycle lock. A door that records its send's state records the
+    /// submission here, so nothing records the send held after it. An `Err`
+    /// refuses the send: nothing is submitted. Answers `Ok` unless the door
+    /// says otherwise.
+    async fn submitting(&self) -> Result<(), GovernedBindRefusal> {
+        Ok(())
+    }
+
     /// Take back custody whose submission's native admission is unresolved,
     /// to keep it until the host can settle it from the native owner's
     /// actual record. Called from the runtime-owned operation, whether or

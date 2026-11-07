@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `receipt: Option<Box<GovernedSubmissionReceipt>>`.
 - `SendTransition::MarkHeld`: a held governed Console dispatch returns its
   send from `Dispatching` to `AcceptedPersisted`.
+- `SendState::Submitted`, `SendTransition::MarkSubmitted` and
+  `ConsoleFrameStatus::Submitted` (frame status `submitted`): a governed
+  Console send whose host's binder bound it is submitted, from
+  `Dispatching`; from there it is delivered or fails, and is never held.
+  `MarkHeld` is accepted only from `Dispatching`. New variants of
+  exhaustive public enums.
 
 ### Added
 
@@ -33,9 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `input_id`, `submitted: false`) and `governed_admission_unresolved` (with
   the receipt). The Python and TypeScript SDKs raise
   `IdentityHistoryUnavailableError` for the held kind, with `kind` exposed.
-- `ConsoleLogStore::update_send_frame_hold` (default: unsupported; the
-  in-memory and SQLite stores implement it) and
-  `MetaConsoleAggregator::mark_interaction_delivery_held`.
+- `ConsoleLogStore::transition_send_frame` (a send state transition applied
+  to the frame's own state, atomically) and
+  `ConsoleLogStore::take_send_frame_hold` (a compare-and-set on a send's
+  hold); by default unsupported, the in-memory and SQLite stores implement
+  both. `MetaConsoleAggregator::mark_interaction_delivery_held`.
+- `GovernedInputBinder::submitting` (provided, `Ok` by default): called once
+  after a bind answered bound and before the input is submitted, outside
+  the protected section; an `Err` refuses the send and nothing is
+  submitted.
 
 ### Changed
 
@@ -44,10 +56,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `accepted` and records `delivery_hold` (`condition`, `waited_ms`, `binds`,
   `retryable`), emitted as a frame update. A replay of the same send
   dispatches the same input again (the governed input's id now derives from
-  the send's frame) and clears the hold. A held steer answers HTTP 503
-  `governed_input_held` (Console JSON-RPC -32052); a refused one answers 409
-  `governed_input_refused` with the refusal's kind (it was 500
+  the send's frame) and takes the hold first, a compare-and-set, unless the
+  runtime's evidence shows the input admitted, which settles it delivered;
+  evidence the replay cannot read does not stop it. A held steer answers
+  HTTP 503 `governed_input_held` (Console JSON-RPC -32052); a refused one
+  answers 409 `governed_input_refused` with the refusal's kind (it was 500
   `internal_error`).
+- A governed Console send's frame records `dispatching` while it is
+  dispatched and `submitted` once its host's binder bound it, before the
+  input is submitted. A replay, a recovery or the gateway's start fails a
+  submitted send whose input the runtime does not hold (the process stopped
+  before submitting it), its outcome unknown (`delivery_failure`:
+  `{reason: "outcome_unknown", retryable: true}`); it is never dispatched
+  again. Downgrade: an older binary reads a frame's `submitted` status as
+  `completed`, so a send in flight at a rollback shows completed even if it
+  then fails; nothing is sent twice.
+- A replay or recovery of a governed Console send reads the runtime's
+  evidence by the send's own input id: Core indexes a governed input under
+  its key as qualified by its association, so the read by the raw key never
+  found it, and an admitted governed send now settles delivered.
 - The Console UI shows a held send ("Message held: nothing was delivered yet.
   Send it again.") until a dispatch clears the hold.
 - A governed Console send verifies its human again at every bind, a bind after

@@ -361,6 +361,25 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
 
+    Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a replayed
+    thinking block only while the system prompt, the tools and the earlier
+    messages it was produced under are unchanged, and accounts created on or
+    after 2026-08-31 refuse a request that replays one after a change.
+    Meerkat changes the tools mid-session as MCP servers connect, so it asks
+    Anthropic to drop such blocks instead
+    (`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, with
+    the `thinking-binding-controls-2026-08-01` beta): beside configured
+    `adaptive` thinking, and beside the model's own default,
+    `{"type": "adaptive"}`, when thinking is omitted, since these models
+    think by default. It is never sent beside `between_tools` or `disabled`,
+    and only on the Anthropic API, Vertex and Foundry: Amazon Bedrock and
+    the Copilot route do not send it. A request that forces a tool call with
+    thinking omitted is sent as before, without the control: Meerkat refuses
+    a forced tool call beside explicit thinking, and a forced call skips
+    thinking on the models that accept one. The model answers that turn without
+    the dropped reasoning and the prompt cache restarts at the first dropped
+    block; Meerkat logs a warning naming each dropped block.
+
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
     `system_and_conversation`, and `disabled`, plus `cache_ttl` (`5m`, the

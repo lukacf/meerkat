@@ -9478,6 +9478,56 @@ mod tests {
             }
         }
 
+        /// A transport whose first answer takes `first_delay`; every later
+        /// one is the model list at once.
+        struct SlowFirstListing {
+            first_delay: StdDuration,
+            requests: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for SlowFirstListing {
+            async fn get(
+                &self,
+                _url: &str,
+                _headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(self.first_delay).await;
+                }
+                Ok(models_response())
+            }
+        }
+
+        /// A first listing attempt that does not answer within its share of
+        /// the listing's bound is cut there, and the second attempt answers
+        /// within the rest of the bound. (Fails-old: the first attempt used
+        /// the whole bound, so the second never answered and the listing
+        /// timed out.)
+        #[tokio::test]
+        async fn a_listing_whose_first_attempt_hangs_is_answered_by_the_second() {
+            let transport = SlowFirstListing {
+                first_delay: StdDuration::from_secs(5),
+                requests: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let started = std::time::Instant::now();
+            let snapshot = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the second attempt lists the models: {error}"));
+            assert!(snapshot.model("gpt-test").is_some());
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                started.elapsed() < StdDuration::from_secs(5),
+                "the first attempt was cut within the bound"
+            );
+        }
+
         /// T8: a GitHub App installation token (server-to-server) has no
         /// user: it skips the identity lookup and lists models on the default
         /// host. A later 401 there (off the request path) has the next

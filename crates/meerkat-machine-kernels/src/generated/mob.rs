@@ -14569,6 +14569,12 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: UnlistEntryVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEnded {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclaredRosterSealRefused {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14769,6 +14775,8 @@ pub enum Effect {
     PreparationSettleResolved(effects::PreparationSettleResolved),
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
+    IdentityEnded(effects::IdentityEnded),
+    DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14964,6 +14972,8 @@ pub enum EffectKind {
     PreparationSettleResolved,
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
+    IdentityEnded,
+    DeclaredRosterSealRefused,
 }
 
 pub mod command_capabilities {
@@ -17008,6 +17018,7 @@ pub enum TransitionId {
     UnlistIdentityEntryMobNotRunningDestroyed,
     AdoptLegacyIdentityEntryAdoptedUnlisted,
     AdoptLegacyIdentityEntryRetireUnadopted,
+    SealDeclaredRosterRefused,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

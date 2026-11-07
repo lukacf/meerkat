@@ -865,7 +865,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "mob_declared_apply_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/actor/declared_apply.rs",
-                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted and archived session forgotten effects",
+                    "MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and refusing the seal while an unseated one remains, which the one-entry unlist ends first on the seal's own step (each end named by the identity ended effect), leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, declared roster seal refused, identity entry unlisted, identity ended and archived session forgotten effects",
                     CoverageClaims::none()
                         .transitions(&[
                             "DeclareIdentityEntryKept",
@@ -900,12 +900,15 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "UnlistIdentityEntryDeferred",
                             "UnlistIdentityEntryNotADeclaredEntry",
                             "UnlistIdentityEntryNonAuthoritative",
+                            "SealDeclaredRosterRefused",
                         ])
                         .effects(&[
                             "IdentityEntryDeclared",
                             "DeclaredRosterSealed",
                             "ArchivedSessionForgotten",
                             "IdentityEntryUnlisted",
+                            "IdentityEnded",
+                            "DeclaredRosterSealRefused",
                         ])
                         .invariants(&[
                             "unseated_entry_is_not_a_member",
@@ -977,6 +980,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "IdentityChangeAdmissionResolved",
                             "CreatedIdentityEntryRecorded",
                             "IdentityEntryChangeResolved",
+                            "IdentityEnded",
                         ])
                         .invariants(&[
                             "archived_entry_is_store_owned",
@@ -3837,7 +3841,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "tool_grant_lifecycle",
                 "ToolGrantLifecycleMachine",
                 "crates/meerkat-runtime/src/tool_grant/dsl.rs",
-                "ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, and the admission of each use; expired and revoked grants are terminal",
+                "ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, its end with its subject (revoked, end reason SubjectEnded, its uses refused as ended with it), and the admission of each use; expired and revoked grants are terminal",
                 CoverageClaims::none()
                     .transitions(&[
                         "Issue",
@@ -3857,6 +3861,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AdmitDue",
                         "AdmitEndedExpired",
                         "AdmitEndedRevoked",
+                        "EndWithSubjectActive",
+                        "EndWithSubjectAfterDeadline",
+                        "EndWithSubjectSettledExpired",
+                        "EndWithSubjectSettledRevoked",
+                        "AdmitEndedWithSubject",
                     ])
                     .effects(&[
                         "Issued",
@@ -3879,7 +3888,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 "tool_grant_service",
                 "ToolGrantLifecycleMachine",
                 "crates/meerkat-runtime/src/tool_grant/service.rs",
-                "ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission",
+                "ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, the end of a subject's grants with it (a grant ended with its subject explains no refusal), settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission",
                 CoverageClaims::none()
                     .transitions(&[
                         "Issue",
@@ -3896,6 +3905,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AdmitDue",
                         "AdmitEndedExpired",
                         "AdmitEndedRevoked",
+                        "EndWithSubjectActive",
+                        "EndWithSubjectAfterDeadline",
+                        "EndWithSubjectSettledExpired",
+                        "EndWithSubjectSettledRevoked",
+                        "AdmitEndedWithSubject",
                     ])
                     .effects(&[
                         "Issued",
@@ -3963,6 +3977,20 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                             "RevokeSettledExpired",
                             "RevokeSettledRevoked",
                             "AdmitEndedRevoked",
+                        ])
+                        .effects(&["Revoked", "Expired", "UseRefused"])
+                        .invariants(&["revocation_precedes_the_deadline"]),
+                ),
+                scenario(
+                    "tool_grant_subject_end",
+                    "tool_grant_lifecycle_machine.rs::a_grant_ended_with_its_subject_refuses_its_use_as_ended_with_it ends a live grant with its subject before its deadline as revoked with the end reason SubjectEnded, refuses every later use as ended with its subject, records the expiry for an end at or after the deadline, and leaves ended grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives the end into every phase",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "EndWithSubjectActive",
+                            "EndWithSubjectAfterDeadline",
+                            "EndWithSubjectSettledExpired",
+                            "EndWithSubjectSettledRevoked",
+                            "AdmitEndedWithSubject",
                         ])
                         .effects(&["Revoked", "Expired", "UseRefused"])
                         .invariants(&["revocation_precedes_the_deadline"]),

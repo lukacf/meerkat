@@ -25,7 +25,9 @@
 \* AdmitUse right before the hand-off, so the admission time is the hand-off
 \* time, and writing an expiry it observed only after it refused the call,
 \* in a separate step that can fail or be lost to a crash; an operator
-\* revoke from any process; a read from any process settling a due grant
+\* revoke from any process; the end of the grant's subject (the identity it
+\* was issued to ended) from any process; a read from any process settling a
+\* due grant
 \* (Expire) without loading the session; and the serving process crashing
 \* and restarting, the restored gate starting closed.
 \*
@@ -54,6 +56,8 @@
 \*     live.
 \*   "revoked_admits": the dispatch hands on a call the revoked grant
 \*     refused.
+\*   "subject_ended_admits": the dispatch hands on a call the grant that
+\*     ended with its subject refused.
 \*   "boundary_trusts_durable_phase": the boundary shows the name because
 \*     the stored row is still Active, without applying AdmitUse at the
 \*     current clock.
@@ -66,7 +70,7 @@ ASSUME AuditDeadline \in 1..AuditClockMax
 ASSUME AuditMaxLifetime >= AuditDeadline
 ASSUME AuditMutant \in {"none", "dispatch_reuses_boundary_verdict",
                         "restart_reactivates_terminal", "revoked_admits",
-                        "boundary_trusts_durable_phase"}
+                        "subject_ended_admits", "boundary_trusts_durable_phase"}
 
 VARIABLES
     \* The host wall clock and its one bounded rollback.
@@ -193,7 +197,8 @@ AuditBoundary ==
                /\ visible' = FALSE
                /\ visible_at' = 0
                /\ expired_by' = "boundary"
-            \/ /\ (AdmitEndedExpired(clock) \/ AdmitEndedRevoked(clock))
+            \/ /\ (AdmitEndedExpired(clock) \/ AdmitEndedRevoked(clock)
+                   \/ AdmitEndedWithSubject(clock))
                /\ visible' = FALSE
                /\ visible_at' = 0
                /\ UNCHANGED expired_by
@@ -248,6 +253,9 @@ AuditDispatch ==
             \/ /\ AdmitEndedRevoked(clock)
                /\ IF AuditMutant = "revoked_admits" THEN Admit ELSE Refuse
                /\ UNCHANGED << expired_by, pending_writes >>
+            \/ /\ AdmitEndedWithSubject(clock)
+               /\ IF AuditMutant = "subject_ended_admits" THEN Admit ELSE Refuse
+               /\ UNCHANGED << expired_by, pending_writes >>
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, down_at_deadline,
                     rolled_back_after_end, write_lost >>
 
@@ -261,7 +269,7 @@ AuditDispatchWrite ==
         /\ pending_writes' = pending_writes \ {t}
         /\ \/ /\ AdmitDue(t)
               /\ expired_by' = "dispatch"
-           \/ /\ (AdmitEndedExpired(t) \/ AdmitEndedRevoked(t))
+           \/ /\ (AdmitEndedExpired(t) \/ AdmitEndedRevoked(t) \/ AdmitEndedWithSubject(t))
               /\ UNCHANGED expired_by
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
@@ -285,6 +293,22 @@ AuditRevoke ==
        \/ /\ RevokeAfterDeadline(clock)
           /\ expired_by' = "revoke"
        \/ /\ (RevokeSettledExpired(clock) \/ RevokeSettledRevoked(clock))
+          /\ UNCHANGED expired_by
+    /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
+                    refused_before_deadline, last_dispatch, down_at_deadline,
+                    admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
+
+\* The grant's subject ends, from any process: the mob ends the identity it
+\* was issued to (or the session that identity held). The grant ends with it,
+\* revoked with the end reason SubjectEnded; an end at or after the deadline
+\* records the expiry instead.
+AuditEndWithSubject ==
+    /\ \/ /\ EndWithSubjectActive(clock)
+          /\ UNCHANGED expired_by
+       \/ /\ EndWithSubjectAfterDeadline(clock)
+          /\ expired_by' = "subject"
+       \/ /\ (EndWithSubjectSettledExpired(clock) \/ EndWithSubjectSettledRevoked(clock))
           /\ UNCHANGED expired_by
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
@@ -349,6 +373,7 @@ AuditNext ==
     \/ AuditDispatchWrite
     \/ AuditDispatchWriteLost
     \/ AuditRevoke
+    \/ AuditEndWithSubject
     \/ AuditRead
     \/ AuditCrash
     \/ AuditRestart
@@ -409,8 +434,16 @@ NotAuditWitnessRollbackAfterExpiryStillRefused ==
 NotAuditWitnessRevokedThenRefused ==
     ~(phase = "Revoked" /\ last_dispatch = "refused")
 
+\* A grant that ended with its subject refused a call.
+NotAuditWitnessEndedWithSubjectThenRefused ==
+    ~(phase = "Revoked" /\ AuditIsSome(end_reason) /\ end_reason.value = "SubjectEnded"
+      /\ last_dispatch = "refused")
+
 \* A revoke at the deadline recorded expiry, not revocation.
 NotAuditWitnessRevokeAfterDeadlineRecordsExpiry == ~(expired_by = "revoke")
+
+\* The subject's end at the deadline recorded expiry, as a revoke does.
+NotAuditWitnessSubjectEndAfterDeadlineRecordsExpiry == ~(expired_by = "subject")
 
 \* A dispatch refused a call at the deadline and its expiry write was lost,
 \* so the row never ended; after the clock rolled back before the deadline,

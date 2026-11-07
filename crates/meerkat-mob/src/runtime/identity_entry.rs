@@ -25,16 +25,27 @@
 //! deletion, a same-session successor) keeps it. An entry outlives a
 //! retirement the declared apply did not start: it stays unseated
 //! ([`EntryStanding::Unseated`]), and the next apply seats it again on its own
-//! archived session. Only the end of an unlisted retirement (the declared
-//! apply's seal), the identity's removal
-//! ([`super::MobHandle::remove_identity`], which tombstones its name), the
-//! mob's destroy and the mob's reset end an entry. An unseated roster-owned
-//! entry is not journaled: after a restart, the next apply declares it
-//! again. An entry's end ends its identity's live scoped tool grants: its
-//! member's retirement ends them when the seal or the removal ends the
-//! entry, and the reset ends them for every entry it ends. A destroy needs
-//! nothing: the next create mints a new incarnation, whose identities hold
-//! none of the old grants.
+//! archived session. Only these end an entry: the end of an unlisted
+//! retirement (a seated entry the declared apply's seal or one-entry unlist
+//! marked); the one-entry unlist of an unseated entry, which a complete
+//! roster's seal runs, on its own step, for each unseated entry it does not
+//! list; the identity's removal ([`super::MobHandle::remove_identity`], which
+//! tombstones its name: at once for an unseated entry, at its member's
+//! retirement end for a seated one); the mob's destroy and the mob's reset.
+//! An unseated roster-owned entry is not journaled: after a restart, the next
+//! apply declares it again.
+//!
+//! An identity's end ends its live scoped tool grants, with those of the
+//! session MobMachine holds for it then (its member's session, or its
+//! entry's archived session record), before the step that ends it commits; a
+//! failure fails that step. MobMachine names the ends of the one-entry
+//! unlist and the removal of an unseated entry, and of a respawn abandoned
+//! after its old member's archive (`IdentityEnded`). The retirement terminal
+//! that ends an identity (a plain retire of a worker, or the end of an
+//! unlisted or removed entry's retirement: `retirement_ends_identity`) and
+//! the mob's reset, which ends every identity the mob held, read MobMachine's
+//! state before their step. A destroy needs nothing: the next create mints a
+//! new incarnation, whose identities hold none of the old grants.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -1724,8 +1735,11 @@ pub(crate) fn plain_retirement_facts(
 /// the retiring incarnation, no respawn holds it for a successor, and it is
 /// no identity entry the retirement keeps (an entry outlives a retirement
 /// that neither unlists nor removes it). The identity's tool grants end with
-/// it, so a name created again later inherits none. A rotation's terminal,
-/// which seats the next incarnation, is not a plain retirement.
+/// it, with those of the session the retirement archives, so a name created
+/// again later inherits none. A rotation's terminal, which seats the next
+/// incarnation, is not a plain retirement. The other ends of an identity are
+/// MobMachine's to name (its `IdentityEnded` effect), but for the reset's,
+/// which ends every identity the mob held.
 #[cfg(feature = "runtime-adapter")]
 pub(crate) fn retirement_ends_identity(
     state: &mob_dsl::MobMachineState,

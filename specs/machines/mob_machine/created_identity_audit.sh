@@ -1353,24 +1353,25 @@ for verdict in ("Kept", "SeatOwed", "HostedOnFirstUse", "AwaitHeldCreation", "Ru
     drop_guard("DeclareIdentityEntry" + verdict, "identity_entry_origins) = FALSE) THEN TRUE ELSE")
 PY
 
-  # The seal removes an unlisted Created entry with no member as it does a
-  # Declared one (the Declared filter of its removal loops takes a Created
-  # entry too). Its mark loop keeps the filter: TLC checks a successor's
-  # invariants before the step's action properties, so a seal that marks a
-  # Created entry is refused first by retiring_entry_is_a_declared_entry.
-  mutate names seal_takes_created "Action property AuditSealNeverTouchesCreated" <<'PY'
+  # The seal marks an unlisted Created entry's seated member as it does a
+  # Declared one (the Declared filter of its lowered mark loop takes a
+  # Created entry too). The seal ends no entry itself (the one-entry unlist
+  # does, whose own filter the unlist run's mutants drop), so the mark loop
+  # is its one lowered loop. TLC checks a successor's invariants before the
+  # step's action properties, so retiring_entry_is_a_declared_entry may
+  # refuse it first.
+  mutate names seal_takes_created \
+    "Invariant retiring_entry_is_a_declared_entry|Action property AuditSealNeverTouchesCreated" <<'PY'
 replace_in_loops("SealDeclaredRosterSealed",
-                 ("identity_entry_origins", "identity_entry_unseated", "member_host_preparation_causes"),
+                 ("identity_entry_retiring",),
                  ' = Some("Declared"))', ' \\in {Some("Declared"), Some("Created")})')
 PY
 
   # The seal acts on an unreadable name's Declared entry (the readable
-  # filter dropped from every one of its lowered loops; the removal's mark
-  # check follows it in the same conjunction).
+  # filter dropped from its lowered mark loop).
   mutate names seal_takes_unreadable "Action property AuditSealNeverTouchesCreated" <<'PY'
 replace_in_loops("SealDeclaredRosterSealed",
-                 ("identity_entry_origins", "identity_entry_unseated", "member_host_preparation_causes",
-                  "identity_entry_retiring"),
+                 ("identity_entry_retiring",),
                  " /\\ ((id \\in identity_entry_unreadable) = FALSE)", "")
 PY
 

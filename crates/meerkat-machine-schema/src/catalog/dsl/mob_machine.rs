@@ -2937,6 +2937,17 @@ macro_rules! mob_catalog_machine_dsl {
             // shell retires a Retiring entry's member with the cause
             // Unlisted.
             IdentityEntryUnlisted { agent_identity: AgentIdentity, verdict: Enum<UnlistEntryVerdict> },
+            // An identity ended in this step (0.9.11): the one-entry unlist
+            // or the removal of an unseated entry, or a respawn abandoned
+            // after its old member's archive. The shell ends the identity's
+            // live scoped tool grants, with those of the session MobMachine
+            // holds for it, before the step commits; a failure fails the
+            // step.
+            IdentityEnded { agent_identity: AgentIdentity },
+            // The seal of a complete roster refused (0.9.11): an unseated
+            // Declared entry it does not list remains, which the one-entry
+            // unlist ends first. Nothing changes.
+            DeclaredRosterSealRefused,
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -4375,6 +4386,14 @@ macro_rules! mob_catalog_machine_dsl {
         // The one-entry unlist (0.9.9): its verdict answers the unlist, which
         // retires a marked entry's member.
         disposition IdentityEntryUnlisted => local seam SurfaceResultAlignment,
+        // The end of an identity (0.9.11): the actor requires this exact
+        // effect, ends the identity's live scoped tool grants (and those of
+        // the session MobMachine holds for it) and only then commits the
+        // prepared step, so no separate feedback input remains.
+        disposition IdentityEnded => local seam OwnerRealizationOnly,
+        // A refused seal answers the declared apply, which never reaches it:
+        // the actor unlists every unseated entry the roster leaves out first.
+        disposition DeclaredRosterSealRefused => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -10982,6 +11001,9 @@ macro_rules! mob_catalog_machine_dsl {
                 generation: Some(generation),
                 session_id: None
             }
+            // The respawn hold kept the identity past its old member's
+            // archive; its abandonment ends the identity (0.9.11).
+            emit IdentityEnded { agent_identity: agent_identity }
         }
 
         transition ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded {
@@ -32156,21 +32178,43 @@ macro_rules! mob_catalog_machine_dsl {
 
         // The seal of a complete declared roster, by an explicit check on
         // Declared entries only. A Declared entry the roster does not list is
-        // unlisted: a seated one is marked (identity_entry_retiring) while its
-        // member is not retiring, and the shell retires the member with the
-        // cause Unlisted, whose end removes the entry; an unseated one is
-        // removed at once. Neither happens while a spawn ladder is open for
-        // the identity (marked_entry_has_no_spawn_in_flight): a later seal
-        // marks the member once its activation ends the ladder, or removes
-        // the entry its abort or its failed spawn's rollback left unseated. A
-        // listed entry loses its mark while its member's retirement has not
-        // started: the host listed it again. A member whose retirement
-        // started for another reason is left to that retirement, whose end
-        // keeps the entry unseated, and a later seal removes it.
+        // unlisted: a seated one is marked (identity_entry_retiring) while
+        // its member is not retiring, and the shell retires the member with
+        // the cause Unlisted, whose end removes the entry. The seal ends no
+        // entry itself: an unseated one is ended by the one-entry unlist
+        // (UnlistIdentityEntryRemoved, which names the end), and the seal is
+        // refused while one the unlist would end remains
+        // (SealDeclaredRosterRefused); the shell unlists each first, on the
+        // seal's own step. Neither the mark nor that end happens while a
+        // spawn ladder is open for the identity
+        // (marked_entry_has_no_spawn_in_flight): a later seal marks the
+        // member once its activation ends the ladder. A listed entry loses
+        // its mark while its member's retirement has not started: the host
+        // listed it again. A member whose retirement started for another
+        // reason is left to that retirement, whose end keeps the entry
+        // unseated, for a later unlist.
         transition SealDeclaredRosterSealed {
             on input SealDeclaredRoster { desired }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The negation of SealDeclaredRosterRefused's guard, written
+            // over the same expression, so the two arms are exclusive by
+            // construction.
+            guard "no_unlisted_entry_to_end" {
+                !exists(id in self.identity_entry_origins.keys(),
+                    desired.contains(id) == false
+                    && unlist_entry_verdict(
+                        true,
+                        self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
+                            && self.identity_entry_unreadable.contains(id) == false,
+                        self.spawn_exec_phase.contains_key(id) == true
+                            || (self.identity_to_runtime.contains_key(id) == true
+                                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) == Some(MobMemberState::Retiring))
+                            || self.identity_entry_removing.contains(id) == true
+                            || self.identity_entry_constructions_held.contains_key(id) == true
+                            || self.identity_entry_constructions_activating.contains_key(id) == true,
+                        self.identity_to_runtime.contains_key(id) == true) == UnlistEntryVerdict::Removed)
+            }
             update {
                 for id in self.identity_entry_origins.keys() {
                     // A removal's entry is the removal's to end: the seal
@@ -32188,27 +32232,41 @@ macro_rules! mob_catalog_machine_dsl {
                                     self.identity_entry_retiring.remove(id);
                                 }
                             }
-                        } else {
-                            // An entry with a construction open is left to a
-                            // later seal: the construction ends first.
-                            if desired.contains(id) == false
-                                && self.spawn_exec_phase.contains_key(id) == false
-                                && self.identity_entry_constructions_held.contains_key(id) == false
-                                && self.identity_entry_constructions_activating.contains_key(id) == false {
-                                self.identity_entry_origins.remove(id);
-                                self.identity_entry_unseated.remove(id);
-                                // Its role hold ends with it: a member later
-                                // seated under the name inherits none.
-                                if self.member_host_preparation_causes.get_cloned(id) == Some(HostPreparationCause::RoleMigrationUndeclared) {
-                                    self.member_host_preparation_causes.remove(id);
-                                }
-                            }
                         }
                     }
                 }
             }
             to Running
             emit DeclaredRosterSealed { verdict: DeclaredRosterSealVerdict::Sealed }
+        }
+
+        // The seal of a complete roster while an unseated Declared entry it
+        // does not list remains, which the one-entry unlist would end:
+        // refused, and nothing changes. The shell unlists each such entry on
+        // the seal's own step first, so every end of the declared apply is
+        // an unlist's, which names it.
+        transition SealDeclaredRosterRefused {
+            on input SealDeclaredRoster { desired }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "unlisted_entry_to_end" {
+                exists(id in self.identity_entry_origins.keys(),
+                    desired.contains(id) == false
+                    && unlist_entry_verdict(
+                        true,
+                        self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
+                            && self.identity_entry_unreadable.contains(id) == false,
+                        self.spawn_exec_phase.contains_key(id) == true
+                            || (self.identity_to_runtime.contains_key(id) == true
+                                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(id).get("value")) == Some(MobMemberState::Retiring))
+                            || self.identity_entry_removing.contains(id) == true
+                            || self.identity_entry_constructions_held.contains_key(id) == true
+                            || self.identity_entry_constructions_activating.contains_key(id) == true,
+                        self.identity_to_runtime.contains_key(id) == true) == UnlistEntryVerdict::Removed)
+            }
+            update {}
+            to Running
+            emit DeclaredRosterSealRefused
         }
 
         // A candidate composition seals nothing.
@@ -32288,6 +32346,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit IdentityEntryUnlisted { agent_identity: agent_identity, verdict: UnlistEntryVerdict::Removed }
+            emit IdentityEnded { agent_identity: agent_identity }
         }
 
         // A spawn, a retirement, a removal or a held construction of the
@@ -33237,6 +33296,7 @@ macro_rules! mob_catalog_machine_dsl {
             }
             to Running
             emit IdentityEntryChangeResolved { agent_identity: agent_identity, verdict: IdentityEntryChangeVerdict::Removed }
+            emit IdentityEnded { agent_identity: agent_identity }
         }
 
         // A removed name's removal: nothing changes.

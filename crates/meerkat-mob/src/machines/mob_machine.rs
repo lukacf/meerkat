@@ -14540,12 +14540,14 @@ mod tests {
             .expect("the declaration emits its verdict")
     }
 
-    /// A role hold belongs to its entry: the seal that removes an unseated
-    /// entry ends its role hold with it, and so does the mob's reset, so a
-    /// member seated later under the name inherits no hold
-    /// (`role_hold_belongs_to_an_entry`).
+    /// A role hold belongs to its entry: the one-entry unlist that ends an
+    /// unseated entry ends its role hold with it, and so does the mob's
+    /// reset, so a member seated later under the name inherits no hold
+    /// (`role_hold_belongs_to_an_entry`). The seal ends no entry itself: it
+    /// is refused while the unseated entry remains, and seals once the
+    /// unlist ended it.
     #[test]
-    fn a_role_hold_ends_with_its_entry_at_the_seal_and_the_reset() {
+    fn a_role_hold_ends_with_its_entry_at_the_unlist_and_the_reset() {
         let held = |authority: &mut MobMachineAuthority, identity: &AgentIdentity| {
             assert_eq!(
                 declare(
@@ -14571,9 +14573,20 @@ mod tests {
         let mut authority = MobMachineAuthority::new();
         let unlisted = AgentIdentity::from("unlisted-held-entry");
         held(&mut authority, &unlisted);
+        assert!(
+            seal_refused(&mut authority, std::collections::BTreeSet::new()),
+            "the seal ends no unseated entry itself"
+        );
+        assert!(
+            authority
+                .state()
+                .member_host_preparation_causes
+                .contains_key(&unlisted),
+            "the refused seal keeps the entry and its role hold"
+        );
         assert_eq!(
-            seal(&mut authority, std::collections::BTreeSet::new()),
-            DeclaredRosterSealVerdict::Sealed
+            unlist(&mut authority, &unlisted),
+            UnlistEntryVerdict::Removed
         );
         assert!(
             !authority
@@ -14586,7 +14599,12 @@ mod tests {
                 .state()
                 .member_host_preparation_causes
                 .contains_key(&unlisted),
-            "the seal ends the role hold with the entry"
+            "the unlist ends the role hold with the entry"
+        );
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal seals once the unlist ended the entry"
         );
 
         let reset = AgentIdentity::from("reset-held-entry");
@@ -14607,6 +14625,44 @@ mod tests {
         );
     }
 
+    /// A seal ends no entry itself: while the roster leaves out an unseated
+    /// Declared entry the one-entry unlist would end, the seal is refused
+    /// and changes nothing, so every identity end of the declared apply is
+    /// an unlist's, which names it.
+    #[test]
+    fn a_seal_is_refused_while_an_unseated_unlisted_entry_remains() {
+        let mut authority = MobMachineAuthority::new();
+        let entry = AgentIdentity::from("unseated-unlisted-entry");
+        assert_eq!(
+            declare(&mut authority, &entry, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        let before = authority.state().clone();
+        assert!(
+            seal_refused(&mut authority, std::collections::BTreeSet::new()),
+            "the seal is refused while the unseated entry remains"
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "the refused seal changes nothing"
+        );
+        assert_eq!(
+            seal(
+                &mut authority,
+                std::collections::BTreeSet::from([entry.clone()])
+            ),
+            DeclaredRosterSealVerdict::Sealed,
+            "a roster that lists the entry seals"
+        );
+        assert_eq!(unlist(&mut authority, &entry), UnlistEntryVerdict::Removed);
+        assert_eq!(
+            seal(&mut authority, std::collections::BTreeSet::new()),
+            DeclaredRosterSealVerdict::Sealed,
+            "the seal seals once the unlist ended the entry"
+        );
+    }
+
     /// The seal of a complete roster listing `desired`.
     fn seal(
         authority: &mut MobMachineAuthority,
@@ -14623,6 +14679,31 @@ mod tests {
                 _ => None,
             })
             .expect("the seal emits its verdict")
+    }
+
+    /// Whether MobMachine refused the seal of a complete roster listing
+    /// `desired` (`SealDeclaredRosterRefused`: an unseated Declared entry it
+    /// leaves out remains, which the one-entry unlist ends first). A refused
+    /// seal answers its refusal only.
+    fn seal_refused(
+        authority: &mut MobMachineAuthority,
+        desired: std::collections::BTreeSet<AgentIdentity>,
+    ) -> bool {
+        let transition =
+            MobMachineMutator::apply(authority, MobMachineInput::SealDeclaredRoster { desired })
+                .expect("the seal answers");
+        let refused = transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, MobMachineEffect::DeclaredRosterSealRefused));
+        if refused {
+            assert_eq!(
+                transition.effects().len(),
+                1,
+                "a refused seal answers its refusal only"
+            );
+        }
+        refused
     }
 
     /// Open `member`'s seat ladder at `generation` with entry custody, as
@@ -14928,9 +15009,10 @@ mod tests {
     }
 
     /// The seal of a complete roster unlists Declared entries only: a seated
-    /// one is marked, an unseated one is removed at once, a worker is never
-    /// touched, and an entry listed again before its retirement started
-    /// loses its mark.
+    /// one is marked, a worker is never touched, and an entry listed again
+    /// before its retirement started loses its mark. An unseated one is the
+    /// one-entry unlist's to end: the seal is refused while it remains, and
+    /// seals once the unlist ended it.
     #[test]
     fn the_seal_unlists_declared_entries_and_never_a_worker() {
         let mut authority = MobMachineAuthority::new();
@@ -14941,6 +15023,21 @@ mod tests {
         assert_eq!(
             declare(&mut authority, &unseated, Declaration::default()),
             IdentityEntryVerdict::SeatOwed
+        );
+        assert!(
+            seal_refused(
+                &mut authority,
+                std::collections::BTreeSet::from([listed.identity.clone()])
+            ),
+            "the seal is refused while the unseated entry it leaves out remains"
+        );
+        assert!(
+            authority.state().identity_entry_retiring.is_empty(),
+            "the refused seal marks nothing"
+        );
+        assert_eq!(
+            unlist(&mut authority, &unseated),
+            UnlistEntryVerdict::Removed
         );
         assert_eq!(
             seal(
@@ -14956,7 +15053,7 @@ mod tests {
         );
         assert!(
             !state.identity_entry_origins.contains_key(&unseated),
-            "an unlisted entry no member holds is removed at once"
+            "the unlist ended the unseated entry"
         );
         assert!(!state.identity_entry_unseated.contains_key(&unseated));
         assert!(
@@ -17726,20 +17823,35 @@ mod tests {
 
     /// One roster-owned identity's unlist, and its verdict.
     fn unlist(authority: &mut MobMachineAuthority, identity: &AgentIdentity) -> UnlistEntryVerdict {
-        MobMachineMutator::apply(
+        let transition = MobMachineMutator::apply(
             authority,
             MobMachineInput::UnlistIdentityEntry {
                 agent_identity: identity.clone(),
             },
         )
-        .expect("the unlist answers")
-        .effects()
-        .iter()
-        .find_map(|effect| match effect {
-            MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
-            _ => None,
-        })
-        .expect("the unlist emits its verdict")
+        .expect("the unlist answers");
+        let verdict = transition
+            .effects()
+            .iter()
+            .find_map(|effect| match effect {
+                MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .expect("the unlist emits its verdict");
+        // The unlist that ends an entry names the identity's end (the shell
+        // ends its grants on it); no other unlist does.
+        let ended = transition.effects().iter().any(|effect| {
+            matches!(
+                effect,
+                MobMachineEffect::IdentityEnded { agent_identity } if agent_identity == identity
+            )
+        });
+        assert_eq!(
+            ended,
+            verdict == UnlistEntryVerdict::Removed,
+            "an unlist names the end of exactly the entry it ends: {verdict:?}"
+        );
+        verdict
     }
 
     /// An identity awaiting its host's preparation is never archived: its

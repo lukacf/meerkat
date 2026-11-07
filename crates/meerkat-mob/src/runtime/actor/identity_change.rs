@@ -79,7 +79,8 @@ impl MobActor {
                 let _ = reply_tx.send(result);
             }
             IdentityChangeCommand::Unlist { identity, reply_tx } => {
-                let _ = reply_tx.send(self.unlist_identity_entry(&identity));
+                let result = Box::pin(self.unlist_identity_entry(&identity)).await;
+                let _ = reply_tx.send(result);
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
@@ -601,6 +602,12 @@ impl MobActor {
             effects: transition.into_effects(),
             phase_changed: false,
         };
+        // The removal of an unseated entry ends the identity at once
+        // (MobMachine names it, `IdentityEnded`): its scoped tool grants end
+        // before the change's store transaction and the step's commit. A
+        // failure fails the change, which writes nothing.
+        self.end_tool_grants_of_ended_identities(&prepared.effects, "it was removed")
+            .await?;
         let written = receipt.clone();
         self.commit_prepared_dsl_input_after(prepared, move || async move {
             let commit = store

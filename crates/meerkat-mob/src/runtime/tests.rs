@@ -17,6 +17,8 @@ mod host_store_boot_reads;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod identity_entry_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod identity_grant_end_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lazy_boot;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod lifecycle_journal_rows;

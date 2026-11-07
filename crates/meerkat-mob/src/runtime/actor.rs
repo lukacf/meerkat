@@ -13180,6 +13180,7 @@ impl MobActor {
                         .error
                         .unwrap_or_else(|| "member restore failed".to_string()),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             );
@@ -13195,6 +13196,7 @@ impl MobActor {
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
                 hold: diag.hold,
+                cause_data: diag.cause_data,
             });
         }
         Ok(())
@@ -14797,6 +14799,7 @@ impl MobActor {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
+                                cause_data: None,
                                 registration_refusal: None,
                             },
                         )
@@ -15612,6 +15615,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15685,6 +15689,7 @@ impl MobActor {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15822,6 +15827,7 @@ impl MobActor {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
+                        cause_data: None,
                         registration_refusal: None,
                     },
                 )
@@ -15838,6 +15844,7 @@ impl MobActor {
                     session_id: Some(bridge_session_id),
                     reason: classify_reason,
                     hold: None,
+                    cause_data: None,
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
@@ -15888,6 +15895,7 @@ impl MobActor {
                     }
                     Err(error) => {
                         let hold = error.durable_resume_hold();
+                        let cause_data = error.structured_data();
                         let failure_reason = format!(
                             "machine-authorized placed revival of '{agent_identity}' on host '{}' failed: {error}",
                             host.as_str()
@@ -15906,6 +15914,7 @@ impl MobActor {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
+                                cause_data: cause_data.clone(),
                                 registration_refusal: None,
                             },
                         )
@@ -15922,6 +15931,7 @@ impl MobActor {
                             session_id: Some(bridge_session_id),
                             reason: failure_reason,
                             hold,
+                            cause_data,
                         })
                     }
                 }
@@ -23409,6 +23419,7 @@ impl MobActor {
                 bridge_session_id: Some(session_id.clone()),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -36106,6 +36117,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: error.durable_resume_hold(),
+                cause_data: error.structured_data(),
                 registration_refusal: None,
             },
         )

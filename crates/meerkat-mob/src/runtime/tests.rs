@@ -38858,6 +38858,7 @@ async fn test_cold_running_resume_fails_closed_without_comms_runtime() {
             session_id,
             reason,
             hold,
+            ..
         }) => {
             assert_eq!(member_id, member);
             assert_eq!(session_id, Some(member_session));
@@ -80865,7 +80866,7 @@ fn provider_auth_build_refusal() -> SessionError {
 /// broke it, read through meerkat-mob's shared failure wrappers.
 fn restore_failure_cause_data(error: &MobError) -> Option<serde_json::Value> {
     match error {
-        // RED: no restore failure keeps its cause's structured data yet.
+        MobError::MemberRestoreFailed { cause_data, .. } => cause_data.clone(),
         MobError::SharedLifecycleFailure(inner) | MobError::SharedRetirementFailure(inner) => {
             restore_failure_cause_data(inner)
         }

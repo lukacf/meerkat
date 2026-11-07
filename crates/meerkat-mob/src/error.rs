@@ -953,6 +953,13 @@ pub enum MobError {
     /// evidence): the session is intact and withheld, and the hold class says
     /// what clears it. Hosts classify on it (or on
     /// [`MobError::durable_resume_hold`]) instead of parsing `reason`.
+    ///
+    /// `cause_data` is the structured data of the failure that broke the
+    /// restore ([`MobError::structured_data`] of it: a session builder's
+    /// typed refusal of the member's build, a provider-auth refusal), when it
+    /// had some. Every later answer for the Broken member carries the same
+    /// data, so a host classifies the failure by its data, never by `reason`.
+    /// `None` for a failure without structured data.
     #[error(
         "member {member_id} failed to restore {}: {reason}",
         format_member_restore_target(.session_id.as_ref())
@@ -962,6 +969,7 @@ pub enum MobError {
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        cause_data: Option<serde_json::Value>,
     },
 
     /// Member `member_id` is seated but was not materialized in this
@@ -4923,6 +4931,7 @@ mod tests {
                 session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
                 hold: None,
+                cause_data: None,
             },
             MobError::MemberStartupRecoveryFailed {
                 member_id: AgentIdentity::from("m"),

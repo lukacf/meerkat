@@ -1424,6 +1424,7 @@ impl MobActor {
             bridge_session_id: session_id,
             reason: error.to_string(),
             hold: error.durable_resume_hold(),
+            cause_data: error.structured_data(),
             registration_refusal: match error {
                 MobError::MemberRegistrationRefused { call, .. } => Some(*call),
                 _ => None,
@@ -1552,6 +1553,7 @@ impl MobActor {
                     bridge_session_id: session_id,
                     reason: reason_text,
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             )

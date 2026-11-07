@@ -54,6 +54,9 @@ pub(in crate::runtime) enum MemberWakeFailure {
         session_id: Option<SessionId>,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        /// The structured data of the failure that broke the member's
+        /// restore, when it had some.
+        cause_data: Option<serde_json::Value>,
         registration_refusal: Option<crate::MemberRegistrationHookCall>,
     },
     /// A peer send from a member that is itself waking, to a member that is
@@ -85,12 +88,14 @@ impl MemberWakeFailure {
                 session_id,
                 reason,
                 hold,
+                cause_data,
                 registration_refusal: None,
             } => MobError::MemberRestoreFailed {
                 member_id: member_id.clone(),
                 session_id,
                 reason,
                 hold,
+                cause_data,
             },
             // Only a peer send carries a sender residency; a host delivery
             // never gets this answer.
@@ -1227,7 +1232,8 @@ impl MobActor {
     }
 
     /// The Broken answer for `identity`: the machine's recorded reason, with
-    /// the restore diagnostic's session, durable hold and host refusal.
+    /// the restore diagnostic's session, durable hold, cause data and host
+    /// refusal.
     pub(in crate::runtime) async fn member_wake_broken(
         &self,
         identity: &AgentIdentity,
@@ -1257,6 +1263,7 @@ impl MobActor {
                 })
                 .unwrap_or_else(|| "member restore failed".to_string()),
             hold: diagnostic.as_ref().and_then(|diagnostic| diagnostic.hold),
+            cause_data: diagnostic.and_then(|diagnostic| diagnostic.cause_data),
             registration_refusal,
         }
     }

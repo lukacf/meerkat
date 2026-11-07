@@ -1535,6 +1535,7 @@ async fn record_seeded_member_endpoint_broken(
             bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     );
@@ -12516,6 +12517,7 @@ pub(super) fn member_restore_failure(
         bridge_session_id: Some(bridge_session_id.clone()),
         reason,
         hold: None,
+        cause_data: None,
         registration_refusal: None,
     }
 }
@@ -13824,6 +13826,7 @@ pub(super) async fn provision_durable_member_restore(
                     bridge_session_id: Some(bridge_session_id.clone()),
                     reason,
                     hold: None,
+                    cause_data: error.structured_data(),
                     registration_refusal,
                 })
             }
@@ -13947,10 +13950,10 @@ async fn provision_fresh_member_restore(
                     cause: RetryableRestoreCause::SeatCreateUnavailable,
                 }
             } else {
-                MemberRestoreProvisionOutcome::Failed(member_restore_failure(
-                    bridge_session_id,
-                    reason,
-                ))
+                MemberRestoreProvisionOutcome::Failed(super::handle::RestoreFailureDiagnostic {
+                    cause_data: error.structured_data(),
+                    ..member_restore_failure(bridge_session_id, reason)
+                })
             }
         }
         Err(error) => return Err(error),
@@ -14141,6 +14144,7 @@ async fn provision_fresh_member_session(
                         entry.agent_identity
                     ),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: Some(registration_refusal),
                 },
             ));

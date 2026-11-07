@@ -13049,6 +13049,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         assert_eq!(
             classify_resume_error(&restore_failed(None)),
@@ -13170,6 +13171,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         let retirement = |inner: meerkat_mob::MobError| {
             meerkat_mob::MobError::SharedRetirementFailure(Arc::new(inner))
@@ -13644,6 +13646,7 @@ mod tests {
             member_id: meerkat_mob::ids::AgentIdentity::from("agent-alpha"),
             session_id: None,
             reason: "durable snapshot missing".to_string(),
+            cause_data: None,
         };
         assert!(matches!(
             resume_rejected(&identity, &session_id, &restore_failed, "resume"),
@@ -14652,6 +14655,7 @@ mod tests {
                 session_id: Some(id.clone()),
                 reason: "recorded restore failure".to_string(),
                 hold: Some(DurableResumeHold::AuditedEndpointDivergence),
+                cause_data: None,
             }),
             ResumeRejectionKind::Held {
                 hold: DurableResumeHold::AuditedEndpointDivergence
@@ -14663,6 +14667,7 @@ mod tests {
                 session_id: Some(id.clone()),
                 reason: "recorded restore failure".to_string(),
                 hold: None,
+                cause_data: None,
             }),
             ResumeRejectionKind::MemberRestoreFailed
         );
@@ -14758,6 +14763,7 @@ mod tests {
                 session_id,
                 reason: "missing durable session snapshot".to_string(),
                 hold,
+                cause_data: None,
             }
         };
         let registration_refused = || MobError::MemberRegistrationRefused {

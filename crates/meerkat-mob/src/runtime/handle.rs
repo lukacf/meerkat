@@ -6780,6 +6780,13 @@ pub(crate) struct RestoreFailureDiagnostic {
     /// carries it, so a host classifies the Broken member typed instead of
     /// parsing `reason`.
     pub(crate) hold: Option<meerkat_core::service::DurableResumeHold>,
+    /// The structured data of the failure that broke the restore
+    /// ([`MobError::structured_data`] of it: a session builder's typed
+    /// refusal of the member's build, a provider-auth refusal), when it had
+    /// some: every later `MemberRestoreFailed` minted from this record
+    /// carries it, so a host classifies the failure by its data instead of
+    /// parsing `reason`.
+    pub(crate) cause_data: Option<serde_json::Value>,
     /// The hook call that refused the member's registration when its boot
     /// restore was refused by its host, set only from the provision's
     /// refusal slot. It feeds only the MobMachine seed
@@ -8063,6 +8070,7 @@ impl MobHandle {
             session_id: diag.bridge_session_id,
             reason: diag.reason,
             hold: diag.hold,
+            cause_data: diag.cause_data,
         }
     }
 

@@ -2364,6 +2364,9 @@ fn verify_console_token_at(
     // whatever claims it carries.
     let human = match (&provider, claims.subject) {
         (AuthProvider::ServiceIdentity, _) | (_, None) => None,
+        // A shared-account issuer's `sub` names an account many people may
+        // hold, never one person.
+        _ if decisions.trusted_oidc.shared_account_tokens => None,
         (_, Some(subject)) if subject.trim().is_empty() => None,
         _ if discovery.issuer.trim().is_empty() => None,
         (_, Some(subject)) => Some(ConsoleTokenHuman {

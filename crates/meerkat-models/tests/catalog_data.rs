@@ -9,7 +9,7 @@
 
 use meerkat_core::Provider;
 use meerkat_core::model_profile::capabilities::{
-    AnthropicDisabledThinking, EffortLevel, ThinkingSupport,
+    AnthropicDisabledThinking, BetaFeature, EffortLevel, ThinkingSupport,
 };
 use meerkat_core::model_profile::catalog::{
     ImageGenerationModelRoute, ImageGenerationSizeParameter, ModelTier,
@@ -502,6 +502,147 @@ fn anthropic_disabled_thinking_rows_follow_the_per_model_thinking_table() {
     }
 }
 
+/// When `thinking` is omitted, per the "Default" column of the per-model
+/// table "Thinking support, defaults, and rejected configurations by model"
+/// (https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OmittedThinking {
+    /// "Always on": thinking cannot be turned off.
+    AlwaysOn,
+    /// "On": the model thinks by default.
+    On,
+    /// "Off": the model answers without thinking.
+    Off,
+}
+
+/// The thinking-binding beta (`thinking.block_binding`) sits on exactly the
+/// catalogued models that check replayed thinking blocks against their
+/// request prefix (the preserved-thinking page's supported models: Claude
+/// Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5;
+/// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+/// The client names adaptive beside the control when `thinking` is omitted,
+/// so every such row must be documented thinking-on by default ("Omit the
+/// `thinking` parameter and the request runs with adaptive thinking",
+/// https://platform.claude.com/docs/en/api/errors) and accept adaptive, and no
+/// row whose default is no thinking (Opus 4.8, Opus 4.7, Sonnet 4.6; Opus 4.6
+/// is not a catalog row) may carry it.
+#[test]
+fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
+    use OmittedThinking::{AlwaysOn, Off, On};
+    const PREFIX_CHECKED: &[&str] = &[
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+    let omitted = [
+        ("claude-fable-5-1", AlwaysOn),
+        ("claude-fable-5", AlwaysOn),
+        ("claude-opus-5-5", AlwaysOn),
+        ("claude-opus-5", On),
+        ("claude-opus-4-8", Off),
+        ("claude-opus-4-7", Off),
+        ("claude-sonnet-5-5", On),
+        ("claude-sonnet-5", On),
+        ("claude-sonnet-4-6", Off),
+        ("claude-sonnet-4-5", Off),
+        ("claude-haiku-5-5", On),
+        ("claude-haiku-4-5-20251001", Off),
+        ("claude-haiku-4-5", Off),
+        ("claude-opus-4-5", Off),
+    ];
+    let anthropic: HashSet<&str> = all_capabilities()
+        .filter(|caps| caps.provider == Provider::Anthropic)
+        .map(|caps| caps.id)
+        .collect();
+    assert_eq!(
+        anthropic,
+        omitted.iter().map(|(id, _)| *id).collect::<HashSet<_>>(),
+        "every Anthropic row records its omitted-thinking default here"
+    );
+    let binding = |id: &str| {
+        capabilities_for(Provider::Anthropic, id)
+            .map(|caps| {
+                caps.beta_headers
+                    .iter()
+                    .filter(|header| header.feature == BetaFeature::ThinkingBindingControls)
+                    .map(|header| header.header_value)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    for (id, default) in omitted {
+        let caps = capabilities_for(Provider::Anthropic, id).unwrap_or_else(|| panic!("{id} row"));
+        let expected: &[&str] = if PREFIX_CHECKED.contains(&id) {
+            &["thinking-binding-controls-2026-08-01"]
+        } else {
+            &[]
+        };
+        assert_eq!(binding(id), expected, "{id}");
+        if !expected.is_empty() {
+            assert_ne!(default, Off, "{id}: a binding row thinks by default");
+            assert!(
+                caps.accepts_anthropic_thinking(
+                    &meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig::Adaptive
+                ),
+                "{id}: a binding row accepts the adaptive type the client names"
+            );
+        }
+    }
+    // The models the review names as default-off; Opus 4.6 has no row today.
+    for id in [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ] {
+        assert!(binding(id).is_empty(), "{id} thinks only when configured");
+    }
+    for caps in all_capabilities().filter(|caps| caps.provider != Provider::Anthropic) {
+        assert!(
+            !caps
+                .beta_headers
+                .iter()
+                .any(|header| header.feature == BetaFeature::ThinkingBindingControls),
+            "{}",
+            caps.id
+        );
+    }
+}
+
+/// Forced tool choice (`tool_choice` `any` or a named tool) per Anthropic
+/// row. Anthropic answers 400 to it on Claude Opus 5.5, Sonnet 5.5, Fable 5.1
+/// and Mythos 5.1: "Forced tool use not supported"
+/// (https://platform.claude.com/docs/en/api/errors) and the "Forcing tool
+/// use" table (https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
+/// The rows that refuse it locally are exactly the catalogued ones among
+/// them (Mythos 5.1 is not a catalog row); every other row sends it, and
+/// Anthropic's own refusal maps to the same typed error.
+#[test]
+fn forced_tool_choice_refusals_are_the_documented_models() {
+    use std::collections::BTreeSet;
+    const DOCUMENTED_REFUSALS: &[&str] = &[
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-mythos-5-1",
+    ];
+    let refusing: BTreeSet<&str> = all_capabilities()
+        .filter(|caps| caps.provider == Provider::Anthropic && !caps.supports_forced_tool_choice)
+        .map(|caps| caps.id)
+        .collect();
+    let documented: BTreeSet<&str> = DOCUMENTED_REFUSALS
+        .iter()
+        .copied()
+        .filter(|id| capabilities_for(Provider::Anthropic, id).is_some())
+        .collect();
+    assert_eq!(
+        refusing, documented,
+        "the catalogued rows refusing a forced tool choice are the documented ones"
+    );
+}
+
 /// Provider inference is an exact catalog match by design: an uncatalogued
 /// `claude-*` id fails loudly instead of resolving by family or prefix, and
 /// the Sonnet 5 row does not make neighbouring ids resolve.
@@ -527,6 +668,7 @@ fn gpt_6_sol_and_luna_are_cataloged_without_changing_the_openai_default() {
     for (id, name) in [
         ("gpt-6-sol", "GPT-6 Sol"),
         ("gpt-6.1-sol", "GPT-6.1 Sol"),
+        ("gpt-6.1-terra", "GPT-6.1 Terra"),
         ("gpt-6-luna", "GPT-6 Luna"),
     ] {
         let entry = entry_for(Provider::OpenAI, id)
@@ -633,8 +775,8 @@ fn gpt_6_astra_owns_defaults_and_projects_independent_input_limit() {
             .profile_witness_for_provider(Provider::Other, "gpt-6-astra")
             .is_none()
     );
-    // The separate input ceiling is a GPT-6 family property (Astra, Sol and
-    // Luna all document 922,000); every other catalog entry projects none.
+    // The separate input ceiling is a GPT-6 family property (Astra, Sol, Terra
+    // and Luna all document 922,000); every other catalog entry projects none.
     for entry in catalog() {
         let family = capabilities_for(Provider::OpenAI, entry.id).map(|caps| caps.model_family);
         if family == Some("gpt-6") {
@@ -1690,6 +1832,7 @@ mod schema {
             "gpt-6-astra",
             "gpt-6-sol",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
@@ -1901,5 +2044,31 @@ fn gpt_6_1_sol_uses_the_astra_effort_ladder() {
         ]
     );
     assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert!(caps.openai_responses_params.is_some());
+}
+
+/// GPT-6.1 Terra documents `none` through `max` (default `medium`), the Sol
+/// and Luna ladder rather than Astra's, plus text/image input and text
+/// output only. Source: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+#[test]
+fn gpt_6_1_terra_uses_the_sol_luna_effort_ladder() {
+    let caps =
+        capabilities_for(Provider::OpenAI, "gpt-6.1-terra").expect("gpt-6.1-terra capabilities");
+    assert_eq!(
+        caps.effort_levels,
+        &[
+            EffortLevel::None,
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+            EffortLevel::Xhigh,
+            EffortLevel::Max,
+        ]
+    );
+    assert_eq!(caps.model_family, "gpt-6");
+    assert_eq!(caps.max_input_tokens, Some(922_000));
+    assert!(caps.vision && caps.image_tool_results);
+    assert!(!caps.inline_video && !caps.realtime && !caps.image_generation);
+    assert!(caps.supports_web_search && caps.supports_structured_output);
     assert!(caps.openai_responses_params.is_some());
 }

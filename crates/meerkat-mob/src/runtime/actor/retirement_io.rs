@@ -462,13 +462,30 @@ impl RetirementArchiveObservationSource {
 /// finalizes what the session still owes, so its owed compaction projections
 /// are finalized cold here, for every host. The answered batch is dropped. A
 /// settle that fails leaves the projections owed, as before, and never fails
-/// the rotation.
+/// the rotation. It runs within the retirement's `deadline`: a settle still
+/// running there is dropped and logged, and what it had not acknowledged
+/// stays owed (a later settle finds a batch this one published, and
+/// acknowledges it with no entries).
 async fn settle_owed_compaction_of_rotated_session(
     service: &dyn MobSessionService,
     session: &SessionId,
     identity: &AgentIdentity,
+    deadline: Instant,
 ) {
-    match service.settle_owed_compaction_projections(session).await {
+    let settle = service.settle_owed_compaction_projections(session);
+    let Ok(answer) =
+        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), settle).await
+    else {
+        tracing::warn!(
+            %identity,
+            session_id = %session,
+            "the rotation's settle of the compaction projections the session it leaves owes \
+             did not finish within the retirement's deadline; what it did not acknowledge \
+             stays owed"
+        );
+        return;
+    };
+    match answer {
         Ok(meerkat_session::OwedCompactionSettlement::Settled { projections }) => {
             tracing::info!(
                 %identity,
@@ -478,6 +495,21 @@ async fn settle_owed_compaction_of_rotated_session(
             );
         }
         Ok(_) => {}
+        // A service that keeps durable sessions refuses the settle only
+        // when a wrapper does not forward it: the projections stay owed
+        // for good, so that is said at warn.
+        Err(meerkat_core::service::SessionError::Unsupported(detail))
+            if service.supports_persistent_sessions() =>
+        {
+            tracing::warn!(
+                %identity,
+                session_id = %session,
+                detail,
+                "the session service keeps durable sessions but does not settle owed \
+                 compaction projections (a wrapper that does not forward the settle); they \
+                 stay owed"
+            );
+        }
         Err(meerkat_core::service::SessionError::Unsupported(detail)) => {
             tracing::debug!(
                 %identity,
@@ -3466,6 +3498,7 @@ impl MobActor {
                         observation.service.as_ref(),
                         session,
                         &identity,
+                        deadline,
                     )
                     .await;
                 }

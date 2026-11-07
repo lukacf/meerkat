@@ -21904,7 +21904,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///   ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`])
     ///   and the store acknowledges the row, which removes the intent from
     ///   the authoritative session in the same transaction, so a later
-    ///   revival's reconciliation sees a consistent pair. The answer is
+    ///   revival's reconciliation sees a consistent pair. Every store that
+    ///   keeps WholeBlob documents cleans the committed document and marks
+    ///   the row in that one transaction (or under one lock), so no other
+    ///   copy of the session is refreshed here. The answer is
     ///   [`OwedCompactionSettlement::Settled`](crate::OwedCompactionSettlement::Settled),
     ///   in outbox order.
     ///

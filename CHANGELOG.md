@@ -308,6 +308,13 @@ them.
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
 
+- `meerkat-mob`: a member seated exempt from the definition's wiring rules
+  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
+  also outside the definition's role-wide flow dispatch: a role-wide step
+  never dispatches to it, a flow's supervisor escalation never picks it,
+  and a role whose only Active members are exempt gets a provisioned flow
+  member. A run whose role targets name it still dispatches to it.
+
 - `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
   decision kind it registers instead of the whole store, so two runtimes on
   one store each execute their own kinds. A kind another executor holds is
@@ -315,13 +322,6 @@ them.
   and asks for its claim again, and the loop takes the kind over once that
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
-
-- `meerkat-mob`: a member seated exempt from the definition's wiring rules
-  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
-  also outside the definition's role-wide flow dispatch: a role-wide step
-  never dispatches to it, a flow's supervisor escalation never picks it,
-  and a role whose only Active members are exempt gets a provisioned flow
-  member. A run whose role targets name it still dispatches to it.
 
 ### Deprecated
 

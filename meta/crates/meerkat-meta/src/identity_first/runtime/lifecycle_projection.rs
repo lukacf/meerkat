@@ -222,7 +222,7 @@ use super::super::types::{
 };
 use super::records::unix_ms_now;
 use super::{IdentityRuntime, IdentityRuntimeError, binding_spawned_for_identity};
-use crate::memory::distiller::DistillCause;
+use crate::memory::distiller::{DiscardEntry, DistillCause};
 use crate::mob_handle_runtime::SessionCreatedContext;
 use crate::runtime::{
     LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
@@ -380,6 +380,11 @@ pub(super) struct LifecycleProjection {
     /// as the retirement hook reads it, by identity: its registration was
     /// read before Core was asked.
     retiring: StdMutex<BTreeMap<AgentIdentity, Retiring>>,
+    /// The compaction batch a step settled before it asked Core to end
+    /// its incarnation's session, by identity: the retirement's side
+    /// effects harvest it before they distill the transcript, and a step
+    /// Core refused hands it to the ordinary compaction harvest.
+    owed_compactions: StdMutex<BTreeMap<AgentIdentity, OwedCompactionBatch>>,
     /// What the build of a seat-like step made, by identity, until Core
     /// answers the step with its session.
     building: StdMutex<BTreeMap<AgentIdentity, SessionCreatedContext>>,
@@ -422,6 +427,20 @@ struct Owner {
     customizer: Option<Arc<dyn AgentCustomizer>>,
     /// An identity context bound it; another binding never replaces one.
     by_context: bool,
+}
+
+/// The discards a cold settle answered for one session.
+pub(super) struct SettledDiscards {
+    pub(super) session_key: String,
+    pub(super) discards: Vec<DiscardEntry>,
+}
+
+/// A compaction batch a step settled before it asked Core to end the
+/// session of an identity's incarnation `generation`.
+struct OwedCompactionBatch {
+    generation: u64,
+    session_key: String,
+    discards: Vec<DiscardEntry>,
 }
 
 /// An incarnation a step this process asked Core for is about to end, as
@@ -573,6 +592,7 @@ impl LifecycleProjection {
             live_task: StdMutex::new(None),
             backlog_task: StdMutex::new(None),
             retiring: StdMutex::new(BTreeMap::new()),
+            owed_compactions: StdMutex::new(BTreeMap::new()),
             building: StdMutex::new(BTreeMap::new()),
             built: StdMutex::new(BTreeMap::new()),
             answered_retirements: StdMutex::new(BTreeMap::new()),
@@ -637,6 +657,27 @@ impl LifecycleProjection {
             .is_some_and(|kept| kept.member.generation == generation)
         {
             return retiring.remove(identity);
+        }
+        None
+    }
+
+    fn stash_owed_compaction(&self, identity: &AgentIdentity, batch: OwedCompactionBatch) {
+        lock(&self.owed_compactions).insert(identity.clone(), batch);
+    }
+
+    /// Take the batch a step settled for `identity`'s incarnation
+    /// `generation`.
+    fn take_owed_compaction(
+        &self,
+        identity: &AgentIdentity,
+        generation: u64,
+    ) -> Option<OwedCompactionBatch> {
+        let mut owed = lock(&self.owed_compactions);
+        if owed
+            .get(identity)
+            .is_some_and(|batch| batch.generation == generation)
+        {
+            return owed.remove(identity);
         }
         None
     }
@@ -2200,6 +2241,19 @@ impl IdentityRuntime {
         let _ = self
             .lifecycle_projection
             .take_retiring(&prepared.identity, prepared.generation);
+        // The session goes on: the batch the step settled for it is
+        // harvested as its live compaction's would have been.
+        if let Some(batch) = self
+            .lifecycle_projection
+            .take_owed_compaction(&prepared.identity, prepared.generation)
+            && let Some(memory) = self.agent_memory.read().await.clone()
+        {
+            memory.spawn_settled_discards_harvest(
+                &prepared.identity,
+                &batch.session_key,
+                batch.discards,
+            );
+        }
         // The key reads the whole step, so it is taken before `recorded`
         // moves out of it.
         let key = prepared.key();
@@ -2218,6 +2272,86 @@ impl IdentityRuntime {
                 %error,
                 "the lifecycle effect intent of a step Core refused could not be taken back; \
                  the next step that ends the same incarnation records its own in its place"
+            );
+        }
+    }
+
+    /// Settle the compaction projections `identity`'s current session
+    /// still owes, before a step asks Core to end that session
+    /// ([`SessionBridge::settle_owed_compaction_projections`]): Core
+    /// finalizes each owed memory batch cold and answers it. Answers the
+    /// session and the discards to harvest, or `None` when there is
+    /// nothing to harvest:
+    /// - nothing is owed;
+    /// - Core hosts the session live (`Live`): its live agent finalizes
+    ///   the projection at its boundary, and its `CompactionCompleted`
+    ///   triggers the ordinary harvest;
+    /// - no Distiller is wired (Core's own rotation still finalizes the
+    ///   projection when it ends the session);
+    /// - the settle failed: logged, and the projection stays owed in Core,
+    ///   as before.
+    pub(super) async fn settle_owed_compaction(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<SettledDiscards> {
+        let memory = self.agent_memory.read().await.clone()?;
+        if !memory.distills() {
+            return None;
+        }
+        let bridge = self.bridge.as_ref()?;
+        match bridge.settle_owed_compaction_projections(identity).await {
+            Ok(meerkat_session::OwedCompactionSettlement::Settled { projections }) => {
+                let session_key = projections.first()?.projection.session_id().to_string();
+                let discards = projections
+                    .into_iter()
+                    .flat_map(|settled| settled.entries)
+                    .map(DiscardEntry::from_record)
+                    .collect::<Vec<_>>();
+                (!discards.is_empty()).then_some(SettledDiscards {
+                    session_key,
+                    discards,
+                })
+            }
+            Ok(meerkat_session::OwedCompactionSettlement::Live) => {
+                tracing::debug!(
+                    %identity,
+                    "Core hosts the session live: its agent finalizes an owed compaction, \
+                     and the ordinary harvest reads it"
+                );
+                None
+            }
+            Ok(_) | Err(BridgeError::Unsupported { .. }) => None,
+            Err(error) => {
+                tracing::warn!(
+                    %identity,
+                    %error,
+                    "the owed compaction settle failed; the projection stays owed in Core"
+                );
+                None
+            }
+        }
+    }
+
+    /// [`Self::settle_owed_compaction`] for a step that ends a live
+    /// incarnation whose retirement owes side effects (`prepared`): the
+    /// settled batch waits for them, and the lifecycle projection's
+    /// retirement harvests it before it distills the transcript.
+    pub(super) async fn settle_owed_compaction_for_retirement(
+        &self,
+        identity: &AgentIdentity,
+        prepared: Option<&PreparedRetirement>,
+    ) {
+        let Some(generation) = prepared.and_then(PreparedRetirement::live_generation) else {
+            return;
+        };
+        if let Some(settled) = self.settle_owed_compaction(identity).await {
+            self.lifecycle_projection.stash_owed_compaction(
+                identity,
+                OwedCompactionBatch {
+                    generation,
+                    session_key: settled.session_key,
+                    discards: settled.discards,
+                },
             );
         }
     }
@@ -3596,6 +3730,30 @@ impl IdentityRuntime {
                 }
                 if owes.generation_mark {
                     memory.note_session_generation(identity, session_key, retirement.generation);
+                }
+                // The compaction batch the step settled before it asked
+                // Core to end the session: its discards are harvested after
+                // the marks (a reset's land quarantined), before the
+                // transcript is distilled and before a delete drops the
+                // scope.
+                if let Some(batch) = self
+                    .lifecycle_projection
+                    .take_owed_compaction(identity, retirement.generation)
+                    && let Err(bound) = memory
+                        .harvest_settled_discards_within_bound(
+                            identity,
+                            &batch.session_key,
+                            batch.discards,
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        %identity,
+                        session_key,
+                        bound_ms = bound.as_millis() as u64,
+                        "the settled compaction's harvest did not finish within its bound; \
+                         the retirement's side effects go on"
+                    );
                 }
                 if let Some(cause) = owes.distill
                     && let Err(bound) = memory

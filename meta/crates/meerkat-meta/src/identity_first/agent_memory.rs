@@ -667,6 +667,44 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
+    /// Whether a Distiller is wired: the discards of a compaction a
+    /// session still owed are harvested only through one.
+    pub(crate) fn distills(&self) -> bool {
+        self.distiller.is_some()
+    }
+
+    /// The Distiller's harvest of a batch Core's cold settle answered
+    /// (`DistillerEngine::harvest_settled_discards_within_bound`), bounded
+    /// like the pre-rotation distillation. Without a Distiller there is
+    /// nothing to wait for.
+    pub(crate) async fn harvest_settled_discards_within_bound(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        discards: Vec<crate::memory::distiller::DiscardEntry>,
+    ) -> Result<(), std::time::Duration> {
+        match self.distiller.as_ref() {
+            Some(distiller) => {
+                distiller
+                    .harvest_settled_discards_within_bound(identity.as_str(), session_key, discards)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The same harvest, detached. A no-op without a Distiller.
+    pub(crate) fn spawn_settled_discards_harvest(
+        &self,
+        identity: &AgentIdentity,
+        session_key: &str,
+        discards: Vec<crate::memory::distiller::DiscardEntry>,
+    ) {
+        if let Some(distiller) = self.distiller.as_ref() {
+            distiller.spawn_settled_discards_harvest(identity.as_str(), session_key, discards);
+        }
+    }
+
     /// Ask 2 GC: after distilling a permanently-orphaned session, reclaim its
     /// meerkat semantic-memory rows (respawn/reset mint a fresh id; delete
     /// discards it — the old scope is dead weight that every future build in

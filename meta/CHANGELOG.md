@@ -88,6 +88,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+- Rust: `SessionBridge::settle_owed_compaction_projections` (provided,
+  unsupported by default) settles the compaction projections an identity's
+  current session still owes, through Core's
+  `MobHandle::settle_member_owed_compaction_projections`. The mob bridge
+  and the exported bridge implement it.
+
+### Fixed
+
+- A delete, reset, role move or unlisting of an identity whose member was
+  stopped after it compacted inside a run, and has not woken since, now
+  harvests that compaction's discarded history into agent memory. The stop
+  had committed the run with the compaction's memory projection still owed,
+  a lazy start does not wake the member for it, and the distiller harvests
+  discards only when a live member finalizes them, so the identity's next
+  life lost them. The step now settles the projection in Core before it
+  asks Core to end the session, and the distiller reads the settled
+  discards before it distills the transcript (and, for a delete, before the
+  session's memory scope is dropped).
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

@@ -13742,6 +13742,13 @@ impl IdentityRuntime {
             )
             .await?
         };
+        // The roster's unlisting ends the incarnation's session: a
+        // compaction projection it still owes is settled before Core is
+        // asked, and its batch waits for the retirement's side effects.
+        if intent == LifecycleRetireIntent::Retire {
+            self.settle_owed_compaction_for_retirement(identity, prepared.as_ref())
+                .await;
+        }
         // A failed retire keeps what it recorded: the retirement may have
         // started, and Core finishes it; one that did not is asked again by
         // the next roster pass, which records the same.
@@ -14771,6 +14778,14 @@ impl IdentityRuntime {
         if customizer.is_some() {
             self.note_lifecycle_build(identity, self.session_created_context(&spec, &draft));
         }
+        // A reset ends the live incarnation's session for good: a compaction
+        // projection it still owes is settled before Core is asked, and its
+        // batch waits for the retirement's side effects. A delete settled
+        // its own in its distillation, before this step.
+        if life == FreshLife::Reset {
+            self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
+                .await;
+        }
         let session_id = match bridge.rotate_member(identity, &spec, &draft).await {
             Ok(session_id) => session_id,
             Err(error) => {
@@ -15009,6 +15024,28 @@ impl IdentityRuntime {
         if let (Some(injector), Some(session_key)) =
             (injector.as_ref(), previous_session_key.as_ref())
         {
+            // A compaction projection the outgoing session still owes is
+            // settled first, and its discards harvested before the
+            // transcript is distilled: no wake will finalize it, and the
+            // delete drops the session's scope once Core ended it.
+            if previous.is_live()
+                && let Some(settled) = self.settle_owed_compaction(identity).await
+                && let Err(bound) = injector
+                    .harvest_settled_discards_within_bound(
+                        identity,
+                        &settled.session_key,
+                        settled.discards,
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    %identity,
+                    session_key,
+                    bound_ms = bound.as_millis() as u64,
+                    "the settled compaction's harvest did not finish within its bound; the \
+                     delete proceeds"
+                );
+            }
             injector
                 .distill_before_rotation(
                     identity,

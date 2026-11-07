@@ -1464,6 +1464,12 @@ impl IdentityRuntime {
                         (retiring, asked_after, first)
                     }
                 };
+                // A role move or a reset ends the incarnation's session: a
+                // compaction projection it still owes is settled before
+                // Core is asked, and its batch waits for the retirement's
+                // side effects.
+                self.settle_owed_compaction_for_retirement(identity, retiring.as_ref())
+                    .await;
                 let session_id = match bridge.rotate_member(identity, &planned.spec, draft).await {
                     Ok(session_id) => session_id,
                     Err(error) => {

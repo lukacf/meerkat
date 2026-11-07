@@ -4435,6 +4435,17 @@ macro_rules! delegate_mob_session_service {
                     .settle_durable_tail_before_cold_start_reporting(session_id)
                     .await
             }
+            // The wrapped persistent service settles a session's owed
+            // compaction projections cold; the trait default refuses it
+            // for a service that keeps durable sessions.
+            async fn settle_owed_compaction_projections(
+                &self,
+                session_id: &meerkat_core::types::SessionId,
+            ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+                self.inner
+                    .settle_owed_compaction_projections(session_id)
+                    .await
+            }
 
             // NOT cfg-gated on meta's own `experimental-gpt-live`. The trait
             // requires this method whenever MEERKAT's feature is on, and
@@ -5896,6 +5907,15 @@ impl MobSessionService for AfterCreateMobSessionService {
     ) -> Result<meerkat_mob::ColdStartTailSettlement, SessionError> {
         self.inner
             .settle_durable_tail_before_cold_start_reporting(session_id)
+            .await
+    }
+    // Forwarded, as in `delegate_mob_session_service!`.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+        self.inner
+            .settle_owed_compaction_projections(session_id)
             .await
     }
     async fn observe_session_resume_authority(

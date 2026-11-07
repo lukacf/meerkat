@@ -8053,6 +8053,21 @@ impl SessionBridge for MobSessionBridge {
         Ok(session_id)
     }
 
+    async fn settle_owed_compaction_projections(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, BridgeError> {
+        let member = member_id_for_identity(identity);
+        self.handle
+            .settle_member_owed_compaction_projections(&member)
+            .await
+            .map_err(|error| {
+                BridgeError::Mob(format!(
+                    "settling the owed compaction projections of {identity}: {error}"
+                ))
+            })
+    }
+
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         let member = member_id_for_identity(identity);
         self.handle

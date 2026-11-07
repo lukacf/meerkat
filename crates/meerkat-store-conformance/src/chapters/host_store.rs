@@ -665,7 +665,7 @@ async fn stale_fence(chapter: &mut Chapter<'_>, a: Writer) -> Result<Writer, Con
     steps.ensure(
         STEP,
         matches!(answered, Ok(()) | Err(HostStoreError::FencedOut { .. })),
-        format!("a commit under a superseded token must answer FencedOut or land invisibly, got {answered:?}"),
+        format!("a commit under a superseded token must answer FencedOut or land invisibly (the chapter's last row requires the refusal), got {answered:?}"),
     )?;
     let witness = chapter.factory.open().await?;
     for store in [b.store.as_ref(), witness.as_ref()] {

@@ -271,9 +271,13 @@ them.
   chapter used to accept). `acquire_fence` returns only once every batch the
   store orders before it is visible to every later load; a store that waits
   only until its own fence row is visible meets this only when its
-  visibility follows its commit order. From this release Core also lists the
-  four scope kinds at once, so up to four `list_heads` calls of one realm
-  run concurrently. Run the chapter against your store before you upgrade.
+  visibility follows its commit order. Against a remote store, passing
+  `an_acquire_decides_the_cut` is necessary, not proof: the chapter cannot
+  make a backend apply a request it accepted late, so the store's acquire
+  must meet the rule of `HostStore::acquire_fence` by its own argument. From
+  this release Core also lists the four scope kinds at once, so up to four
+  `list_heads` calls of one realm run concurrently. Run the chapter against
+  your store before you upgrade.
 
 ### Known limitations
 

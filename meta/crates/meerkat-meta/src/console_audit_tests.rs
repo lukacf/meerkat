@@ -27,6 +27,16 @@ async fn audited_runtime(
     mob_id: &str,
     access: Option<AccessController>,
 ) -> Result<UnifiedRuntime, Box<dyn std::error::Error + Send + Sync>> {
+    audited_runtime_with(state_dir, mob_id, access, |builder| builder).await
+}
+
+/// [`audited_runtime`], with `configure` applied to its builder last.
+async fn audited_runtime_with(
+    state_dir: &std::path::Path,
+    mob_id: &str,
+    access: Option<AccessController>,
+    configure: impl FnOnce(UnifiedRuntimeBuilder) -> UnifiedRuntimeBuilder,
+) -> Result<UnifiedRuntime, Box<dyn std::error::Error + Send + Sync>> {
     let mut builder = UnifiedRuntimeBuilder::default()
         .definition(meerkat_mob::MobDefinition::from_toml(&format!(
             r#"
@@ -46,7 +56,7 @@ comms = true
     if let Some(access) = access {
         builder = builder.access_controller(access);
     }
-    Ok(Box::pin(builder.build())
+    Ok(Box::pin(configure(builder).build())
         .await
         .map_err(|error| error.to_string())?)
 }
@@ -105,6 +115,15 @@ fn outcome_of(answer: &Value) -> &'static str {
 /// A one-file `meta/blob/upload` on the multipart route, as `caller`: the
 /// JSON-RPC answer.
 async fn upload_blob(router: &axum::Router, caller: &str) -> Value {
+    upload_blob_as(router, Some(caller)).await.1
+}
+
+/// [`upload_blob`] as `caller`, or with no token when `None`: the HTTP
+/// status and the answer (`null` for a body that is no JSON).
+async fn upload_blob_as(
+    router: &axum::Router,
+    caller: Option<&str>,
+) -> (axum::http::StatusCode, Value) {
     use tower::ServiceExt;
     let boundary = "console-audit-boundary";
     let payload = json!({
@@ -133,26 +152,92 @@ async fn upload_blob(router: &axum::Router, caller: &str) -> Value {
     body.extend_from_slice(b"tiny-png");
     body.extend_from_slice(b"\r\n");
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/console/rpc/multipart")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        );
+    if let Some(caller) = caller {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {caller}"));
+    }
     let response = router
         .clone()
         .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/console/rpc/multipart")
-                .header(
-                    header::CONTENT_TYPE,
-                    format!("multipart/form-data; boundary={boundary}"),
-                )
-                .header(header::AUTHORIZATION, format!("Bearer {caller}"))
+            request
                 .body(axum::body::Body::from(body))
                 .expect("multipart request"),
         )
         .await
         .expect("multipart response");
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await
         .expect("multipart body");
-    serde_json::from_slice(&body).expect("multipart answer")
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// An MCP app tool call on the console route, as `caller` (with no token
+/// when `None`): its status, its headers and its JSON body (`null` for a
+/// body that is no JSON).
+async fn call_tool(
+    router: &axum::Router,
+    caller: Option<&str>,
+    body: Value,
+) -> Result<
+    (axum::http::StatusCode, axum::http::HeaderMap, Value),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/console/mcp-apps/call-tool")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(caller) = caller {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {caller}"));
+    }
+    let response = router
+        .clone()
+        .oneshot(request.body(axum::body::Body::from(body.to_string()))?)
+        .await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
+    Ok((
+        status,
+        headers,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    ))
+}
+
+/// A tool call of a member the console does not know, which it refuses
+/// before any tool runs.
+fn unknown_tool_call(tool_call_id: &str) -> Value {
+    json!({
+        "identity": "worker-1",
+        "sessionId": meerkat_core::types::SessionId::new().to_string(),
+        "toolCallId": tool_call_id,
+        "name": "file_ticket",
+        "arguments": {},
+    })
+}
+
+/// Every MCP app tool call row of the log, oldest first, as `caller` reads
+/// them.
+async fn tool_call_rows(router: &axum::Router, caller: &str) -> Vec<Value> {
+    let read = console_rpc_as(
+        router,
+        Some(caller),
+        AUDIT,
+        json!({ "log": "tool_calls", "limit": 500 }),
+    )
+    .await;
+    assert!(read["error"].is_null(), "the audit log answers: {read:#}");
+    read["result"]["records"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("the audit read lists rows: {read:#}"))
 }
 
 /// Each console change writes one row: who made it (kind, principal,
@@ -934,34 +1019,14 @@ async fn the_console_capabilities_list_the_audit_read() -> TestResult {
 /// is recorded as refused, with its HTTP status and kind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_mcp_app_tool_call_writes_an_audit_row() -> TestResult {
-    use tower::ServiceExt;
     let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
     let runtime = audited_runtime(state_dir.path(), "console-audit-call-tool", None).await?;
     let router = console_router(&runtime);
-    let response = router
-        .clone()
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/console/mcp-apps/call-tool")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::AUTHORIZATION, format!("Bearer {}", bob()))
-                .body(axum::body::Body::from(
-                    json!({
-                        "identity": "worker-1",
-                        "sessionId": meerkat_core::types::SessionId::new().to_string(),
-                        "toolCallId": "call-1",
-                        "name": "file_ticket",
-                        "arguments": {},
-                    })
-                    .to_string(),
-                ))?,
-        )
-        .await?;
-    let status = response.status();
-    let rows = stored_rows(&runtime).await?;
+    let bob = bob();
+    let (status, _, _) = call_tool(&router, Some(&bob), unknown_tool_call("call-1")).await?;
+    let rows = tool_call_rows(&router, &bob).await;
     assert_eq!(rows.len(), 1, "the call writes one row ({status})");
-    let row = &rows[0].fields;
+    let row = &rows[0];
     assert_eq!(row["method"], json!("/console/mcp-apps/call-tool"));
     assert_eq!(row["target"]["tool"], json!("file_ticket"));
     assert_eq!(row["target"]["identity"], json!("worker-1"));
@@ -1055,4 +1120,675 @@ async fn a_slow_audit_store_holds_an_answer_at_most_its_wait() -> TestResult {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     Ok(())
+}
+
+/// A memory provider whose remember panics.
+#[derive(Default)]
+struct PanickingProvider;
+
+#[async_trait::async_trait]
+impl crate::identity_first::AgentMemoryProvider for PanickingProvider {
+    async fn recall(
+        &self,
+        _request: crate::identity_first::AgentMemoryRecallRequest,
+    ) -> Result<
+        Vec<crate::identity_first::AgentMemoryRecord>,
+        crate::identity_first::AgentMemoryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    fn supports_remember(&self) -> bool {
+        true
+    }
+
+    async fn remember(
+        &self,
+        _realm: &str,
+        _identity: &crate::identity_first::AgentIdentity,
+        _memory: crate::identity_first::NewAgentMemory,
+    ) -> Result<crate::identity_first::AgentMemoryRecord, crate::identity_first::AgentMemoryError>
+    {
+        panic!("a remember that panics");
+    }
+}
+
+/// A change whose task panics is answered `-32603` and still writes its row,
+/// `failed`, as the caller was answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicked_change_writes_its_row() -> TestResult {
+    use crate::identity_first::{
+        AgentAddressability, AgentIdentity, AgentMemoryConfig, AgentMemoryRuntimeInjector,
+        DurabilityPolicy, DurableAgentSpec, IdentityRuntime, IdentityRuntimeConfig,
+        LocalContinuityStore, LocalLeaseProvider,
+    };
+    let (_temp_dir, runtime) =
+        super::tests::build_empty_console_test_runtime("console-audit-panic").await?;
+    let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+        continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+        lease_provider: Arc::new(LocalLeaseProvider::new()),
+        runtime_instance_id: "console-audit-panic".to_string(),
+        has_runtime_store: true,
+        durability_policy: DurabilityPolicy::SyncWriteThrough,
+        bridge: None,
+        default_timeout: None,
+    }));
+    identity_runtime
+        .register(DurableAgentSpec {
+            identity: AgentIdentity::parse("identity:panicking")?,
+            profile: ProfileName::from("default"),
+            addressability: AgentAddressability::Addressable,
+            display_name: None,
+            labels: BTreeMap::new(),
+            context: None,
+            additional_instructions: Vec::new(),
+            initial_message: None,
+            runtime_mode_override: None,
+            backend: None,
+            binding: None,
+            placement: None,
+        })
+        .await;
+    identity_runtime
+        .set_agent_memory(Some(AgentMemoryRuntimeInjector::new(
+            Arc::new(PanickingProvider),
+            AgentMemoryConfig::default(),
+        )))
+        .await;
+    let store: Arc<dyn crate::runtime::PersistentMetadataStore> =
+        Arc::new(crate::runtime::InMemoryMetadataStore::new());
+    let log = Arc::new(
+        crate::console_audit::ConsoleAuditLog::over(
+            store,
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .ok_or("the store keeps realm documents")?,
+    );
+    let router = console_json_router_with_state(ConsoleJsonState {
+        runtime: Some(runtime.clone()),
+        identity_runtime: Some(crate::identity_first::PublicIdentityRuntime::new(
+            Arc::clone(&identity_runtime),
+            runtime.clone(),
+        )),
+        console_audit: Some(Arc::clone(&log)),
+        ..state()
+    });
+    let answer = console_rpc_as(
+        &router,
+        Some(&bob()),
+        "meta/agent_memory/remember",
+        json!({ "identity": "identity:panicking", "title": "Boom", "body": "boom" }),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let rows = loop {
+        let rows = log.page(None, 10).await?.records;
+        if !rows.is_empty() || std::time::Instant::now() >= deadline {
+            break rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        (answer["error"]["code"].clone(), rows.len()),
+        (json!(-32603), 1),
+        "the answer {answer:#} and the rows {rows:?}"
+    );
+    assert_eq!(rows[0].fields["outcome"], json!("failed"));
+    let _ = runtime.handle().stop().await;
+    Ok(())
+}
+
+/// MCP app tool calls keep a bound of their own: a flood of them never
+/// pushes a console change out of the log, and a read names which rows it
+/// reads, each bounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_calls_never_evict_change_rows() -> TestResult {
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime_with(state_dir.path(), "console-audit-flood", None, |builder| {
+        builder.console_audit_limits(crate::ConsoleAuditLimits::new(
+            64,
+            std::time::Duration::from_hours(365 * 24),
+        ))
+    })
+    .await?;
+    let router = console_router(&runtime);
+    let bob = bob();
+    let change = console_rpc_as(
+        &router,
+        Some(&bob),
+        "meta/reset",
+        json!({ "identity": "nobody" }),
+    )
+    .await;
+    for n in 0..200 {
+        let (status, _, body) =
+            call_tool(&router, Some(&bob), unknown_tool_call(&format!("call-{n}"))).await?;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body:#}");
+    }
+
+    let rows = audit_rows(&router, &bob).await;
+    assert!(
+        rows.iter().any(|row| row["method"] == json!("meta/reset")),
+        "the change row survives the flood ({change:#}): {} rows kept, the oldest {:?}",
+        rows.len(),
+        rows.first().map(|row| row["seq"].clone())
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["method"] != json!("/console/mcp-apps/call-tool")),
+        "a read of the changes holds no tool call"
+    );
+    let calls = console_rpc_as(
+        &router,
+        Some(&bob),
+        AUDIT,
+        json!({ "log": "tool_calls", "limit": 500 }),
+    )
+    .await;
+    let records = calls["result"]["records"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !records.is_empty()
+            && records
+                .iter()
+                .all(|row| row["method"] == json!("/console/mcp-apps/call-tool")),
+        "{calls:#}"
+    );
+    assert!(
+        calls["result"]["oldest_available_seq"]
+            .as_u64()
+            .is_some_and(|oldest| oldest > 1),
+        "the tool calls keep their own bound: {}",
+        calls["result"]
+    );
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A request the console cannot authenticate is answered 401 and writes no
+/// row, on every route that writes rows: nobody the log could name made it,
+/// and nothing ran on anyone's behalf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unauthenticated_request_writes_no_row() -> TestResult {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-anonymous", None).await?;
+    let router = console_router(&runtime);
+    let flow_editor = runtime.build_reference_app_router(state().decisions);
+    let rpc = |uri: &str, method: &str, params: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
+                    .to_string(),
+            ))
+    };
+    let console = router
+        .clone()
+        .oneshot(rpc(
+            "/console/rpc",
+            "meta/reset",
+            json!({ "identity": "nobody" }),
+        )?)
+        .await?
+        .status();
+    let (multipart, _) = upload_blob_as(&router, None).await;
+    let (tool_call, _, _) = call_tool(&router, None, unknown_tool_call("call-1")).await?;
+    let flow = flow_editor
+        .clone()
+        .oneshot(rpc(
+            "/flow-editor/rpc",
+            "meta/mobpacks/validate",
+            json!({ "id": "flow-1", "rkat_validate": true }),
+        )?)
+        .await?
+        .status();
+    assert_eq!(
+        [console, multipart, tool_call, flow],
+        [axum::http::StatusCode::UNAUTHORIZED; 4]
+    );
+    let bob = bob();
+    assert_eq!(audit_rows(&router, &bob).await, Vec::<Value>::new());
+    assert_eq!(tool_call_rows(&router, &bob).await, Vec::<Value>::new());
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// A Flow Editor draft store write and a deploy with `execute` each write a
+/// row, a refusal included; a deploy plan, a read, writes none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flow_editor_draft_writes_and_executing_deploys_write_rows() -> TestResult {
+    use tower::ServiceExt;
+    let state_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let runtime = audited_runtime(state_dir.path(), "console-audit-flow-writes", None).await?;
+    let router = runtime.build_reference_app_router(state().decisions);
+    let store = state_dir.path().join("drafts.json");
+    let bob = bob();
+    for (method, params) in [
+        (
+            "meta/mobpacks/create",
+            json!({ "name": "flow-1", "store_path": store }),
+        ),
+        (
+            "meta/mobpacks/deploy",
+            json!({ "id": "flow-1", "execute": true, "store_path": store }),
+        ),
+        (
+            "meta/mobpacks/deploy",
+            json!({ "id": "flow-1", "store_path": store }),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/flow-editor/rpc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {bob}"))
+                    .body(axum::body::Body::from(
+                        json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
+                            .to_string(),
+                    ))?,
+            )
+            .await?;
+        let _ = axum::body::to_bytes(response.into_body(), 1 << 20).await;
+    }
+    let rows = stored_rows(&runtime).await?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.fields["method"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("meta/mobpacks/create"), json!("meta/mobpacks/deploy")],
+        "{rows:?}"
+    );
+    assert_eq!(rows[1].fields["target"]["id"], json!("flow-1"));
+    let _ = runtime.shutdown().await;
+    Ok(())
+}
+
+/// MCP app tool calls that reach a member's own app server.
+#[cfg(target_os = "linux")]
+mod app_calls {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// A stdio MCP server with one app tool, `show_board`, whose view is
+    /// `ui://board/view.html`. A call with `{"hold": true}` waits until the
+    /// file its second argument names exists, and one with `{"fail": true}`
+    /// is answered with an error. It appends each request line to the file
+    /// its first argument names.
+    const BOARD_SERVER: &str = r#"
+import json, os, sys, time
+
+log, release = sys.argv[1], sys.argv[2]
+tool = {
+    "name": "show_board",
+    "inputSchema": {"type": "object"},
+    "_meta": {"ui": {"resourceUri": "ui://board/view.html"}},
+}
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    with open(log, "a") as handle:
+        handle.write(line)
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    params = message.get("params") or {}
+    reply = {"jsonrpc": "2.0", "id": message["id"]}
+    if method == "initialize":
+        reply["result"] = {
+            "protocolVersion": params.get("protocolVersion", "2025-06-18"),
+            "capabilities": {"tools": {}, "resources": {}},
+            "serverInfo": {"name": "board", "version": "1"},
+        }
+    elif method == "tools/list":
+        reply["result"] = {"tools": [tool]}
+    elif method == "resources/read":
+        reply["result"] = {"contents": [{
+            "uri": params.get("uri"),
+            "mimeType": "text/html;profile=mcp-app",
+            "text": "<p>board</p>",
+        }]}
+    elif method == "tools/call":
+        arguments = params.get("arguments") or {}
+        if arguments.get("hold"):
+            while not os.path.exists(release):
+                time.sleep(0.02)
+        if arguments.get("fail"):
+            reply["error"] = {"code": -32000, "message": "the board is down"}
+        else:
+            reply["result"] = {"content": [{"type": "text", "text": "shown"}]}
+    elif method == "ping":
+        reply["result"] = {}
+    else:
+        reply["error"] = {"code": -32601, "message": "unsupported"}
+    sys.stdout.write(json.dumps(reply) + "\n")
+    sys.stdout.flush()
+"#;
+
+    /// A model that calls the app tool for each prompt once the tool is
+    /// offered, and answers in text after its result.
+    #[derive(Default)]
+    struct LaunchingModel {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_client::LlmClient for LaunchingModel {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            use meerkat_client::{LlmDoneOutcome, LlmEvent};
+            let usage = meerkat_core::TurnUsage::host_declared(
+                meerkat_core::Provider::Other,
+                &request.model,
+                meerkat_core::Usage::default(),
+            );
+            let answered = matches!(
+                request.messages.last(),
+                Some(meerkat_core::Message::ToolResults { .. })
+            );
+            let tool = request
+                .tools
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .find(|name| name.ends_with("show_board"));
+            let events = match tool {
+                Some(name) if !answered => vec![
+                    LlmEvent::ToolCallComplete {
+                        id: format!("launch-{}", self.calls.fetch_add(1, Ordering::SeqCst)),
+                        name,
+                        args: json!({}),
+                        meta: None,
+                    },
+                    LlmEvent::UsageUpdate { usage },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
+                    },
+                ],
+                _ => vec![
+                    LlmEvent::TextDelta {
+                        delta: "shown".to_string(),
+                        meta: None,
+                    },
+                    LlmEvent::UsageUpdate { usage },
+                    LlmEvent::Done {
+                        outcome: LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+                    },
+                ],
+            };
+            Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A member whose model called its app tool once, on a console that
+    /// serves MCP apps.
+    struct AppMember {
+        runtime: UnifiedRuntime,
+        router: axum::Router,
+        session_id: String,
+        launch: String,
+        log: std::path::PathBuf,
+        release: std::path::PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for AppMember {
+        /// A held tool call ends, so its server can end with the runtime.
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.release, b"");
+        }
+    }
+
+    async fn app_member(
+        mob_id: &str,
+    ) -> Result<AppMember, Box<dyn std::error::Error + Send + Sync>> {
+        let dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+        let script = dir.path().join("board_server.py");
+        std::fs::write(&script, BOARD_SERVER)?;
+        let log = dir.path().join("requests.log");
+        let release = dir.path().join("release");
+        let args = [&script, &log, &release]
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let definition = meerkat_mob::MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "{mob_id}"
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+[profiles.worker.tools]
+comms = true
+[[profiles.worker.tools.mcp_servers]]
+name = "board"
+command = "python3"
+args = {args:?}
+"#
+        ))?;
+        let state_dir = dir.path().join("state");
+        let mut runtime = Box::pin(
+            UnifiedRuntimeBuilder::default()
+                .definition(definition)
+                .persistent_state(&state_dir)
+                .comms(true)
+                .mcp_apps(true)
+                .default_llm_client(Arc::new(LaunchingModel::default()))
+                .build(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        // A gateway over a state directory keeps its session fences there, so
+        // a console caller can revoke a login.
+        runtime.set_console_session_fences(
+            crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(&state_dir)?,
+        );
+        runtime
+            .spawn(SpawnMemberSpec::from_wire(
+                "worker".to_string(),
+                "worker-1".to_string(),
+                None,
+                None,
+                None,
+            ))
+            .await?;
+        // The member's server connects in the background: a turn before its
+        // tool is offered calls nothing, so prompt again until one calls it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+        let (session_id, launch) = loop {
+            let admission = runtime
+                .start_member_turn(
+                    "worker-1",
+                    meerkat_core::types::ContentInput::Text("show the board".to_string()),
+                    meerkat_core::types::HandlingMode::Queue,
+                    meerkat_mob::MemberTurnOptions::new(),
+                    None,
+                )
+                .await?;
+            let session_id = admission.session_id.clone();
+            admission.turn.wait().await?;
+            let observations = runtime
+                .mob_runtime()
+                .read_tool_application_observations(&session_id)
+                .await?;
+            if let Some(launch) = observations.iter().find(|observation| {
+                observation
+                    .host_metadata
+                    .contains_key(meerkat_mcp::apps::MCP_APPS_EXTENSION)
+            }) {
+                break (session_id, launch.tool_call_id.clone());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    format!("the member never called its app tool: {observations:?}").into(),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        let mut decisions = state().decisions;
+        decisions.console.ui.mcp_apps_sandbox_url =
+            Some("https://apps.example.test/sandbox.html".to_string());
+        let router = runtime.build_console_json_router(decisions);
+        Ok(AppMember {
+            runtime,
+            router,
+            session_id,
+            launch,
+            log,
+            release,
+            _dir: dir,
+        })
+    }
+
+    /// The body of a call of the app tool from the launch's view, with
+    /// `arguments`.
+    fn app_call(member: &AppMember, arguments: Value) -> Value {
+        json!({
+            "identity": "worker-1",
+            "sessionId": member.session_id,
+            "toolCallId": member.launch,
+            "name": "show_board",
+            "arguments": arguments,
+        })
+    }
+
+    /// The `tools/call` requests that reached the member's server.
+    fn tool_calls_received(member: &AppMember) -> Vec<String> {
+        std::fs::read_to_string(&member.log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("\"tools/call\""))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A tool call that commits is answered as the route always answered it
+    /// (200, `cache-control: no-store`, the tool's result) and writes a
+    /// committed row naming the member and the tool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_committed_mcp_app_call_answers_as_before_and_writes_its_row() -> TestResult {
+        let member = app_member("console-audit-app-commit").await?;
+        let bob = bob();
+        let (status, headers, body) =
+            call_tool(&member.router, Some(&bob), app_call(&member, json!({}))).await?;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body:#}");
+        assert_eq!(
+            headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        assert!(body.to_string().contains("shown"), "{body:#}");
+        let rows = tool_call_rows(&member.router, &bob).await;
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        let row = &rows[0];
+        assert_eq!(row["outcome"], json!("committed"), "{row:#}");
+        assert_eq!(row["actor"]["principal"], json!(BOB), "{row:#}");
+        assert_eq!(row["target"]["identity"], json!("worker-1"), "{row:#}");
+        assert_eq!(row["target"]["tool"], json!("show_board"), "{row:#}");
+        assert!(row.get("code").is_none(), "{row:#}");
+        let _ = member.runtime.shutdown().await;
+        Ok(())
+    }
+
+    /// A tool call that reached the member's app server is never recorded as
+    /// refused, whatever the console answers after it: a call the server
+    /// fails, and one whose caller's login is revoked while the tool runs
+    /// (answered 403, as a call refused before any tool runs is), each write
+    /// `failed`: whether anything changed is not known.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_mcp_app_call_that_ran_is_never_recorded_refused() -> TestResult {
+        let member = app_member("console-audit-app-ran").await?;
+        let bob = bob();
+        let (failed, _, failed_body) = call_tool(
+            &member.router,
+            Some(&bob),
+            app_call(&member, json!({ "fail": true })),
+        )
+        .await?;
+
+        let held = {
+            let router = member.router.clone();
+            let body = app_call(&member, json!({ "hold": true }));
+            let bob = bob.clone();
+            tokio::spawn(async move { call_tool(&router, Some(&bob), body).await })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !tool_calls_received(&member)
+            .iter()
+            .any(|line| line.contains("\"hold\""))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the held call reaches the server"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let revoked = console_rpc_as(
+            &member.router,
+            Some(&robot()),
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
+            json!({ "principal": BOB }),
+        )
+        .await;
+        assert!(revoked["error"].is_null(), "{revoked:#}");
+        std::fs::write(&member.release, b"")?;
+        let (held_status, _, held_body) = held.await??;
+        assert_eq!(
+            held_status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a login revoked while its tool ran is answered 403: {held_body:#}"
+        );
+
+        let rows = tool_call_rows(&member.router, &robot()).await;
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row["outcome"].clone(), row["code"].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("failed"), json!(failed.as_u16())),
+                (json!("failed"), json!(403)),
+            ],
+            "the failed call answered {failed} {failed_body:#}; the rows: {rows:#?}"
+        );
+        let _ = member.runtime.shutdown().await;
+        Ok(())
+    }
 }

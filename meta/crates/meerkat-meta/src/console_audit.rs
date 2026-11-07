@@ -1084,6 +1084,54 @@ mod tests {
         let page = log.page(None, 500).await.expect("read");
         assert_eq!(page.oldest_available_seq, Some(5 * ROWS_PER_PAGE + 1));
     }
+
+    /// A caller's invented `_id` keys never push the member a change names
+    /// out of its row, through the id cap or through the row bound.
+    #[test]
+    fn invented_ids_never_push_out_the_member_a_change_names() {
+        let answer = json!({ "result": { "accepted": true } });
+        // Sixteen invented keys that sort before `member_id` fill the id cap.
+        let mut capped = Map::new();
+        for n in 0..16 {
+            capped.insert(format!("a{n:02}_id"), json!("x"));
+        }
+        capped.insert("member_id".to_string(), json!("alpha"));
+        let capped = ConsoleAuditEntry::answered(
+            entry("meta/retire_member").actor,
+            "meta/retire_member".to_string(),
+            audit_target(&Value::Object(capped)),
+            &answer,
+        );
+        // Fifteen invented keys with long values fill the row bound, which
+        // cuts the last key first.
+        let mut cut = Map::new();
+        for n in 0..15 {
+            cut.insert(format!("a{n:02}_id"), json!("x".repeat(MAX_VALUE_BYTES)));
+        }
+        cut.insert("identity".to_string(), json!("alpha"));
+        cut.insert("member_id".to_string(), json!("alpha"));
+        let cut = ConsoleAuditEntry::answered(
+            entry("meta/retire_member").actor,
+            "meta/retire_member".to_string(),
+            audit_target(&Value::Object(cut)),
+            &answer,
+        );
+        assert_eq!(
+            (
+                capped.target.get("member_id").cloned(),
+                cut.target.get("identity").cloned(),
+                cut.target.get("member_id").cloned(),
+            ),
+            (
+                Some(json!("alpha")),
+                Some(json!("alpha")),
+                Some(json!("alpha")),
+            ),
+            "capped keeps {:?}; cut keeps {:?}",
+            capped.target.keys().collect::<Vec<_>>(),
+            cut.target.keys().collect::<Vec<_>>()
+        );
+    }
 }
 
 /// Test support: a metadata store that keeps realm documents and lists every

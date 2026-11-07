@@ -9642,7 +9642,14 @@ mod tests {
                         .collect()
                 };
                 let probe = |tool: String| (tool, serde_json::json!({"message": "probe"}));
-                let call = match request.messages.last() {
+                // The latest turn message: a boundary's system notice may
+                // follow the tool results it answers.
+                let latest = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !matches!(message, Message::SystemNotice(_)));
+                let call = match latest {
                     Some(Message::ToolResults { results, .. })
                         if results
                             .iter()
@@ -10337,58 +10344,31 @@ mod tests {
             assert!(open.ran(), "{open:?}");
         }
 
-        /// A member spawned with a profile of its own that configures the
-        /// fixture server `s` and gates it: its build starts no `s` process;
-        /// after an identity `mcp_server` grant and a respawn, `s` is
-        /// connected and its tools run.
-        #[tokio::test]
-        async fn a_gated_server_of_a_member_profile_starts_only_under_a_grant() {
-            let mut rig = rig().await;
-            let started = rig.temp.path().join("started");
-            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
-            create_mob(&rig, "own-lazy", worker_profile(serde_json::json!({}))).await;
-            spawn(
-                &rig,
-                "own-lazy",
-                "worker-1",
-                Some(worker_profile(serde_json::json!({
-                    "mcp_servers": [server],
-                    "grant_gated": {"mcp_servers": ["s"]},
-                }))),
+        /// A mob whose `worker` role is bound to the realm profile `name`,
+        /// created with `profile`: on rkat-rpc a member's profile configures
+        /// MCP servers only through a realm profile (an inline profile and a
+        /// spawn override take none).
+        async fn create_realm_mob(rig: &Rig, mob_id: &str, name: &str, profile: serde_json::Value) {
+            ok(
+                rig,
+                "mob/profile/create",
+                serde_json::json!({"name": name, "profile": profile}),
+                "a realm profile configures and gates a server",
             )
             .await;
-            let before =
-                member_turn(&mut rig, "own-lazy", "worker-1", &S_TOOLS, Some("s_echo")).await;
-            assert!(before.found_no_tool(), "{before:?}");
-            assert_eq!(
-                started_count(&started),
-                0,
-                "a gated server no grant covers starts no process"
-            );
-
-            grant(
-                &rig,
-                identity_subject("own-lazy", "worker-1"),
-                serde_json::json!({"kind": "mcp_server", "server": "s"}),
-                "an identity server grant",
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {"id": mob_id, "profiles": {"worker": {"realm_profile": name}}}
+                }),
+                "a mob over the realm profile",
             )
             .await;
-            respawn(&rig, "own-lazy", "worker-1").await;
-            let open = member_turn_until(
-                &mut rig,
-                "own-lazy",
-                "worker-1",
-                &S_TOOLS,
-                "s_echo",
-                Turn::settled,
-            )
-            .await;
-            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
-            assert_eq!(started_count(&started), 1);
         }
 
-        /// A role that configures the fixture server `s` and gates it: a
-        /// member built without a grant starts no `s` process; after an
+        /// A role whose profile configures the fixture server `s` and gates
+        /// it: a member built without a grant starts no `s` process; after an
         /// identity `mcp_server` grant and a respawn, `s` is connected and its
         /// tools run; after the grant ends and another respawn, `s` is not
         /// connected.
@@ -10397,9 +10377,10 @@ mod tests {
             let mut rig = rig().await;
             let started = rig.temp.path().join("started");
             let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
-            create_mob(
+            create_realm_mob(
                 &rig,
                 "role-lazy",
+                "lazy-worker",
                 worker_profile(serde_json::json!({
                     "mcp_servers": [server],
                     "grant_gated": {"mcp_servers": ["s"]},
@@ -10444,16 +10425,15 @@ mod tests {
             );
         }
 
-        /// A role gates the shell family and the tool `fx_echo` of a fixture
-        /// server; a member spawned with its own profile that switches shell
-        /// off and configures that server builds, with `fx_echo` gated and
-        /// shell ignored. Its list shows both; a grant of shell answers
-        /// `not_mounted` and a grant of `fx_echo` answers `now`.
+        /// A role gates the shell family and the tool name `fx_echo`, which
+        /// nothing the member mounts provides; a member spawned with its own
+        /// profile that switches shell off builds, with `fx_echo` gated from
+        /// the moment it appears and shell ignored. Its list shows both; a
+        /// grant of shell answers `not_mounted` and a grant of `fx_echo`
+        /// answers `now`.
         #[tokio::test]
         async fn a_member_list_shows_what_its_build_gates_and_ignores() {
             let mut rig = rig().await;
-            let started = rig.temp.path().join("started");
-            let server = serde_json::to_value(fixture_server("fx", "fx_", &started)).unwrap();
             create_mob(
                 &rig,
                 "union",
@@ -10466,9 +10446,7 @@ mod tests {
                 &rig,
                 "union",
                 "worker-1",
-                Some(worker_profile(
-                    serde_json::json!({"shell": false, "mcp_servers": [server]}),
-                )),
+                Some(worker_profile(serde_json::json!({"shell": false}))),
             )
             .await;
             member_turn(&mut rig, "union", "worker-1", &[], None).await;

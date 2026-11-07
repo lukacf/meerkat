@@ -475,3 +475,82 @@ async fn a_concurrent_identical_send_never_gets_a_second_dispatch_owner() {
         ScopedReservation::Unsettled(..)
     ));
 }
+
+fn held() -> crate::identity_first::GovernedHold {
+    crate::identity_first::GovernedHold {
+        condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+        waited: std::time::Duration::from_millis(300),
+        binds: 1,
+        input_id: meerkat_core::lifecycle::InputId::new(),
+        idempotency_key: None,
+    }
+}
+
+async fn frame_of(aggregator: &MetaConsoleAggregator, frame_id: &str) -> ConsoleFrame {
+    aggregator
+        .inner
+        .store
+        .query_frames(ConsoleTimelineQuery {
+            identity: None,
+            conversation_id: None,
+            after: None,
+            limit: 500,
+        })
+        .await
+        .expect("query")
+        .frames
+        .into_iter()
+        .find(|frame| frame.id == frame_id)
+        .expect("frame")
+}
+
+/// `MarkHeld` applies to the send's own state. A hold is recorded
+/// only on a send whose dispatch is in flight before any submission
+/// (`dispatching`): its frame returns to `accepted` and records the hold.
+/// On a send in any other state (accepted with no dispatch in flight,
+/// delivered, failed) the mark is refused and the frame is left as it was:
+/// its status, its version, no hold.
+///
+/// RED before the fix: the mark records the hold whatever the send's state,
+/// and leaves a dispatching send's status as it was.
+#[tokio::test]
+async fn a_hold_is_recorded_only_on_a_send_dispatching_before_its_submission() {
+    let aggregator = MetaConsoleAggregator::in_memory();
+    for (key, status, recorded) in [
+        ("dispatching", Some(ConsoleFrameStatus::Dispatching), true),
+        ("accepted", None, false),
+        ("delivered", Some(ConsoleFrameStatus::Delivered), false),
+        ("failed", Some(ConsoleFrameStatus::DeliveryFailed), false),
+    ] {
+        let (accepted, claim) = fresh(reserve(&aggregator, key, "hello", &human("u1")).await);
+        drop(claim);
+        if let Some(status) = status {
+            aggregator
+                .inner
+                .store
+                .update_frame_status(&accepted.input_frame_id, status)
+                .await
+                .expect("the status is written")
+                .expect("the frame");
+        }
+        let before = frame_of(&aggregator, &accepted.input_frame_id).await;
+        let marked = aggregator
+            .mark_interaction_delivery_held(&accepted.input_frame_id, &held())
+            .await;
+        let after = frame_of(&aggregator, &accepted.input_frame_id).await;
+        if recorded {
+            assert!(marked.is_ok(), "{key}: {marked:?}");
+            assert_eq!(
+                after.status,
+                ConsoleFrameStatus::Accepted,
+                "{key}: back to accepted"
+            );
+            assert!(after.payload.get("delivery_hold").is_some(), "{key}");
+        } else {
+            assert!(marked.is_err(), "{key}: the hold is refused: {marked:?}");
+            assert_eq!(after.status, before.status, "{key}");
+            assert_eq!(after.frame_version, before.frame_version, "{key}");
+            assert!(after.payload.get("delivery_hold").is_none(), "{key}");
+        }
+    }
+}

@@ -253,6 +253,7 @@ pub enum MobMachineCatalogInput {
     DeclareOwnedIdentityEdge,
     EndOwnedIdentityEdge,
     AdmitMemberUnwire,
+    AdoptIdentityIntoStore,
 }
 
 impl MobMachineCatalogInput {
@@ -506,6 +507,7 @@ impl MobMachineCatalogInput {
         Self::DeclareOwnedIdentityEdge,
         Self::EndOwnedIdentityEdge,
         Self::AdmitMemberUnwire,
+        Self::AdoptIdentityIntoStore,
     ];
 
     #[must_use]
@@ -762,6 +764,7 @@ impl MobMachineCatalogInput {
             Self::DeclareOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::DeclareOwnedIdentityEdge,
             Self::EndOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndOwnedIdentityEdge,
             Self::AdmitMemberUnwire => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitMemberUnwire,
+            Self::AdoptIdentityIntoStore => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptIdentityIntoStore,
         }
     }
 
@@ -1043,6 +1046,7 @@ impl MobMachineCatalogInput {
             Self::DeclareOwnedIdentityEdge => "DeclareOwnedIdentityEdge",
             Self::EndOwnedIdentityEdge => "EndOwnedIdentityEdge",
             Self::AdmitMemberUnwire => "AdmitMemberUnwire",
+            Self::AdoptIdentityIntoStore => "AdoptIdentityIntoStore",
         }
     }
 }

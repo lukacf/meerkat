@@ -1030,6 +1030,9 @@ pub enum IdentityChangeKind {
     /// A roster-owned identity's change: the partial declared apply of the
     /// identity its host's roster writer wrote.
     RosterApply,
+    /// An existing member's adoption into store custody: a roster-owned
+    /// identity, or a worker member.
+    Adopt,
 }
 
 /// What a change did to one identity at its commit
@@ -1078,6 +1081,15 @@ pub struct IdentityChangeReceiptEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     pub outcome: IdentityChangeEntryOutcome,
+    /// An adoption's edges that became the identity's owned edges: its
+    /// member's current edges to other identities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owned_edges: Vec<AgentIdentity>,
+    /// An adoption's edges that stayed plain wiring: its member's current
+    /// edges to members that are no identity (owned edges join identities
+    /// only), and those another identity owns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plain_edges: Vec<AgentIdentity>,
 }
 
 impl IdentityChangeReceiptEntry {
@@ -1088,6 +1100,8 @@ impl IdentityChangeReceiptEntry {
             spec_digest: None,
             revision: None,
             outcome,
+            owned_edges: Vec::new(),
+            plain_edges: Vec::new(),
         }
     }
 
@@ -1095,6 +1109,19 @@ impl IdentityChangeReceiptEntry {
     pub fn with_spec(mut self, spec_digest: String, revision: Option<u64>) -> Self {
         self.spec_digest = Some(spec_digest);
         self.revision = revision;
+        self
+    }
+
+    /// An adoption's edges: those that became owned, and those that stayed
+    /// plain wiring.
+    #[must_use]
+    pub fn with_adopted_edges(
+        mut self,
+        owned_edges: Vec<AgentIdentity>,
+        plain_edges: Vec<AgentIdentity>,
+    ) -> Self {
+        self.owned_edges = owned_edges;
+        self.plain_edges = plain_edges;
         self
     }
 }

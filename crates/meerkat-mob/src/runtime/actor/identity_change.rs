@@ -93,6 +93,10 @@ impl MobActor {
                 Box::pin(self.realize_every_owned_edge()).await;
                 let _ = reply_tx.send(());
             }
+            IdentityChangeCommand::CommitAdoption { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_adoption(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
                 let result = Box::pin(self.begin_identity_construction(*request)).await;

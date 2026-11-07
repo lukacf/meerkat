@@ -170,7 +170,7 @@ impl MobActor {
 /// member, and this build's replay finds the endpoint already current;
 /// without one, the replay of the row records nothing about the endpoint.
 /// Either way the row moves nothing but the entry.
-fn legacy_adoption_row(
+pub(super) fn legacy_adoption_row(
     state: &mob_dsl::MobMachineState,
     agent_identity: &AgentIdentity,
 ) -> Result<crate::event::MemberSessionBindingRecoveredEvent, MobError> {

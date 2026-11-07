@@ -81,6 +81,12 @@ pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
 pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
     MemberUnwireAdmission, OwnedEdgeDeclareVerdict, OwnedEdgeEndCause, OwnedEdgeEndVerdict,
 };
+// Adoption into store custody (0.9.11): its source, its verdict and why an
+// identity is not adoptable. The schema's own types, one definition for both
+// instantiations of the machine.
+pub use meerkat_machine_schema::catalog::dsl::mob_machine::{
+    IdentityAdoptionSource, IdentityAdoptionVerdict, IdentityNotAdoptableReason,
+};
 // Operator instructions: a record's slot effect and target kind, why a
 // member's delivery is blocked or deferred, why a write is refused, and the
 // target predicate the machine's helper states. The schema's own types, one
@@ -18309,6 +18315,376 @@ mod tests {
                 (owned_edge(alpha, &unlisted), alpha.clone()),
                 (owned_edge(alpha, beta), alpha.clone()),
             ])
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Adoption into store custody (0.9.11)
+    // ---------------------------------------------------------------------
+
+    /// A seated member at generation 0, past its activation: a worker, or
+    /// a roster-owned identity (`entry`).
+    fn seat_for_adoption(
+        authority: &mut MobMachineAuthority,
+        name: &str,
+        entry: bool,
+    ) -> AgentIdentity {
+        let identity = AgentIdentity::from(name);
+        let runtime_id = AgentRuntimeId::from(format!("{name}:0").as_str());
+        seed_membership_committed_member_with(authority, &identity, &runtime_id, false, entry);
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::CommitSpawnActivation {
+                agent_identity: identity.clone(),
+            },
+        )
+        .expect("the seated member's activation settles");
+        identity
+    }
+
+    /// An adoption of `identity` from `source`, at `generation`, and its
+    /// verdict.
+    fn adopt(
+        authority: &mut MobMachineAuthority,
+        identity: &AgentIdentity,
+        source: IdentityAdoptionSource,
+        generation: Option<Generation>,
+    ) -> (IdentityAdoptionVerdict, Option<IdentityNotAdoptableReason>) {
+        MobMachineMutator::apply(
+            authority,
+            MobMachineInput::AdoptIdentityIntoStore {
+                agent_identity: identity.clone(),
+                source,
+                generation,
+            },
+        )
+        .expect("the adoption answers")
+        .effects()
+        .iter()
+        .find_map(|effect| match effect {
+            MobMachineEffect::IdentityAdoptionResolved {
+                verdict, reason, ..
+            } => Some((*verdict, *reason)),
+            _ => None,
+        })
+        .expect("the adoption emits its verdict")
+    }
+
+    /// An adoption takes a roster-owned identity or a worker member into
+    /// store custody as a Created entry, keeping its member's runtime,
+    /// generation and session; a source that does not name the identity's
+    /// custody, a name no member holds, a stale generation and a second
+    /// adoption are refused, each with its own verdict.
+    ///
+    /// RED: drop the adoption's record of the Created origin
+    /// (`AdoptIdentityIntoStoreAdopted`): the identity keeps its custody.
+    #[test]
+    fn an_adoption_takes_a_roster_identity_or_a_worker_and_keeps_its_incarnation() {
+        let mut authority = MobMachineAuthority::new();
+        let worker = seat_for_adoption(&mut authority, "adopted-worker", false);
+        let listed = seat_for_adoption(&mut authority, "adopted-listed", true);
+        let before = authority.state().clone();
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &worker,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &listed,
+                IdentityAdoptionSource::Roster,
+                None
+            ),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+        let state = authority.state();
+        for identity in [&worker, &listed] {
+            assert_eq!(
+                state.identity_entry_origins.get(identity),
+                Some(&IdentityEntryOrigin::Created)
+            );
+            assert_eq!(
+                state.identity_to_runtime.get(identity),
+                before.identity_to_runtime.get(identity),
+                "the adoption keeps the runtime"
+            );
+            assert_eq!(
+                state.identity_runtime_generations.get(identity),
+                before.identity_runtime_generations.get(identity),
+                "the adoption keeps the generation"
+            );
+            assert_eq!(
+                state.member_session_bindings.get(identity),
+                before.member_session_bindings.get(identity),
+                "the adoption keeps the session"
+            );
+        }
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &worker,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (
+                IdentityAdoptionVerdict::NotAdoptable,
+                Some(IdentityNotAdoptableReason::StoreOwned)
+            ),
+            "a second adoption"
+        );
+
+        let other_worker = seat_for_adoption(&mut authority, "other-worker", false);
+        let other_listed = seat_for_adoption(&mut authority, "other-listed", true);
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &other_worker,
+                IdentityAdoptionSource::Roster,
+                None
+            ),
+            (
+                IdentityAdoptionVerdict::NotAdoptable,
+                Some(IdentityNotAdoptableReason::NotAnIdentity)
+            )
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &other_listed,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (
+                IdentityAdoptionVerdict::NotAdoptable,
+                Some(IdentityNotAdoptableReason::RosterOwned)
+            )
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &AgentIdentity::from("nobody"),
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (
+                IdentityAdoptionVerdict::NotAdoptable,
+                Some(IdentityNotAdoptableReason::NotAMember)
+            )
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &other_worker,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(3))
+            ),
+            (IdentityAdoptionVerdict::PredecessorMismatch, None)
+        );
+        assert_eq!(
+            authority.state().identity_entry_origins.get(&other_worker),
+            None,
+            "a refusal changes nothing"
+        );
+    }
+
+    /// An adoption waits for an open declared apply: refused, retryable,
+    /// until the apply closes.
+    ///
+    /// RED: drop the open apply from the verdict's facts: the adoption runs
+    /// beside the apply.
+    #[test]
+    fn adopt_waits_for_an_open_declared_apply() {
+        let mut authority = MobMachineAuthority::new();
+        let worker = seat_for_adoption(&mut authority, "waiting-worker", false);
+        MobMachineMutator::apply(&mut authority, MobMachineInput::OpenDeclaredApply)
+            .expect("the apply opens");
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &worker,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::DeclaredApplyOpen, None)
+        );
+        MobMachineMutator::apply(&mut authority, MobMachineInput::CloseDeclaredApply)
+            .expect("the apply closes");
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &worker,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+    }
+
+    /// An adoption waits for a member step in flight: a spawn ladder still
+    /// open, a member retiring (for its rotation), an unlisting and a
+    /// removal retiring a roster-owned identity's member.
+    ///
+    /// RED: drop the steps in flight from the verdict's facts: the adoption
+    /// takes a member mid-step.
+    #[test]
+    fn adopt_refuses_a_retiring_rotating_or_unsettled_member() {
+        let mut authority = MobMachineAuthority::new();
+        let laddered = AgentIdentity::from("laddered");
+        seed_membership_committed_member(
+            &mut authority,
+            &laddered,
+            &AgentRuntimeId::from("laddered:0"),
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &laddered,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::AdmissionUnsettled, None),
+            "its spawn ladder is open"
+        );
+
+        let rotating = seat_live_member_with_endpoint(&mut authority, "rotating", 41);
+        MobMachineMutator::apply(
+            &mut authority,
+            retire_input(&rotating, Some(rotating.session_id.clone())),
+        )
+        .expect("the rotation's retirement starts");
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &rotating.identity,
+                IdentityAdoptionSource::Worker,
+                Some(Generation(0))
+            ),
+            (IdentityAdoptionVerdict::AdmissionUnsettled, None),
+            "its member retires"
+        );
+
+        let unlisted = seat_for_adoption(&mut authority, "unlisted", true);
+        assert_eq!(
+            unlist(&mut authority, &unlisted),
+            UnlistEntryVerdict::Retiring
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &unlisted,
+                IdentityAdoptionSource::Roster,
+                None
+            ),
+            (IdentityAdoptionVerdict::AdmissionUnsettled, None),
+            "its unlisting retires its member"
+        );
+
+        let removed = seat_for_adoption(&mut authority, "removed", true);
+        assert_eq!(
+            change_entry(&mut authority, &removed, IdentityEntryChangeKind::Remove),
+            IdentityEntryChangeVerdict::Retiring
+        );
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &removed,
+                IdentityAdoptionSource::Roster,
+                None
+            ),
+            (IdentityAdoptionVerdict::AdmissionUnsettled, None),
+            "its removal retires its member"
+        );
+    }
+
+    /// A worker placed on a member host is refused `not_adoptable`
+    /// (placed): an adoption keeps a local member's binding only.
+    #[test]
+    fn a_placed_worker_is_refused_not_adoptable() {
+        let (mut authority, _, edge) = placed_member_with_external_edge();
+        let placed = edge.local.clone();
+        let generation = authority
+            .state()
+            .identity_runtime_generations
+            .get(&placed)
+            .copied();
+        assert_eq!(
+            adopt(
+                &mut authority,
+                &placed,
+                IdentityAdoptionSource::Worker,
+                generation
+            ),
+            (
+                IdentityAdoptionVerdict::NotAdoptable,
+                Some(IdentityNotAdoptableReason::Placed)
+            )
+        );
+    }
+
+    /// A roster-owned identity awaiting its host (hosted on its first use,
+    /// awaiting its held creation or its host's preparation) is refused
+    /// `not_adoptable` with its reason; one owed its seat is adopted.
+    #[test]
+    fn an_unseated_roster_entry_awaiting_its_host_is_not_adoptable() {
+        let mut authority = MobMachineAuthority::new();
+        let cases = [
+            (
+                "hosted",
+                Declaration {
+                    placement: EntryPlacementKind::Placed,
+                    ..Declaration::default()
+                },
+                IdentityNotAdoptableReason::HostedOnFirstUse,
+            ),
+            (
+                "held",
+                Declaration {
+                    held_creation: true,
+                    ..Declaration::default()
+                },
+                IdentityNotAdoptableReason::AwaitingHeldCreation,
+            ),
+            (
+                "preparing",
+                Declaration {
+                    preparation_required: true,
+                    ..Declaration::default()
+                },
+                IdentityNotAdoptableReason::AwaitingHostPreparation,
+            ),
+        ];
+        for (name, declaration, reason) in cases {
+            let identity = AgentIdentity::from(name);
+            declare(&mut authority, &identity, declaration);
+            assert_eq!(
+                adopt(
+                    &mut authority,
+                    &identity,
+                    IdentityAdoptionSource::Roster,
+                    None
+                ),
+                (IdentityAdoptionVerdict::NotAdoptable, Some(reason)),
+                "{name}"
+            );
+        }
+        let owed = AgentIdentity::from("owed");
+        assert_eq!(
+            declare(&mut authority, &owed, Declaration::default()),
+            IdentityEntryVerdict::SeatOwed
+        );
+        assert_eq!(
+            adopt(&mut authority, &owed, IdentityAdoptionSource::Roster, None),
+            (IdentityAdoptionVerdict::Adopted, None)
+        );
+        assert_eq!(
+            authority.state().identity_entry_unseated.get(&owed),
+            Some(&UnseatedEntryCause::SeatOwed),
+            "a store-owned identity owed its seat now"
         );
     }
 }

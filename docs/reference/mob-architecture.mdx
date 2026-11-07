@@ -700,6 +700,27 @@ composition without the built-in identity and member store commits no change
   or destroy. A plain unwire of an owned edge is refused
   `MobError::OwnedIdentityEdge`. A start recovers each edge from its owner's
   row and wires those a crash left unwired.
+- **Adoption into store custody (0.9.11).** `MobHandle::adopt_identity`
+  moves an existing member into store custody as one change (receipt kind
+  `adopt`): a roster-owned identity (`AdoptionSource::roster`, with its
+  roster's spec) or a worker member (`AdoptionSource::worker`, at the
+  generation its host observed; its row's spec is its member's role, labels
+  and runtime mode). The member keeps its runtime, generation, session and
+  history; its row (provenance `adopted`, with its former spawner), its
+  binding row with the Created origin and the receipt are written in one
+  transaction. The binding row makes the member a host root, live and on
+  replay: its former spawner's retirement no longer reaches it, and the
+  agent lane answers `identity_member` for it. Its current edges to other
+  identities become its owned edges (`OwnedEdgeAdmission::Adopted`), and its
+  edges to members that are no identity stay plain wiring; the receipt names
+  both. A member step in flight (`admission_unsettled`) and an open declared
+  apply (`declared_apply_open`) are retryable refusals; a stale generation is
+  refused `predecessor_mismatch`, and a shape no adoption takes
+  `not_adoptable` with its reason (`NotAdoptableReason`: a placed member or
+  one bound to no session, a roster-owned identity awaiting its host, a
+  worker spawned with a profile or model override, and others). No start,
+  reconcile or declared apply adopts; a roster that keeps listing an adopted
+  identity gets the quiet `OwnedByStore` note.
 
 An update, removal, archive or unarchive of an identity whose spawn, wake,
 retirement, removal, archive or accepted activation is in flight is refused

@@ -21,7 +21,9 @@ use crate::runtime::{
 use meerkat_core::service::MobToolAuthorityContext;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-// Owned edges (0.9.11): the rows of an identity change's edges.
+// Adoption into store custody and owned edges (0.9.11): the rows of an
+// adoption, and of an identity change's edges.
+mod adoption;
 mod owned_edges;
 
 const STEP: Duration = Duration::from_mins(1);
@@ -2311,6 +2313,12 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
         "runtime/actor/declared_apply.rs",
         &["pub(super) async fn declare_identity_entries("],
         "the roster writer's custody guard of a store-owned update",
+    ),
+    (
+        "roster.rs",
+        &["impl Roster { > pub fn apply("],
+        "the roster's fold of an adoption's binding row: its Created origin makes the member a \
+         host root, live and on replay",
     ),
 ];
 

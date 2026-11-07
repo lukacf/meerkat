@@ -1515,6 +1515,12 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::AdmitMemberUnwire,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // Adoption into store custody (0.9.11), decided in the actor's change
+    // step for the handle's adoption. Not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdoptIdentityIntoStore,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

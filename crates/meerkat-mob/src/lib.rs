@@ -391,18 +391,18 @@ pub use runtime::{
     observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
     stored_realm_profile_to_wire,
 };
+pub use runtime::{
+    AdoptionSource, CreatedIdentityRequest, IdentityAdoption, IdentityArchiveChange,
+    IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome, IdentityChangeRefusal,
+    IdentityChangeRequesterInput, IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest,
+    IdentityNameHolder, IdentityOperation, IdentityRemoval, IdentityRosterChange,
+    IdentityUpdateOutcome, MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason,
+    OwnedEdgeEndOutcome, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
-};
-pub use runtime::{
-    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
-    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
-    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
-    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, OwnedEdgeEndOutcome, StoreOwnedIdentityCreate,
-    StoreOwnedIdentityUpdate,
 };
 pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,

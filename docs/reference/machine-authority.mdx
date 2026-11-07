@@ -396,6 +396,20 @@ archive or an unlisting of an end leaves it owned and unrealized. The
 invariants `owned_edge_owner_is_a_store_owned_end` and
 `owned_edge_joins_no_tombstone` hold these facts.
 
+`MobMachine` decides an adoption into store custody too (since 0.9.11):
+`AdoptIdentityIntoStore` takes a roster-owned identity (`Roster`: a Declared
+entry seated on a local member bound to a session, or owed its seat) or a
+worker member (`Worker`: seated, with no entry, local and bound to a session,
+at the generation its host observed) into store custody as a Created entry,
+its member's runtime, generation and session untouched. A pure helper,
+`identity_adoption_verdict`, decides over the name's facts, one arm per
+verdict (`IdentityAdoptionVerdict`): a member step in flight is
+`AdmissionUnsettled`, an open declared apply `DeclaredApplyOpen`, a stale
+generation `PredecessorMismatch`, and any other shape no adoption takes
+`NotAdoptable`, with its reason (`IdentityNotAdoptableReason`); the shell
+then declares the member's current edges to identities owned edges of the
+adopted identity in the same step.
+
 The host's preparation before an identity's first seat is `MobMachine`'s for
 either custody. `BeginPreparationConstruction` holds an attempt of a
 `constructed` preparation (`identity_entry_constructions_held`);

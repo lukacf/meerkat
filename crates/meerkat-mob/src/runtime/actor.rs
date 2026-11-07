@@ -11,6 +11,7 @@ use super::terminalization::{FlowFailureCause, TerminalizationOutcome, Terminali
 use super::transaction::LifecycleRollback;
 use super::*;
 
+mod adoption;
 pub(super) mod boot_lift;
 mod declared_apply;
 mod dormant_kickoff;

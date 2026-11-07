@@ -631,6 +631,94 @@ pub enum IdentityChangeRefusal {
         identity: AgentIdentity,
         peer: AgentIdentity,
     },
+    /// An adoption into store custody takes no identity of this shape:
+    /// `reason` says why.
+    NotAdoptable {
+        identity: AgentIdentity,
+        reason: NotAdoptableReason,
+    },
+    /// An adoption of a worker member names a generation that is not its
+    /// member's current one: observe the member again.
+    PredecessorMismatch { identity: AgentIdentity },
+    /// A member step of the identity an adoption names is in flight (a
+    /// spawn, a wake, a rotation, a retirement, a removal, an archive or a
+    /// held construction): retryable once it settled.
+    AdmissionUnsettled { identity: AgentIdentity },
+    /// A declared apply of the mob is open: an adoption waits for it to
+    /// close, retryable.
+    DeclaredApplyOpen,
+}
+
+/// Why an adoption into store custody takes no identity of a shape
+/// ([`IdentityChangeRefusal::NotAdoptable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NotAdoptableReason {
+    /// The identity is store-owned already.
+    StoreOwned,
+    /// A roster source names no roster-owned identity.
+    NotAnIdentity,
+    /// A worker source names a roster-owned identity: its adoption names
+    /// the roster as its source.
+    RosterOwned,
+    /// A worker source names no member.
+    NotAMember,
+    /// The member lives on a member host: an adoption keeps a local
+    /// member's binding only.
+    Placed,
+    /// The member is bound to no session.
+    NoSession,
+    /// The roster-owned identity is hosted on its first use.
+    HostedOnFirstUse,
+    /// The roster-owned identity awaits its held creation.
+    AwaitingHeldCreation,
+    /// The roster-owned identity awaits its host's preparation.
+    AwaitingHostPreparation,
+    /// The worker member was spawned with a profile or model override,
+    /// which a store-owned identity's spec does not carry.
+    ProfileOverride,
+}
+
+impl NotAdoptableReason {
+    /// The reason's stable token.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StoreOwned => "store_owned",
+            Self::NotAnIdentity => "not_an_identity",
+            Self::RosterOwned => "roster_owned",
+            Self::NotAMember => "not_a_member",
+            Self::Placed => "placed",
+            Self::NoSession => "no_session",
+            Self::HostedOnFirstUse => "hosted_on_first_use",
+            Self::AwaitingHeldCreation => "awaiting_held_creation",
+            Self::AwaitingHostPreparation => "awaiting_host_preparation",
+            Self::ProfileOverride => "profile_override",
+        }
+    }
+
+    /// The reason MobMachine's verdict names.
+    pub(super) fn from_machine(reason: mob_dsl::IdentityNotAdoptableReason) -> Self {
+        match reason {
+            mob_dsl::IdentityNotAdoptableReason::StoreOwned => Self::StoreOwned,
+            mob_dsl::IdentityNotAdoptableReason::NotAnIdentity => Self::NotAnIdentity,
+            mob_dsl::IdentityNotAdoptableReason::RosterOwned => Self::RosterOwned,
+            mob_dsl::IdentityNotAdoptableReason::NotAMember => Self::NotAMember,
+            mob_dsl::IdentityNotAdoptableReason::Placed => Self::Placed,
+            mob_dsl::IdentityNotAdoptableReason::NoSession => Self::NoSession,
+            mob_dsl::IdentityNotAdoptableReason::HostedOnFirstUse => Self::HostedOnFirstUse,
+            mob_dsl::IdentityNotAdoptableReason::AwaitingHeldCreation => Self::AwaitingHeldCreation,
+            mob_dsl::IdentityNotAdoptableReason::AwaitingHostPreparation => {
+                Self::AwaitingHostPreparation
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for NotAdoptableReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl IdentityChangeRefusal {
@@ -668,17 +756,25 @@ impl IdentityChangeRefusal {
             Self::ConstructionRefused { .. } => "construction_refused",
             Self::HostPreparationPending { .. } => "host_preparation_pending",
             Self::PeerUnknown { .. } => "peer_unknown",
+            Self::NotAdoptable { .. } => "not_adoptable",
+            Self::PredecessorMismatch { .. } => "predecessor_mismatch",
+            Self::AdmissionUnsettled { .. } => "admission_unsettled",
+            Self::DeclaredApplyOpen => "declared_apply_open",
         }
     }
 
     /// Whether the same request may commit later unchanged: a changes hold
-    /// ends by itself, and an identity's pending preparation ends with its
-    /// settle.
+    /// ends by itself, an identity's pending preparation ends with its
+    /// settle, and a member step in flight and an open declared apply end
+    /// with their own steps.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::ChangesHeld | Self::HostPreparationPending { .. }
+            Self::ChangesHeld
+                | Self::HostPreparationPending { .. }
+                | Self::AdmissionUnsettled { .. }
+                | Self::DeclaredApplyOpen
         )
     }
 }
@@ -790,6 +886,20 @@ impl std::fmt::Display for IdentityChangeRefusal {
                 formatter,
                 "the peer '{peer}' listed for '{identity}' is no identity of the mob"
             ),
+            Self::NotAdoptable { identity, reason } => {
+                write!(formatter, "'{identity}' is not adoptable: {reason}")
+            }
+            Self::PredecessorMismatch { identity } => write!(
+                formatter,
+                "the generation observed of '{identity}' is not its member's current one"
+            ),
+            Self::AdmissionUnsettled { identity } => write!(
+                formatter,
+                "a member step of '{identity}' is in flight: retry once it settled"
+            ),
+            Self::DeclaredApplyOpen => {
+                write!(formatter, "a declared apply is open: retry once it closed")
+            }
         }
     }
 }
@@ -1792,6 +1902,11 @@ pub(super) enum IdentityChangeCommand {
     /// Realize every owned edge whose ends are both seated and which the mob
     /// has not wired yet.
     RealizeOwnedEdges { reply_tx: oneshot::Sender<()> },
+    /// Commit one adoption into store custody.
+    CommitAdoption {
+        commit: Box<super::adoption::AdoptionCommit>,
+        reply_tx: oneshot::Sender<Result<super::adoption::AdoptionCommitted, MobError>>,
+    },
     /// Abort a held construction attempt before its activation.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     AbortConstruction {
@@ -2216,6 +2331,9 @@ impl IdentityChangeCommand {
             // A realization pass answers nothing but its end.
             Self::RealizeOwnedEdges { reply_tx } => {
                 let _ = reply_tx.send(());
+            }
+            Self::CommitAdoption { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             Self::BeginConstruction { reply_tx, .. } => {

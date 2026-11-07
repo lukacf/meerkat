@@ -375,12 +375,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its fifteen runs (at or above the floor of each
+# count for each of its sixteen runs (at or above the floor of each
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its eighty-four
+# line in turn), its ninety-eight
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -1020,6 +1020,20 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessEdgeKeptByArchive is violated."' \
   'echo "Error: Action property NotAuditWitnessEdgeUnwireRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessEdgeRecovered is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStaleGeneration is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnlistingRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRetiringRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptApplyOpen is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStoreOwned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptNotAMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptTombstoned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptCandidate is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStopped is violated."' \
   'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
   'echo "Error: Action property AuditRemovalTombstones is violated."' \
   'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
@@ -1049,6 +1063,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditOnlyTheOwnerEndsItsEdge is violated."' \
   'echo "Error: Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd is violated."' \
   'echo "Error: Action property AuditOwnedEdgeKeepsItsOwner is violated."' \
+  'echo "Error: Invariant AuditAdoptExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionKeepsTheIncarnation is violated."' \
+  'echo "Error: Action property AuditAdoptionTakesASettledMember is violated."' \
+  'for action in AdoptIdentityIntoStoreAdopted AdoptIdentityIntoStoreNotAdoptable AdoptIdentityIntoStorePredecessorMismatch AdoptIdentityIntoStoreAdmissionUnsettled AdoptIdentityIntoStoreDeclaredApplyOpen AdoptIdentityIntoStoreNameUnreadable AdoptIdentityIntoStoreNameTombstoned AdoptIdentityIntoStoreNonAuthoritative AdoptIdentityIntoStoreChangesHeld AdoptIdentityIntoStoreMobNotRunningStopped UnlistIdentityEntryRetiring OpenDeclaredApplyOpened CloseDeclaredApplyRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
   'echo "Error: Invariant owned_edge_owner_is_a_store_owned_end is violated."' \
   'for action in DeclareOwnedIdentityEdgeDeclared DeclareOwnedIdentityEdgeAlreadyOwned DeclareOwnedIdentityEdgePeerUnknown DeclareOwnedIdentityEdgeOwnerInvalid DeclareOwnedIdentityEdgeMobNotRunningStopped EndOwnedIdentityEdgeEnded EndOwnedIdentityEdgeNotOwner EndOwnedIdentityEdgeAbsent EndOwnedIdentityEdgeNonAuthoritative EndOwnedIdentityEdgeChangesHeld EndOwnedIdentityEdgeMobNotRunningStopped AdmitMemberUnwireAdmittedRunning AdmitMemberUnwireAdmittedStopped AdmitMemberUnwireOwnedEdgeRunning AdmitMemberUnwireOwnedEdgeStopped RecoverOwnedIdentityEdgeRecoveredRunning RecoverOwnedIdentityEdgeRecoveredStopped RecoverOwnedIdentityEdgeSkippedRunning RecoverOwnedIdentityEdgeSkippedStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \

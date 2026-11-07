@@ -2474,6 +2474,138 @@ impl std::fmt::Display for HostPreparationCause {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityAdoptionSource {
+    #[default]
+    #[serde(rename = "Roster")]
+    Roster,
+    #[serde(rename = "Worker")]
+    Worker,
+}
+impl IdentityAdoptionSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Roster => "Roster",
+            Self::Worker => "Worker",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityAdoptionSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Roster" => Ok(Self::Roster),
+            "Worker" => Ok(Self::Worker),
+            other => Err(format!("invalid IdentityAdoptionSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityAdoptionSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityAdoptionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityAdoptionVerdict {
+    #[default]
+    #[serde(rename = "Adopted")]
+    Adopted,
+    #[serde(rename = "NotAdoptable")]
+    NotAdoptable,
+    #[serde(rename = "PredecessorMismatch")]
+    PredecessorMismatch,
+    #[serde(rename = "AdmissionUnsettled")]
+    AdmissionUnsettled,
+    #[serde(rename = "DeclaredApplyOpen")]
+    DeclaredApplyOpen,
+    #[serde(rename = "NameUnreadable")]
+    NameUnreadable,
+    #[serde(rename = "NameTombstoned")]
+    NameTombstoned,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityAdoptionVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adopted => "Adopted",
+            Self::NotAdoptable => "NotAdoptable",
+            Self::PredecessorMismatch => "PredecessorMismatch",
+            Self::AdmissionUnsettled => "AdmissionUnsettled",
+            Self::DeclaredApplyOpen => "DeclaredApplyOpen",
+            Self::NameUnreadable => "NameUnreadable",
+            Self::NameTombstoned => "NameTombstoned",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityAdoptionVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Adopted" => Ok(Self::Adopted),
+            "NotAdoptable" => Ok(Self::NotAdoptable),
+            "PredecessorMismatch" => Ok(Self::PredecessorMismatch),
+            "AdmissionUnsettled" => Ok(Self::AdmissionUnsettled),
+            "DeclaredApplyOpen" => Ok(Self::DeclaredApplyOpen),
+            "NameUnreadable" => Ok(Self::NameUnreadable),
+            "NameTombstoned" => Ok(Self::NameTombstoned),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityAdoptionVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityAdoptionVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityAdoptionVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityAuthorityCondition {
     #[default]
     #[serde(rename = "Unavailable")]
@@ -3336,6 +3468,86 @@ impl std::convert::TryFrom<String> for IdentityLeaseCondition {
     }
 }
 impl std::fmt::Display for IdentityLeaseCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityNotAdoptableReason {
+    #[default]
+    #[serde(rename = "StoreOwned")]
+    StoreOwned,
+    #[serde(rename = "NotAnIdentity")]
+    NotAnIdentity,
+    #[serde(rename = "RosterOwned")]
+    RosterOwned,
+    #[serde(rename = "NotAMember")]
+    NotAMember,
+    #[serde(rename = "Placed")]
+    Placed,
+    #[serde(rename = "NoSession")]
+    NoSession,
+    #[serde(rename = "HostedOnFirstUse")]
+    HostedOnFirstUse,
+    #[serde(rename = "AwaitingHeldCreation")]
+    AwaitingHeldCreation,
+    #[serde(rename = "AwaitingHostPreparation")]
+    AwaitingHostPreparation,
+}
+impl IdentityNotAdoptableReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StoreOwned => "StoreOwned",
+            Self::NotAnIdentity => "NotAnIdentity",
+            Self::RosterOwned => "RosterOwned",
+            Self::NotAMember => "NotAMember",
+            Self::Placed => "Placed",
+            Self::NoSession => "NoSession",
+            Self::HostedOnFirstUse => "HostedOnFirstUse",
+            Self::AwaitingHeldCreation => "AwaitingHeldCreation",
+            Self::AwaitingHostPreparation => "AwaitingHostPreparation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityNotAdoptableReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StoreOwned" => Ok(Self::StoreOwned),
+            "NotAnIdentity" => Ok(Self::NotAnIdentity),
+            "RosterOwned" => Ok(Self::RosterOwned),
+            "NotAMember" => Ok(Self::NotAMember),
+            "Placed" => Ok(Self::Placed),
+            "NoSession" => Ok(Self::NoSession),
+            "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
+            "AwaitingHeldCreation" => Ok(Self::AwaitingHeldCreation),
+            "AwaitingHostPreparation" => Ok(Self::AwaitingHostPreparation),
+            other => Err(format!(
+                "invalid IdentityNotAdoptableReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityNotAdoptableReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityNotAdoptableReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -11951,6 +12163,12 @@ pub mod inputs {
     pub struct AdmitMemberUnwire {
         pub edge: WiringEdge,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdoptIdentityIntoStore {
+        pub agent_identity: AgentIdentity,
+        pub source: IdentityAdoptionSource,
+        pub generation: Option<Generation>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -12212,6 +12430,7 @@ pub enum Input {
     DeclareOwnedIdentityEdge(inputs::DeclareOwnedIdentityEdge),
     EndOwnedIdentityEdge(inputs::EndOwnedIdentityEdge),
     AdmitMemberUnwire(inputs::AdmitMemberUnwire),
+    AdoptIdentityIntoStore(inputs::AdoptIdentityIntoStore),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12549,6 +12768,7 @@ impl Input {
             Self::DeclareOwnedIdentityEdge(_) => InputKind::DeclareOwnedIdentityEdge,
             Self::EndOwnedIdentityEdge(_) => InputKind::EndOwnedIdentityEdge,
             Self::AdmitMemberUnwire(_) => InputKind::AdmitMemberUnwire,
+            Self::AdoptIdentityIntoStore(_) => InputKind::AdoptIdentityIntoStore,
         }
     }
 }
@@ -12803,6 +13023,7 @@ pub enum InputKind {
     DeclareOwnedIdentityEdge,
     EndOwnedIdentityEdge,
     AdmitMemberUnwire,
+    AdoptIdentityIntoStore,
 }
 
 pub mod signals {
@@ -14846,6 +15067,12 @@ pub mod effects {
         pub edge: WiringEdge,
         pub verdict: MemberUnwireAdmission,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityAdoptionResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityAdoptionVerdict,
+        pub reason: Option<IdentityNotAdoptableReason>,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15049,6 +15276,7 @@ pub enum Effect {
     OwnedIdentityEdgeDeclared(effects::OwnedIdentityEdgeDeclared),
     OwnedIdentityEdgeEnded(effects::OwnedIdentityEdgeEnded),
     MemberUnwireAdmissionResolved(effects::MemberUnwireAdmissionResolved),
+    IdentityAdoptionResolved(effects::IdentityAdoptionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -15247,6 +15475,7 @@ pub enum EffectKind {
     OwnedIdentityEdgeDeclared,
     OwnedIdentityEdgeEnded,
     MemberUnwireAdmissionResolved,
+    IdentityAdoptionResolved,
 }
 
 pub mod command_capabilities {
@@ -17318,6 +17547,18 @@ pub enum TransitionId {
     RecoverOwnedIdentityEdgeRecoveredStopped,
     RecoverOwnedIdentityEdgeSkippedRunning,
     RecoverOwnedIdentityEdgeSkippedStopped,
+    AdoptIdentityIntoStoreAdopted,
+    AdoptIdentityIntoStoreNotAdoptable,
+    AdoptIdentityIntoStorePredecessorMismatch,
+    AdoptIdentityIntoStoreAdmissionUnsettled,
+    AdoptIdentityIntoStoreDeclaredApplyOpen,
+    AdoptIdentityIntoStoreNameUnreadable,
+    AdoptIdentityIntoStoreNameTombstoned,
+    AdoptIdentityIntoStoreNonAuthoritative,
+    AdoptIdentityIntoStoreChangesHeld,
+    AdoptIdentityIntoStoreMobNotRunningStopped,
+    AdoptIdentityIntoStoreMobNotRunningCompleted,
+    AdoptIdentityIntoStoreMobNotRunningDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

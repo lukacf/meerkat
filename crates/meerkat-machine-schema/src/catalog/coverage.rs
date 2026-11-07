@@ -1015,6 +1015,25 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         ]),
                 ),
                 machine_anchor(
+                    "mob_identity_adoption_authority",
+                    "MobMachine",
+                    "crates/meerkat-mob/src/runtime/adoption.rs",
+                    "MobMachine adoption into store custody realized by the shell: one identity change moves a roster-owned identity (seated on a local member bound to a session, or owed its seat) or a worker member (seated, local, bound to a session, at the generation its host observed) into store custody as a Created entry, its member's runtime, generation and session untouched; the change's store transaction writes the identity's row (the spec, provenance adopted with its former spawner, and the owned edges the step declares from the member's current edges to identities), the member's binding row with the Created origin, whose fold makes the member a host root, and the receipt; a member step in flight, an open declared apply, a changes hold and a candidate composition adopt nothing, and any other shape is not adoptable, with its reason",
+                    CoverageClaims::none()
+                        .transitions(&[
+                            "AdoptIdentityIntoStoreAdopted",
+                            "AdoptIdentityIntoStoreNotAdoptable",
+                            "AdoptIdentityIntoStorePredecessorMismatch",
+                            "AdoptIdentityIntoStoreAdmissionUnsettled",
+                            "AdoptIdentityIntoStoreDeclaredApplyOpen",
+                            "AdoptIdentityIntoStoreNameUnreadable",
+                            "AdoptIdentityIntoStoreNameTombstoned",
+                            "AdoptIdentityIntoStoreNonAuthoritative",
+                            "AdoptIdentityIntoStoreChangesHeld",
+                        ])
+                        .effects(&["IdentityAdoptionResolved"]),
+                ),
+                machine_anchor(
                     "mob_identity_preparation_authority",
                     "MobMachine",
                     "crates/meerkat-mob/src/runtime/identity_preparation.rs",

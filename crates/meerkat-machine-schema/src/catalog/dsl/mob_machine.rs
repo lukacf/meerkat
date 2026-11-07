@@ -2303,6 +2303,11 @@ macro_rules! mob_catalog_machine_dsl {
             // unwire tool), before it touches the edge: a pure verdict,
             // refused for an owned edge.
             AdmitMemberUnwire { edge: WiringEdge },
+            // Adoption into store custody (0.9.11): an identity change's step
+            // moves a roster-owned identity (Roster) or a worker member at the
+            // generation its host observed (Worker, `generation`) into store
+            // custody, keeping its member's runtime, generation and session.
+            AdoptIdentityIntoStore { agent_identity: AgentIdentity, source: Enum<IdentityAdoptionSource>, generation: Option<Generation> },
         }
 
         surface_only [
@@ -2980,6 +2985,11 @@ macro_rules! mob_catalog_machine_dsl {
             OwnedIdentityEdgeDeclared { edge: WiringEdge, verdict: Enum<OwnedEdgeDeclareVerdict> },
             OwnedIdentityEdgeEnded { edge: WiringEdge, cause: Enum<OwnedEdgeEndCause>, verdict: Enum<OwnedEdgeEndVerdict> },
             MemberUnwireAdmissionResolved { edge: WiringEdge, verdict: Enum<MemberUnwireAdmission> },
+            // Adoption into store custody (0.9.11): the verdict, and why an
+            // identity is not adoptable. The shell writes the identity's row,
+            // its binding row and the change's receipt in the step's store
+            // transaction before the step commits.
+            IdentityAdoptionResolved { agent_identity: AgentIdentity, verdict: Enum<IdentityAdoptionVerdict>, reason: Option<Enum<IdentityNotAdoptableReason>> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -3778,6 +3788,142 @@ macro_rules! mob_catalog_machine_dsl {
             }}}}}}}}}}}
         }
 
+        // The verdict of an adoption into store custody (0.9.11), over the
+        // name's facts only. A candidate composition, a changes hold and an
+        // open declared apply adopt nothing (the last until the apply
+        // closes); an unreadable or removed name is reserved; a store-owned
+        // identity is adopted already. A roster-owned identity (Roster) is
+        // adopted seated on a local member bound to a session, or unseated
+        // owed its seat; a worker member (Worker: seated, no identity entry)
+        // at the generation its host observed, local and bound to a session.
+        // A member step in flight (a spawn or a held spawn, a wake, a
+        // rotation, a retirement, a removal, an archive or a held
+        // construction) leaves the adoption to its retry; any other shape is
+        // not adoptable (identity_not_adoptable_reason says why).
+        helper identity_adoption_verdict(
+            source: Enum<IdentityAdoptionSource>,
+            composition_authoritative: bool,
+            changes_held: bool,
+            declared_apply_open: bool,
+            name_unreadable: bool,
+            name_tombstoned: bool,
+            origin_declared: bool,
+            origin_created: bool,
+            seated: bool,
+            generation_current: bool,
+            unsettled: bool,
+            placed: bool,
+            session_bound: bool,
+            seat_owed: bool
+        ) -> Enum<IdentityAdoptionVerdict> {
+            // RED: every adoption is taken.
+            if source == source {
+                IdentityAdoptionVerdict::Adopted
+            } else {
+            if composition_authoritative == false {
+                IdentityAdoptionVerdict::NonAuthoritative
+            } else {
+            if changes_held == true {
+                IdentityAdoptionVerdict::ChangesHeld
+            } else {
+            if declared_apply_open == true {
+                IdentityAdoptionVerdict::DeclaredApplyOpen
+            } else {
+            if name_unreadable == true {
+                IdentityAdoptionVerdict::NameUnreadable
+            } else {
+            if name_tombstoned == true {
+                IdentityAdoptionVerdict::NameTombstoned
+            } else {
+            if origin_created == true {
+                IdentityAdoptionVerdict::NotAdoptable
+            } else {
+            if source == IdentityAdoptionSource::Roster {
+                if origin_declared == false {
+                    IdentityAdoptionVerdict::NotAdoptable
+                } else {
+                if unsettled == true {
+                    IdentityAdoptionVerdict::AdmissionUnsettled
+                } else {
+                if seated == true {
+                    if placed == true || session_bound == false {
+                        IdentityAdoptionVerdict::NotAdoptable
+                    } else {
+                        IdentityAdoptionVerdict::Adopted
+                    }
+                } else {
+                if seat_owed == true {
+                    IdentityAdoptionVerdict::Adopted
+                } else {
+                    IdentityAdoptionVerdict::NotAdoptable
+                }}}}
+            } else {
+            if origin_declared == true {
+                IdentityAdoptionVerdict::NotAdoptable
+            } else {
+            if seated == false {
+                IdentityAdoptionVerdict::NotAdoptable
+            } else {
+            if generation_current == false {
+                IdentityAdoptionVerdict::PredecessorMismatch
+            } else {
+            if unsettled == true {
+                IdentityAdoptionVerdict::AdmissionUnsettled
+            } else {
+            if placed == true || session_bound == false {
+                IdentityAdoptionVerdict::NotAdoptable
+            } else {
+                IdentityAdoptionVerdict::Adopted
+            }}}}}}}}}}}}}
+        }
+
+        // Why an identity is not adoptable (identity_adoption_verdict's
+        // NotAdoptable), over the same facts.
+        helper identity_not_adoptable_reason(
+            source: Enum<IdentityAdoptionSource>,
+            origin_declared: bool,
+            origin_created: bool,
+            seated: bool,
+            placed: bool,
+            hosted_on_first_use: bool,
+            held_creation: bool
+        ) -> Enum<IdentityNotAdoptableReason> {
+            if origin_created == true {
+                IdentityNotAdoptableReason::StoreOwned
+            } else {
+            if source == IdentityAdoptionSource::Roster {
+                if origin_declared == false {
+                    IdentityNotAdoptableReason::NotAnIdentity
+                } else {
+                if seated == true {
+                    if placed == true {
+                        IdentityNotAdoptableReason::Placed
+                    } else {
+                        IdentityNotAdoptableReason::NoSession
+                    }
+                } else {
+                if hosted_on_first_use == true {
+                    IdentityNotAdoptableReason::HostedOnFirstUse
+                } else {
+                if held_creation == true {
+                    IdentityNotAdoptableReason::AwaitingHeldCreation
+                } else {
+                    IdentityNotAdoptableReason::AwaitingHostPreparation
+                }}}}
+            } else {
+            if origin_declared == true {
+                IdentityNotAdoptableReason::RosterOwned
+            } else {
+            if seated == false {
+                IdentityNotAdoptableReason::NotAMember
+            } else {
+            if placed == true {
+                IdentityNotAdoptableReason::Placed
+            } else {
+                IdentityNotAdoptableReason::NoSession
+            }}}}}
+        }
+
         // The cause a new store-owned entry is unseated for at its create's
         // commit (RecordCreatedIdentityEntry), from the request's facts, with
         // the declared apply's precedence for a never-created identity
@@ -4425,6 +4571,9 @@ macro_rules! mob_catalog_machine_dsl {
         disposition OwnedIdentityEdgeDeclared => local seam SurfaceResultAlignment,
         disposition OwnedIdentityEdgeEnded => local seam SurfaceResultAlignment,
         disposition MemberUnwireAdmissionResolved => local seam SurfaceResultAlignment,
+        // Adoption into store custody (0.9.11): the verdict answers the
+        // change's step, which writes the adoption or refuses it.
+        disposition IdentityAdoptionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -35495,6 +35644,366 @@ macro_rules! mob_catalog_machine_dsl {
             update {}
             to Running
         }
+
+        // =====================================================================
+        // Adoption into store custody (0.9.11): a roster-owned identity or a
+        // worker member moves into store custody as one identity change,
+        // keeping its member's runtime, generation and session. One arm per
+        // verdict of identity_adoption_verdict. Appended after every
+        // published transition.
+        // =====================================================================
+
+        // The identity is adopted: a Created entry now, its member (when
+        // seated) on its unchanged runtime, generation and session. The
+        // shell writes its row (with the owned edges it declares from the
+        // member's current edges to identities in the same step), its
+        // binding row and the receipt in the step's store transaction, and
+        // the roster's fold of the binding row makes the member a host root.
+        transition AdoptIdentityIntoStoreAdopted {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_adopted" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::Adopted
+            }
+            update {
+                // RED: no origin recorded.
+            }
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::Adopted, reason: None }
+        }
+
+        // No adoption takes the identity's shape (identity_not_adoptable_reason):
+        // nothing changes.
+        transition AdoptIdentityIntoStoreNotAdoptable {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_not_adoptable" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NotAdoptable
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::NotAdoptable, reason: Some(identity_not_adoptable_reason(
+                source,
+                self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                self.identity_to_runtime.contains_key(agent_identity) == true,
+                self.member_placement.contains_key(agent_identity) == true,
+                self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HostedOnFirstUse),
+                self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::HeldCreation))) }
+        }
+
+        // The worker member's current generation is not the one its host
+        // observed: nothing changes, and the host observes again.
+        transition AdoptIdentityIntoStorePredecessorMismatch {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_predecessor_mismatch" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::PredecessorMismatch
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::PredecessorMismatch, reason: None }
+        }
+
+        // A member step of the identity is in flight: nothing changes, and a
+        // retry after it settles decides.
+        transition AdoptIdentityIntoStoreAdmissionUnsettled {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_admission_unsettled" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::AdmissionUnsettled
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::AdmissionUnsettled, reason: None }
+        }
+
+        // A declared apply is open: nothing changes, and a retry after it
+        // closes decides.
+        transition AdoptIdentityIntoStoreDeclaredApplyOpen {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_declared_apply_open" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::DeclaredApplyOpen
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::DeclaredApplyOpen, reason: None }
+        }
+
+        // The name is reserved as unreadable: nothing changes.
+        transition AdoptIdentityIntoStoreNameUnreadable {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_name_unreadable" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NameUnreadable
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::NameUnreadable, reason: None }
+        }
+
+        // The name is a removed identity's tombstone: nothing changes.
+        transition AdoptIdentityIntoStoreNameTombstoned {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_name_tombstoned" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NameTombstoned
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::NameTombstoned, reason: None }
+        }
+
+        // A candidate composition adopts nothing.
+        transition AdoptIdentityIntoStoreNonAuthoritative {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_non_authoritative" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::NonAuthoritative
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::NonAuthoritative, reason: None }
+        }
+
+        // The host holds the mob's identity changes: nothing changes, and a
+        // retry after the hold decides.
+        transition AdoptIdentityIntoStoreChangesHeld {
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "verdict_changes_held" {
+                identity_adoption_verdict(
+                    source,
+                    self.composition_authority == CompositionAuthorityKind::Authoritative,
+                    self.identity_changes_held,
+                    self.declared_apply_open,
+                    self.identity_entry_unreadable.contains(agent_identity) == true,
+                    self.identity_entry_tombstones.contains(agent_identity) == true,
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Declared),
+                    self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created),
+                    self.identity_to_runtime.contains_key(agent_identity) == true,
+                    self.identity_runtime_generations.get_copied(agent_identity) == generation,
+                    self.spawn_exec_phase.contains_key(agent_identity) == true
+                        || self.pending_spawn_sessions.contains_key(agent_identity) == true
+                        || self.member_wake_attempts.contains_key(agent_identity) == true
+                        || self.member_rotation_targets.contains_key(agent_identity) == true
+                        || (self.identity_to_runtime.contains_key(agent_identity) == true
+                            && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
+                        || self.identity_entry_retiring.contains(agent_identity) == true
+                        || self.identity_entry_removing.contains(agent_identity) == true
+                        || self.identity_entry_archiving.contains(agent_identity) == true
+                        || self.identity_entry_constructions_held.contains_key(agent_identity) == true
+                        || self.identity_entry_constructions_activating.contains_key(agent_identity) == true,
+                    self.member_placement.contains_key(agent_identity) == true,
+                    self.member_session_bindings.contains_key(agent_identity) == true,
+                    self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityAdoptionVerdict::ChangesHeld
+            }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::ChangesHeld, reason: None }
+        }
+
+        // A mob that is not running adopts nothing.
+        transition AdoptIdentityIntoStoreMobNotRunning {
+            per_phase [Stopped, Completed, Destroyed]
+            on input AdoptIdentityIntoStore { agent_identity, source, generation }
+            update {}
+            to Running
+            emit IdentityAdoptionResolved { agent_identity: agent_identity, verdict: IdentityAdoptionVerdict::MobNotRunning, reason: None }
+        }
     }
         }
 
@@ -39121,6 +39630,71 @@ pub enum MemberUnwireAdmission {
     OwnedIdentityEdge,
 }
 
+/// Where an adoption into store custody takes its identity from
+/// ([`MobMachineInput::AdoptIdentityIntoStore`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityAdoptionSource {
+    /// A roster-owned identity: a Declared entry.
+    #[default]
+    Roster,
+    /// A worker member: seated, with no identity entry.
+    Worker,
+}
+
+/// The verdict of an adoption into store custody
+/// ([`MobMachineInput::AdoptIdentityIntoStore`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityAdoptionVerdict {
+    /// The identity is a Created entry now, its member unchanged.
+    #[default]
+    Adopted,
+    /// No adoption takes the identity's shape
+    /// ([`IdentityNotAdoptableReason`]).
+    NotAdoptable,
+    /// The worker member's current generation is not the observed one.
+    PredecessorMismatch,
+    /// A member step of the identity is in flight: retry once it settled.
+    AdmissionUnsettled,
+    /// A declared apply is open: retry once it closed.
+    DeclaredApplyOpen,
+    /// The name is reserved as unreadable.
+    NameUnreadable,
+    /// The name is a removed identity's tombstone.
+    NameTombstoned,
+    /// A candidate composition adopts nothing.
+    NonAuthoritative,
+    /// The host holds the mob's identity changes: retry.
+    ChangesHeld,
+    /// The mob is not running.
+    MobNotRunning,
+}
+
+/// Why an identity is not adoptable
+/// ([`IdentityAdoptionVerdict::NotAdoptable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum IdentityNotAdoptableReason {
+    /// The identity is store-owned already.
+    #[default]
+    StoreOwned,
+    /// A roster source names no roster-owned identity.
+    NotAnIdentity,
+    /// A worker source names a roster-owned identity.
+    RosterOwned,
+    /// A worker source names no member.
+    NotAMember,
+    /// The member lives on a member host: an adoption's binding row is a
+    /// local member's.
+    Placed,
+    /// The member is bound to no session.
+    NoSession,
+    /// The roster-owned identity is hosted on its first use.
+    HostedOnFirstUse,
+    /// The roster-owned identity awaits its held creation.
+    AwaitingHeldCreation,
+    /// The roster-owned identity awaits its host's preparation.
+    AwaitingHostPreparation,
+}
+
 /// Why an identity's host preparation is owed
 /// (`member_host_preparation_causes`). Every cause refuses the member's
 /// wakes.
@@ -40112,6 +40686,9 @@ mod origin_custody_guard_tests {
         "RecoverCreatedIdentityEntry",
         "RecoverIdentityEntry",
         "AdoptLegacyIdentityEntry",
+        // The adoption into store custody (0.9.11): a custody move, from a
+        // roster-owned identity or from no entry.
+        "AdoptIdentityIntoStore",
         "RecordCreatedIdentityEntry",
         // The store's writes of an archive and an unarchive: a roster-owned
         // identity's are its host's.

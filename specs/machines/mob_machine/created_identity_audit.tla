@@ -22,10 +22,11 @@
 \* vacuously.
 \* This module keeps the generated model unchanged, extends
 \* identity_entry_apply_audit for its constants and arm families, and
-\* checks fifteen runs over fixed domains: the four of the recovery part
-\* below, and the eleven of the changes part (0.9.9: admit, commit, update,
+\* checks sixteen runs over fixed domains: the four of the recovery part
+\* below, and the twelve of the changes part (0.9.9: admit, commit, update,
 \* removal, archive, preparation, prepverdicts, placement, unlist and
-\* recovered; 0.9.11: edges), which its own section describes.
+\* recovered; 0.9.11: edges and adoption), which its own section
+\* describes.
 \* The recovery part:
 \*
 \*   scan (ScanSpec): member 1 recovered and bound (a seated local member),
@@ -580,7 +581,8 @@ NotAuditWitnessScanContradictedPlaced == [][~AuditWitnessScanContradictedPlaced]
 (* placed and peer-only spawns of a store-owned identity (placement), the  *)
 (* one-entry unlist of a roster-owned identity (unlist), the replay of a   *)
 (* removal or an archive in flight carried to its terminal (recovered),    *)
-(* and (0.9.11) the owned edges an identity change declares (edges).       *)
+(* and (0.9.11) the owned edges an identity change declares (edges) and    *)
+(* the adoption into store custody (adoption).                             *)
 (***************************************************************************)
 
 Receipts == {"Absent", "Same", "Other"}
@@ -1927,4 +1929,146 @@ NotAuditWitnessEdgeKeptByThirdRemoval == [][~AuditWitnessEdgeKeptByThirdRemoval]
 NotAuditWitnessEdgeKeptByArchive == [][~AuditWitnessEdgeKeptByArchive]_vars
 NotAuditWitnessEdgeUnwireRefused == [][~AuditWitnessEdgeUnwireRefused]_vars
 NotAuditWitnessEdgeRecovered == [][~AuditWitnessEdgeRecovered]_vars
+(***************************************************************************)
+(* The adoption run (0.9.11).                                              *)
+(***************************************************************************)
+
+AdoptionIds == {Id1, Id2, Id3}
+AdoptionSources == {"Roster", "Worker"}
+AdoptionGenerations == {None, Some(0), Some(1)}
+
+\* Every arm of an adoption into store custody, in a running and a stopped
+\* mob.
+AdoptIntoStoreArm(id, src, g) ==
+    \/ AdoptIdentityIntoStoreAdopted(id, src, g)
+    \/ AdoptIdentityIntoStoreNotAdoptable(id, src, g)
+    \/ AdoptIdentityIntoStorePredecessorMismatch(id, src, g)
+    \/ AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g)
+    \/ AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g)
+    \/ AdoptIdentityIntoStoreNameUnreadable(id, src, g)
+    \/ AdoptIdentityIntoStoreNameTombstoned(id, src, g)
+    \/ AdoptIdentityIntoStoreNonAuthoritative(id, src, g)
+    \/ AdoptIdentityIntoStoreChangesHeld(id, src, g)
+    \/ AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g)
+AdoptIntoStoreVerdicts(id, src, g) ==
+    << ENABLED AdoptIdentityIntoStoreAdopted(id, src, g),
+       ENABLED AdoptIdentityIntoStoreNotAdoptable(id, src, g),
+       ENABLED AdoptIdentityIntoStorePredecessorMismatch(id, src, g),
+       ENABLED AdoptIdentityIntoStoreAdmissionUnsettled(id, src, g),
+       ENABLED AdoptIdentityIntoStoreDeclaredApplyOpen(id, src, g),
+       ENABLED AdoptIdentityIntoStoreNameUnreadable(id, src, g),
+       ENABLED AdoptIdentityIntoStoreNameTombstoned(id, src, g),
+       ENABLED AdoptIdentityIntoStoreNonAuthoritative(id, src, g),
+       ENABLED AdoptIdentityIntoStoreChangesHeld(id, src, g),
+       ENABLED AdoptIdentityIntoStoreMobNotRunningStopped(id, src, g) >>
+
+\* Member 1 a roster-owned identity declared, owed its seat, seated on its
+\* first incarnation and unlisted (its member retiring); member 2 a worker
+\* the replay recovered and bound (no entry), retired; member 3 a
+\* store-owned identity recorded owed its seat, or a name the scan of its
+\* row reserves (removed or unreadable), or nothing; a declared apply
+\* opened and closed, the host's changes hold and the build seed's
+\* composition authority, in a running and a stopped mob; and the adoption
+\* of each from either source, at no generation, the worker's or another.
+AdoptionNext ==
+    \/ ASeed
+    \/ HoldArm
+    \/ CStop
+    \/ DeclareCustodyArm(Id1, ApplyShape, FALSE, FALSE)
+    \/ AAuthorize
+    \/ AOpen(AFirst)
+    \/ ASeat(AFirst)
+    \/ UnlistArm(Id1)
+    \/ A2Recover
+    \/ A2Bind
+    \/ A2Retire
+    \/ RecordAs(Id3, "SeatOwed")
+    \/ \E presence \in {"Tombstone", "Unreadable"} : RecoverArm(Id3, presence, None)
+    \/ OpenDeclaredApplyOpened
+    \/ CloseDeclaredApplyRunning
+    \/ \E id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
+           AdoptIntoStoreArm(id, src, g)
+
+AdoptionSpec == Init /\ [][AdoptionNext]_vars
+
+\* Exactly one arm answers every adoption in a running and a stopped mob.
+AuditAdoptExactlyOne ==
+    phase \in {"Running", "Stopped"} =>
+        \A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
+            Cardinality({i \in 1..10 : AdoptIntoStoreVerdicts(id, src, g)[i]}) = 1
+
+\* An adoption keeps its member's incarnation: its runtime, generation and
+\* session are the ones it had.
+AuditAdoptionKeepsTheIncarnation ==
+    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
+         AdoptIdentityIntoStoreAdopted(id, src, g)
+           => /\ identity_to_runtime' = identity_to_runtime
+              /\ identity_runtime_generations' = identity_runtime_generations
+              /\ member_session_bindings' = member_session_bindings
+      ]_vars
+
+\* An adoption takes a settled member only: no declared apply is open, no
+\* spawn ladder of the name is, and no retirement of its member or end of
+\* its entry is under way.
+AuditAdoptionTakesASettledMember ==
+    [][\A id \in AdoptionIds, src \in AdoptionSources, g \in AdoptionGenerations :
+         AdoptIdentityIntoStoreAdopted(id, src, g)
+           => /\ declared_apply_open = FALSE
+              /\ id \notin DOMAIN spawn_exec_phase
+              /\ id \notin identity_entry_retiring
+              /\ id \notin identity_entry_removing
+              /\ (Seated(id) =>
+                    ~(identity_to_runtime[id] \in DOMAIN member_state_markers
+                      /\ member_state_markers[identity_to_runtime[id]] = "Retiring"))
+      ]_vars
+
+\* Witnesses of the adoption run.
+AuditWitnessAdoptRosterSeated ==
+    /\ Origin(Id1) = Some("Declared")
+    /\ Seated(Id1)
+    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None)
+    /\ OriginNext(Id1) = Some("Created")
+AuditWitnessAdoptRosterOwedSeat ==
+    /\ Unseated(Id1) = Some("SeatOwed")
+    /\ AdoptIdentityIntoStoreAdopted(Id1, "Roster", None)
+    /\ UnseatedNext(Id1) = Some("SeatOwed")
+AuditWitnessAdoptWorker ==
+    /\ Origin(Id2) = None
+    /\ AdoptIdentityIntoStoreAdopted(Id2, "Worker", Some(0))
+    /\ OriginNext(Id2) = Some("Created")
+AuditWitnessAdoptStaleGeneration == AdoptIdentityIntoStorePredecessorMismatch(Id2, "Worker", Some(1))
+AuditWitnessAdoptUnlistingRefused ==
+    /\ Id1 \in identity_entry_retiring
+    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id1, "Roster", None)
+AuditWitnessAdoptRetiringRefused ==
+    /\ Origin(Id2) = None
+    /\ AdoptIdentityIntoStoreAdmissionUnsettled(Id2, "Worker", Some(0))
+AuditWitnessAdoptApplyOpen == AdoptIdentityIntoStoreDeclaredApplyOpen(Id2, "Worker", Some(0))
+AuditWitnessAdoptStoreOwned ==
+    /\ Created(Id3)
+    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Roster", None)
+AuditWitnessAdoptNotAMember ==
+    /\ Origin(Id3) = None
+    /\ AdoptIdentityIntoStoreNotAdoptable(Id3, "Worker", Some(0))
+AuditWitnessAdoptTombstoned == AdoptIdentityIntoStoreNameTombstoned(Id3, "Roster", None)
+AuditWitnessAdoptUnreadable == AdoptIdentityIntoStoreNameUnreadable(Id3, "Worker", Some(0))
+AuditWitnessAdoptHeld == AdoptIdentityIntoStoreChangesHeld(Id2, "Worker", Some(0))
+AuditWitnessAdoptCandidate == AdoptIdentityIntoStoreNonAuthoritative(Id2, "Worker", Some(0))
+AuditWitnessAdoptStopped == AdoptIdentityIntoStoreMobNotRunningStopped(Id2, "Worker", Some(0))
+
+NotAuditWitnessAdoptRosterSeated == [][~AuditWitnessAdoptRosterSeated]_vars
+NotAuditWitnessAdoptRosterOwedSeat == [][~AuditWitnessAdoptRosterOwedSeat]_vars
+NotAuditWitnessAdoptWorker == [][~AuditWitnessAdoptWorker]_vars
+NotAuditWitnessAdoptStaleGeneration == [][~AuditWitnessAdoptStaleGeneration]_vars
+NotAuditWitnessAdoptUnlistingRefused == [][~AuditWitnessAdoptUnlistingRefused]_vars
+NotAuditWitnessAdoptRetiringRefused == [][~AuditWitnessAdoptRetiringRefused]_vars
+NotAuditWitnessAdoptApplyOpen == [][~AuditWitnessAdoptApplyOpen]_vars
+NotAuditWitnessAdoptStoreOwned == [][~AuditWitnessAdoptStoreOwned]_vars
+NotAuditWitnessAdoptNotAMember == [][~AuditWitnessAdoptNotAMember]_vars
+NotAuditWitnessAdoptTombstoned == [][~AuditWitnessAdoptTombstoned]_vars
+NotAuditWitnessAdoptUnreadable == [][~AuditWitnessAdoptUnreadable]_vars
+NotAuditWitnessAdoptHeld == [][~AuditWitnessAdoptHeld]_vars
+NotAuditWitnessAdoptCandidate == [][~AuditWitnessAdoptCandidate]_vars
+NotAuditWitnessAdoptStopped == [][~AuditWitnessAdoptStopped]_vars
+
 ====

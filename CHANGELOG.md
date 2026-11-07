@@ -170,6 +170,16 @@ them.
   appended last, so no existing variant's discriminant moves. Every enum
   named here is exhaustive, so a downstream exhaustive match needs the new
   arms, or a wildcard arm.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides an adoption into store custody (see Added).
+  `MobMachineInput` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` inputs gain
+  `AdoptIdentityIntoStore { agent_identity, source, generation }`, and
+  `MobMachineEffect` gains `IdentityAdoptionResolved`. The kernel
+  `generated::mob::TransitionId` gains the new arms, each appended last, so
+  no existing variant's discriminant moves. Every enum named here is
+  exhaustive, so a downstream exhaustive match needs the new arms, or a
+  wildcard arm.
 
 ### Added
 
@@ -368,6 +378,26 @@ them.
   `MobError::OwnedIdentityEdge` (`owned_identity_edge`). An edge enables no
   tool. A start recovers each edge from its owner's row and wires those a
   crash left unwired.
+- `meerkat-mob`: adoption into store custody. `MobHandle::adopt_identity`
+  moves an existing member into store custody as one change
+  (`IdentityAdoption`, receipt kind `IdentityChangeKind::Adopt`): a
+  roster-owned identity (`AdoptionSource::roster`, with its roster's spec) or
+  a worker member (`AdoptionSource::worker`, at the generation its host
+  observed, its row's spec its member's role, labels and runtime mode). The
+  member keeps its runtime, generation, session and history: its row
+  (provenance `adopted`, with its former spawner), its binding row with the
+  Created origin and the receipt commit in one store transaction, and the
+  binding row makes the member a host root, live and on replay (its former
+  spawner's retirement no longer reaches it, and the agent lane answers
+  `identity_member` for it). Its current edges to other identities become
+  its owned edges (`OwnedEdgeAdmission::Adopted`); its edges to members that
+  are no identity stay plain wiring, and the receipt's entry names both
+  (`IdentityChangeReceiptEntry::owned_edges`, `plain_edges`). Refusals:
+  `IdentityChangeRefusal::NotAdoptable` (`not_adoptable`, with a
+  `NotAdoptableReason`), `PredecessorMismatch` (`predecessor_mismatch`), and
+  the retryable `AdmissionUnsettled` (`admission_unsettled`) and
+  `DeclaredApplyOpen` (`declared_apply_open`). No start, reconcile or
+  declared apply adopts.
 
 ### Changed
 
@@ -502,6 +532,11 @@ them.
   does not act on them: an edge wired before the downgrade stays wired as
   plain wiring, which a plain unwire ends there, and the next 0.9.11 start
   owns every edge its owner's row holds again.
+- A 0.9.10 build reads an adopted identity as the store-owned identity its
+  row records, and a replay of the adoption's operation there reads its
+  receipt (kind `adopt`) as unreadable. Its roster keeps the member's former
+  spawner: retiring that spawner there retires the adopted member too, and
+  the identity is owed its seat again.
 
 ### Known limitations
 

@@ -4608,6 +4608,38 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MemberUnwireAdmission",
                 &["Admitted", "OwnedIdentityEdge"],
             ),
+            // Adoption into store custody (0.9.11): its source, its verdict
+            // and why an identity is not adoptable.
+            NamedTypeBinding::string_enum("IdentityAdoptionSource", &["Roster", "Worker"]),
+            NamedTypeBinding::string_enum(
+                "IdentityAdoptionVerdict",
+                &[
+                    "Adopted",
+                    "NotAdoptable",
+                    "PredecessorMismatch",
+                    "AdmissionUnsettled",
+                    "DeclaredApplyOpen",
+                    "NameUnreadable",
+                    "NameTombstoned",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityNotAdoptableReason",
+                &[
+                    "StoreOwned",
+                    "NotAnIdentity",
+                    "RosterOwned",
+                    "NotAMember",
+                    "Placed",
+                    "NoSession",
+                    "HostedOnFirstUse",
+                    "AwaitingHeldCreation",
+                    "AwaitingHostPreparation",
+                ],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -5288,6 +5320,9 @@ runtime_internal_inputs!(
         DeclareOwnedIdentityEdge,
         EndOwnedIdentityEdge,
         AdmitMemberUnwire,
+        // Adoption into store custody (0.9.11), decided in the actor's change
+        // step. Not a surface command.
+        AdoptIdentityIntoStore,
     ]
 );
 

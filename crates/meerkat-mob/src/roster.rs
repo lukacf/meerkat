@@ -425,6 +425,14 @@ impl Roster {
                             .insert(bridge_session_id.clone());
                     }
                 }
+                // An adoption into store custody (the row's Created origin)
+                // makes the member a host root, live and on replay: its
+                // former spawner no longer reaches it.
+                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created)
+                    && let Some(entry) = self.entries.get_mut(&recovered.agent_identity)
+                {
+                    entry.spawned_by = None;
+                }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));

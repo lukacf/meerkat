@@ -30,7 +30,11 @@
 //! ([`super::MobHandle::remove_identity`], which tombstones its name), the
 //! mob's destroy and the mob's reset end an entry. An unseated roster-owned
 //! entry is not journaled: after a restart, the next apply declares it
-//! again.
+//! again. An entry's end ends its identity's live scoped tool grants: its
+//! member's retirement ends them when the seal or the removal ends the
+//! entry, and the reset ends them for every entry it ends. A destroy needs
+//! nothing: the next create mints a new incarnation, whose identities hold
+//! none of the old grants.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers

@@ -17537,6 +17537,16 @@ impl MobHandle {
     /// `reset` by design avoids that regime and so has no equivalent
     /// data to surface.
     ///
+    /// # Scoped tool grants
+    ///
+    /// A reset ends every identity the mob held, its identity entries
+    /// included, and keeps the mob's incarnation. Before its epoch marker
+    /// commits it ends the live scoped tool grants of each of them, so a
+    /// name declared again after the reset holds none of them. A failure to
+    /// end them fails the reset and leaves the mob Stopped: retry the reset.
+    /// A crash between the end of the grants and the epoch marker leaves
+    /// those identities without grants, which fails closed.
+    ///
     /// # Dogma fit (B3)
     ///
     /// DELETE_ME finding B3 flagged the divergent return types as an

@@ -54230,8 +54230,11 @@ impl MobActor {
                     &ctx.entry.agent_identity,
                     &ctx.entry.agent_runtime_id,
                 ) {
-                    self.end_identity_tool_grants(&ctx.entry.agent_identity)
-                        .await?;
+                    self.end_identity_tool_grants(
+                        &ctx.entry.agent_identity,
+                        format!("the identity '{}' left the mob", ctx.entry.agent_identity),
+                    )
+                    .await?;
                 }
             }
             let journal_session = if is_peer_only { None } else { session_id };
@@ -61157,6 +61160,19 @@ impl MobActor {
             "reset_to_running",
         )?;
 
+        // The reset ends every identity the mob held, its identity entries
+        // included, and keeps the mob's incarnation, so a name declared
+        // again after it would match their scoped tool grants: they end here,
+        // after the member retirements and before the epoch marker commits.
+        // A failure fails the reset (retry it; the mob is left Stopped). A
+        // crash between the two leaves those identities without grants,
+        // which fails closed.
+        #[cfg(feature = "runtime-adapter")]
+        if let Err(error) = self.end_reset_identity_tool_grants().await {
+            self.fail_reset_to_stopped().await;
+            return Err(error);
+        }
+
         // --- Event rewrite phase: append the new epoch marker. ---
         // Append-only epoch model: projections clear on MobReset; the original
         // MobCreated definition remains the durable resume authority for this
@@ -65083,10 +65099,14 @@ impl MobActor {
     }
 
     /// End every live scoped tool grant of `identity` in this mob
-    /// incarnation: its identity ended. Without a runtime there are no
-    /// grants.
+    /// incarnation, recording `reason`: its identity ended. Without a
+    /// runtime there are no grants.
     #[cfg(feature = "runtime-adapter")]
-    async fn end_identity_tool_grants(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+    async fn end_identity_tool_grants(
+        &self,
+        identity: &AgentIdentity,
+        reason: String,
+    ) -> Result<(), MobError> {
         let Some(runtime) = self.runtime_adapter.as_ref() else {
             return Ok(());
         };
@@ -65100,16 +65120,37 @@ impl MobActor {
                 &subject,
                 meerkat_runtime::tool_grant::ToolGrantRevocation {
                     actor: None,
-                    reason: Some(format!("the identity '{identity}' left the mob")),
+                    reason: Some(reason),
                 },
             )
             .await
             .map(|_| ())
             .map_err(|error| {
                 MobError::Internal(format!(
-                    "ending the tool grants of the retiring identity '{identity}' failed: {error}"
+                    "ending the tool grants of the identity '{identity}' failed: {error}"
                 ))
             })
+    }
+
+    /// End the live scoped tool grants of every identity MobMachine holds as
+    /// a reset commits: each identity an incarnation held since the last
+    /// reset (its members', the retired ones included) and each identity
+    /// entry, seated or not. The reset ends them all and keeps the mob's
+    /// incarnation.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_reset_identity_tool_grants(&self) -> Result<(), MobError> {
+        let state = self.dsl_authority.state();
+        let identities = state
+            .identity_runtime_generations
+            .keys()
+            .chain(state.identity_entry_origins.keys())
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for identity in &identities {
+            self.end_identity_tool_grants(identity, "the mob was reset".to_string())
+                .await?;
+        }
+        Ok(())
     }
 
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.

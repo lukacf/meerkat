@@ -348,8 +348,8 @@ them.
   the member's builds while the mob runs at the incarnation it was issued in,
   across respawns and restarts; the member's refusals are audited under its
   identity. An identity's grants end, revoked, when the identity ends: a
-  plain retire of its member, or the end of its identity entry; a respawn
-  keeps them.
+  plain retire of its member, the end of its identity entry, or a reset of
+  the mob, which ends every identity the mob held; a respawn keeps them.
 - `tool_grants/grant` takes `decision_ref`, the host's opaque reference to
   the decision it made before issuing (non-empty, at most 1024 bytes, no
   control character): the grant's issuer, its listing and its `granted`

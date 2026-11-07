@@ -2149,7 +2149,9 @@ upgrades; a mob destroyed and created again under the same id is a new
 incarnation, whose identities hold none of the old grants. A member's
 `tool_grant_required` refusals are audited under its identity. An identity's
 grants end, `revoked`, when the identity ends: a plain retire of its member,
-or the end of its identity entry. A respawn keeps them.
+the end of its identity entry, or a reset of its mob, which ends every
+identity the mob held, so a name declared again after the reset holds none of
+them. A respawn keeps them.
 
 A grant's `status` is `active`, `expired` or `revoked`; `requested` and
 `declined` are reserved for grant requests. A request's `subject` and `target`

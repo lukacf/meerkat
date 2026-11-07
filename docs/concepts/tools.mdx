@@ -271,7 +271,8 @@ confinement all still apply to every call it opens.
   [scoped tool grants over JSON-RPC](/api/rpc#scoped-tool-grants)), and the
   Python and TypeScript SDKs wrap them. A member's build reads its identity's
   grants first, then its session's, so an identity grant follows the member
-  across respawns and restarts; its grants end when its identity ends.
+  across respawns and restarts; its grants end when its identity ends, and a
+  reset of its mob, which ends every identity the mob held, ends them too.
 - **Adjudication.** Every model-request boundary opens the gated names a live
   grant admits at that moment, and every gated call is adjudicated again
   immediately before it is handed to its tool, so a call at or after the

@@ -236,6 +236,22 @@ impl ConsoleHttpAuthContext {
             _ => Ok(()),
         }
     }
+
+    /// The original requester of the work this caller starts, by the console
+    /// send rule: the verified person's qualified principal on a console that
+    /// requires sign-in, and none on an open console (a person who volunteers
+    /// a token included), for a service and for a token principal. A person
+    /// whose principal does not qualify is an error: the caller is refused,
+    /// never served as no one.
+    fn requester(
+        &self,
+        console: &crate::ConsolePolicy,
+    ) -> Result<Option<meerkat_core::PrincipalRef>, meerkat_core::PrincipalContractError> {
+        match &self.human {
+            Some(human) if console.require_app_auth => human.principal().map(Some),
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Clone, Default)]

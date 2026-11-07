@@ -72,7 +72,9 @@ fn apps_enabled(state: &ConsoleJsonState) -> bool {
 impl ConsoleToolApplicationIngress {
     /// The ingress of a request [`route`] admitted, bound to the caller the
     /// Console authenticated for it: its principal and the requester its app
-    /// actions run for ([`ToolApplicationIngress::requester`]).
+    /// actions run for ([`ToolApplicationIngress::requester`]), by the
+    /// console send rule. `None` for a person whose principal does not
+    /// qualify: such a caller is refused, never served as no one.
     fn for_caller(
         (state, request, registration): Routed,
         headers: HeaderMap,
@@ -81,6 +83,7 @@ impl ConsoleToolApplicationIngress {
         operation: Operation,
         auth: ConsoleHttpAuthContext,
     ) -> Option<Self> {
+        let requester = auth.requester(&state.decisions.console).ok()?;
         Some(Self {
             state,
             headers,
@@ -90,7 +93,7 @@ impl ConsoleToolApplicationIngress {
             registration,
             operation,
             principal: auth.principal,
-            requester: None,
+            requester,
         })
     }
 

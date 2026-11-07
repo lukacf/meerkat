@@ -683,7 +683,15 @@ impl ToolApplicationControlRequest {
     ) -> Result<Arc<Self>, OperationAuthorizationError> {
         request.validate()?;
         ingress.revalidate()?;
+        // An operation runs for an opaque qualified principal or for no one:
+        // an unqualified requester is never one Core acts for.
         let requester = ingress.requester();
+        if requester
+            .as_ref()
+            .is_some_and(|requester| requester.validate_qualified().is_err())
+        {
+            return Err(OperationAuthorizationError::Unavailable);
+        }
         Ok(Arc::new(Self {
             session_id,
             request,

@@ -11333,15 +11333,19 @@ impl MobHandle {
     ///
     /// The verb never wakes a member. A member the mob does not hold is
     /// [`MobError::MemberNotFound`]; one not materialized in this process
-    /// (dormant, or waking), or whose registration is gone or leaving
-    /// through its unregister, is [`MobError::MemberSessionNotLive`]: wake it
-    /// under the host's hold first, or read its stored work cold with
+    /// (dormant, or waking), whose registration is gone or leaving through
+    /// its unregister, or whose session store's fence another writer took, is
+    /// [`MobError::MemberSessionNotLive`]: wake it under the host's hold
+    /// first, or read its stored work cold with
     /// [`meerkat_runtime::MeerkatMachine::session_work_state`]. A member
     /// whose runtime needs a durability reload, also when the settlement's
     /// own write failed (the reload loses the settle) or its tail repair
     /// left the run's tail standing (the reloaded member keeps no run), is
     /// refused with [`MobError::MemberReloadRequired`]: reload it
     /// ([`Self::reload_member_registration`]) under the hold and settle
+    /// again. A registration that no longer keeps the run while an input
+    /// bound to it reads no committed terminal yet is refused with the
+    /// retryable [`MobError::MemberInputTerminalNotYetReadable`]: settle
     /// again. A placed member is refused with
     /// [`MobError::UnsupportedForMode`]. `Cancel`-scoped at chokepoint (a).
     pub async fn settle_member_retained_run(

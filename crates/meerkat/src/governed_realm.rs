@@ -873,3 +873,6 @@ mod review_load_tests;
 
 #[cfg(all(test, feature = "memory-store-session"))]
 mod memory_grant_tests;
+
+#[cfg(test)]
+mod custody_release_tests;

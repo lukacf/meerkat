@@ -177,7 +177,8 @@ impl ConsentControl {
     pub(super) fn bind_routes(&self, runtime: &UnifiedRuntime, host: &ToolkitGatewayHost) {
         let decisions = meerkat_mobkit::console_auth_config::parse_console_auth_config(&json!({
             "provider":"jwt", "shared_secret":std::str::from_utf8(KEY).unwrap(),
-            "issuer":ISSUER, "audience":"controlled-console", "email_allowlist":[EMAIL]
+            "issuer":ISSUER, "audience":"controlled-console", "email_allowlist":[EMAIL],
+            "accounts":"personal"
         }))
         .unwrap();
         let actual = runtime.console_viewer_resolver(&decisions);

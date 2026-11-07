@@ -850,6 +850,7 @@ async fn console_send_refused_after_its_first_attempt_write_admits_nothing() {
             meerkat_mobkit::console_auth_config::parse_console_auth_config(&serde_json::json!({
                 "provider": "jwt", "shared_secret": std::str::from_utf8(KEY).unwrap(),
                 "issuer": ISSUER, "audience": AUDIENCE, "email_allowlist": [EMAIL],
+                "accounts": "personal",
             }))
             .unwrap();
         let config = |actions: &[&str]| AccessControlConfig {

@@ -558,7 +558,10 @@ them.
   an event ends at its blank line and the `data:` lines of one event join
   with a line break, so an event whose data spans several lines is one event
   instead of a parse error, and at the end of the body its last line counts
-  even without a line break. An empty `data:` field is still a parse error.
+  even without a line break, as does an event whose blank line never came.
+  A body that ends inside an event (its data cut) still ends the response
+  with the retryable incomplete-response error; a complete event whose data
+  does not parse, an empty `data:` field included, is a parse error.
   A body that writes events on consecutive lines with no blank line between
   them is read as one event.
 - GitHub Copilot: a session's default compaction threshold stays below the

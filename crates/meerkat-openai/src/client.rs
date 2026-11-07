@@ -2932,7 +2932,20 @@ impl OpenAiClient {
                         }
                         continue;
                     }
-                    let parsed_event = Self::parse_responses_sse_data(&data)?;
+                    // At the end of the body every complete event was read in
+                    // its own chunk's pass, so data that does not parse here
+                    // is the event the end cut: the response is incomplete, as
+                    // for a body cut anywhere else, not a malformed event. A
+                    // complete event that does not parse stays a parse error.
+                    let parsed_event = Self::parse_responses_sse_data(&data).map_err(|error| {
+                        if body_ended {
+                            LlmError::IncompleteResponse {
+                                message: "OpenAI Responses stream ended mid-event".to_string(),
+                            }
+                        } else {
+                            error
+                        }
+                    })?;
 
                     if let Some(mut event) = parsed_event {
                         let terminal_event = event.event_type == "response.completed"

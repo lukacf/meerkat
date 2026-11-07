@@ -96,8 +96,8 @@ use std::time::Duration;
 use meerkat_core::host_store::{FenceToken, HostStoreError};
 
 pub use realm::{
-    ArmedScopes, PoisonedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId,
-    ScopeState, SpiRealm, SpiRealmConfig,
+    ArmedScopes, PoisonedScope, QuarantinedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard,
+    ScopeId, ScopeState, SpiRealm, SpiRealmConfig,
 };
 pub use runtime::{RUNTIME_FAMILY, SpiRuntimeStore};
 pub use session::SpiSessionStore;
@@ -115,10 +115,24 @@ pub enum SpiError {
     /// refuses every call until the realm is reopened.
     #[error("host store scope {scope} is poisoned: {cause}")]
     ScopePoisoned { scope: String, cause: String },
+    /// The store reports a conflict for this scope (two batches hold one of
+    /// its versions): the realm quarantined it, and it refuses every call
+    /// until it is repaired in the store and the realm is reopened. `cause`
+    /// names each conflicted incarnation, its version and the repair.
+    #[error("host store scope {scope} is quarantined: {cause}")]
+    ScopeQuarantined { scope: String, cause: String },
     /// A read across the scopes of some families met poisoned ones: it
     /// refuses until the realm is reopened. Names each with its cause.
     #[error("{}", PoisonedScopesDisplay(scopes))]
     ScopesPoisoned { scopes: Vec<PoisonedScope> },
+    /// A read across the scopes of some families met quarantined ones, and
+    /// maybe poisoned ones: it refuses until they are repaired in the store
+    /// and the realm is reopened. Names each with its cause.
+    #[error("{}", QuarantinedScopesDisplay(quarantined, poisoned))]
+    ScopesQuarantined {
+        quarantined: Vec<QuarantinedScope>,
+        poisoned: Vec<PoisonedScope>,
+    },
     /// An exclusive acquire met a live holder.
     #[error("host store fence is held by token {holder} for {remaining:?} more")]
     Held {
@@ -243,20 +257,37 @@ impl SpiError {
 
     /// The typed refusal a poisoned realm or scope answers until the realm
     /// is reopened: [`RuntimeStoreError::RealmRefused`] for a realm that lost
-    /// its fence, [`RuntimeStoreError::ScopeRefused`] naming each poisoned
-    /// scope the call needs. Any other error comes back unchanged.
+    /// its fence, [`RuntimeStoreError::ScopeRefused`] naming each poisoned or
+    /// quarantined scope the call needs. Any other error comes back
+    /// unchanged.
     fn into_refusal(self) -> Result<RuntimeStoreError, Self> {
         match self {
             Self::RealmPoisoned(cause) => Ok(RuntimeStoreError::RealmRefused { cause }),
-            Self::ScopePoisoned { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
-                scopes: vec![RefusedScope::new(scope, cause)],
-            }),
+            Self::ScopePoisoned { scope, cause } | Self::ScopeQuarantined { scope, cause } => {
+                Ok(RuntimeStoreError::ScopeRefused {
+                    scopes: vec![RefusedScope::new(scope, cause)],
+                })
+            }
             Self::ScopesPoisoned { scopes } => Ok(RuntimeStoreError::ScopeRefused {
                 scopes: scopes
                     .into_iter()
                     .map(|poisoned| RefusedScope::new(poisoned.id.to_string(), poisoned.cause))
                     .collect(),
             }),
+            Self::ScopesQuarantined {
+                quarantined,
+                poisoned,
+            } => {
+                Ok(RuntimeStoreError::ScopeRefused {
+                    scopes: quarantined
+                        .into_iter()
+                        .map(|quarantined| RefusedScope::new(quarantined.scope, quarantined.cause))
+                        .chain(poisoned.into_iter().map(|poisoned| {
+                            RefusedScope::new(poisoned.id.to_string(), poisoned.cause)
+                        }))
+                        .collect(),
+                })
+            }
             other => Err(other),
         }
     }
@@ -272,6 +303,30 @@ impl std::fmt::Display for LastAnswer<'_> {
             Some(last) => write!(f, "; last answer: {last}"),
             None => Ok(()),
         }
+    }
+}
+
+/// The scopes of a [`SpiError::ScopesQuarantined`], each with its cause.
+struct QuarantinedScopesDisplay<'a>(&'a [QuarantinedScope], &'a [PoisonedScope]);
+
+impl std::fmt::Display for QuarantinedScopesDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host store scopes refuse until the realm is reopened (")?;
+        let quarantined = self
+            .0
+            .iter()
+            .map(|scope| (scope.scope.clone(), "quarantined", scope.cause.as_str()));
+        let poisoned = self
+            .1
+            .iter()
+            .map(|scope| (scope.id.to_string(), "poisoned", scope.cause.as_str()));
+        for (index, (scope, state, cause)) in quarantined.chain(poisoned).enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{scope} is {state}: {cause}")?;
+        }
+        f.write_str(")")
     }
 }
 

@@ -1117,9 +1117,12 @@ impl meerkat_runtime::RuntimeStoreWriteFence for SpiIdentityRuntimeWriteFence {
                 reason: "the identity authority has a host store commit in flight".to_string(),
             });
         };
-        if let Some(cause) = state.poison() {
+        if let Some(cause) = state.refusal() {
             return Ok(meerkat_runtime::RuntimeStoreWriteFenceOutcome::Conflict {
-                reason: format!("the identity authority's host store scope is poisoned: {cause}"),
+                reason: format!(
+                    "the identity authority's host store scope refuses until the realm is \
+                     reopened: {cause}"
+                ),
             });
         }
         let outcome = self.inner.execute_if_current(operation);

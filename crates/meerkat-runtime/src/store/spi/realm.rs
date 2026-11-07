@@ -106,6 +106,36 @@
 //! across many scopes refuses only while a scope of a family it reads is
 //! poisoned ([`SpiRealm::check_cross_scope_read_of`]).
 //!
+//! # Containment
+//!
+//! A store that meets obligation 4 at load answers a typed conflict for a
+//! scope two batches hold one version of, and its listings report such a
+//! scope per scope ([`HeadPage::conflicts`]). The realm quarantines that
+//! scope instead of failing: the open records each conflict its listing
+//! reports and opens the rest, and a load that meets a conflict records it
+//! then (a chunk's conflict under the chunk's name and under its owner's
+//! key). A quarantined scope is never in the baseline a re-acquire compares
+//! with. It refuses every call ([`SpiError::ScopeQuarantined`], whose cause
+//! names each conflicted incarnation and the repair), every read across its
+//! family refuses typed while it is quarantined, and the reads that list
+//! runtimes name it, or refuse typed while they cannot name it
+//! ([`SpiRealm::quarantined_scopes`] lists every one). A
+//! re-acquire's listing must show each recorded conflict unchanged, its
+//! version and, where both sides name them, its commit ids, and no other: a
+//! conflict on another scope, a recorded one listed among the heads, or one
+//! missing from both lists is a batch this writer did not write, and the
+//! realm is lost. Only a repair in the store, then a reopen, lifts a
+//! quarantine.
+//!
+//! Which scopes are poisoned or quarantined, and why, is the writer fence
+//! machine's: a scope is usable, poisoned or quarantined for the life of an
+//! open, never both, and the first classification stands. The realm reports
+//! each decision as an input, keeps the texts, and caches each scope's
+//! classification on its cell, written under the cell's lock when the cell
+//! is created and in the call that classified the scope. Lock order: a
+//! scope's lock, then the cells lock, then the writer fence's; the claimed
+//! lock, then the cells lock, then the writer fence's.
+//!
 //! # Cancellation
 //!
 //! An adapter call changes memory before its batch commits, and its future
@@ -130,9 +160,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use meerkat_core::host_store::{
-    AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HostStore,
-    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeHead, ScopeKind, ScopeName,
-    ScopeRef, ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
+    AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
+    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeConflict, ScopeHead,
+    ScopeKind, ScopeName, ScopeRef, ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -143,9 +173,9 @@ use super::codec::{
 use super::writer_fence::{
     HostStoreWriterFenceEffect as FenceEffect, HostStoreWriterFenceInput as FenceInput,
     HostStoreWriterFenceMachineAuthority, HostStoreWriterFenceMachineMutator,
-    HostStoreWriterFencePhase as FencePhase, WriterFenceAcquireOutcome, WriterFenceAcquireStep,
-    WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal, WriterFenceRenewOutcome,
-    WriterFenceStopCause,
+    HostStoreWriterFencePhase as FencePhase, ScopePoisonCause, WriterFenceAcquireOutcome,
+    WriterFenceAcquireStep, WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal,
+    WriterFenceRenewOutcome, WriterFenceStopCause,
 };
 
 /// A row entry value larger than this goes to a chunk scope.
@@ -335,6 +365,37 @@ pub struct PoisonedScope {
     pub cause: String,
 }
 
+/// A quarantined scope ([`SpiRealm::quarantined_scopes`]): the store
+/// reports a conflict for it (two batches hold one of its versions), and it
+/// refuses every call until it is repaired in the store and the realm is
+/// reopened. A reopen alone quarantines it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuarantinedScope {
+    /// The scope as its refusals name it: `<tag>:<key>`. A scope whose key
+    /// its store name hashes (a key over 200 bytes, or with a control
+    /// character) is named `<tag>:h<hash>` until a call names its key, and
+    /// a chunk by its full store name.
+    pub scope: String,
+    /// The store names of its conflicted incarnations.
+    pub names: Vec<String>,
+    /// The cause its refusals carry: each conflicted incarnation with the
+    /// version that holds two batches and their commit ids, and the repair.
+    pub cause: String,
+}
+
+/// A scope's classification as its cell caches it: the writer fence
+/// machine's entry for the scope, with the cause its refusals carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Classification {
+    /// Neither poisoned nor quarantined.
+    Usable,
+    /// Poisoned: memory may differ from the host for it.
+    Poisoned(String),
+    /// Quarantined: the store reports a conflict for it.
+    Quarantined(String),
+}
+
 /// One scope's lock and journal state.
 pub type ScopeCell = Mutex<ScopeState>;
 
@@ -394,7 +455,8 @@ pub struct ScopeState {
     /// Chunks referenced from rows of the window (spills), by row index.
     row_chunks: Vec<(u64, ChunkRef)>,
     body: Body,
-    poison: Option<String>,
+    /// The scope's classification, cached from the writer fence.
+    classification: Classification,
 }
 
 impl ScopeState {
@@ -410,7 +472,7 @@ impl ScopeState {
             since_checkpoint: 0,
             row_chunks: Vec::new(),
             body: Body::Loaded,
-            poison: None,
+            classification: Classification::Usable,
         }
     }
 
@@ -444,7 +506,7 @@ impl ScopeState {
             } else {
                 Body::Unloaded
             },
-            poison: None,
+            classification: Classification::Usable,
         })
     }
 
@@ -468,7 +530,30 @@ impl ScopeState {
     /// The poison cause, when this scope is poisoned.
     #[must_use]
     pub fn poison(&self) -> Option<&str> {
-        self.poison.as_deref()
+        match &self.classification {
+            Classification::Poisoned(cause) => Some(cause),
+            Classification::Usable | Classification::Quarantined(_) => None,
+        }
+    }
+
+    /// The quarantine's cause, when the store reports a conflict for this
+    /// scope.
+    #[must_use]
+    pub fn quarantine(&self) -> Option<&str> {
+        match &self.classification {
+            Classification::Quarantined(cause) => Some(cause),
+            Classification::Usable | Classification::Poisoned(_) => None,
+        }
+    }
+
+    /// The cause of this scope's refusal, when it refuses every call until
+    /// the realm is reopened: poisoned or quarantined.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&str> {
+        match &self.classification {
+            Classification::Poisoned(cause) | Classification::Quarantined(cause) => Some(cause),
+            Classification::Usable => None,
+        }
     }
 
     /// Whether the next commit should carry the scope's full image, so the
@@ -581,6 +666,74 @@ struct ListedHead {
     head: ScopeHeadV1,
 }
 
+/// One kind's listing as the open keeps it: every visible scope's head, and
+/// every conflicted scope.
+#[derive(Debug, Default)]
+struct KindHeads {
+    heads: Vec<ScopeHead>,
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// One kind's listing as a re-acquire keeps it: every visible scope's
+/// version (not its head), and every conflicted scope.
+#[derive(Debug, Default)]
+struct KindVersions {
+    versions: Vec<(ScopeName, ScopeVersion)>,
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// A re-acquire's listing of every kind.
+#[derive(Debug, Default)]
+struct Listing {
+    /// Every visible scope's version.
+    heads: HashMap<(ScopeKind, String), ScopeVersion>,
+    /// Every conflicted scope.
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// Whether a re-acquire's listing shows exactly the conflicts the writer
+/// fence recorded, `versions` and `commit_ids` by name: each listed conflict
+/// matches the record of its own name, at the same version and, where both
+/// name commit ids, with the same ids (ids known on one side only do not
+/// make it foreign), and each recorded name is listed as a conflict, not
+/// among the heads. Anything else is a change this writer did not make: a
+/// conflict on a scope not quarantined, a recorded one at another version
+/// or with other ids, one listed among the heads (repaired meanwhile, or a
+/// cut that now hides one of its batches), or one missing from both lists.
+/// An owner quarantined at a load for its chunk's conflict records the
+/// chunk's name, never its own, so its unchanged head is no change.
+fn listed_conflicts_match(
+    listed: &Listing,
+    versions: &BTreeMap<String, u64>,
+    commit_ids: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let conflicted: HashSet<&str> = listed
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.name.as_str())
+        .collect();
+    let visible: HashSet<&str> = listed.heads.keys().map(|(_, name)| name.as_str()).collect();
+    let each_listed_is_recorded = listed.conflicts.iter().all(|conflict| {
+        let name = conflict.name.as_str();
+        let same_ids = match commit_ids.get(name) {
+            Some(recorded) if !recorded.is_empty() && !conflict.commit_ids.is_empty() => {
+                let listed: BTreeSet<String> = conflict
+                    .commit_ids
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect();
+                &listed == recorded
+            }
+            _ => true,
+        };
+        versions.get(name) == Some(&conflict.version.get()) && same_ids
+    });
+    let each_recorded_is_listed = versions
+        .keys()
+        .all(|name| conflicted.contains(name.as_str()) && !visible.contains(name.as_str()));
+    each_listed_is_recorded && each_recorded_is_listed
+}
+
 #[derive(Debug, Clone)]
 struct ChunkMeta {
     version: ScopeVersion,
@@ -624,9 +777,11 @@ impl ScopePlan {
 
 /// The realm's writer fence: the state of its `HostStoreWriterFenceMachine`
 /// (the writer's phase, the token it commits with, the grant it has not
-/// installed, the acquires it gave up on and the holder it waits out), and
-/// what the machine leaves to the realm: the text of the realm's loss and
-/// the instant the waited-out holder's recorded lease ends.
+/// installed, the acquires it gave up on and the holder it waits out, and
+/// which scopes are poisoned or quarantined), and what the machine leaves to
+/// the realm: the texts of the realm's loss and of each poisoned scope, the
+/// names each quarantined key was recorded with, and the instant the
+/// waited-out holder's recorded lease ends.
 struct WriterFence {
     machine: HostStoreWriterFenceMachineAuthority,
     /// Why the realm was lost, in words, recorded with the machine's loss.
@@ -638,6 +793,13 @@ struct WriterFence {
     /// down makes it early, and the holder met again after it, its lease not
     /// moved later by more than one renew interval, is waited out again.
     waited_until: Option<(FenceToken, Instant)>,
+    /// Each poisoned scope, with its cause in words, by the key the machine
+    /// records it under: written only with the machine's
+    /// `ScopePoisonRecorded`.
+    poisoned: BTreeMap<String, PoisonedScope>,
+    /// The conflicted incarnations each quarantined key was recorded with,
+    /// by name: written only with the machine's `ScopeQuarantineRecorded`.
+    quarantined: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl WriterFence {
@@ -647,6 +809,8 @@ impl WriterFence {
             machine: HostStoreWriterFenceMachineAuthority::new(),
             lost: None,
             waited_until: None,
+            poisoned: BTreeMap::new(),
+            quarantined: BTreeMap::new(),
         };
         fence.apply(FenceInput::Open { token: token.get() }, |_| String::new());
         fence
@@ -654,6 +818,54 @@ impl WriterFence {
 
     fn phase(&self) -> FencePhase {
         self.machine.state().lifecycle_phase
+    }
+
+    /// The classification of the scope the machine records under `key`,
+    /// with its refusal's cause; `live` is the incarnation the open listed
+    /// beside a conflicted one, which the quarantine's cause names too.
+    fn classification(&self, key: &str, live: Option<&ScopeName>) -> Classification {
+        if self.machine.state().quarantined_keys.contains(key) {
+            Classification::Quarantined(self.quarantine_cause(key, live))
+        } else if let Some(poisoned) = self.poisoned.get(key) {
+            Classification::Poisoned(poisoned.cause.clone())
+        } else {
+            Classification::Usable
+        }
+    }
+
+    /// The cause a quarantined key's refusals carry: each conflicted
+    /// incarnation recorded for it, with its version and commit ids, the
+    /// live incarnation beside them, and the repair.
+    fn quarantine_cause(&self, key: &str, live: Option<&ScopeName>) -> String {
+        let state = self.machine.state();
+        let mut parts: Vec<String> = self
+            .quarantined
+            .get(key)
+            .into_iter()
+            .flatten()
+            .map(|name| {
+                let version = state
+                    .quarantine_versions
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default();
+                let ids = match state.quarantine_commit_ids.get(name) {
+                    Some(ids) if !ids.is_empty() => format!(
+                        "commit ids {}",
+                        ids.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                    _ => "the store names no commit ids".to_string(),
+                };
+                format!("{name} is conflicted in the store at version {version} ({ids})")
+            })
+            .collect();
+        if let Some(live) = live {
+            parts.push(format!("its live incarnation is {live}"));
+        }
+        format!(
+            "{}: repair the scope in the store, then reopen the realm",
+            parts.join("; ")
+        )
     }
 
     /// Apply `input` to the machine. When the input loses the realm, `loss`
@@ -733,11 +945,6 @@ pub struct SpiRealm {
     /// landed. A re-acquire accepts any of them; a later landed batch
     /// on the scope settles it.
     uncertain: StdMutex<HashMap<(ScopeKind, String), Vec<Option<ScopeVersion>>>>,
-    /// Every poisoned scope, with its cause: a scope enters once, when it is
-    /// poisoned, and stays until the realm is reopened. A read across many
-    /// scopes checks only the families it reads
-    /// ([`Self::check_cross_scope_read_of`]).
-    poisoned: StdMutex<BTreeMap<ScopeId, String>>,
     cells: StdMutex<HashMap<ScopeId, Arc<ScopeCell>>>,
     listed: StdMutex<HashMap<String, Vec<ListedHead>>>,
     /// Families claimed so far, with the refusal of a claim that failed.
@@ -912,6 +1119,14 @@ impl Drop for SlowSettle<'_> {
 type SharedReacquire =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<(), SpiError>>>;
 
+/// A body read and folded: its values, its stamps, and the chunks its rows
+/// spill to, by row index.
+type FoldedBody = (
+    BTreeMap<String, Arc<Vec<u8>>>,
+    BTreeMap<String, Stamp>,
+    Vec<(u64, ChunkRef)>,
+);
+
 /// Clears the realm's re-acquire slot when the re-acquire task ends, however
 /// it ends.
 struct ClearReacquireInFlight(Arc<SpiRealm>);
@@ -944,10 +1159,30 @@ fn no_baseline() -> SpiError {
     )
 }
 
+/// What a realm loss reported as `text` answers when the writer fence
+/// refused the report before the realm opened: a misuse that names the
+/// refusal. `None` otherwise: the loss's recorded cause answers, whether the
+/// report lost the realm or the realm was lost already.
+pub(crate) fn refused_loss(effects: &[FenceEffect], text: &str) -> Option<SpiError> {
+    effects.iter().find_map(|effect| match effect {
+        FenceEffect::RequestRefused {
+            reason: WriterFenceRefusal::NotOpened,
+        } => Some(SpiError::Misuse(format!(
+            "a realm loss was reported before the realm opened, and refused: {text}"
+        ))),
+        _ => None,
+    })
+}
+
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The family tag a classification key starts with.
+fn key_tag(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(tag, _)| tag)
 }
 
 fn next_version(previous: Option<ScopeVersion>) -> Result<ScopeVersion, SpiError> {
@@ -967,6 +1202,8 @@ impl SpiRealm {
     /// Acquire the realm's fence, start renewing it, wait out a superseded
     /// holder's lease, and list every head (after the acquire, before
     /// the first commit). Chunks whose owner no longer exists are deleted.
+    /// A scope the listing reports conflicted is quarantined, and the rest
+    /// of the realm opens.
     ///
     /// That listing installs the baseline a re-acquire compares with. The
     /// open holds the gate a re-acquire takes from before the renewal starts
@@ -1008,7 +1245,6 @@ impl SpiRealm {
             reacquire_in_flight: StdMutex::new(None),
             known_heads: StdMutex::new(None),
             uncertain: StdMutex::new(HashMap::new()),
-            poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
             listed: StdMutex::new(HashMap::new()),
             claimed: StdMutex::new(HashMap::new()),
@@ -1093,40 +1329,178 @@ impl SpiRealm {
     /// Whether any scope is poisoned.
     #[must_use]
     pub fn has_poisoned_scopes(&self) -> bool {
-        !lock(&self.poisoned).is_empty()
+        !lock(&self.writer_fence)
+            .machine
+            .state()
+            .poisoned_scopes
+            .is_empty()
     }
 
     /// Whether the scope `id` is poisoned: it refuses every call until the
     /// realm is reopened.
     #[must_use]
     pub fn scope_poisoned(&self, id: &ScopeId) -> bool {
-        lock(&self.poisoned).contains_key(id)
+        lock(&self.writer_fence)
+            .machine
+            .state()
+            .poisoned_scopes
+            .contains_key(&codec::scope_key(id.family.tag, &id.key))
+    }
+
+    /// Whether the scope `id` refuses every call until the realm is
+    /// reopened: it is poisoned, or quarantined.
+    #[must_use]
+    pub fn scope_refused(&self, id: &ScopeId) -> bool {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        let fence = lock(&self.writer_fence);
+        let state = fence.machine.state();
+        state.poisoned_scopes.contains_key(&key) || state.quarantined_keys.contains(&key)
     }
 
     /// Every poisoned scope, in scope order, with its cause. A scope stays
     /// poisoned until the realm is reopened.
     #[must_use]
     pub fn poisoned_scopes(&self) -> Vec<PoisonedScope> {
-        lock(&self.poisoned)
-            .iter()
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
-            })
-            .collect()
+        self.poisoned_where(|_| true)
     }
 
     /// The poisoned scopes of `family`, in key order, with their causes.
     #[must_use]
     pub fn poisoned_scopes_of(&self, family: ScopeFamily) -> Vec<PoisonedScope> {
-        lock(&self.poisoned)
-            .iter()
-            .filter(|(id, _)| id.family == family)
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
+        self.poisoned_where(|id| id.family == family)
+    }
+
+    /// The poisoned scopes `keep` keeps, in scope order: the writer fence's
+    /// entries, with the causes recorded with them.
+    fn poisoned_where(&self, keep: impl Fn(&ScopeId) -> bool) -> Vec<PoisonedScope> {
+        let fence = lock(&self.writer_fence);
+        let mut poisoned: Vec<PoisonedScope> = fence
+            .machine
+            .state()
+            .poisoned_scopes
+            .keys()
+            .filter_map(|key| fence.poisoned.get(key))
+            .filter(|scope| keep(&scope.id))
+            .cloned()
+            .collect();
+        poisoned.sort_by(|left, right| left.id.cmp(&right.id));
+        poisoned
+    }
+
+    /// Every quarantined scope, in key order: the store reports a conflict
+    /// for each, and each refuses every call until it is repaired in the
+    /// store and the realm is reopened.
+    #[must_use]
+    pub fn quarantined_scopes(&self) -> Vec<QuarantinedScope> {
+        self.quarantined_where(None)
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect()
+    }
+
+    /// The quarantined scopes of `families` (of any family with `None`), in
+    /// key order, each with the id a call names it by when the realm knows
+    /// it: its store name keeps its key verbatim, or a call named it.
+    fn quarantined_where(
+        &self,
+        families: Option<&[ScopeFamily]>,
+    ) -> Vec<(QuarantinedScope, Option<ScopeId>)> {
+        let entries: Vec<(String, Vec<String>, String)> = {
+            let fence = lock(&self.writer_fence);
+            fence
+                .machine
+                .state()
+                .quarantined_keys
+                .iter()
+                .filter(|key| {
+                    families.is_none_or(|families| {
+                        families.iter().any(|family| key_tag(key) == family.tag)
+                    })
+                })
+                .map(|key| {
+                    let names = fence
+                        .quarantined
+                        .get(key)
+                        .map(|names| names.iter().cloned().collect())
+                        .unwrap_or_default();
+                    (key.clone(), names, fence.quarantine_cause(key, None))
+                })
+                .collect()
+        };
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        // The ids calls named, for the keys their store names hash. The
+        // writer fence's lock is not held: the cells lock comes first.
+        let named: HashMap<String, ScopeId> = lock(&self.cells)
+            .keys()
+            .map(|id| (codec::scope_key(id.family.tag, &id.key), id.clone()))
+            .filter(|(key, _)| entries.iter().any(|(quarantined, ..)| quarantined == key))
+            .collect();
+        entries
+            .into_iter()
+            .map(|(key, names, cause)| {
+                let tag = key_tag(&key);
+                let id = named.get(&key).cloned().or_else(|| {
+                    families
+                        .into_iter()
+                        .flatten()
+                        .find(|family| family.tag == tag)
+                        .and_then(|family| {
+                            codec::plain_key(&key, family.tag)
+                                .map(|plain| ScopeId::new(*family, plain))
+                        })
+                });
+                let scope = match (&id, codec::plain_key(&key, tag)) {
+                    (Some(id), _) => id.to_string(),
+                    (None, Some(plain)) if tag != CHUNK_TAG => format!("{tag}:{plain}"),
+                    (None, _) => key.clone(),
+                };
+                (
+                    QuarantinedScope {
+                        scope,
+                        names,
+                        cause,
+                    },
+                    id,
+                )
             })
             .collect()
+    }
+
+    /// The scopes of `family` that refuse every call until the realm is
+    /// reopened, poisoned or quarantined, in scope order, each with its
+    /// refusal's cause: the reads that list runtimes name each one.
+    ///
+    /// # Errors
+    /// [`SpiError::ScopesQuarantined`] naming each quarantined scope of
+    /// `family` whose store name hashes its key and that no call named
+    /// yet: such a read cannot name it, and never leaves it out.
+    pub(crate) fn refused_scopes_of(
+        &self,
+        family: ScopeFamily,
+    ) -> Result<Vec<(ScopeId, String)>, SpiError> {
+        let mut refused: Vec<(ScopeId, String)> = self
+            .poisoned_scopes_of(family)
+            .into_iter()
+            .map(|scope| (scope.id, scope.cause))
+            .collect();
+        let mut unnamed = Vec::new();
+        for (scope, id) in self.quarantined_where(Some(&[family])) {
+            match id {
+                Some(id) => refused.push((id, scope.cause)),
+                None => unnamed.push(scope),
+            }
+        }
+        if !unnamed.is_empty() {
+            return Err(SpiError::ScopesQuarantined {
+                quarantined: unnamed,
+                poisoned: Vec::new(),
+            });
+        }
+        refused.sort_by(|left, right| left.0.cmp(&right.0));
+        refused.dedup_by(|left, right| left.0 == right.0);
+        Ok(refused)
     }
 
     /// Refuse when the realm is poisoned.
@@ -1137,54 +1511,84 @@ impl SpiRealm {
         }
     }
 
-    /// Refuse a cross-scope read while the realm or any scope is poisoned:
-    /// a poisoned scope's memory may be ahead of the host. The conservative
+    /// Refuse a cross-scope read while the realm or any scope is poisoned
+    /// or quarantined: a poisoned scope's memory may be ahead of the host,
+    /// and a quarantined one is not in memory at all. The conservative
     /// form, for a read that may depend on a scope of any family; an
     /// adapter names the families a read depends on with
     /// [`Self::check_cross_scope_read_of`].
     ///
     /// # Errors
-    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
-    /// every poisoned scope.
+    /// [`SpiError::RealmPoisoned`], [`SpiError::ScopesQuarantined`] naming
+    /// every quarantined scope and every poisoned one, or
+    /// [`SpiError::ScopesPoisoned`] naming every poisoned scope when none
+    /// is quarantined.
     pub fn check_cross_scope_read(&self) -> Result<(), SpiError> {
         self.check_realm()?;
-        let poisoned = self.poisoned_scopes();
-        if poisoned.is_empty() {
-            Ok(())
-        } else {
-            Err(SpiError::ScopesPoisoned { scopes: poisoned })
-        }
+        Self::refuse_scopes(self.poisoned_scopes(), self.quarantined_scopes())
     }
 
     /// Refuse a read across every scope of `families` while the realm, or a
-    /// scope of one of those families, is poisoned: that scope's memory may
-    /// differ from the host, and the read answers from memory.
+    /// scope of one of those families, is poisoned or quarantined: a
+    /// poisoned scope's memory may differ from the host, a quarantined
+    /// scope is not in memory, and the read answers from memory.
     ///
     /// A scope of another family cannot change what such a read answers. A
     /// scope's memory changes only under its own lock, in a call that
     /// commits before releasing it, or the scope is poisoned, and a call that
     /// touches memory outside the scopes it locked poisons the scope it
     /// touched (or the realm, when that scope is busy). So a read of these
-    /// families' memory never depends on another family's poisoned scope,
-    /// and is answered while one exists.
+    /// families' memory never depends on another family's poisoned or
+    /// quarantined scope, and is answered while one exists.
     ///
     /// # Errors
-    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
-    /// the poisoned scopes of `families`.
+    /// [`SpiError::RealmPoisoned`], [`SpiError::ScopesQuarantined`] naming
+    /// the quarantined and poisoned scopes of `families`, or
+    /// [`SpiError::ScopesPoisoned`] naming the poisoned ones when none is
+    /// quarantined.
     pub fn check_cross_scope_read_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
         self.check_realm()?;
-        let poisoned: Vec<PoisonedScope> = lock(&self.poisoned)
-            .iter()
-            .filter(|(id, _)| families.contains(&id.family))
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
-            })
+        let poisoned = self.poisoned_where(|id| families.contains(&id.family));
+        let quarantined = self
+            .quarantined_where(Some(families))
+            .into_iter()
+            .map(|(scope, _)| scope)
             .collect();
-        if poisoned.is_empty() {
-            Ok(())
-        } else {
+        Self::refuse_scopes(poisoned, quarantined)
+    }
+
+    /// Refuse a read across the scopes of `families` while one of them is
+    /// quarantined (or the realm is poisoned), whatever is poisoned: for a
+    /// read that cannot tell which of those scopes it needs, since a
+    /// quarantined scope's head, and so what it holds, is unknown.
+    ///
+    /// # Errors
+    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesQuarantined`]
+    /// naming the quarantined scopes of `families`.
+    pub(crate) fn check_quarantined_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
+        self.check_realm()?;
+        let quarantined = self
+            .quarantined_where(Some(families))
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect();
+        Self::refuse_scopes(Vec::new(), quarantined)
+    }
+
+    /// The refusal of a cross-scope read that met these scopes.
+    fn refuse_scopes(
+        poisoned: Vec<PoisonedScope>,
+        quarantined: Vec<QuarantinedScope>,
+    ) -> Result<(), SpiError> {
+        if !quarantined.is_empty() {
+            Err(SpiError::ScopesQuarantined {
+                quarantined,
+                poisoned,
+            })
+        } else if !poisoned.is_empty() {
             Err(SpiError::ScopesPoisoned { scopes: poisoned })
+        } else {
+            Ok(())
         }
     }
 
@@ -1201,15 +1605,19 @@ impl SpiRealm {
         self.slow_settles.subscribe()
     }
 
-    /// Refuse a call on a poisoned scope (or realm).
+    /// Refuse a call on a poisoned or quarantined scope (or realm).
     pub fn check_scope(&self, state: &ScopeState) -> Result<(), SpiError> {
         self.check_realm()?;
-        match &state.poison {
-            Some(cause) => Err(SpiError::ScopePoisoned {
+        match &state.classification {
+            Classification::Usable => Ok(()),
+            Classification::Poisoned(cause) => Err(SpiError::ScopePoisoned {
                 scope: state.id.to_string(),
                 cause: cause.clone(),
             }),
-            None => Ok(()),
+            Classification::Quarantined(cause) => Err(SpiError::ScopeQuarantined {
+                scope: state.id.to_string(),
+                cause: cause.clone(),
+            }),
         }
     }
 
@@ -1412,7 +1820,7 @@ impl SpiRealm {
         };
         let checked = match self.list_versions().await {
             Ok(listed) => match self.listing_matches(&listed) {
-                Some(clean) => Ok((listed, clean)),
+                Some(clean) => Ok((listed.heads, clean)),
                 None => Err(no_baseline()),
             },
             Err(error) => Err(error),
@@ -1690,73 +2098,101 @@ impl SpiRealm {
     /// Whether a fresh listing shows only batches this writer wrote: every
     /// scope at the version this writer last saw or wrote, or, for a scope a
     /// batch with an unknown outcome touched, at any version that batch
-    /// leaves possible. `None` while the open has not installed the
-    /// baseline: such a listing proves nothing either way.
-    fn listing_matches(&self, listed: &HashMap<(ScopeKind, String), ScopeVersion>) -> Option<bool> {
+    /// leaves possible; and exactly the recorded conflicts
+    /// ([`listed_conflicts_match`]). `None` while the open has not installed
+    /// the baseline: such a listing proves nothing either way.
+    fn listing_matches(&self, listed: &Listing) -> Option<bool> {
+        // The recorded conflicts, read first: the writer fence's lock is
+        // never held with the baseline's.
+        let (versions, commit_ids) = {
+            let fence = lock(&self.writer_fence);
+            let state = fence.machine.state();
+            (
+                state.quarantine_versions.clone(),
+                state.quarantine_commit_ids.clone(),
+            )
+        };
         let known = lock(&self.known_heads);
         let known = known.as_ref()?;
         let uncertain = lock(&self.uncertain);
         let keys: HashSet<&(ScopeKind, String)> = known
             .keys()
-            .chain(listed.keys())
+            .chain(listed.heads.keys())
             .chain(uncertain.keys())
             .collect();
-        Some(keys.into_iter().all(|key| {
-            let seen = listed.get(key).copied();
+        let heads_match = keys.into_iter().all(|key| {
+            let seen = listed.heads.get(key).copied();
             match uncertain.get(key) {
                 Some(possible) => possible.contains(&seen) || seen == known.get(key).copied(),
                 None => seen == known.get(key).copied(),
             }
-        }))
+        });
+        Some(heads_match && listed_conflicts_match(listed, &versions, &commit_ids))
     }
 
-    /// The version of every visible scope, from one listing
-    /// ([`Self::list_kinds`]).
-    async fn list_versions(&self) -> Result<HashMap<(ScopeKind, String), ScopeVersion>, SpiError> {
-        let mut versions = HashMap::new();
-        for (kind, heads) in self.list_kinds().await? {
-            for scope in heads {
-                versions.insert((kind, scope.name.as_str().to_string()), scope.head.version);
+    /// One listing of every scope, as a re-acquire keeps it: each visible
+    /// scope's version (a page's heads are dropped as it is read), and every
+    /// conflicted scope.
+    async fn list_versions(&self) -> Result<Listing, SpiError> {
+        let mut listing = Listing::default();
+        let kinds = self
+            .list_kinds(|kept: &mut KindVersions, page: HeadPage| {
+                kept.versions.extend(
+                    page.heads
+                        .into_iter()
+                        .map(|scope| (scope.name, scope.head.version)),
+                );
+                kept.conflicts.extend(page.conflicts);
+            })
+            .await?;
+        for (kind, kept) in kinds {
+            for (name, version) in kept.versions {
+                listing
+                    .heads
+                    .insert((kind, name.as_str().to_string()), version);
             }
+            listing.conflicts.extend(kept.conflicts);
         }
-        Ok(versions)
+        Ok(listing)
     }
 
-    /// Every head of the listed kinds, in one pass: the kinds at once, each
-    /// kind's pages in order ([`Self::list_kind`]), so a listing waits for
-    /// its slowest kind rather than for the sum of them. The first page that
-    /// fails fails the whole pass and drops the other kinds' calls; the
-    /// caller installs nothing of it, and lists again only after a fresh
-    /// acquire.
-    async fn list_kinds(&self) -> Result<Vec<(ScopeKind, Vec<ScopeHead>)>, SpiError> {
+    /// One pass over every listed kind: the kinds at once, each kind's
+    /// pages in order ([`Self::list_kind`]), so a listing waits for its
+    /// slowest kind rather than for the sum of them. `keep` takes each page
+    /// into its kind's `T` as the page is read. The first page that fails
+    /// fails the whole pass and drops the other kinds' calls; the caller
+    /// installs nothing of it, and lists again only after a fresh acquire.
+    async fn list_kinds<T: Default>(
+        &self,
+        keep: impl Fn(&mut T, HeadPage) + Sync,
+    ) -> Result<Vec<(ScopeKind, T)>, SpiError> {
+        let keep = &keep;
         let listed =
-            futures::future::try_join_all(LISTED_KINDS.map(|kind| self.list_kind(kind))).await?;
+            futures::future::try_join_all(LISTED_KINDS.map(|kind| self.list_kind(kind, keep)))
+                .await?;
         Ok(LISTED_KINDS.into_iter().zip(listed).collect())
     }
 
-    /// Every head of `kind`, page after page: each call's cursor is the
-    /// `next` of the answer before it, so a kind never has two pages in
-    /// flight and no cursor crosses kinds.
-    async fn list_kind(&self, kind: ScopeKind) -> Result<Vec<ScopeHead>, SpiError> {
-        let mut heads = Vec::new();
+    /// Every page of `kind`, page after page, each taken into one `T` by
+    /// `keep`: each call's cursor is the `next` of the answer before it, so
+    /// a kind never has two pages in flight and no cursor crosses kinds.
+    async fn list_kind<T: Default>(
+        &self,
+        kind: ScopeKind,
+        keep: &(impl Fn(&mut T, HeadPage) + Sync),
+    ) -> Result<T, SpiError> {
+        let mut kept = T::default();
         let mut after: Option<ScopeName> = None;
         loop {
             let page = self
                 .host
                 .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
                 .await?;
-            // A conflicted scope the store reports fails the listing, as a
-            // store that fails the page for it does.
-            if let Some(conflict) = page.conflicts.first() {
-                return Err(SpiError::Host(HostStoreError::Conflict {
-                    scope: ScopeRef::new(kind, conflict.name.clone()),
-                    current: Some(conflict.version),
-                }));
-            }
-            heads.extend(page.heads);
-            match page.next {
+            let next = page.next.clone();
+            keep(&mut kept, page);
+            match next {
                 Some(next) => after = Some(next),
-                None => return Ok(heads),
+                None => return Ok(kept),
             }
         }
     }
@@ -1815,16 +2251,20 @@ impl SpiRealm {
 
     /// Lose the realm to `cause`, in words `text`: every call refuses until
     /// it is reopened. A realm already lost keeps its first cause, and the
-    /// refusal names it.
+    /// refusal names it. A loss the writer fence refuses before the open is
+    /// a misuse, and answers so.
     fn poison_realm(&self, cause: WriterFenceLostCause, text: String) -> SpiError {
-        self.apply_fence(FenceInput::Poison { cause }, |_| text);
-        self.lost_realm()
+        let effects = self.apply_fence(FenceInput::Poison { cause }, |_| text.clone());
+        refused_loss(&effects, &text).unwrap_or_else(|| self.lost_realm())
     }
 
     /// Poison one scope: it refuses every call until the realm reopens.
-    /// For adapters whose memory may now differ from the host for it.
+    /// For adapters whose memory may now differ from the host for it. A
+    /// scope already poisoned keeps its first cause, and a quarantined one
+    /// stays quarantined: its quarantine already refuses everything a
+    /// poison refuses.
     pub fn poison(&self, state: &mut ScopeState, cause: &str) {
-        self.poison_scope(state, cause);
+        self.poison_scope(state, ScopePoisonCause::Adapter, cause);
     }
 
     /// Poison the whole realm (an adapter rule was broken and the affected
@@ -1833,12 +2273,61 @@ impl SpiRealm {
         self.poison_realm(WriterFenceLostCause::AdapterRule, cause)
     }
 
-    fn poison_scope(&self, state: &mut ScopeState, cause: &str) {
-        if state.poison.is_none() {
-            state.poison = Some(cause.to_string());
-            lock(&self.poisoned).insert(state.id.clone(), cause.to_string());
-            tracing::error!(scope = %state.id, %cause, "host store scope poisoned; it refuses until the realm is reopened");
+    /// Poison one scope through the writer fence, `cause` naming the
+    /// decision site and `text` the failure: the machine records the first
+    /// cause, and `state`, whose lock the caller holds, caches the scope's
+    /// classification as the machine then holds it. A scope already
+    /// classified keeps its classification; a report before the open, or
+    /// once the realm is lost, changes nothing (every call already refuses
+    /// with the realm's cause after a loss).
+    pub(crate) fn poison_scope(&self, state: &mut ScopeState, cause: ScopePoisonCause, text: &str) {
+        if state.classification != Classification::Usable {
+            return;
         }
+        let key = codec::scope_key(state.id.family.tag, &state.id.key);
+        let (effects, classification) = {
+            let mut fence = lock(&self.writer_fence);
+            let effects = fence.apply(
+                FenceInput::ScopePoisoned {
+                    scope: key.clone(),
+                    cause,
+                },
+                |_| String::new(),
+            );
+            if effects
+                .iter()
+                .any(|effect| matches!(effect, FenceEffect::ScopePoisonRecorded { .. }))
+            {
+                fence.poisoned.insert(
+                    key.clone(),
+                    PoisonedScope {
+                        id: state.id.clone(),
+                        cause: text.to_string(),
+                    },
+                );
+            }
+            let classification = fence.classification(&key, state.name.as_ref());
+            (effects, classification)
+        };
+        for effect in &effects {
+            match effect {
+                FenceEffect::ScopePoisonRecorded { .. } => tracing::error!(
+                    scope = %state.id,
+                    cause = %text,
+                    "host store scope poisoned; it refuses until the realm is reopened"
+                ),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::NotOpened,
+                } => tracing::error!(
+                    scope = %state.id,
+                    cause = %text,
+                    "a host store scope poison was reported before the realm opened; a misuse, \
+                     ignored"
+                ),
+                _ => {}
+            }
+        }
+        state.classification = classification;
     }
 
     /// Renew once per renew interval while the writer runs. A failed renew
@@ -1894,14 +2383,23 @@ impl SpiRealm {
 
     /// List every head at the open ([`Self::list_kinds`]) and install what
     /// the listing shows: the listed heads of each family, the chunk table,
-    /// and the scope versions a re-acquire compares with. Nothing is
-    /// installed when the listing fails.
+    /// and the scope versions a re-acquire compares with. Every conflicted
+    /// scope the listing reports is quarantined, out of the listed heads and
+    /// the baseline. Nothing is installed when the listing fails.
     async fn list_all(&self) -> Result<(), SpiError> {
         let mut listed: HashMap<String, Vec<ListedHead>> = HashMap::new();
         let mut chunks: HashMap<String, ChunkMeta> = HashMap::new();
         let mut known: HashMap<(ScopeKind, String), ScopeVersion> = HashMap::new();
-        for (kind, heads) in self.list_kinds().await? {
-            for scope in heads {
+        let mut conflicts = Vec::new();
+        let kinds = self
+            .list_kinds(|kept: &mut KindHeads, page: HeadPage| {
+                kept.heads.extend(page.heads);
+                kept.conflicts.extend(page.conflicts);
+            })
+            .await?;
+        for (kind, kept) in kinds {
+            conflicts.extend(kept.conflicts);
+            for scope in kept.heads {
                 known.insert((kind, scope.name.as_str().to_string()), scope.head.version);
                 let Some(tag) = codec::name_tag(&scope.name).map(str::to_string) else {
                     // Not a name this journal writes: leave it alone.
@@ -1941,18 +2439,84 @@ impl SpiRealm {
         *lock(&self.listed) = listed;
         *lock(&self.chunks) = chunks;
         *lock(&self.known_heads) = Some(known);
+        for conflict in &conflicts {
+            self.quarantine_listed(conflict);
+        }
         Ok(())
+    }
+
+    /// The open's listing reports `conflict`: record it under its key (the
+    /// scope's name without its incarnation, a chunk's full name), and log
+    /// it once.
+    fn quarantine_listed(&self, conflict: &ScopeConflict) {
+        let key = codec::name_key(&conflict.name);
+        let commit_ids = conflict
+            .commit_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        if self.record_quarantine(&key, &conflict.name, conflict.version, commit_ids) {
+            tracing::error!(
+                scope = %key,
+                name = %conflict.name,
+                version = conflict.version.get(),
+                commit_ids = ?conflict.commit_ids,
+                "host store scope quarantined: the store reports two batches at one of its \
+                 versions; it refuses every call until it is repaired in the store and the realm \
+                 is reopened"
+            );
+        }
+    }
+
+    /// Record the conflicted incarnation `name` of the scope the writer
+    /// fence classifies under `key`, at `version`, in the writer fence.
+    /// Answers whether the machine recorded something new.
+    fn record_quarantine(
+        &self,
+        key: &str,
+        name: &ScopeName,
+        version: ScopeVersion,
+        commit_ids: BTreeSet<String>,
+    ) -> bool {
+        let mut fence = lock(&self.writer_fence);
+        let effects = fence.apply(
+            FenceInput::ScopeQuarantined {
+                key: key.to_string(),
+                name: name.as_str().to_string(),
+                version: version.get(),
+                commit_ids,
+            },
+            |_| String::new(),
+        );
+        let mut recorded = false;
+        for effect in effects {
+            if let FenceEffect::ScopeQuarantineRecorded { key, name } = effect {
+                fence.quarantined.entry(key).or_default().insert(name);
+                recorded = true;
+            }
+        }
+        recorded
     }
 
     /// Delete chunks whose owner is not a listed scope: garbage of a crash
     /// between a chunk and the batch that would have referenced it, or of a
-    /// deleted owner. Best effort; a failure leaves garbage, not corruption.
+    /// deleted owner. A quarantined scope still owns its chunks: its
+    /// conflicted incarnations count as owners. Best effort; a failure
+    /// leaves garbage, not corruption.
     async fn sweep_ownerless_chunks(&self) {
-        let owners: HashSet<String> = lock(&self.listed)
+        let mut owners: HashSet<String> = lock(&self.listed)
             .values()
             .flatten()
             .map(|listed| listed.name.as_str().to_string())
             .collect();
+        owners.extend(
+            lock(&self.writer_fence)
+                .machine
+                .state()
+                .quarantine_versions
+                .keys()
+                .cloned(),
+        );
         let doomed: Vec<(String, ScopeVersion)> = lock(&self.chunks)
             .iter()
             .filter(|(_, meta)| !owners.contains(&meta.owner))
@@ -2001,6 +2565,13 @@ impl SpiRealm {
     /// claimed once per realm: a later claim answers the family's registered
     /// cells, or the first claim's refusal again.
     ///
+    /// Each cell starts with its scope's classification. A quarantined
+    /// scope of the family whose store name keeps its key verbatim is
+    /// claimed as well, with no incarnation, so an adapter that lists the
+    /// family names it typed (its cell refuses every call) instead of
+    /// leaving it out; one whose name hashes its key is known by that name
+    /// only ([`Self::quarantined_scopes`]).
+    ///
     /// # Errors
     /// [`SpiError::Corrupt`] when two live incarnations claim one key.
     pub fn claim(&self, family: ScopeFamily) -> Result<Vec<Arc<ScopeCell>>, SpiError> {
@@ -2031,6 +2602,8 @@ impl SpiRealm {
 
     fn claim_listed(&self, family: ScopeFamily) -> Result<Vec<Arc<ScopeCell>>, SpiError> {
         let listed = lock(&self.listed).remove(family.tag).unwrap_or_default();
+        // The claimed lock (the caller's), then the cells lock, then the
+        // writer fence's.
         let mut cells = lock(&self.cells);
         let mut claimed = BTreeMap::new();
         for entry in listed {
@@ -2046,7 +2619,20 @@ impl SpiRealm {
                     "two live incarnations of {id} exist"
                 )));
             }
-            let state = ScopeState::from_head(id.clone(), entry.name, entry.version, &entry.head)?;
+            // A live incarnation listed beside a conflicted one of its key
+            // starts quarantined, and its refusal names both.
+            let classification = self.classification_of(&id, Some(&entry.name));
+            let mut state =
+                ScopeState::from_head(id.clone(), entry.name, entry.version, &entry.head)?;
+            state.classification = classification;
+            claimed.insert(id, Arc::new(Mutex::new(state)));
+        }
+        for id in self.quarantined_plain_ids(family) {
+            if cells.contains_key(&id) || claimed.contains_key(&id) {
+                continue;
+            }
+            let mut state = ScopeState::empty(id.clone());
+            state.classification = self.classification_of(&id, None);
             claimed.insert(id, Arc::new(Mutex::new(state)));
         }
         let mut out = Vec::with_capacity(claimed.len());
@@ -2055,6 +2641,27 @@ impl SpiRealm {
             out.push(cell);
         }
         Ok(out)
+    }
+
+    /// The classification the writer fence holds for the scope `id`, as a
+    /// new cell of it caches it; `live` is the incarnation the open listed
+    /// for it, which a quarantine's cause names beside the conflicted ones.
+    fn classification_of(&self, id: &ScopeId, live: Option<&ScopeName>) -> Classification {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        lock(&self.writer_fence).classification(&key, live)
+    }
+
+    /// The ids of the quarantined scopes of `family` whose store names keep
+    /// their keys verbatim.
+    fn quarantined_plain_ids(&self, family: ScopeFamily) -> Vec<ScopeId> {
+        lock(&self.writer_fence)
+            .machine
+            .state()
+            .quarantined_keys
+            .iter()
+            .filter_map(|key| codec::plain_key(key, family.tag))
+            .map(|key| ScopeId::new(family, key))
+            .collect()
     }
 
     /// The realm's one value of type `T`, created by `init` on first use:
@@ -2081,15 +2688,22 @@ impl SpiRealm {
         Ok(value)
     }
 
-    /// The cell of a scope, created empty (no incarnation) when unknown.
+    /// The cell of a scope, created empty (no incarnation) when unknown. A
+    /// new cell starts with its scope's classification: a scope quarantined
+    /// at the open has no cell until a call needs it, and refuses from that
+    /// call on.
     #[must_use]
     pub fn cell(&self, id: &ScopeId) -> Arc<ScopeCell> {
+        // The cells lock, then the writer fence's.
         let mut cells = lock(&self.cells);
-        Arc::clone(
-            cells
-                .entry(id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(ScopeState::empty(id.clone())))),
-        )
+        if let Some(cell) = cells.get(id) {
+            return Arc::clone(cell);
+        }
+        let mut state = ScopeState::empty(id.clone());
+        state.classification = self.classification_of(id, None);
+        let cell = Arc::new(Mutex::new(state));
+        cells.insert(id.clone(), Arc::clone(&cell));
+        cell
     }
 
     /// The ids of every registered scope of a family, in key order.
@@ -2114,8 +2728,22 @@ impl SpiRealm {
         guards
     }
 
-    /// The pinned values of a scope, chunked ones read and verified.
+    /// The pinned values of a scope, chunked ones read and verified. A
+    /// poisoned or quarantined scope refuses first, as every call on it
+    /// does, and a chunk whose load answers a typed conflict quarantines the
+    /// scope ([`Self::load_body`]).
     pub async fn pinned_values(
+        &self,
+        state: &mut ScopeState,
+    ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
+        self.check_scope(state)?;
+        match self.read_pinned(state).await {
+            Ok(values) => Ok(values),
+            Err(error) => Err(self.load_failed(state, error)),
+        }
+    }
+
+    async fn read_pinned(
         &self,
         state: &ScopeState,
     ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
@@ -2140,14 +2768,35 @@ impl SpiRealm {
     /// adapter has installed the answered values in its memory and called
     /// [`ScopeState::mark_loaded`], so a call dropped in between leaves it
     /// unloaded and the next call loads it again.
+    ///
+    /// A read that answers a typed conflict, of the scope's own rows or of a
+    /// chunk it references, quarantines the scope, never poisons it: nothing
+    /// of the load reached memory. The call answers
+    /// [`SpiError::ScopeQuarantined`], and so does every later call on it.
     pub async fn load_body(
         &self,
         state: &mut ScopeState,
     ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
         self.check_scope(state)?;
-        let Some(name) = state.name.clone() else {
+        if state.name.is_none() {
             state.body = Body::Loaded;
             return Ok(BTreeMap::new());
+        }
+        let (values, stamps, row_chunks) = match self.fold_body(state).await {
+            Ok(folded) => folded,
+            Err(error) => return Err(self.load_failed(state, error)),
+        };
+        state.rows = stamps;
+        state.row_chunks = row_chunks;
+        self.collect_owned_garbage(state).await;
+        Ok(values)
+    }
+
+    /// The body of a scope that has an incarnation, read and folded: its
+    /// values, its stamps and the chunks its rows spill to.
+    async fn fold_body(&self, state: &ScopeState) -> Result<FoldedBody, SpiError> {
+        let Some(name) = state.name.clone() else {
+            return Ok((BTreeMap::new(), BTreeMap::new(), Vec::new()));
         };
         let scope = ScopeRef::new(state.id.family.kind, name.clone());
         let mut values: BTreeMap<String, Arc<Vec<u8>>> = BTreeMap::new();
@@ -2198,10 +2847,71 @@ impl SpiRealm {
                 values.insert(key.clone(), value);
             }
         }
-        state.rows = stamps;
-        state.row_chunks = row_chunks;
-        self.collect_owned_garbage(state).await;
-        Ok(values)
+        Ok((values, stamps, row_chunks))
+    }
+
+    /// A load of `state`'s scope failed with `error`. A typed conflict, of
+    /// the scope's own rows or of a chunk it references, quarantines the
+    /// scope ([`Self::quarantine_at_load`]) and answers its refusal; any
+    /// other failure comes back unchanged.
+    fn load_failed(&self, state: &mut ScopeState, error: SpiError) -> SpiError {
+        match error {
+            SpiError::Host(HostStoreError::Conflict {
+                scope,
+                current: Some(version),
+            }) => self.quarantine_at_load(state, &scope, version),
+            other => other,
+        }
+    }
+
+    /// A load of `state`'s scope met a typed conflict: `conflicted`, the
+    /// scope itself or a chunk it references, holds two batches at
+    /// `version`. The scope is quarantined under its key, recorded with the
+    /// conflicted name: for its own conflict that name is its own, and it
+    /// leaves the baseline, as the open's listing would have left it out;
+    /// for a chunk's, the chunk's own entry is recorded too, and the scope
+    /// stays in the baseline, its head unchanged (its record names the
+    /// chunk, never itself). `state` caches the classification the machine
+    /// then holds. Answers the call's refusal.
+    fn quarantine_at_load(
+        &self,
+        state: &mut ScopeState,
+        conflicted: &ScopeRef,
+        version: ScopeVersion,
+    ) -> SpiError {
+        let key = codec::scope_key(state.id.family.tag, &state.id.key);
+        let own = state.name.as_ref() == Some(&conflicted.name);
+        if !own {
+            self.record_quarantine(
+                &codec::name_key(&conflicted.name),
+                &conflicted.name,
+                version,
+                BTreeSet::new(),
+            );
+        }
+        let recorded = self.record_quarantine(&key, &conflicted.name, version, BTreeSet::new());
+        if own && let Some(known) = lock(&self.known_heads).as_mut() {
+            known.remove(&(conflicted.kind, conflicted.name.as_str().to_string()));
+        }
+        state.classification = lock(&self.writer_fence).classification(&key, state.name.as_ref());
+        if recorded {
+            tracing::error!(
+                scope = %state.id,
+                conflicted = %conflicted.name,
+                version = version.get(),
+                "host store scope quarantined: a load met two batches at one version; it refuses \
+                 every call until it is repaired in the store and the realm is reopened"
+            );
+        }
+        match self.check_scope(state) {
+            Err(refusal) => refusal,
+            // The writer fence recorded nothing (the realm has not opened):
+            // the load's own failure answers.
+            Ok(()) => SpiError::Host(HostStoreError::Conflict {
+                scope: conflicted.clone(),
+                current: Some(version),
+            }),
+        }
     }
 
     /// Fold one row op into the entries. A chunked entry gets its stamp
@@ -2366,7 +3076,7 @@ impl SpiRealm {
                 // with a change may now differ from the host.
                 let cause = error.to_string();
                 for index in changed {
-                    self.poison_scope(&mut *scopes[index], &cause);
+                    self.poison_scope(&mut *scopes[index], ScopePoisonCause::PlanFailed, &cause);
                 }
                 return Err(error);
             }
@@ -2386,8 +3096,13 @@ impl SpiRealm {
             }
             Err(error) => {
                 let cause = error.to_string();
+                let site = match &error {
+                    SpiError::UnsettledAtFenceWindow { .. }
+                    | SpiError::UnsettledPastRetryBudget { .. } => ScopePoisonCause::Unsettled,
+                    _ => ScopePoisonCause::Refused,
+                };
                 for plan in &plans {
-                    self.poison_scope(&mut *scopes[plan.index], &cause);
+                    self.poison_scope(&mut *scopes[plan.index], site, &cause);
                 }
                 if matches!(error, SpiError::Host(HostStoreError::FencedOut { .. })) {
                     return Err(self.poison_realm(WriterFenceLostCause::FencedOutCommit, cause));
@@ -3013,8 +3728,12 @@ impl SpiRealm {
 
     fn adopt(&self, state: &mut ScopeState, plan: ScopePlan) {
         if plan.delete {
+            // The cell keeps its classification: only a usable scope
+            // commits, and a delete leaves it usable.
             let id = state.id.clone();
+            let classification = state.classification.clone();
             *state = ScopeState::empty(id);
+            state.classification = classification;
             return;
         }
         let window = plan_window_of(&plan);
@@ -3179,7 +3898,8 @@ impl Drop for ArmedScopes {
         if self.armed {
             let cause = "a call was dropped while it changed this scope; memory may hold a change the host never got";
             for guard in &mut self.guards {
-                self.realm.poison(guard, cause);
+                self.realm
+                    .poison_scope(guard, ScopePoisonCause::Dropped, cause);
             }
         }
     }

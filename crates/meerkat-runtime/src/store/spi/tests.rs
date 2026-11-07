@@ -581,7 +581,7 @@ async fn reload(
     let mut image = BTreeMap::new();
     for cell in cells {
         let mut state = cell.lock().await;
-        image.extend(realm.pinned_values(&state).await.unwrap());
+        image.extend(realm.pinned_values(&mut state).await.unwrap());
         image.extend(realm.load_body(&mut state).await.unwrap());
         // The test is the adapter here: it holds the loaded values.
         state.mark_loaded();
@@ -2817,10 +2817,10 @@ async fn boot_obligation_scan_spi_store_fails_closed_on_a_head_pinned_before_the
     let id = ScopeId::new(super::RUNTIME_FAMILY, quiet.0.clone());
     let folded = {
         let cell = opened.0.cell(&id);
-        let state = cell.lock().await;
+        let mut state = cell.lock().await;
         let pinned = opened
             .0
-            .pinned_values(&state)
+            .pinned_values(&mut state)
             .await
             .expect("the pinned head");
         Arc::clone(pinned.get("boot").expect("the boot facts are pinned"))
@@ -2919,10 +2919,10 @@ async fn boot_obligation_scan_spi_store_does_not_fail_closed_on_a_retired_runtim
     let id = ScopeId::new(super::RUNTIME_FAMILY, retired.0.clone());
     let folded = {
         let cell = opened.0.cell(&id);
-        let state = cell.lock().await;
+        let mut state = cell.lock().await;
         let pinned = opened
             .0
-            .pinned_values(&state)
+            .pinned_values(&mut state)
             .await
             .expect("the pinned head");
         Arc::clone(pinned.get("boot").expect("the boot facts are pinned"))
@@ -2967,8 +2967,11 @@ async fn boot_obligation_scan_spi_store_agrees_with_the_open_on_each_pinned_head
         .collect();
     for runtime in fixture.runtimes() {
         let cell = realm.cell(&ScopeId::new(super::RUNTIME_FAMILY, runtime.0.clone()));
-        let state = cell.lock().await;
-        let pinned = realm.pinned_values(&state).await.expect("the pinned head");
+        let mut state = cell.lock().await;
+        let pinned = realm
+            .pinned_values(&mut state)
+            .await
+            .expect("the pinned head");
         assert_eq!(
             super::runtime::needs_body_at_boot(&pinned).expect("the pinned head decodes"),
             listed.contains(runtime),

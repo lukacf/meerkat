@@ -1,4 +1,4 @@
-//! Containing one conflicted host store scope (CONTAINMENT-NOTE r7).
+//! Containing one conflicted host store scope.
 //!
 //! A store that meets obligation 4 at load answers a typed conflict for a
 //! scope two batches hold one version of (a superseded writer's late batch,
@@ -12,6 +12,7 @@
 
 use meerkat_core::host_store::ScopeVersion;
 
+use super::super::writer_fence::ScopePoisonCause;
 use super::*;
 
 /// The cause a quarantined scope's refusal carries, in part.
@@ -133,6 +134,14 @@ async fn an_open_contains_a_conflicted_runtime_and_serves_the_others() {
         &[&name],
     );
     assert!(
+        store.refuses_runtime_until_reopen(&conflicted),
+        "the quarantined runtime refuses until the realm is reopened"
+    );
+    assert!(
+        !store.refuses_runtime_until_reopen(&kept),
+        "another runtime does not"
+    );
+    assert!(
         realm.realm_poisoned().is_none(),
         "the realm keeps its fence: {:?}",
         realm.realm_poisoned()
@@ -177,7 +186,10 @@ async fn an_open_contains_a_runtime_whose_recovery_load_answers_a_conflict() {
 // A runtime id too long for a plain key part is hashed in its scope name,
 // so the open knows its conflicted scope only by that name. It is still
 // quarantined under the key a call names it by: a call naming the runtime
-// refuses typed. RED before containment: the open fails.
+// refuses typed. Until a call names it, the reads that list runtimes by id
+// cannot name it, so they refuse typed, naming its scope, rather than leave
+// it out; once a call named it, they name it as any quarantined runtime.
+// RED before containment: the open fails.
 #[tokio::test]
 async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
     let host = Arc::new(TestHost::new());
@@ -193,6 +205,7 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
     let name = host
         .conflict_scope(ScopeKind::Session, &prefix)
         .expect("one conflicted scope");
+    let hashed = prefix.trim_end_matches('~');
 
     let (_realm, store) = open_contained(&host).await;
     store
@@ -200,9 +213,45 @@ async fn a_conflicted_scope_with_a_hashed_key_is_refused_by_its_runtime_id() {
         .await
         .expect("another runtime serves");
     assert_quarantined(
+        store.list_runtimes_with_recovery_work().await,
+        hashed,
+        &[&name],
+    );
+    assert_quarantined(
+        store
+            .list_runtime_delivery_authorities_or_unavailable()
+            .await,
+        hashed,
+        &[&name],
+    );
+    assert!(
+        store.refuses_runtime_until_reopen(&long),
+        "the quarantined runtime refuses until the realm is reopened"
+    );
+    assert_quarantined(
         store.load_input_states(&long).await,
         &format!("rt:{}", long.0),
         &[&name],
+    );
+
+    let with_work = store
+        .list_runtimes_with_recovery_work()
+        .await
+        .expect("the scan names the runtime a call named");
+    assert!(
+        with_work.contains(&long),
+        "the scan lists the quarantined runtime: {with_work:?}"
+    );
+    let authorities = store
+        .list_runtime_delivery_authorities_or_unavailable()
+        .await
+        .expect("the listing names the runtime a call named");
+    assert!(
+        authorities
+            .unavailable
+            .iter()
+            .any(|runtime| runtime.runtime_id == long),
+        "the delivery listing names the quarantined runtime unavailable"
     );
 }
 
@@ -390,4 +439,614 @@ async fn a_key_with_two_conflicted_incarnations_opens_contained_and_keeps_its_re
         "mhb:mob-a",
         &names,
     );
+}
+
+/// A host whose writer re-acquires within a row on tokio's paused clock: a
+/// one second renew interval and a three second lease.
+fn reacquiring_host() -> Arc<TestHost> {
+    let timing = FenceTiming::try_new(Duration::from_secs(1), Duration::from_secs(3)).unwrap();
+    Arc::new(TestHost::with_timing(timing))
+}
+
+/// Fail the writer's next renew and let the tick after it re-acquire. The
+/// row's checkpoints fall between ticks, which come once a second from the
+/// realm's open.
+async fn stop_and_reacquire(host: &TestHost, realm: &SpiRealm) {
+    host.faults.lock().unwrap().renew_unavailable = 1;
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert!(!realm.lease_is_live(), "the writer stopped");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// The visible incarnation of a test family scope whose name starts with
+/// `prefix`: its name and version.
+fn incarnation(host: &TestHost, prefix: &str) -> (String, ScopeVersion) {
+    let scopes = host.scopes_of(ScopeKind::Record);
+    let (name, stored) = scopes
+        .iter()
+        .find(|(name, _)| name.starts_with(prefix))
+        .expect("the scope is visible");
+    (name.clone(), stored.version)
+}
+
+/// A one-entry change of a test family scope.
+fn pin(value: &str) -> ScopeDelta {
+    ScopeDelta::Changes(vec![(
+        "pin".to_string(),
+        Some(Arc::new(value.as_bytes().to_vec())),
+    )])
+}
+
+/// Open a bare realm over `host`, with no adapter, the last writer's lease
+/// ended.
+async fn open_realm(host: &Arc<TestHost>) -> Arc<SpiRealm> {
+    SpiRealm::open(Arc::clone(host) as _, SpiRealmConfig::default())
+        .await
+        .expect("the realm opens")
+}
+
+// A scope quarantined at the open stays quarantined through a stop: the
+// re-acquire's listing shows its recorded conflict unchanged and keeps the
+// realm, and the scope still refuses. A new conflict on another scope at the
+// next re-acquire is a change this writer did not make: the realm is lost,
+// and the next open contains both scopes and serves the rest.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_conflict_keeps_the_realm_and_a_new_one_loses_it() {
+    let host = reacquiring_host();
+    let first = LogicalRuntimeId::new("first");
+    let second = LogicalRuntimeId::new("second");
+    let kept = LogicalRuntimeId::new("kept");
+    {
+        let (_realm, store) = open(&host).await;
+        accept_inputs(&store, &[&first, &second, &kept]).await;
+    }
+    host.expire_lease();
+    let first_name = host
+        .conflict_scope(ScopeKind::Session, "rt:rfirst~")
+        .expect("one conflicted scope");
+
+    let (realm, store) = open_contained(&host).await;
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "a listing that shows only the recorded conflict keeps the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert_quarantined(
+        store.load_input_states(&first).await,
+        "rt:first",
+        &[&first_name],
+    );
+
+    let second_name = host
+        .conflict_scope(ScopeKind::Session, "rt:rsecond~")
+        .expect("one conflicted scope");
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_some(),
+        "a conflict the writer did not record is a batch it did not write"
+    );
+    drop(store);
+    drop(realm);
+    host.expire_lease();
+
+    let (_realm, store) = open_contained(&host).await;
+    assert_quarantined(
+        store.load_input_states(&first).await,
+        "rt:first",
+        &[&first_name],
+    );
+    assert_quarantined(
+        store.load_input_states(&second).await,
+        "rt:second",
+        &[&second_name],
+    );
+    assert_eq!(
+        store
+            .load_input_states(&kept)
+            .await
+            .expect("another runtime serves")
+            .len(),
+        1
+    );
+}
+
+// An unchanged conflict listed again with its commit ids in another order,
+// and once with none, still matches its record: each re-acquire keeps the
+// realm. The same conflict listed with other ids, where both sides name
+// them, is another batch: the realm is lost.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_conflict_matches_with_its_ids_reordered_or_unnamed_and_not_with_others() {
+    let host = reacquiring_host();
+    let runtime = LogicalRuntimeId::new("conflicted");
+    {
+        let (_realm, store) = open(&host).await;
+        accept_inputs(&store, &[&runtime]).await;
+    }
+    host.expire_lease();
+    let name = host
+        .conflict_scope(ScopeKind::Session, "rt:rconflicted~")
+        .expect("one conflicted scope");
+    let stored = host
+        .scopes_of(ScopeKind::Session)
+        .get(&name)
+        .expect("the scope is visible")
+        .commit_id
+        .as_str()
+        .to_string();
+    let late = format!("late-{name}");
+    let mut descending = [stored, late];
+    descending.sort();
+    descending.reverse();
+
+    let (realm, _store) = open_contained(&host).await;
+    host.set_conflict_ids(
+        ScopeKind::Session,
+        &name,
+        &[descending[0].as_str(), descending[1].as_str()],
+    );
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none() && realm.lease_is_live(),
+        "the same ids in another order match: {:?}",
+        realm.realm_poisoned()
+    );
+    host.set_conflict_ids(ScopeKind::Session, &name, &[]);
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none() && realm.lease_is_live(),
+        "ids named on one side only match: {:?}",
+        realm.realm_poisoned()
+    );
+    host.set_conflict_ids(ScopeKind::Session, &name, &["another-batch"]);
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_some(),
+        "other ids where both sides name them are another batch"
+    );
+}
+
+// A recorded conflict that a re-acquire's listing shows in neither list (the
+// deleted incarnation it was recorded for is gone) is a change this writer
+// did not make: the realm is lost.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_conflict_missing_from_a_reacquires_listing_loses_the_realm() {
+    let host = reacquiring_host();
+    let doomed = ScopeId::new(TEST_FAMILY, "doomed");
+    let (deleted, version) = {
+        let realm = open_realm(&host).await;
+        commit_one(&realm, &doomed, pin("v1"))
+            .await
+            .expect("the scope is written");
+        let (name, version) = incarnation(&host, "tst:rdoomed~");
+        commit_one(&realm, &doomed, ScopeDelta::Full(BTreeMap::new()))
+            .await
+            .expect("the scope is deleted");
+        (name, version.next().expect("a next version"))
+    };
+    host.expire_lease();
+    host.conflict_deleted(ScopeKind::Record, &deleted, version);
+
+    let realm = open_realm(&host).await;
+    host.repair_conflict(ScopeKind::Record, &deleted);
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_some(),
+        "a recorded conflict listed in neither list is a change"
+    );
+}
+
+// A recorded conflict that a re-acquire's listing shows among the heads (the
+// scope repaired meanwhile) is a change this writer did not make: the realm
+// is lost. The writer cannot tell an operator's repair from another writer's
+// commit, so a repair is followed by a reopen.
+#[tokio::test(start_paused = true)]
+async fn a_recorded_conflict_listed_among_the_heads_loses_the_realm() {
+    let host = reacquiring_host();
+    let runtime = LogicalRuntimeId::new("conflicted");
+    {
+        let (_realm, store) = open(&host).await;
+        accept_inputs(&store, &[&runtime]).await;
+    }
+    host.expire_lease();
+    let name = host
+        .conflict_scope(ScopeKind::Session, "rt:rconflicted~")
+        .expect("one conflicted scope");
+
+    let (realm, _store) = open_contained(&host).await;
+    host.repair_conflict(ScopeKind::Session, &name);
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_some(),
+        "a recorded conflict listed among the heads is a change"
+    );
+}
+
+// An owner whose chunk is conflicted: the open's listing quarantines the
+// chunk by its full store name, and the owner's first load meets that
+// conflict and quarantines the owner as well, refused typed; neither the
+// realm nor any scope is poisoned. A commit on the owner writes nothing, and
+// a re-acquire whose listing shows the owner's head unchanged and the
+// chunk's recorded conflict keeps the realm.
+#[tokio::test(start_paused = true)]
+async fn an_owner_whose_chunk_is_conflicted_is_quarantined_at_its_first_load() {
+    let host = reacquiring_host();
+    let owner = ScopeId::new(TEST_FAMILY, "owner");
+    {
+        let realm = open_realm(&host).await;
+        let body = Arc::new(vec![7_u8; super::super::realm::INLINE_VALUE_LIMIT + 1]);
+        commit_one(
+            &realm,
+            &owner,
+            ScopeDelta::Changes(vec![("body".to_string(), Some(body))]),
+        )
+        .await
+        .expect("the body is written to a chunk");
+    }
+    host.expire_lease();
+    let chunk = host
+        .conflict_scope(ScopeKind::Record, "ch:")
+        .expect("one chunk");
+
+    let realm = open_realm(&host).await;
+    let quarantined: Vec<String> = realm
+        .quarantined_scopes()
+        .into_iter()
+        .map(|scope| scope.scope)
+        .collect();
+    assert_eq!(
+        quarantined,
+        vec![chunk.clone()],
+        "the open quarantined the chunk by its full name"
+    );
+    let cells = realm.claim(TEST_FAMILY).expect("the family claims");
+    {
+        let mut state = cells[0].lock().await;
+        match realm.load_body(&mut state).await {
+            Err(SpiError::ScopeQuarantined { scope, cause }) => {
+                assert_eq!(scope, "tst:owner");
+                assert!(
+                    cause.contains(QUARANTINED) && cause.contains(REPAIR) && cause.contains(&chunk),
+                    "the cause names the chunk's conflict and the repair: {cause}"
+                );
+            }
+            other => panic!("the owner's first load refuses typed: {other:?}"),
+        }
+    }
+    let quarantined = realm.quarantined_scopes();
+    assert!(
+        quarantined
+            .iter()
+            .any(|scope| scope.scope == "tst:owner" && scope.names == vec![chunk.clone()]),
+        "the owner is quarantined for its chunk's conflict: {quarantined:?}"
+    );
+    assert!(realm.realm_poisoned().is_none());
+    assert!(realm.poisoned_scopes().is_empty());
+
+    let commits = host.commit_count();
+    assert!(matches!(
+        commit_one(&realm, &owner, pin("next")).await,
+        Err(SpiError::ScopeQuarantined { .. })
+    ));
+    assert_eq!(
+        host.commit_count(),
+        commits,
+        "a commit on the owner writes nothing"
+    );
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the owner's unchanged head and the chunk's recorded conflict keep the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+}
+
+// A quarantined scope still owns its chunks: the open's sweep of chunks
+// whose owner is not listed keeps them.
+#[tokio::test]
+async fn the_chunk_sweep_keeps_a_quarantined_owners_chunks() {
+    let host = Arc::new(TestHost::new());
+    let owner = ScopeId::new(TEST_FAMILY, "owner");
+    {
+        let realm = open_realm(&host).await;
+        let body = Arc::new(vec![7_u8; super::super::realm::INLINE_VALUE_LIMIT + 1]);
+        commit_one(
+            &realm,
+            &owner,
+            ScopeDelta::Changes(vec![("body".to_string(), Some(body))]),
+        )
+        .await
+        .expect("the body is written to a chunk");
+    }
+    host.expire_lease();
+    let name = host
+        .conflict_scope(ScopeKind::Record, "tst:rowner~")
+        .expect("the owner");
+
+    let realm = open_realm(&host).await;
+    let chunks: Vec<String> = host
+        .scopes_of(ScopeKind::Record)
+        .into_keys()
+        .filter(|name| name.starts_with("ch:"))
+        .collect();
+    assert_eq!(chunks.len(), 1, "the owner's chunk is kept: {chunks:?}");
+    let cells = realm.claim(TEST_FAMILY).expect("the family claims");
+    let state = cells[0].lock().await;
+    assert!(
+        state
+            .quarantine()
+            .is_some_and(|cause| cause.contains(&name)),
+        "the owner is quarantined: {:?}",
+        state.quarantine()
+    );
+}
+
+// What still fails the whole open: a store's Unavailable listing (a pending
+// acquire cut), which a later open gets past, and a head no format decodes.
+#[tokio::test]
+async fn an_unavailable_listing_stays_retryable_and_an_undecodable_head_fails_the_open() {
+    let host = Arc::new(TestHost::new());
+    let kept = LogicalRuntimeId::new("kept");
+    {
+        let (_realm, store) = open(&host).await;
+        accept_inputs(&store, &[&kept]).await;
+    }
+    host.expire_lease();
+    host.faults.lock().unwrap().list_unavailable = 1;
+    match SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default()).await {
+        Err(SpiError::Host(HostStoreError::Unavailable(_))) => {}
+        other => panic!("an unavailable listing fails the open as an outage: {other:?}"),
+    }
+    host.expire_lease();
+    drop(open_contained(&host).await);
+    host.expire_lease();
+    host.corrupt_head(ScopeKind::Session, "rt:rkept~")
+        .expect("one runtime");
+    match SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default()).await {
+        Err(SpiError::Corrupt(_)) => {}
+        other => panic!("a head no format decodes fails the open: {other:?}"),
+    }
+}
+
+// A scope a dropped call poisoned is listed by `poisoned_scopes` and still
+// refuses after a renew failure's re-acquire: the writer fence keeps the
+// poison through a stop, a re-acquire and a resume.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_calls_poison_is_listed_and_refuses_after_a_reacquire() {
+    let host = reacquiring_host();
+    let realm = open_realm(&host).await;
+    let armed = ScopeId::new(TEST_FAMILY, "armed");
+    {
+        let guards = realm.lock_scopes(std::slice::from_ref(&armed)).await;
+        let mut scopes = ArmedScopes::new(Arc::clone(&realm), guards);
+        scopes.arm();
+    }
+    let listed: Vec<ScopeId> = realm
+        .poisoned_scopes()
+        .into_iter()
+        .map(|scope| scope.id)
+        .collect();
+    assert_eq!(listed, vec![armed.clone()]);
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(realm.lease_is_live(), "the writer resumed");
+    assert!(realm.scope_poisoned(&armed));
+    assert!(matches!(
+        commit_one(&realm, &armed, pin("v1")).await,
+        Err(SpiError::ScopePoisoned { .. })
+    ));
+}
+
+// A mob's host revocation scope quarantined at the open: a read of the
+// revocation and a binding write that would supersede it refuse typed, and
+// nothing is written. The open claims the scope with no incarnation and its
+// cell starts quarantined; created usable, its write would land a second
+// live incarnation of the key.
+#[tokio::test]
+async fn a_quarantined_revocation_scope_refuses_its_read_and_a_write_that_supersedes_it() {
+    let host = Arc::new(TestHost::new());
+    {
+        let (_realm, store) = open(&host).await;
+        assert!(
+            store
+                .put_mob_host_binding_if_absent("mob-a", b"first")
+                .await
+                .expect("mob-a binds")
+        );
+        assert!(
+            store
+                .revoke_mob_host_binding("mob-a", b"first", b"receipt")
+                .await
+                .expect("mob-a is revoked")
+        );
+    }
+    host.expire_lease();
+    let name = host
+        .conflict_scope(ScopeKind::Record, "mhr:rmob-a~")
+        .expect("the revocation scope");
+
+    let (_realm, store) = open_contained(&host).await;
+    assert_quarantined(
+        store.load_mob_host_revocation("mob-a").await,
+        "mhr:mob-a",
+        &[&name],
+    );
+    let commits = host.commit_count();
+    assert_quarantined(
+        store
+            .put_mob_host_binding_if_absent("mob-a", b"again")
+            .await,
+        "mhr:mob-a",
+        &[&name],
+    );
+    assert_eq!(host.commit_count(), commits, "nothing was written");
+}
+
+// A tool grant scope quarantined at the open: a load of that grant refuses
+// typed, and so does the grant listing of every subject, since the
+// quarantined grant's head, and so the subject it is filed under, is
+// unknown. Another grant still loads.
+#[tokio::test]
+async fn a_quarantined_tool_grant_scope_refuses_its_load_and_every_grant_listing() {
+    let host = Arc::new(TestHost::new());
+    {
+        let (_realm, store) = open(&host).await;
+        for (grant, subject) in [("g1", "s:a"), ("g2", "s:b")] {
+            assert!(
+                store
+                    .put_tool_grant_if_absent(grant, subject, b"grant", &[])
+                    .await
+                    .expect("the grant is written")
+            );
+        }
+    }
+    host.expire_lease();
+    let name = host
+        .conflict_scope(ScopeKind::Record, "tg:rg1~")
+        .expect("the grant scope");
+
+    let (_realm, store) = open_contained(&host).await;
+    assert_quarantined(store.load_tool_grant("g1").await, "tg:g1", &[&name]);
+    for subject in ["s:a", "s:b"] {
+        assert_quarantined(store.list_tool_grants(subject).await, "tg:g1", &[&name]);
+    }
+    assert_eq!(
+        store
+            .load_tool_grant("g2")
+            .await
+            .expect("another grant loads"),
+        Some(b"grant".to_vec())
+    );
+}
+
+// A poison report keeps a quarantine: an adapter's poison of a scope
+// quarantined at the open, before the scope has a cell, and a stray touch of
+// another, change nothing. Each refuses as quarantined at its next call,
+// nothing is listed poisoned, and the next re-acquire keeps the realm.
+#[tokio::test(start_paused = true)]
+async fn a_poison_report_keeps_a_quarantine_through_a_reacquire() {
+    let host = reacquiring_host();
+    let reported = ScopeId::new(TEST_FAMILY, "reported");
+    let touched = ScopeId::new(TEST_FAMILY, "touched");
+    {
+        let realm = open_realm(&host).await;
+        for id in [&reported, &touched] {
+            commit_one(&realm, id, pin("v1"))
+                .await
+                .expect("the scope is written");
+        }
+    }
+    host.expire_lease();
+    let reported_name = host
+        .conflict_scope(ScopeKind::Record, "tst:rreported~")
+        .expect("one scope");
+    let touched_name = host
+        .conflict_scope(ScopeKind::Record, "tst:rtouched~")
+        .expect("one scope");
+
+    // No adapter claimed the family: neither scope has a cell yet.
+    let realm = open_realm(&host).await;
+    {
+        let cell = realm.cell(&reported);
+        let mut state = cell.lock().await;
+        realm.poison(&mut state, "an adapter's rule broke");
+        assert!(state.quarantine().is_some(), "the scope stays quarantined");
+    }
+    {
+        let cell = realm.cell(&touched);
+        let mut state = cell.lock().await;
+        realm.poison_scope(
+            &mut state,
+            ScopePoisonCause::StrayTouch,
+            "a call changed it outside the scopes it locked",
+        );
+        assert!(state.quarantine().is_some(), "the scope stays quarantined");
+    }
+    assert!(realm.poisoned_scopes().is_empty(), "nothing is poisoned");
+    for (id, name) in [(&reported, &reported_name), (&touched, &touched_name)] {
+        match commit_one(&realm, id, pin("v2")).await {
+            Err(SpiError::ScopeQuarantined { cause, .. }) => {
+                assert!(cause.contains(name.as_str()), "{cause}");
+            }
+            other => panic!("{id} refuses as quarantined: {other:?}"),
+        }
+    }
+
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the recorded conflicts keep the realm: {:?}",
+        realm.realm_poisoned()
+    );
+    assert!(realm.lease_is_live(), "the writer resumed");
+}
+
+// A poisoned scope that a re-acquire's listing shows conflicted is a change
+// this writer did not make (a poisoned scope sends no further batch): the
+// realm is lost. The next open quarantines the scope.
+#[tokio::test(start_paused = true)]
+async fn a_poisoned_scope_listed_conflicted_at_a_reacquire_loses_the_realm() {
+    let host = reacquiring_host();
+    let scope = ScopeId::new(TEST_FAMILY, "poisoned");
+    let realm = open_realm(&host).await;
+    commit_one(&realm, &scope, pin("v1"))
+        .await
+        .expect("the scope is written");
+    {
+        let cell = realm.cell(&scope);
+        let mut state = cell.lock().await;
+        realm.poison(&mut state, "an adapter's rule broke");
+    }
+    let name = host
+        .conflict_scope(ScopeKind::Record, "tst:rpoisoned~")
+        .expect("one scope");
+    stop_and_reacquire(&host, &realm).await;
+    assert!(
+        realm.realm_poisoned().is_some(),
+        "a conflict on a scope not quarantined is a change"
+    );
+    drop(realm);
+    host.expire_lease();
+
+    let realm = open_realm(&host).await;
+    let quarantined = realm.quarantined_scopes();
+    assert!(
+        quarantined
+            .iter()
+            .any(|scope| scope.scope == "tst:poisoned" && scope.names == vec![name.clone()]),
+        "the next open quarantines it: {quarantined:?}"
+    );
+}
+
+// A realm loss the writer fence refuses before the realm opened is a misuse,
+// answered so; a loss it records, or a realm lost already, answers the
+// recorded cause.
+#[test]
+fn a_realm_loss_refused_before_the_open_answers_a_misuse() {
+    use super::super::writer_fence::{
+        HostStoreWriterFenceEffect, WriterFenceLostCause, WriterFenceRefusal,
+    };
+    let refused = super::super::realm::refused_loss(
+        &[HostStoreWriterFenceEffect::RequestRefused {
+            reason: WriterFenceRefusal::NotOpened,
+        }],
+        "an adapter's rule broke",
+    );
+    assert!(
+        matches!(&refused, Some(SpiError::Misuse(text)) if text.contains("before the realm opened")),
+        "{refused:?}"
+    );
+    for effect in [
+        HostStoreWriterFenceEffect::RealmLost {
+            cause: WriterFenceLostCause::AdapterRule,
+        },
+        HostStoreWriterFenceEffect::RequestRefused {
+            reason: WriterFenceRefusal::Lost,
+        },
+    ] {
+        assert!(super::super::realm::refused_loss(&[effect], "lost").is_none());
+    }
 }

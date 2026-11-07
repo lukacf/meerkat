@@ -365,6 +365,43 @@ impl TestHost {
         );
     }
 
+    /// List the conflict of `name` with these commit ids from now on: the
+    /// same conflict, with its ids in another order, or with none.
+    pub(crate) fn set_conflict_ids(&self, kind: ScopeKind, name: &str, ids: &[&str]) {
+        if let Some(conflicted) = self.state().conflicts.get_mut(&(kind, name.to_string())) {
+            conflicted.commit_ids = ids
+                .iter()
+                .filter_map(|id| CommitId::try_new(*id).ok())
+                .collect();
+        }
+    }
+
+    /// The conflict of `name` is repaired in the store: a visible scope is
+    /// listed among the heads again, and a deleted incarnation is in neither
+    /// list.
+    pub(crate) fn repair_conflict(&self, kind: ScopeKind, name: &str) {
+        self.state().conflicts.remove(&(kind, name.to_string()));
+    }
+
+    /// Replace the head of the only visible scope of `kind` whose name starts
+    /// with `prefix` by bytes no head format decodes. Answers its name, or
+    /// `None` unless exactly one scope matches.
+    pub(crate) fn corrupt_head(&self, kind: ScopeKind, prefix: &str) -> Option<String> {
+        let mut state = self.state();
+        let matching: Vec<String> = state
+            .scopes
+            .keys()
+            .filter(|(scope_kind, name)| *scope_kind == kind && name.starts_with(prefix))
+            .map(|(_, name)| name.clone())
+            .collect();
+        let [name] = matching.as_slice() else {
+            return None;
+        };
+        let stored = state.scopes.get_mut(&(kind, name.clone()))?;
+        stored.head = b"not a head".to_vec();
+        Some(name.clone())
+    }
+
     /// The typed conflict a load of `scope` answers, when the host holds it
     /// conflicted.
     fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {

@@ -663,6 +663,7 @@ struct MobMetaV1 {
 
 /// A stored mob as the boot listing sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SpiStoredMob {
     /// The storage key the host opened the storage with.
     pub storage_key: String,
@@ -673,6 +674,12 @@ pub struct SpiStoredMob {
     /// Why the pinned summary could not be read, when it could not: the
     /// storage exists, and opening it reports the same failure typed.
     pub unreadable: Option<String>,
+    /// Why a scope of the storage is quarantined, when one is: the store
+    /// reports a conflict for it (two batches hold one of its versions), and
+    /// opening the storage refuses typed until the scope is repaired in the
+    /// store and the realm is reopened. The cause names the conflict and the
+    /// repair.
+    pub quarantined: Option<String>,
 }
 
 /// Which scopes a call locks.
@@ -1881,22 +1888,33 @@ impl HostInner {
                 ))
             })?;
             for cell in cells {
-                let state = cell.lock().await;
+                let mut state = cell.lock().await;
                 let key = state.id().key.clone();
                 let entry = stored.entry(key.clone()).or_insert_with(|| SpiStoredMob {
                     storage_key: key,
                     mob_id: None,
                     finalized: false,
                     unreadable: None,
+                    quarantined: None,
                 });
+                // A quarantined scope of the storage: the store reports a
+                // conflict for it, and opening the storage refuses typed.
+                if let Some(cause) = state.quarantine() {
+                    entry.quarantined.get_or_insert_with(|| cause.to_string());
+                    continue;
+                }
                 if family.tag != MOB_FAMILY.tag {
                     continue;
                 }
-                let meta = match realm.pinned_values(&state).await {
+                let meta = match realm.pinned_values(&mut state).await {
                     Ok(pinned) => pinned
                         .get(G_META)
                         .map(|bytes| decode_single::<MobMetaV1>(bytes))
                         .transpose(),
+                    Err(SpiError::ScopeQuarantined { cause, .. }) => {
+                        entry.quarantined.get_or_insert(cause);
+                        continue;
+                    }
                     Err(error) => Err(read_error(error)),
                 };
                 match meta {
@@ -2003,6 +2021,7 @@ impl SpiMobStoreHost {
                 mob_id: None,
                 finalized: false,
                 unreadable: None,
+                quarantined: None,
             });
         Ok(SpiMobStores { bundle })
     }

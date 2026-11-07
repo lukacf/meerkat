@@ -344,7 +344,8 @@ pub(crate) fn copilot_coverage_mismatch(error: LlmError) -> LlmError {
 /// moved or merged.
 ///
 /// The terminal output is paired with the slots by each item's own
-/// `output_index`, else by its array position, and is taken only when it
+/// `output_index` (one that is not an unsigned integer is a mismatch), else
+/// by its array position, and is taken only when it
 /// lines up with them: exactly one terminal item for every slot the stream
 /// announced and none for another, each of its slot's kind and, where the
 /// stream completed the slot, the same item apart from its id
@@ -521,10 +522,17 @@ impl CopilotSlots {
         };
         let mut paired: BTreeMap<u64, Value> = BTreeMap::new();
         for (position, mut item) in output.into_iter().enumerate() {
-            let index = item
-                .get("output_index")
-                .and_then(Value::as_u64)
-                .unwrap_or(position as u64);
+            // An item's own output_index pairs it; an absent one, its array
+            // position. One that is present but not an unsigned integer is
+            // evidence the pairing must not trust.
+            let index = match item.get("output_index") {
+                None | Some(Value::Null) => position as u64,
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    copilot_mismatch(format!(
+                        "the terminal output's item at position {position} has an output_index that is not an unsigned integer"
+                    ))
+                })?,
+            };
             let Some(slot) = self.slots.get(&index) else {
                 return Err(copilot_mismatch(format!(
                     "the terminal output has an item at output_index {index} the stream never announced"

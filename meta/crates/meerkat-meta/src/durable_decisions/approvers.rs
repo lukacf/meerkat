@@ -262,17 +262,15 @@ impl ConsentEligibility for LiveHolderEligibility {
         let Some(access) = self.access.as_ref() else {
             return Err(ConsentIneligible);
         };
-        let config = access.snapshot().0;
-        let Some(held) = holding(&config, &self.approver_id, &self.identity) else {
-            return Err(ConsentIneligible);
-        };
-        // The requester link, re-derived from the map read now: a decide
-        // read before the map linked the decider to the requester carries
-        // the decider's own key, and is not eligible.
-        let linked = held
-            .linked_principal(&self.input.requester, self.input.operator.as_ref())
-            .is_some();
-        if linked && self.input.carried.as_ref() != Some(&self.input.requester) {
+        // The holder and the requester link, re-derived from the map read
+        // now: a decide read before the map linked the decider to the
+        // requester carries the decider's own key, and is not eligible.
+        if !holds_as_carried(
+            &access.snapshot().0,
+            &self.approver_id,
+            &self.identity,
+            &self.input,
+        ) {
             return Err(ConsentIneligible);
         }
         let open = self
@@ -287,11 +285,34 @@ impl ConsentEligibility for LiveHolderEligibility {
     }
 }
 
+/// Whether `config` lists `identity` as a holder of `approver_id` that may
+/// decide as `input` says: a holder, and, when `config` links the identity
+/// in one person with the decision's requester, an input that carries the
+/// requester's own key (which the decision machine refuses as
+/// `self_approval`). The one link rule, over the snapshot the caller read: a
+/// decide checks it as it commits, and a decided decision's currentness
+/// answer with its own.
+fn holds_as_carried(
+    config: &AccessControlConfig,
+    approver_id: &str,
+    identity: &DeciderIdentity,
+    input: &DecideInput,
+) -> bool {
+    let Some(held) = holding(config, approver_id, identity) else {
+        return false;
+    };
+    let linked = held
+        .linked_principal(&input.requester, input.operator.as_ref())
+        .is_some();
+    !linked || input.carried.as_ref() == Some(&input.requester)
+}
+
 /// Meta's answer to whether the party that decided a decision still holds
 /// its approver id, from one snapshot of the live approver map: `Eligible`
 /// while the map lists the identity that decided (the stdio operator of
 /// this host's realm, or a person a declared ingress attests) for the
-/// decision's approver id, and `Refused` otherwise. Without an access
+/// decision's approver id and does not link it in one person with the
+/// decision's requester, and `Refused` otherwise. Without an access
 /// controller there is no map and no holder. Meta vouches for operator
 /// evidence only when its decider is this host's operator, and for no other
 /// party (a reviewer, or a person another surface attested): those answer
@@ -319,16 +340,23 @@ impl DecisionApproverCurrentness for MapApproverCurrentness {
         };
         let config = access.snapshot().0;
         let approver_id = decision.descriptor.approver_id.as_str();
-        match decided_identity(&config, decision, self.operator.as_ref()) {
-            Some((identity, decider)) if holding(&config, approver_id, &identity).is_some() => {
-                ConsentEligibilityAnswer::Eligible(Arc::new(LiveHolderEligibility::attested(
-                    Some(access.clone()),
-                    approver_id.to_string(),
-                    identity,
-                    DecideInput::recorded(decision, &decider, self.operator.as_ref()),
-                )))
-            }
-            _ => ConsentEligibilityAnswer::Refused,
+        let Some((identity, decider)) = decided_identity(&config, decision, self.operator.as_ref())
+        else {
+            return ConsentEligibilityAnswer::Refused;
+        };
+        // The same link rule as a decide's, over this answer's snapshot: a
+        // map that now links the recorded decider with the requester refuses
+        // the decider, as the decide would have been refused.
+        let input = DecideInput::recorded(decision, &decider, self.operator.as_ref());
+        if holds_as_carried(&config, approver_id, &identity, &input) {
+            ConsentEligibilityAnswer::Eligible(Arc::new(LiveHolderEligibility::attested(
+                Some(access.clone()),
+                approver_id.to_string(),
+                identity,
+                input,
+            )))
+        } else {
+            ConsentEligibilityAnswer::Refused
         }
     }
 }

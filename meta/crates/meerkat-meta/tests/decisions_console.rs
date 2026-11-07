@@ -1491,7 +1491,7 @@ async fn an_unreadable_row_reads_as_not_found_to_a_non_administrator() {
             if case == "enforced" {
                 let administrator = rpc(
                     &app,
-                    Some(ERIN),
+                    Some(ADMIN),
                     method,
                     json!({"decision_id": broken.decision_id.to_string()}),
                 )

@@ -152,7 +152,8 @@ each package is accepted only on evidence for that exact package, and the
   persistent runtime built with in-memory metadata refuses attested decides.
 - For Rust hosts, `meerkat_meta::durable_decisions`: `RuntimeDecisions`,
   `StdioDecisionConnection`, `DecisionNoticeSink`,
-  `DecisionIngressDeclarations` and `check_approver_ingresses`, with the
+  `DecisionIngressDeclarations`, `DecisionIngressDeclaration`,
+  `DecisionIngressError` and `check_approver_ingresses`, with the
   decision wire types (`MetaDecisionNoticeEvent` decodes an event it does
   not know as `Unknown`); `UnifiedRuntime::durable_decisions`,
   `decision_owner`, `set_durable_decisions` and

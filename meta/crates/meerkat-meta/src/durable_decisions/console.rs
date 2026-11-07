@@ -336,7 +336,8 @@ fn visible_page(
 }
 
 /// The decision `decision_id` names, as the caller may see it; a decision
-/// it may not see at all reads as one that is not there.
+/// it may not see at all reads as one that is not there, and so does a row
+/// that does not decode, to a caller that does not administer.
 fn visible(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
@@ -348,10 +349,16 @@ fn visible(
     if !decisions.is_available() {
         return Err(wire::no_decision_store(id));
     }
-    let row = decisions
-        .owner()
-        .get(&decision_id)
-        .map_err(|error| wire::decision_error(id, error))?;
+    let row = match decisions.owner().get(&decision_id) {
+        Ok(row) => row,
+        // Only an administrator, who reads every decision whole, learns
+        // that an unreadable row is there (and its decode error); to any
+        // other caller it answers as an id that names no decision.
+        Err(DecisionError::Unreadable { .. }) if !caller.administers() => {
+            return Err(wire::not_found(id));
+        }
+        Err(error) => return Err(wire::decision_error(id, error)),
+    };
     match Viewer::of(caller).sight(&row) {
         Sight::Nothing => Err(wire::not_found(id)),
         sight => Ok((row, sight)),

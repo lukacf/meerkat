@@ -428,7 +428,17 @@ fn uncertain_write_makes_the_owner_unavailable_and_invalidates_observations() {
             try_issue(&owner, "uncertain"),
             Err(GrantRefusal::Unavailable)
         );
-        assert_eq!(state(&owner), before, "the candidate is never installed");
+        let after = state(&owner);
+        assert_eq!(
+            after.lifecycle_phase,
+            dsl::GrantAuthorityPhase::Uncertain,
+            "the owner's custody ends at the uncertain append"
+        );
+        assert_eq!(
+            (&after.records, after.revision, &after.revoked),
+            (&before.records, before.revision, &before.revoked),
+            "the candidate is never installed"
+        );
         assert_eq!(
             resolved.check_current(),
             Err(PublicationError::Changed),
@@ -826,17 +836,6 @@ fn a_lookup_waiting_behind_an_uncertain_append_is_unavailable() {
     });
 }
 
-/// RED stand-in for the custody release this change adds: before it, a
-/// host's close leaves the owner's custody as it is.
-trait ReleaseCustodyAtBase {
-    fn release_custody(&self) -> Result<(), GrantRefusal>;
-}
-impl ReleaseCustodyAtBase for LocalGrantAuthority {
-    fn release_custody(&self) -> Result<(), GrantRefusal> {
-        Ok(())
-    }
-}
-
 /// The close of an owner's host while a task of that host still holds a
 /// reference to the owner: the store restores at once, the straggler's later
 /// changes and uses are refused without extending the lease, and the
@@ -906,6 +905,54 @@ fn a_released_owner_frees_its_lease_while_a_reference_is_still_held() {
     release_while_referenced(|| -> Arc<dyn GrantOwnerStore> {
         Arc::new(FileGrantOwnerStore::new(&path))
     });
+}
+
+/// An owner whose append was uncertain refuses every later change and use,
+/// and its host's close still hands its lease back while another reference
+/// to it is held: a successor restores what the store retained at once.
+#[test]
+fn an_uncertain_owner_still_releases_its_lease_at_close() {
+    for outcome in [Append::UncertainLanded, Append::UncertainLost] {
+        let store = Scripted::new();
+        let owner = Arc::new(durable(store.clone()));
+        let kept = issue(&owner, "kept");
+        store.set(outcome);
+        assert_eq!(
+            try_issue(&owner, "uncertain"),
+            Err(GrantRefusal::Unavailable)
+        );
+        store.set(Append::Acknowledge);
+        assert_eq!(
+            state(&owner).lifecycle_phase,
+            dsl::GrantAuthorityPhase::Uncertain
+        );
+        assert_eq!(try_issue(&owner, "after"), Err(GrantRefusal::Unavailable));
+        assert!(matches!(
+            restart(store.clone()),
+            Err(GrantDurabilityError::StoreUnavailable)
+        ));
+
+        let straggler = Arc::clone(&owner);
+        owner
+            .release_custody()
+            .expect("the host's close releases custody");
+        drop(owner);
+        assert_eq!(
+            state(&straggler).lifecycle_phase,
+            dsl::GrantAuthorityPhase::Released
+        );
+        let successor = restart(store.clone()).expect("the released store restores at once");
+        successor
+            .resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None)
+            .expect("the acknowledged grant survives");
+        let landed = state(&successor).records.contains_key(&id("uncertain"));
+        assert_eq!(landed, outcome == Append::UncertainLanded);
+        assert!(!state(&successor).records.contains_key(&id("after")));
+        assert_eq!(
+            straggler.issued_reference(&id("kept")),
+            Err(GrantRefusal::Unavailable)
+        );
+    }
 }
 
 /// A conjunct window open far beyond the fixture clock.

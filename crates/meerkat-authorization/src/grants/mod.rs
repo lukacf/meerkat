@@ -498,6 +498,7 @@ impl LocalGrantAuthority {
             .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let may_issue = owner.state().root.as_ref() == Some(&actor);
         let record = GrantRecord {
             id,
@@ -547,6 +548,7 @@ impl LocalGrantAuthority {
             .reserve_owner_change()
             .map_err(|_| GrantRefusal::Unavailable)?;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let parent = exact_record(&owner, parent)?.clone();
         let may_issue = parent.grantee == actor;
         let chain = chain(&owner, &parent)?;
@@ -722,9 +724,7 @@ impl LocalGrantAuthority {
             .owner
             .lock()
             .map_err(|_| ChildGrantRefusal::Unavailable)?;
-        if let Some(durable) = &self.durable {
-            durable.check_available().map_err(refused)?;
-        }
+        require_custody(&owner).map_err(refused)?;
         let parent = exact_record(&owner, parent_reference)
             .map_err(refused)?
             .clone();
@@ -805,10 +805,9 @@ impl LocalGrantAuthority {
                 now_ms,
             },
         ) {
-            let uncertain = self
-                .durable
-                .as_ref()
-                .is_some_and(|durable| durable.check_available().is_err());
+            // Custody was required above under this same owner lock, so an
+            // owner now in `Uncertain` recorded this call's own append.
+            let uncertain = owner.state().lifecycle_phase == dsl::GrantAuthorityPhase::Uncertain;
             return Err(if uncertain {
                 ChildGrantRefusal::Uncertain
             } else {
@@ -865,11 +864,9 @@ impl LocalGrantAuthority {
         test_boundary::reached_lookup();
         let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
         // Checked under the owner mutex: an issuance whose append became
-        // uncertain marks custody failed before it releases the mutex, so a
-        // lookup waiting behind it never answers from stale memory.
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
+        // uncertain ends the owner's custody before it releases the mutex, so
+        // a lookup waiting behind it never answers from stale memory.
+        require_custody(&owner)?;
         owner
             .state()
             .records
@@ -987,6 +984,7 @@ impl LocalGrantAuthority {
             .owner
             .try_lock()
             .map_err(|_| GrantRefusal::Unavailable)?;
+        require_custody(&owner)?;
         let record = exact_record(&owner, grant)?.clone();
         let revision = owner.state().revision;
         self.apply_change(
@@ -1005,6 +1003,46 @@ impl LocalGrantAuthority {
         Ok(())
     }
 
+    /// End this owner's custody of its retained facts at its host's close,
+    /// after the host's last legitimate change: the generated
+    /// `ReleaseCustody`. From then on every change and every use of this
+    /// owner is refused as [`GrantRefusal::Unavailable`], whoever still holds
+    /// a reference to it, and every earlier observation fails its final
+    /// currentness check. With durable custody the store's lease is handed
+    /// back after any append in flight, so a successor restores the same
+    /// owner at once; nothing retained is lost. A second call changes
+    /// nothing.
+    ///
+    /// Takes this owner's publication writer: do not call it while holding a
+    /// reservation of that publication.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Unavailable`] when this owner's state lock is
+    /// poisoned: nothing is released, and the lease ends when the last
+    /// reference to the owner drops.
+    pub fn release_custody(&self) -> Result<(), GrantRefusal> {
+        // A poisoned or exhausted publication already refuses every
+        // observation; the custody still ends.
+        let mut publication = self.publication.reserve_owner_change().ok();
+        let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        let transition = owner
+            .apply(GrantAuthorityInput::ReleaseCustody)
+            .map_err(|_| GrantRefusal::Unavailable)?;
+        for effect in transition.effects() {
+            if let GrantAuthorityEffect::CustodyReleased = effect {
+                if let Some(durable) = &self.durable {
+                    durable.release();
+                }
+                if let Some(publication) = publication.as_mut() {
+                    // Poisoned since the reservation, the publication is
+                    // unavailable already, so the result changes nothing.
+                    let _ = publication.publish();
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Apply one accepted administrative change. With durable custody the
     /// change is acknowledged by the store before it is installed; callers
     /// publish the change only after this returns `Ok`.
@@ -1014,6 +1052,7 @@ impl LocalGrantAuthority {
         publication: &mut crate::publication::LocalPublicationGuard<'_>,
         input: GrantAuthorityInput,
     ) -> Result<(), GrantRefusal> {
+        require_custody(owner)?;
         match &self.durable {
             Some(durable) => durable.apply(owner, publication, input),
             None => owner
@@ -1266,9 +1305,6 @@ impl LocalGrantAuthority {
         lineage_use: LineageUse<'_>,
         controller: bool,
     ) -> Result<(ExecutionRestrictions, Vec<ExecutionRestrictions>, u64), GrantRefusal> {
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
         let claimed = match lineage_use {
             LineageUse::Executor {
                 executor,
@@ -1285,6 +1321,10 @@ impl LocalGrantAuthority {
             .map_err(|_| GrantRefusal::Unavailable)?
             .unix_ms;
         let mut owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        // Retained facts are usable only while the owner holds custody of
+        // them: after its host's close or an uncertain append, memory and
+        // store are no longer known to agree.
+        require_custody(&owner)?;
         let reference = references.last().ok_or(GrantRefusal::Denied)?;
         let leaf = exact_record(&owner, reference)?.clone();
         // A leaf-own use (liveness or a ceiling) names the retained leaf's
@@ -1362,6 +1402,17 @@ enum LineageUse<'a> {
     /// the same owner lock as the use: a liveness check or a ceiling, never
     /// an executor's authority.
     LeafOwn,
+}
+
+/// Only an owner in custody of its retained facts (the generated `Active`)
+/// serves a change or a use. After its host's close (`Released`) or an
+/// uncertain append (`Uncertain`) every one is refused as unavailable.
+fn require_custody(owner: &GrantAuthorityMachineAuthority) -> Result<(), GrantRefusal> {
+    if owner.state().lifecycle_phase == dsl::GrantAuthorityPhase::Active {
+        Ok(())
+    } else {
+        Err(GrantRefusal::Unavailable)
+    }
 }
 
 /// A generated rejection of an issuance the caller may perform, for an id

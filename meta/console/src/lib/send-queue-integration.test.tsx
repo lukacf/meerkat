@@ -584,11 +584,8 @@ describe("stock durable queue integration", () => {
     expect(commands.find(entry => entry.command === "decideGating")?.params).toEqual({ pending_id: "gate-1", decision: "approve", reason: "console_approve" });
   });
 
-  it.each([
-    ["a transport without whoami", undefined],
-    ["a failed whoami read", async () => { throw new Error("whoami unavailable"); }],
-  ] as const)("shows approvals read-only to %s", async (_label, whoami) => {
-    const { fake, commands } = approvalTransport(whoami as MetaConsoleTransport["whoami"]);
+  it("shows approvals read-only to a transport without whoami", async () => {
+    const { fake, commands } = approvalTransport(undefined);
     render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
     fireEvent.click(await screen.findByRole("button", { name: "Needs you, 1 pending approval" }));
     const approve = await screen.findByRole("button", { name: "Approve" }) as HTMLButtonElement;
@@ -597,6 +594,15 @@ describe("stock durable queue integration", () => {
     fireEvent.click(approve);
     await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 20)); });
     expect(commands.some(entry => entry.command === "decideGating")).toBe(false);
+  });
+
+  it("sends no approval request while a failed whoami read leaves the caller unknown", async () => {
+    const { fake, commands } = approvalTransport(async () => { throw new Error("whoami unavailable"); });
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="scope" />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 100)); });
+    // Neither read nor decided: no console request leaves without its caller.
+    expect(commands).toEqual([]);
   });
 
   it.each(["anonymous", "service", "token_principal"] as const)("tells a %s caller to sign in as themselves to decide", async (actorKind) => {

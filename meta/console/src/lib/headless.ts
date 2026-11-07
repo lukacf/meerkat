@@ -13,6 +13,7 @@ import {
 import {
   callConsoleRpc,
   callerScopeParam,
+  consoleCallerUnknownFailure,
   fetchJson,
   queryTimeline,
   sendConsole,
@@ -94,12 +95,18 @@ export interface ConsoleSendInput {
   idempotencyKey: string;
   handlingMode?: "queue" | "steer";
   attachments?: File[];
+  /** The caller the request is made for (`meta/console/whoami`'s
+   * `caller_scope`), named as `expected_caller_scope`; `null` names none (a
+   * connection without whoami). Absent: the transport names its own. */
+  expectedCallerScope?: string | null;
 }
 
 export interface ConsoleUploadInput {
   blobId?: string;
   file?: File;
   mediaType?: string;
+  /** As for a send: the caller the upload is made for. */
+  expectedCallerScope?: string | null;
 }
 
 export interface ConsoleBlobReadInput {
@@ -458,6 +465,8 @@ export interface ConsoleCommandRequest {
   command: ConsoleCommandName;
   target: ConsoleWorkbenchTarget;
   params?: Record<string, unknown>;
+  /** As for a send: the caller the command is made for. */
+  expectedCallerScope?: string | null;
 }
 
 export interface ConsoleCommandResult {
@@ -534,33 +543,35 @@ export function createHttpConsoleTransport({
   fetchTimeoutMs?: number | (() => number);
 }): MetaConsoleTransport {
   const timeout = () => typeof fetchTimeoutMs === "function" ? fetchTimeoutMs() : fetchTimeoutMs;
-  // Who this transport acts as: the latest `meta/console/whoami` answer.
-  // Every command, send and upload names it (`expected_caller_scope`), so the
-  // gateway refuses a change made for anyone else instead of making it as
-  // them. Each `whoami()` reads again, so a console that loads again after a
-  // user switch names the caller its own read found; the first change waits
-  // for a read when none has answered yet. A failed read keeps the previous
-  // answer, and a gateway without whoami (method not found) is not asked
-  // again by a change: its changes name no caller.
-  let known: ConsoleWhoami | undefined;
+  // Who this transport acts as: the caller of its first answered
+  // `meta/console/whoami` read. Every command, send and upload names it
+  // (`expected_caller_scope`), so the gateway refuses a change made for
+  // anyone else instead of making it as them. A later answer for another
+  // caller (someone else signed in to this browser) never rebinds the
+  // transport; `whoami()` still reads again and says who the gateway serves
+  // now. The first change waits for a read when none has answered, and while
+  // none has, the change is refused here (`caller_unknown`): nothing is sent.
+  // A gateway without whoami (method not found) is not asked again by a
+  // change: its changes name no caller. A request that names its caller
+  // (`expectedCallerScope`, the console instance's own) names that one.
+  let bound: ConsoleWhoami | undefined;
   let reading: Promise<ConsoleWhoami> | undefined;
-  let reads = 0;
   let unsupported = false;
   const whoami = (): Promise<ConsoleWhoami> => {
-    const sequence = ++reads;
     const read = callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.whoami, {}, timeout()).then(normalizeWhoami);
     reading = read;
     void read.then(
-      (value) => { if (sequence === reads) known = value; },
+      (value) => { bound ??= value; },
       (error: unknown) => { if (isJsonRpcMethodNotFoundError(error)) unsupported = true; },
     ).finally(() => { if (reading === read) reading = undefined; });
     return read;
   };
-  const callerScope = async (): Promise<string | undefined> => {
+  const callerScope = async (named: string | null | undefined): Promise<string | undefined> => {
+    if (named !== undefined) return named ?? undefined;
+    if (!bound && !unsupported) await (reading ?? whoami()).catch(() => undefined);
+    if (bound) return bound.callerScope;
     if (unsupported) return undefined;
-    const pending = reading ?? (known ? undefined : whoami());
-    if (pending) await pending.catch(() => undefined);
-    return known?.callerScope;
+    throw consoleCallerUnknownFailure();
   };
   return {
     loadExperience: () => fetchJson<ConsoleExperience>(baseUrl, CONSOLE_REST_PATHS.experience, timeout()),
@@ -575,7 +586,7 @@ export function createHttpConsoleTransport({
     }),
     send: async (input) => {
       const handlingMode = input.handlingMode ?? "queue";
-      const scope = await callerScope();
+      const scope = await callerScope(input.expectedCallerScope);
       if (input.attachments?.length) {
         return sendConsoleMultipart(
           baseUrl,
@@ -610,7 +621,7 @@ export function createHttpConsoleTransport({
         }
         params.identity = identity;
       }
-      Object.assign(params, callerScopeParam(await callerScope()));
+      Object.assign(params, callerScopeParam(await callerScope(input.expectedCallerScope)));
       input.signal?.throwIfAborted();
       let result: unknown;
       try {
@@ -630,7 +641,7 @@ export function createHttpConsoleTransport({
         result,
       };
     },
-    upload: async (input) => uploadConsoleBlobMultipart(baseUrl, input, timeout(), await callerScope()),
+    upload: async (input) => uploadConsoleBlobMultipart(baseUrl, input, timeout(), await callerScope(input.expectedCallerScope)),
     readBlob: (input) => readConsoleBlob(baseUrl, input.blobId, timeout(), input.signal),
     blobUrl: (blobId) => `${baseUrl}${CONSOLE_BLOB_PATH_PREFIX}${encodeURIComponent(blobId)}`,
   };

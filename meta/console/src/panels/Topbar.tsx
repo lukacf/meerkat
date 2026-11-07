@@ -16,8 +16,29 @@ export interface TopbarIdentity {
   detail: string;
   /** The host's sign-out (console configuration `[sign_out]`). */
   signOut?: { href: string; method: "get" | "post" };
-  /** Runs right before the browser leaves for the sign-out. */
-  onSignOut?: () => void;
+  /** Runs before the browser leaves for the sign-out; a returned promise
+   * holds the browser until it settled. */
+  onSignOut?: () => Promise<void> | void;
+}
+
+/** Runs the sign-out first: when it returns a promise, the browser leaves
+ * (`leave`) once that settled instead of at once. */
+function signOutThen(event: React.SyntheticEvent, onSignOut: TopbarIdentity["onSignOut"], leave: () => void): void {
+  const pending = onSignOut?.();
+  if (!pending) return;
+  event.preventDefault();
+  void pending.then(leave, leave);
+}
+
+/** Posts to the host's sign-out from a form of its own, so the browser
+ * leaves even when the popover closed in the meantime. */
+function postSignOut(href: string): void {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = href;
+  form.hidden = true;
+  document.body.append(form);
+  form.submit();
 }
 
 interface TopbarProps {
@@ -215,11 +236,20 @@ function IdentityChip({ identity }: { identity: TopbarIdentity }): React.JSX.Ele
         <p className="meta-topbar__identity-name">{identity.label}</p>
         <p className="meta-topbar__identity-detail">{identity.detail}</p>
         {signOut?.method === "post" ? (
-          <form method="post" action={signOut.href} className="meta-topbar__identity-sign-out" onSubmit={() => identity.onSignOut?.()}>
+          <form
+            method="post"
+            action={signOut.href}
+            className="meta-topbar__identity-sign-out"
+            onSubmit={(event) => signOutThen(event, identity.onSignOut, () => postSignOut(signOut.href))}
+          >
             <Button type="submit" size="sm">Sign out</Button>
           </form>
         ) : signOut ? (
-          <a className="cc-btn cc-btn--sm meta-topbar__identity-sign-out" href={signOut.href} onClick={() => identity.onSignOut?.()}>
+          <a
+            className="cc-btn cc-btn--sm meta-topbar__identity-sign-out"
+            href={signOut.href}
+            onClick={(event) => signOutThen(event, identity.onSignOut, () => window.location.assign(signOut.href))}
+          >
             Sign out
           </a>
         ) : null}

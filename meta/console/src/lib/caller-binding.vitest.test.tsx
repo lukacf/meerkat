@@ -2,7 +2,7 @@ import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConsoleApp } from "../ConsoleApp";
-import type { ConsoleWhoami, MetaConsoleTransport } from "./headless";
+import type { ConsoleCommandRequest, ConsoleWhoami, MetaConsoleTransport } from "./headless";
 import { useVoiceController } from "./use-voice-controller";
 import { createNativeMcpAppsHost } from "../mcp-apps/native-host";
 
@@ -144,6 +144,16 @@ describe("the caller is bound to the console instance", () => {
     expect(sends[0].expected_caller_scope).toBe("caller-a");
   });
 
+  it("names the instance's caller on its commands", async () => {
+    const fake = transport(async () => whoamiFor("a"));
+    fake.capabilities = async () => ({ version: "test", methods: ["meta/console/send", "meta/console/timeline", "meta/gating/pending", "meta/gating/decide"] }) as never;
+    const executeCommand = vi.fn(async (input: ConsoleCommandRequest) => ({ command: input.command, accepted: true, result: { pending: [] } }) as never);
+    fake.executeCommand = executeCommand;
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await waitFor(() => expect(executeCommand).toHaveBeenCalled());
+    expect(executeCommand.mock.calls.map(([input]) => input.expectedCallerScope)).toEqual(executeCommand.mock.calls.map(() => "caller-a"));
+  });
+
   it("sends nothing while every whoami read fails: the message reads Not sent", async () => {
     const send = vi.fn(async (input: Parameters<MetaConsoleTransport["send"]>[0]) => ({ interaction_id: "sent", identity: input.identity }));
     const fake = transport(async () => { throw Object.assign(new Error("whoami unavailable"), { httpStatus: 503 }); }, send);
@@ -153,7 +163,30 @@ describe("the caller is bound to the console instance", () => {
     await compose("Nobody knows who sends this");
     await settle(500);
     expect(send).not.toHaveBeenCalled();
-    expect(await screen.findByText(/Not sent/)).toBeVisible();
+    expect(await screen.findByText("Not sent")).toBeVisible();
+  });
+
+  it("reads a failed whoami again with its next experience load, and then names that caller", async () => {
+    let reads = 0;
+    const send = vi.fn(async (input: Parameters<MetaConsoleTransport["send"]>[0]) => ({ interaction_id: "sent", identity: input.identity }));
+    const fake = transport(async () => {
+      if (++reads === 1) throw Object.assign(new Error("whoami unavailable"), { httpStatus: 503 });
+      return whoamiFor("a");
+    }, send);
+    let receive: ((frame: never) => void) | undefined;
+    fake.subscribeTimeline = (_input, next) => { receive = next as never; return () => {}; };
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await screen.findByTestId(`chat-composer:${identity}`);
+    await waitFor(() => expect(receive).toBeTypeOf("function"));
+    await settle();
+    expect(reads).toBe(1);
+    // A topology change loads the experience again: the caller is read with it.
+    await act(async () => { receive?.({ id: "refresh", event: "topology_updated", timestampMs: 2, data: {} } as never); });
+    await waitFor(() => expect(screen.getByTestId("identity-chip")).toHaveTextContent("a@example.test"));
+    expect(reads).toBe(2);
+    await compose("Sent once the caller is known");
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0][0].expectedCallerScope).toBe("caller-a");
   });
 });
 

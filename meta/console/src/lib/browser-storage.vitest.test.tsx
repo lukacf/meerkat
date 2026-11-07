@@ -102,12 +102,15 @@ describe("storage hygiene", () => {
     const chip = await screen.findByTestId("identity-chip");
     fireEvent.click(within(chip).getByRole("button", { name: /a@example\.test/ }));
     const signOut = await screen.findByRole("button", { name: "Sign out" });
+    const leave = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
     fireEvent.submit(signOut.closest("form")!);
     // a's queue and drafts leave this browser; b's stay untouched.
     expect(window.localStorage.getItem(consoleSendStorageKey(namespaceOf("a"), identity))).toBeNull();
     expect(storageKeys(window.sessionStorage).filter((key) => key.includes(encoded))).toEqual([]);
     expect(JSON.parse(window.localStorage.getItem(consoleSendStorageKey(namespaceOf("b"), identity))!).attempts[0].text).toBe("Queued by b");
     expect(JSON.parse(window.localStorage.getItem(CALLER_KEY)!).caller).toBeNull();
+    // Then the browser leaves for the host's sign-out.
+    await waitFor(() => expect(leave).toHaveBeenCalledTimes(1));
   });
 
   it("a tab told of a sign-out removes its own drafts", async () => {

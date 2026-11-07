@@ -288,8 +288,11 @@ async function fetchWithConsoleTimeout<T>(
  * browser cannot tell a gateway it never reached from a response lost after
  * the gateway handled the request, so this never implies "not sent".
  * `sign_in_redirect`: a front answered with a redirect to its sign-in page,
- * so the request never reached the gateway and the browser must sign in. */
-export type ConsoleTransportFailureKind = "timeout" | "connection_failed" | "invalid_response" | "sign_in_redirect";
+ * so the request never reached the gateway and the browser must sign in.
+ * `caller_unknown`: the console refused the request before sending it: it
+ * does not know the caller it acts for (no `meta/console/whoami` read has
+ * answered), and no change leaves without naming its caller. */
+export type ConsoleTransportFailureKind = "timeout" | "connection_failed" | "invalid_response" | "sign_in_redirect" | "caller_unknown";
 export interface ConsoleTransportFailure extends Error {
   httpStatus?: number;
   transportFailure?: ConsoleTransportFailureKind;
@@ -305,6 +308,14 @@ export interface ConsoleTransportFailure extends Error {
 function signInRedirectFailure(label: string): ConsoleTransportFailure {
   const failure = new Error(`${label}: a sign-in page answered instead of the gateway`) as ConsoleTransportFailure;
   failure.transportFailure = "sign_in_redirect";
+  return failure;
+}
+
+/** A request the console refused before sending it: it does not know the
+ * caller it acts for yet, and no change leaves without naming its caller. */
+export function consoleCallerUnknownFailure(): ConsoleTransportFailure {
+  const failure = new Error("The console does not know who it acts for yet, so it sent nothing") as ConsoleTransportFailure;
+  failure.transportFailure = "caller_unknown";
   return failure;
 }
 
@@ -404,7 +415,7 @@ export async function fetchJson<T>(
  * console knows the caller it acts for (`meta/console/whoami`'s
  * `caller_scope`). The gateway refuses a change made for another caller
  * (`caller_changed`), and every read ignores it. */
-export function callerScopeParam(callerScope: string | undefined): { expected_caller_scope?: string } {
+export function callerScopeParam(callerScope: string | null | undefined): { expected_caller_scope?: string } {
   return callerScope ? { expected_caller_scope: callerScope } : {};
 }
 
@@ -581,13 +592,17 @@ export async function uploadConsoleBlobMultipart(
     "console multipart",
     timeoutMs,
   );
+  // Typed like a send's refusal, so an upload refused for another caller
+  // (`caller_changed`) or with an ended login (401) reaches the console's
+  // switch and sign-in state.
   if (!response.ok) {
-    const preview = await responseErrorPreview(response);
-    throw new Error(`${CONSOLE_RPC_METHODS.blobUpload} multipart failed ${response.status}${preview ? `: ${preview}` : ""}`);
+    throw await consoleResponseFailure(`${CONSOLE_RPC_METHODS.blobUpload} multipart failed`, response);
   }
-  const result = await response.json();
+  const result = await consoleResponseJson(`${CONSOLE_RPC_METHODS.blobUpload} multipart`, response);
   if (result.error) {
-    throw new Error(`${CONSOLE_RPC_METHODS.blobUpload} RPC error: ${result.error.message || JSON.stringify(result.error)}`);
+    const error = new Error(`${CONSOLE_RPC_METHODS.blobUpload} RPC error: ${result.error.message || JSON.stringify(result.error)}`);
+    (error as Error & { rpcError?: { code?: unknown; message?: unknown; data?: unknown } }).rpcError = result.error;
+    throw error;
   }
   const record = result.result && typeof result.result === "object"
     ? result.result as Record<string, unknown>

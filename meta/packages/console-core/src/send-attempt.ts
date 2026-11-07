@@ -36,6 +36,8 @@ export type ConsoleSendFailureKind =
   | "unauthenticated"
   /** The gateway serves another caller than the one the console sent for. */
   | "caller_changed"
+  /** The console did not know the caller it acts for, so it sent nothing. */
+  | "caller_unknown"
   | "access_denied"
   | "read_only"
   | "rejected"
@@ -185,7 +187,9 @@ const PRE_INGRESS_REFUSAL_STATUSES = new Set([400, 404, 405, 413, 414, 415, 422,
  * `definitely-rejected`: a 401, a typed `unauthenticated` or
  * `caller_not_current` refusal or a sign-in redirect (the request met a
  * front's sign-in page, not the gateway), a typed `caller_changed` refusal
- * (the gateway serves another caller than the console sent for), a 403 or
+ * (the gateway serves another caller than the console sent for), the
+ * console's own `caller_unknown` refusal (it did not know whom it sends for,
+ * so it sent nothing), a 403 or
  * typed `access_denied`, a typed read-only refusal, invalid params (-32602),
  * or a listed pre-ingress HTTP status. Network loss, timeouts, 5xx,
  * non-JSON answers and conflicts are `outcome-unknown`: the server may have
@@ -202,6 +206,10 @@ export function classifyConsoleSendFailure(error: unknown): ConsoleSendFailure {
   if (rpcKind === "caller_changed") {
     return { state: "definitely-rejected", kind: "caller_changed",
       message: "Not sent: this browser is now signed in as someone else. Nothing was sent." };
+  }
+  if (typed.transportFailure === "caller_unknown") {
+    return { state: "definitely-rejected", kind: "caller_unknown",
+      message: "Not sent: the console could not confirm whom this browser is signed in as. Nothing was sent." };
   }
   if (typed.transportFailure === "sign_in_redirect") {
     return { state: "definitely-rejected", kind: "unauthenticated",
@@ -284,6 +292,7 @@ export function consoleSendFailureLabel(attempt: Pick<ConsoleSendAttempt, "state
   switch (attempt.failureKind) {
     case "unauthenticated": return "Not authorized";
     case "caller_changed": return "Signed in as someone else";
+    case "caller_unknown": return "Sign-in not confirmed";
     case "access_denied": return "Not allowed";
     case "read_only": return "Console read-only";
     case "capability_unavailable": return "Send unavailable";
@@ -405,6 +414,7 @@ export function describeConsolePendingRow(
       switch (attempt.failureKind) {
         case "unauthenticated": return "Sign in again or check this connection's authentication. Then review your saved message before choosing Send again.";
         case "caller_changed": return "This browser is now signed in as someone else, so the console did not send it.";
+        case "caller_unknown": return "The console couldn't confirm whom you're signed in as, so it didn't send it. Try again in a moment.";
         case "access_denied": return `You don't have permission to message ${names.agent}.`;
         case "read_only": return "This console is read-only.";
         case "capability_unavailable": return "Sending isn't available here.";

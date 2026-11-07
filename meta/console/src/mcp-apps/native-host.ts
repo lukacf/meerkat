@@ -11,8 +11,14 @@ export interface NativeMcpAppsHostOptions {
   readOnly?: boolean;
   requestTimeoutMs?: number;
   /** The caller the console acts as (`meta/console/whoami`'s `caller_scope`):
-   * a tool call names it, and the gateway refuses one made for anyone else. */
-  callerScope?: () => string | undefined;
+   * a tool call names it, and the gateway refuses one made for anyone else.
+   * A tool call waits for it, and is not made when the getter refuses (the
+   * console does not know its caller). */
+  callerScope?: () => Promise<string | undefined> | string | undefined;
+  /** Hears a request the gateway refused (typed `httpStatus` and `kind`, the
+   * body's `error`), so an ended login or another caller reaches the
+   * console's sign-in state or its switch. */
+  reportFailure?: (error: unknown) => void;
 }
 
 /** The stock gateway remains the only owner of viewer, member and MCP admission. */
@@ -41,7 +47,16 @@ export function createNativeMcpAppsHost(options: NativeMcpAppsHostOptions): Cons
         body: JSON.stringify({ ...locator, ...params }),
       });
       controller.signal.throwIfAborted();
-      if (!response.ok) throw new Error(`MCP App request failed (HTTP ${response.status})`);
+      if (!response.ok) {
+        // Typed from the gateway's refusal (`{ error, message }`): a 401 or
+        // `caller_changed` is the console's to handle, as for its own requests.
+        const failure = Object.assign(new Error(`MCP App request failed (HTTP ${response.status})`), { httpStatus: response.status }) as Error & { httpStatus: number; kind?: string };
+        const body: unknown = await response.json().catch(() => null);
+        const kind = body && typeof body === "object" ? (body as { error?: unknown }).error : undefined;
+        if (typeof kind === "string") failure.kind = kind;
+        options.reportFailure?.(failure);
+        throw failure;
+      }
       const result: unknown = await response.json();
       controller.signal.throwIfAborted();
       return result;
@@ -89,7 +104,8 @@ export function createNativeMcpAppsHost(options: NativeMcpAppsHostOptions): Cons
         ...(resolved.canCallTools === true && !options.readOnly ? {
           async callTool(name: string, toolArgs: Record<string, unknown>, requestSignal: AbortSignal) {
             current(requestSignal);
-            const expectedCallerScope = options.callerScope?.();
+            const expectedCallerScope = await options.callerScope?.();
+            current(requestSignal);
             return CallToolResultSchema.parse(await request(CONSOLE_REST_PATHS.mcpAppsCallTool, original, {
               name, arguments: toolArgs, ...(expectedCallerScope ? { expectedCallerScope } : {}),
             }, requestSignal));

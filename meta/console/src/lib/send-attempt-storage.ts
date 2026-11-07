@@ -41,12 +41,16 @@ export interface ConsoleRemovableStorage {
  * offered once and no other user of this browser is offered them: the
  * unscoped queue, the predecessor console's queue of this scope, and a queue
  * kept under the host's namespace alone (`hostOnlyNamespace`, before the
- * console combined it with the user's scope).
+ * console combined it with the user's scope), with the storage lock's records
+ * of those queues. The storage removals are done when it returns; the promise
+ * settles once the lock records are gone too.
  */
-export function removeOlderConsoleQueues(storage: ConsoleRemovableStorage, namespace: string, destination: string, hostOnlyNamespace: string | null): void {
+export function removeOlderConsoleQueues(storage: ConsoleRemovableStorage, namespace: string, destination: string, hostOnlyNamespace: string | null): Promise<void> {
+  const older = [predecessorConsoleSendStorageKey(namespace, destination)];
+  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) older.push(consoleSendStorageKey(hostOnlyNamespace, destination));
   storage.removeItem(legacyConsoleQueueKey(destination));
-  storage.removeItem(predecessorConsoleSendStorageKey(namespace, destination));
-  if (hostOnlyNamespace && hostOnlyNamespace !== namespace) storage.removeItem(consoleSendStorageKey(hostOnlyNamespace, destination));
+  for (const key of older) storage.removeItem(key);
+  return forgetConsoleQueueLockRecords(older, []);
 }
 
 export interface ConsoleEnumerableStorage extends ConsoleRemovableStorage {
@@ -72,12 +76,58 @@ function removeKeysWithPrefixes(storage: ConsoleEnumerableStorage | null, prefix
  * Signing out: removes what this browser keeps for one user's console scope,
  * the queued messages of every agent (this console's and the predecessor
  * console's keys) from `local`, and the composer drafts from this tab's
- * `session` storage. Preferences stay.
+ * `session` storage. Preferences stay. The storage removals are done when it
+ * returns; the promise settles once the storage lock's records of the queues
+ * are gone too.
  */
-export function purgeConsoleSendScope(local: ConsoleEnumerableStorage | null, session: ConsoleEnumerableStorage | null, namespace: string): void {
+export function purgeConsoleSendScope(local: ConsoleEnumerableStorage | null, session: ConsoleEnumerableStorage | null, namespace: string): Promise<void> {
   const scope = encodeURIComponent(namespace);
-  removeKeysWithPrefixes(local, [`meta-send-attempts:v1:${scope}:`, `mobkit-send-attempts:v1:${scope}:`]);
+  const queues = [`meta-send-attempts:v1:${scope}:`, `mobkit-send-attempts:v1:${scope}:`];
+  removeKeysWithPrefixes(local, queues);
   removeKeysWithPrefixes(session, [`meta-composer-draft:v1:${scope}:`, `meta-composer-draft:v2:${scope}:`]);
+  return forgetConsoleQueueLockRecords([], queues);
+}
+
+/**
+ * Deletes the records the storage lock (`send-storage-lock.ts`) keeps in
+ * IndexedDB for the given queue keys and key prefixes. A record holds the
+ * last value its queue key had, so a queue removed from localStorage would
+ * otherwise stay readable there. A browser that never kept such records has
+ * no database, and none is created. Never rejects.
+ */
+async function forgetConsoleQueueLockRecords(keys: readonly string[], prefixes: readonly string[]): Promise<void> {
+  if (typeof indexedDB === "undefined" || !indexedDB) return;
+  // The lock helper's database and store (its source stays as reviewed).
+  const database = await new Promise<IDBDatabase | null>((resolve) => {
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open("meta-console-queue-locks");
+    } catch {
+      resolve(null);
+      return;
+    }
+    // No database yet: nothing to delete, and none is created.
+    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+  if (!database) return;
+  try {
+    if (!database.objectStoreNames.contains("locks")) return;
+    await new Promise<void>((resolve) => {
+      const transaction = database.transaction("locks", "readwrite");
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => resolve();
+      const store = transaction.objectStore("locks");
+      for (const key of keys) store.delete(key);
+      for (const prefix of prefixes) store.delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(0xffff)));
+    });
+  } catch {
+    // Storage denied or closing: nothing more can be removed here.
+  } finally {
+    database.close();
+  }
 }
 
 function parseConsoleSendDocument(raw: string | null, namespace: string, destination: string, now: number): ConsoleSendLoad {

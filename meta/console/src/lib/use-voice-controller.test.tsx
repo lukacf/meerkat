@@ -55,11 +55,15 @@ it("keeps the controller on rerender and disposes it when the gateway changes", 
   expect(create.mock.lastCall?.[0]).toBe("/second");
 });
 
-it("names the caller the console acts as on the session's requests, as the console learns it", () => {
-  let callerScope: string | undefined;
-  renderHook(() => useVoiceController("/gateway", () => callerScope));
+it("names the caller the console acts as on the session's requests, and reports the refused ones", async () => {
+  let callerScope: Promise<string | undefined> = new Promise(() => {});
+  const reported: unknown[] = [];
+  renderHook(() => useVoiceController("/gateway", () => callerScope, (error) => reported.push(error)));
   const sessionCaller = create.mock.lastCall?.[2];
-  expect(sessionCaller?.()).toBeUndefined();
-  callerScope = "caller-a";
-  expect(sessionCaller?.()).toBe("caller-a");
+  const sessionReport = create.mock.lastCall?.[3];
+  callerScope = Promise.resolve("caller-a");
+  await expect(sessionCaller?.()).resolves.toBe("caller-a");
+  const refused = Object.assign(new Error("refused"), { httpStatus: 401 });
+  sessionReport?.(refused);
+  expect(reported).toEqual([refused]);
 });

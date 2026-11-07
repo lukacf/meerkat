@@ -749,7 +749,7 @@ test("createHttpConsoleTransport falls back to legacy inspect RPC when the conso
     if (requestUrl.endsWith(CONSOLE_RPC_PATHS.jsonRpc)) {
       const body = JSON.parse(String(init?.body || "{}"));
       methods.push(body.method);
-      if (body.method === CONSOLE_RPC_METHODS.inspectIdentity) {
+      if (body.method === CONSOLE_RPC_METHODS.inspectIdentity || body.method === CONSOLE_RPC_METHODS.whoami) {
         return new Response(JSON.stringify({
           jsonrpc: "2.0",
           id: body.id,
@@ -777,8 +777,8 @@ test("createHttpConsoleTransport falls back to legacy inspect RPC when the conso
       accepted: true,
       result: { identity: "identity:lead", status: "legacy-ready" },
     });
-    // The first command reads who the connection acts as (this gateway does
-    // not answer, so the command names no caller).
+    // The first command reads who the connection acts as (this gateway has
+    // no whoami, so the command names no caller).
     assert.deepEqual(methods, [
       CONSOLE_RPC_METHODS.whoami,
       CONSOLE_RPC_METHODS.inspectIdentity,
@@ -802,6 +802,13 @@ test("createHttpConsoleTransport does not fall back on non-method-missing inspec
           jsonrpc: "2.0",
           id: body.id,
           error: { code: -32000, message: "backend unavailable" },
+        }), { status: 200 });
+      }
+      if (body.method === CONSOLE_RPC_METHODS.whoami) {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32601, message: "method not found" },
         }), { status: 200 });
       }
       if (body.method === "meta/inspect_identity") {

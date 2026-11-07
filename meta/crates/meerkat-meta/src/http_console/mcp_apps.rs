@@ -71,10 +71,9 @@ fn apps_enabled(state: &ConsoleJsonState) -> bool {
 
 impl ConsoleToolApplicationIngress {
     /// The ingress of a request [`route`] admitted, bound to the caller the
-    /// Console authenticated for it: its principal and the requester its app
-    /// actions run for ([`ToolApplicationIngress::requester`]), by the
-    /// console send rule. `None` for a person whose principal does not
-    /// qualify: such a caller is refused, never served as no one.
+    /// Console authenticated for it: its principal, and the requester its app
+    /// actions run for ([`ToolApplicationIngress::requester`]), which is the
+    /// requester the caller's console sends carry (its sender's).
     fn for_caller(
         (state, request, registration): Routed,
         headers: HeaderMap,
@@ -82,9 +81,9 @@ impl ConsoleToolApplicationIngress {
         public_identity: String,
         operation: Operation,
         auth: ConsoleHttpAuthContext,
-    ) -> Option<Self> {
-        let requester = auth.requester(&state.decisions.console).ok()?;
-        Some(Self {
+    ) -> Self {
+        let requester = auth.sender(&state.decisions).requester;
+        Self {
             state,
             headers,
             uri,
@@ -94,7 +93,7 @@ impl ConsoleToolApplicationIngress {
             operation,
             principal: auth.principal,
             requester,
-        })
+        }
     }
 
     /// Actual authenticated Console principal. `None` denotes a host-protected
@@ -480,17 +479,14 @@ async fn handle(
     let Ok((state, request, registration)) = route(state, request, lookup_operation).await else {
         return unavailable();
     };
-    let Some(ingress) = Ingress::for_caller(
+    let mut ingress = Arc::new(Ingress::for_caller(
         (state.clone(), request.clone(), registration),
         headers,
         uri,
         public_identity,
         lookup_operation,
         auth,
-    ) else {
-        return unavailable();
-    };
-    let mut ingress = Arc::new(ingress);
+    ));
     let Some(runtime) = state.runtime.as_ref() else {
         return unavailable();
     };
@@ -851,15 +847,14 @@ mcp_apps_sandbox_url = " "
                 .ok_or("the console admits the caller")?;
             let request = request(&session);
             let public_identity = request.identity.clone();
-            Ingress::for_caller(
+            Ok(Ingress::for_caller(
                 (state.clone(), request, None),
                 headers,
                 uri.clone(),
                 public_identity,
                 Operation::CallTool,
                 auth,
-            )
-            .ok_or_else(|| "the caller's ingress".into())
+            ))
         };
 
         let mut enforced = signed_in();

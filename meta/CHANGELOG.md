@@ -86,6 +86,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `#[serde(default)]`). A host that builds the struct literally adds
   `sign_out: None` to keep today's behaviour.
 
+- Forge: a single shared console account
+  (`{"authentication":"local-password"}`) no longer approves frontend
+  changes, answers the controller review or answers the Forge setup
+  bridge's prompts: each is refused with 403 `approver_unauthenticated`.
+  The native Toolkit setup panel's answers are refused by the console itself
+  (403). Reads stay open. Named accounts
+  (`{"authentication":"local-accounts"}`) sign each person in as themselves;
+  they need the Meta runtime, so on the MobKit runtime the console approves
+  nothing.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -124,6 +134,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   writes the draft store or writes a deploy's or a validation's archive and
   runs `rkat`, that its caller's login is still current, and is refused with
   `caller_not_current` otherwise; nothing is written or run.
+
+- Forge: logout also ends the login in the console
+  (`meta/console/sign_out`), so tokens minted for it stop working there;
+  when the console does not confirm, the front still ends its own session
+  and says so. Failed sign-ins are limited per account and per client
+  address, so one person's mistakes no longer lock out the others, and
+  login forms and sessions are bounded per address and per account. The
+  client address is the connection's peer, never a forwarded-for header;
+  an attempt counts before its password check, checks running at once are
+  capped, and every account costs the same scrypt check. Signing in over a
+  live session ends the earlier login, and a path with dot or empty
+  segments is refused.
+- Forge: with OIDC sign-in the console accepts only tokens the front
+  signed under its own issuer: not the provider's ID token, not another key
+  or issuer, not an unverified or missing email, and only the listed
+  people. A sign-in's state is spent once and bound to the browser that
+  started it; the provider's code exchange carries the PKCE verifier and
+  the client's credentials, and its tokens never reach the browser.
 
 ### Upgrade
 
@@ -187,6 +215,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out keeps them in the file but does not enforce them while it runs;
   they apply again after the upgrade.
 
+- Forge: a product application set up with one shared console account
+  moves to named accounts on its next update. Every later Build of its
+  source declares `local-accounts`, and the installation's owner accepts
+  that one change and no other: the update changes only
+  `application/console.json` (`local-password` to `local-accounts`); the
+  private fields, the installation's own account and password, and the
+  operator stay as they are. The installation's own account then becomes
+  the operator's personal account and the first administrator: if others
+  know its Console password, change it (Change private settings) when you
+  switch. Add an account for each further person with
+  `.venv/bin/python setup.py` on the deployment computer.
+- Forge: named accounts need the Meta runtime. An application on the MobKit
+  runtime keeps one shared account, whose console approves nothing.
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console. To approve there,
+  build the application again on the product route.
+- Forge: the console keeps its access rules in
+  `.mobkit/console-access.toml`, copied once from `config/access.toml` at
+  the first start. An installation whose console already rewrote
+  `config/access.toml` needs its original bytes restored once. A rollback
+  to a package built by an earlier Forge leaves that copy as it is, but the
+  earlier package's console reads `config/access.toml`, so the
+  administrators added in the console are missing there and access fails
+  closed. Do not add them again in that console: it would rewrite
+  `config/access.toml`, and Forge would then refuse to start, change or
+  update the installation. Update forward instead; the console then reads
+  its kept copy again.
+- Forge: OIDC sign-in is an application's own choice, for a new
+  installation: no update moves an installation to it or from it. Forge's
+  normal build route always produces named accounts, so OIDC must come from
+  the application's own source. Register
+  `<Console address>/login/callback` as a redirect URI with the identity
+  provider (`http://127.0.0.1:<port>/login/callback` for the local
+  Console). Keep `.mobkit/console-oidc-issuer` and
+  `.mobkit/console-oidc-signing.pem` in the installation's backups, and keep
+  those backups private: the console knows each person by the issuer, so a
+  new one makes everyone new to the console, and the key signs the console
+  tokens of every person, administrators included.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -234,6 +301,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the capabilities again before it sends another request. The changes are
   the ones a candidate launch refuses, read from one list as each handler
   parses its request.
+
+- Forge: named console accounts (`{"authentication":"local-accounts"}`).
+  The installation's own account comes from the same two private fields;
+  further accounts, one per person, are kept on the deployment computer as
+  password hashes and managed with the application's setup. At sign-in an
+  empty account name is the installation's own account. Each person is
+  their own principal in the console, its access rules and its records.
+- Forge: the front forwards native consent reads and decisions
+  (`/host/toolkit/consent/read` and `/decide`) under the setup routes'
+  rules, so people decide native consent in the console as themselves.
+- Forge: OIDC sign-in for the console
+  (`{"authentication":"oidc","issuer":...,"client_id":...,"client_secret":{"env":NAME}}`,
+  or `{"file":PATH}` for the secret). People sign in at the application's
+  identity provider with the authorization code flow, PKCE, state and
+  nonce. The front verifies the provider's ID token (its signature through
+  the provider's published keys, fetched again for an unknown key at most
+  every 30 seconds; issuer, audience, authorized party, expiry and issue
+  time within a minute, and the sign-in's nonce) and admits a verified
+  email that is the operator's (`CONSOLE_USER_ID`) or listed in
+  `CONSOLE_ALLOWED_EMAILS`. It keeps none of the provider's tokens and signs
+  the console's tokens itself, as its own issuer recorded once per
+  installation (`.mobkit/console-oidc-issuer`), with an ES256 key kept in
+  `.mobkit/console-oidc-signing.pem`; each token's subject carries the
+  provider's issuer and subject. The console gets the front's issuer and
+  public key only (`provider: "oidc"`). The client secret is referenced, by
+  a declared secret private field or a private file, never written into
+  source. Needs the Meta runtime.
 
 ### Changed
 
@@ -307,6 +401,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A candidate launch serves a `meta/mobpacks/validate` whose
   `rkat_validate` is `false`, which runs no `rkat`, whatever `rkatValidate`
   says; before, it refused it.
+
+- Forge builds new applications with named console accounts
+  (`local-accounts`). The operator signs in as before, with an empty account
+  name, and now signs in as a person.
 
 ### Fixed
 
@@ -397,6 +495,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   requests that wait for you, not the ones routed to another approver.
   Before, they counted every pending request, and a request decided
   elsewhere vanished at the next poll.
+
+- Forge: the controller review is open to every console administrator. It
+  starts at an administrator's first sign-in, or when an administrator
+  opens it if that start could not run, and stays open after that person
+  signs out, until their sign-in would have expired (8 hours).
+- Forge: the console keeps its access edits (a second administrator, rules,
+  groups) in its own live copy, `.mobkit/console-access.toml`, so they no
+  longer stop Forge from changing private settings, starting, updating,
+  downloading or supervising the installation. `config/access.toml` stays
+  the package's exact bytes and may list further admins after the
+  installation's own account. The copy is published only once complete,
+  and an empty copy, which only a start stopped while copying can leave, is
+  copied again with a warning, so access control stays on. A temporary file
+  that a start or setup stopped while writing leaves in `.mobkit` is removed
+  by a later one.
+
+### Known limitations
+
+- Forge: an application on the legacy ordinary route keeps one shared
+  console account, which decides nothing in its console: no frontend
+  changes, controller review or setup answers. Use the product route.
+- Forge: the same holds for an application on the MobKit runtime, since
+  named accounts need the Meta runtime.
+- Forge: OIDC sign-in needs the Meta runtime too. Signing out ends the
+  front's login and the console's tokens for it, not the person's session
+  at the identity provider: on a shared computer, **Continue to sign in**
+  can open the previous person's console without a prompt until they sign
+  out at the provider. A provider that does not send `email_verified: true`
+  signs nobody in. The front reaches the provider directly, not through a
+  proxy set in its environment.
+- Forge: sign-in forms and OIDC sign-ins waiting for the provider are
+  bounded per client address and in total; a full table drops its oldest
+  entry instead of refusing a new one, so one caller behind a shared address
+  cannot hold everyone else's sign-in off. A flood through one address can
+  still make other people's forms or waiting sign-ins expire early; put a
+  console that other computers reach behind a rate-limiting proxy.
 
 ## [0.9.10] - 2026-11-04
 

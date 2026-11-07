@@ -95,6 +95,19 @@ def application_setup_binding(settings, guide_id, deployment_id):
             "source_digest", "package_sha256")}}
 
 
+def protected_source_matches(host, name, content, pinned):
+    """Whether package bytes keep one protected file of this source owner.
+
+    Byte for byte, except the one change a setup owner accepts: its pinned
+    single shared Console account (`local-password`) arriving as named
+    accounts (`local-accounts`). The declared private fields and the access
+    file are protected files too, so they still compare exactly.
+    """
+    from .deployment_updates import CONSOLE_AUTHENTICATION_PATH, console_named_accounts_move
+    return content == pinned or (type(host) is ForgeApplicationHost and name == CONSOLE_AUTHENTICATION_PATH
+                                 and console_named_accounts_move(pinned, content))
+
+
 def owner_choices_match(host, files):
     """Whether a package keeps the protected choices of this source owner.
 
@@ -121,7 +134,8 @@ def owner_choices_match(host, files):
             or inventory is not None and host._accepted_inventory_pin is not None)
         and blueprint == host._blueprint and definition == host._definition.encode("utf-8")
         and target == host._target
-        and all(files.get(name, (None, None))[0] == pin.read() for name, pin in host._protected))
+        and all(protected_source_matches(host, name, files.get(name, (None, None))[0], pin.read())
+                for name, pin in host._protected))
 
 
 class ForgeApplicationHost:
@@ -467,16 +481,19 @@ class ForgeApplicationHost:
             pin.read()
         protected = dict(self._protected)
         for name in ("application/configuration.json", "application/console.json", "config/access.toml"):
-            original = protected[name].read()
+            entry = files.get(name)
             # Host-adopted public text uses the existing package mode projection.
-            if files.get(name) != (original, 0o644):
+            if (not isinstance(entry, tuple) or len(entry) != 2 or entry[1] != 0o644
+                    or not protected_source_matches(self, name, entry[0], protected[name].read())):
                 raise CustodyError("The installed viewer source differs from the original selected application.")
             path = _path(destination / name)
             installed = _read_protected_application_file(path, name)
             # Ordinary source publication honors the owner's private umask.
+            # The console keeps its access edits in its own live copy
+            # (.mobkit/console-access.toml), so these stay the exact bytes.
             if (path.lstat().st_uid != os.getuid() or installed.mode & ~0o644
                     or not installed.mode & 0o400
-                    or installed.content.encode("utf-8") != original):
+                    or installed.content.encode("utf-8") != entry[0]):
                 raise CustodyError("The installed viewer bytes or permissions changed before private settings validation.")
         self._validate_console_subject(settings)
         for pin in self._pins:
@@ -579,8 +596,13 @@ class ForgeApplicationHost:
         names = ["application/vendor/" + wheel.path.name for wheel in wheels]
         if len(set(names)) != len(names):
             raise CustodyError("The host-selected SDK/dependency wheels alias a package path.")
+        from .deployment_updates import CONSOLE_AUTHENTICATION_PATH, named_console_accounts_source
+        # A source pinned with one shared Console account declares named
+        # accounts in every later Build: the one change its update accepts.
+        moved = named_console_accounts_source(dict(self._protected)[CONSOLE_AUTHENTICATION_PATH].read())
         workspace.adopt_application_inputs(
-            {name: pin.path for name, pin in self._protected}, require_current=self.require_current)
+            {name: pin.path for name, pin in self._protected}, require_current=self.require_current,
+            replacements={} if moved is None else {CONSOLE_AUTHENTICATION_PATH: moved})
         for name, wheel in zip(names, wheels):
             self.require_current()
             workspace.adopt_wheel(name, wheel.path, wheel.sha256)
@@ -745,7 +767,8 @@ class ForgeApplicationHost:
             if ((self._product_source_custody is None and artifacts.selection != self._target)
                     or not _same_json_value(_json(package["blueprint.json"][0]), self._blueprint)
                     or package["config/mob.toml"][0] != self._definition.encode("utf-8")
-                    or any(pin.read() != package[name][0] for name, pin in self._protected)):
+                    or not all(protected_source_matches(self, name, package[name][0], pin.read())
+                               for name, pin in self._protected)):
                 raise CustodyError("Install completion differs from the original selected host source.")
             gateway = ProductGatewayFile.observe(ExactFile(
                 destination / ".bin" / artifacts.prefix / "bin/toolkit_gateway",

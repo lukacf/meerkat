@@ -56,6 +56,9 @@ export interface PendingApprovalSnapshot {
   requests: readonly PendingApproval[];
   decisions: Readonly<Record<string, ApprovalDecisionState>>;
   readOnly: boolean;
+  /** Why the requests are read-only, when the console knows it: `sign_in`
+   * when the caller is no signed-in person (only a person decides). */
+  readOnlyReason?: "sign_in";
   updatedAtMs?: number;
   error?: string;
 }
@@ -138,6 +141,7 @@ const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   approver_mismatch: "This request is waiting for another approver.",
   unknown_pending_id: "This request was already decided or has expired.",
   empty_principal: "Sign in to decide approvals.",
+  approver_unauthenticated: "Only a signed-in person can decide approvals. Sign in as yourself; nothing was decided.",
   gating_ids_unavailable: "The decision couldn't be recorded right now. Nothing changed; try again.",
 };
 export function approvalRefusal(error: unknown): ApprovalRefusal | null {
@@ -171,11 +175,14 @@ export function createPendingApprovalResource(input: {
   load(signal: AbortSignal): Promise<unknown>;
   decide(pendingId: string, action: ApprovalAction, signal: AbortSignal): Promise<unknown>;
   readOnly?: boolean;
+  /** Why `readOnly` holds, for the cards' words (see the snapshot's field). */
+  readOnlyReason?: "sign_in";
   environment?: ApprovalResourceEnvironment;
 }): PendingApprovalResource {
   const env = input.environment || browserEnvironment();
   let snapshot: PendingApprovalSnapshot = {
     scopeKey: input.scopeKey, status: "loading", requests: [], decisions: {}, readOnly: input.readOnly === true,
+    ...(input.readOnly === true && input.readOnlyReason ? { readOnlyReason: input.readOnlyReason } : {}),
   };
   const listeners = new Set<() => void>();
   const lifetime = new AbortController();

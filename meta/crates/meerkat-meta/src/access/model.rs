@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 pub const ACTION_AGENT_VIEW: &str = "agent.view";
 /// Send a message to an agent (console send / chat).
 pub const ACTION_AGENT_SEND: &str = "agent.send";
+/// Change an agent's console schedules: create, edit, pause, resume and
+/// delete them. A schedule is a deferred send, so each change also needs
+/// `agent.send`; this action lets a deployment keep some who may message an
+/// agent from changing its schedules. A configuration that names no
+/// schedule action grants it wherever it grants `agent.send`
+/// ([`normalize_access_config_for_schedule_actions`]).
+pub const ACTION_SCHEDULE_MANAGE: &str = "schedule.manage";
 /// Write durable identity-scoped memory records for future agent context.
 pub const ACTION_AGENT_MEMORY_WRITE: &str = "agent.memory.write";
 /// Delete durable identity-scoped memory records.
@@ -80,6 +87,10 @@ pub const ACTION_TOPOLOGY_CROSS_AUTHORITY: &str = "topology.cross_authority";
 pub const ACTION_MOBPACK_AUTHOR: &str = "mobpack.author";
 /// Execute a mobpack deploy on the host (`rkat mob run`).
 pub const ACTION_MOBPACK_DEPLOY: &str = "mobpack.deploy";
+/// Read the console audit log (`meta/console/audit`): who made each console
+/// change, when, and how it ended. Kept apart from `access.admin` so a
+/// reviewer can read the log without editing access.
+pub const ACTION_AUDIT_VIEW: &str = "audit.view";
 /// Read and mutate the access-control configuration itself.
 pub const ACTION_ACCESS_ADMIN: &str = "access.admin";
 
@@ -124,6 +135,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     "extension.manage",
     ACTION_AGENT_VIEW,
     ACTION_AGENT_SEND,
+    ACTION_SCHEDULE_MANAGE,
     ACTION_AGENT_MEMORY_WRITE,
     ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ,
@@ -152,6 +164,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_TOPOLOGY_CROSS_AUTHORITY,
     ACTION_MOBPACK_AUTHOR,
     ACTION_MOBPACK_DEPLOY,
+    ACTION_AUDIT_VIEW,
     ACTION_ACCESS_ADMIN,
 ];
 
@@ -399,29 +412,12 @@ fn pattern_mentions_memory(pattern: &str) -> bool {
 /// never rewritten again. Returns `true` when anything changed; callers log
 /// the recommendation to write explicit memory rules.
 pub fn normalize_access_config_for_memory_actions(config: &mut AccessControlConfig) -> bool {
-    let mentions_memory = config
-        .rules
-        .iter()
-        .flat_map(|rule| rule.actions.iter())
-        .any(|pattern| pattern_mentions_memory(pattern));
-    if mentions_memory {
-        return false;
-    }
-    let mut changed = false;
-    for rule in &mut config.rules {
-        let matches_view = rule
-            .actions
-            .iter()
-            .any(|pattern| action_pattern_matches(pattern, ACTION_AGENT_VIEW));
-        let matches_read = rule
-            .actions
-            .iter()
-            .any(|pattern| action_pattern_matches(pattern, ACTION_AGENT_MEMORY_READ));
-        if matches_view && !matches_read {
-            rule.actions.push(ACTION_AGENT_MEMORY_READ.to_string());
-            changed = true;
-        }
-    }
+    let changed = extend_rules_unless_family_named(
+        config,
+        pattern_mentions_memory,
+        ACTION_AGENT_VIEW,
+        ACTION_AGENT_MEMORY_READ,
+    );
     if changed {
         tracing::warn!(
             target: "meta::access",
@@ -429,6 +425,82 @@ pub fn normalize_access_config_for_memory_actions(config: &mut AccessControlConf
              agent.view is granted (write explicit agent.memory.read / mob.memory.read / \
              memory.quarantine.review rules to silence this)"
         );
+    }
+    changed
+}
+
+/// True when the pattern explicitly references the schedule action family:
+/// one of its dot-separated segments (with a trailing `.*` stripped) is
+/// `schedule`. Broad wildcards (`*`) already match `schedule.manage` and do
+/// not count.
+fn pattern_mentions_schedule(pattern: &str) -> bool {
+    pattern
+        .strip_suffix(".*")
+        .unwrap_or(pattern)
+        .split('.')
+        .any(|segment| segment == "schedule")
+}
+
+/// Migration compat for [`ACTION_SCHEDULE_MANAGE`]: configurations written
+/// before it existed keep working.
+///
+/// Console schedule writes used to need only `agent.send`. A configuration
+/// that mentions **no** schedule action in any rule gets `schedule.manage`
+/// on every rule matching `agent.send`, allow and deny rules alike, so
+/// "manage rides send" reproduces what its rules allowed before. A
+/// configuration that mentions a schedule action anywhere is taken
+/// literally. Like [`normalize_access_config_for_memory_actions`], the
+/// extension is materialized into the rule list, reaches the persisted TOML
+/// on the next admin save, and never rewrites a normalized configuration
+/// again. Returns `true` when anything changed.
+pub fn normalize_access_config_for_schedule_actions(config: &mut AccessControlConfig) -> bool {
+    let changed = extend_rules_unless_family_named(
+        config,
+        pattern_mentions_schedule,
+        ACTION_AGENT_SEND,
+        ACTION_SCHEDULE_MANAGE,
+    );
+    if changed {
+        tracing::warn!(
+            target: "meta::access",
+            "access config predates schedule.manage; granting it wherever agent.send is granted \
+             (write explicit schedule.manage rules to silence this)"
+        );
+    }
+    changed
+}
+
+/// Extend every rule that matches `carrier` to also cover `action`, allow and
+/// deny rules alike, unless some rule already names an action of the family
+/// `names_family` recognizes. Returns `true` when anything changed.
+fn extend_rules_unless_family_named(
+    config: &mut AccessControlConfig,
+    names_family: fn(&str) -> bool,
+    carrier: &str,
+    action: &str,
+) -> bool {
+    let named = config
+        .rules
+        .iter()
+        .flat_map(|rule| rule.actions.iter())
+        .any(|pattern| names_family(pattern));
+    if named {
+        return false;
+    }
+    let mut changed = false;
+    for rule in &mut config.rules {
+        let carries = rule
+            .actions
+            .iter()
+            .any(|pattern| action_pattern_matches(pattern, carrier));
+        let covers = rule
+            .actions
+            .iter()
+            .any(|pattern| action_pattern_matches(pattern, action));
+        if carries && !covers {
+            rule.actions.push(action.to_string());
+            changed = true;
+        }
     }
     changed
 }
@@ -669,6 +741,71 @@ mod tests {
         assert!(action_pattern_matches("agent.*", "agent.memory.read"));
         assert!(action_pattern_matches("*", "memory.quarantine.review"));
         assert!(!action_pattern_matches("agent.*", "mob.memory.read"));
+    }
+
+    /// A configuration that names no schedule action keeps the schedule
+    /// gate it had: `schedule.manage` rides every rule that matches
+    /// `agent.send`, allow and deny alike, `agent.*` included (it matches
+    /// the send but not the schedule action), and the rewrite runs once.
+    #[test]
+    fn schedule_naive_config_grants_manage_alongside_send() {
+        let mut deny_send = rule("deny-secret", &["agent.send"]);
+        deny_send.effect = AccessEffect::Deny;
+        deny_send.agents = vec!["identity:secret".to_string()];
+        let mut config = AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                rule("send-all", &["agent.send"]),
+                deny_send,
+                rule("agent-verbs", &["agent.*"]),
+                rule("view-one", &["agent.view"]),
+                rule("everything", &["*"]),
+            ],
+            ..AccessControlConfig::default()
+        };
+        assert!(normalize_access_config_for_schedule_actions(&mut config));
+        let actions_of = |id: &str| {
+            config
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .expect("rule")
+                .actions
+                .clone()
+        };
+        let manage = ACTION_SCHEDULE_MANAGE.to_string();
+        assert!(actions_of("send-all").contains(&manage));
+        assert!(
+            actions_of("deny-secret").contains(&manage),
+            "a send deny denies schedule changes too"
+        );
+        assert!(actions_of("agent-verbs").contains(&manage));
+        assert!(!actions_of("view-one").contains(&manage));
+        assert_eq!(actions_of("everything"), vec!["*".to_string()]);
+        assert!(!normalize_access_config_for_schedule_actions(&mut config));
+        assert_eq!(validate_access_config(&config), Ok(()));
+    }
+
+    /// A configuration that names a schedule action anywhere, exactly or by
+    /// its family's wildcard, is taken literally.
+    #[test]
+    fn config_naming_a_schedule_action_is_taken_literally() {
+        for named in ["schedule.manage", "schedule.*"] {
+            let mut config = AccessControlConfig {
+                rules: vec![
+                    rule("send-all", &["agent.send"]),
+                    rule("schedulers", &[named]),
+                ],
+                ..AccessControlConfig::default()
+            };
+            assert!(
+                !normalize_access_config_for_schedule_actions(&mut config),
+                "{named}"
+            );
+            assert_eq!(config.rules[0].actions, vec!["agent.send".to_string()]);
+            assert_eq!(validate_access_config(&config), Ok(()), "{named}");
+        }
     }
 
     #[test]

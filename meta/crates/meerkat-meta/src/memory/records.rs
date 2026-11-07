@@ -244,11 +244,25 @@ impl RecordStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "author", rename_all = "snake_case")]
 pub enum MemoryAuthor {
-    Operator,
+    /// A person operating the platform. `principal` names them when the
+    /// write came from an authenticated console caller (the principal
+    /// `meta/console/whoami` reports); it is absent when the write names no
+    /// one, and on records written before it was kept, so such a record
+    /// keeps its JSON form `{"author": "operator"}`.
+    Operator {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        principal: Option<String>,
+    },
     Application,
-    Agent { identity: String },
-    Steward { run_id: String },
-    Distiller { run_id: String },
+    Agent {
+        identity: String,
+    },
+    Steward {
+        run_id: String,
+    },
+    Distiller {
+        run_id: String,
+    },
 }
 
 impl MemoryAuthor {
@@ -522,6 +536,35 @@ pub fn age_days(updated_at_ms: u64, now_ms: u64) -> u64 {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// An operator author names its person when it has one, and one without
+    /// keeps the JSON form records written before had.
+    #[test]
+    fn an_operator_author_names_its_person_and_keeps_its_old_form() {
+        let anonymous = MemoryAuthor::Operator { principal: None };
+        assert_eq!(
+            serde_json::to_value(&anonymous).expect("encode"),
+            serde_json::json!({ "author": "operator" })
+        );
+        assert_eq!(
+            serde_json::from_value::<MemoryAuthor>(serde_json::json!({ "author": "operator" }))
+                .expect("decode"),
+            anonymous
+        );
+        let person = MemoryAuthor::Operator {
+            principal: Some("bob@example.test".to_string()),
+        };
+        let encoded = serde_json::to_value(&person).expect("encode");
+        assert_eq!(
+            encoded,
+            serde_json::json!({ "author": "operator", "principal": "bob@example.test" })
+        );
+        assert_eq!(
+            serde_json::from_value::<MemoryAuthor>(encoded).expect("decode"),
+            person
+        );
+        assert!(!person.is_llm());
+    }
 
     #[test]
     fn trust_tier_order_matches_lattice_authority() {

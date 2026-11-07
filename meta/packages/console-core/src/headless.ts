@@ -56,6 +56,17 @@ export interface ConsoleCapabilities {
   topologyControl?: ConsoleTopologyControlCapabilities;
 }
 
+/** Who the console acts as for this connection (`meta/console/whoami`). */
+export interface ConsoleWhoami {
+  /** `person`, `service`, `token_principal` or `anonymous`; read others as not a person. */
+  actorKind: string;
+  principal?: string;
+  approverIds: string[];
+  canAdminister: boolean;
+  callerScope?: string;
+  loginExpiresAtMs?: number;
+}
+
 export interface ConsoleTimelineQueryInput {
   signal?: AbortSignal;
   identity?: string;
@@ -456,6 +467,9 @@ export interface MetaConsoleTransport {
   loadExperience(): Promise<ConsoleExperience>;
   loadModules?(): Promise<ConsoleModulesResponse>;
   capabilities(): Promise<ConsoleCapabilities>;
+  /** Who the console acts as for this connection. Optional: a transport
+   * without it is never treated as a person, so approvals stay read-only. */
+  whoami?(): Promise<ConsoleWhoami>;
   queryTimeline(input: ConsoleTimelineQueryInput): Promise<ConsoleTimelinePage>;
   subscribeTimeline(
     input: ConsoleTimelineSubscribeInput,
@@ -520,6 +534,9 @@ export function createHttpConsoleTransport({
     loadModules: () => fetchJson<ConsoleModulesResponse>(baseUrl, CONSOLE_REST_PATHS.modules, timeout()),
     capabilities: async () => normalizeCapabilities(
       await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.capabilities, {}, timeout()),
+    ),
+    whoami: async () => normalizeWhoami(
+      await callConsoleRpc<unknown>(baseUrl, CONSOLE_RPC_METHODS.whoami, {}, timeout()),
     ),
     queryTimeline: (input) => queryTimeline(baseUrl, input, input.limit, timeout(), input.signal),
     subscribeTimeline: (input, onFrame, options) => subscribeTimelineEvents(baseUrl, input, onFrame, {
@@ -740,6 +757,24 @@ function normalizeCapabilities(value: unknown): ConsoleCapabilities {
     ...(record.topology_control && typeof record.topology_control === "object"
       ? { topologyControl: record.topology_control as ConsoleTopologyControlCapabilities }
       : {}),
+  };
+}
+
+/** A `meta/console/whoami` result; anything malformed reads as not a person. */
+export function normalizeWhoami(value: unknown): ConsoleWhoami {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const actor = record.actor && typeof record.actor === "object" ? record.actor as Record<string, unknown> : {};
+  const text = (field: unknown) => typeof field === "string" && field.trim() ? field : undefined;
+  const expiresAt = record.login_expires_at_ms;
+  return {
+    actorKind: text(actor.kind) ?? "anonymous",
+    ...(text(actor.principal) ? { principal: text(actor.principal) } : {}),
+    approverIds: Array.isArray(record.approver_ids)
+      ? record.approver_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      : [],
+    canAdminister: record.can_administer === true,
+    ...(text(record.caller_scope) ? { callerScope: text(record.caller_scope) } : {}),
+    ...(typeof expiresAt === "number" && Number.isFinite(expiresAt) ? { loginExpiresAtMs: expiresAt } : {}),
   };
 }
 

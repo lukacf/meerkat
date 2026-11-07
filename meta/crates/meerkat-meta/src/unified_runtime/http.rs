@@ -488,6 +488,7 @@ impl UnifiedRuntime {
             self.console_governed_ingress.clone(),
             self.console_session_fences().clone(),
             self.mob_announcements_slot(),
+            self.console_audit_log(),
         )
     }
 
@@ -683,6 +684,7 @@ impl UnifiedRuntime {
                     }
                 }),
                 self.has_explicit_provider_credentials(),
+                self.console_audit_log(),
             ))
             .merge(agent_events_sse_router_with_access_and_priming(
                 Arc::new(move |agent_id, cursor| {

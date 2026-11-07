@@ -58,6 +58,10 @@ export type ConsoleGatewayInteractionRejectedError = ConsoleInteractionRejectedE
 export interface ConsoleAgentAffordances {
   addressable?: boolean;
   can_send_message?: boolean;
+  /** Under enforced access: whether the viewer may change the agent's
+   * console schedules (`agent.send` and `schedule.manage`). Absent
+   * otherwise, where `can_send_message` decides. */
+  can_manage_schedules?: boolean;
   can_retire?: boolean;
   can_respawn?: boolean;
   runtime_mode?: string;

@@ -38,6 +38,35 @@ mod routine_tools;
 #[path = "console_acceptance_support/durable_steer.rs"]
 mod durable_steer;
 
+/// The person approval scenarios sign in as. The console decides approvals
+/// only as a verified person, so the open console also verifies this fixture
+/// issuer's tokens; a caller without a token stays anonymous.
+const FIXTURE_PERSON: &str = "operator@fixture.test";
+const FIXTURE_PERSON_SECRET: &str = "console-acceptance-person-secret";
+const FIXTURE_PERSON_ISSUER: &str = "http://127.0.0.1/console-acceptance";
+const FIXTURE_PERSON_AUDIENCE: &str = "console-acceptance";
+
+/// A day-long signed login token of [`FIXTURE_PERSON`].
+fn fixture_person_token() -> Result<String, FixtureError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    Ok(jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &json!({
+            "iss": FIXTURE_PERSON_ISSUER,
+            "aud": FIXTURE_PERSON_AUDIENCE,
+            "sub": FIXTURE_PERSON,
+            "email": FIXTURE_PERSON,
+            "email_verified": true,
+            "sid": "fixture-login",
+            "iat": now,
+            "exp": now + 24 * 60 * 60,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(FIXTURE_PERSON_SECRET.as_bytes()),
+    )?)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), FixtureError> {
     tracing_subscriber::fmt()
@@ -215,10 +244,10 @@ image_generation = {live_images}
         }
     }
     // Escalation is refused without a configured route, so the approval
-    // scenarios route it to the fixture operator, who decides the successor.
+    // scenarios route it to the fixture person, who decides the successor.
     runtime
         .set_gating_escalation_routes(meerkat_meta::runtime::GatingEscalationRoutes {
-            default: Some("fixture-operator".to_owned()),
+            default: Some(FIXTURE_PERSON.to_owned()),
             routes: BTreeMap::new(),
         })
         .await;
@@ -267,6 +296,14 @@ image_generation = {live_images}
         None,
     );
     open.console.ui.mcp_apps_sandbox_url = std::env::var("META_FIXTURE_APP_SANDBOX").ok();
+    open.trusted_oidc = meerkat_meta::console_auth_config::parse_console_auth_config(&json!({
+        "provider": "jwt",
+        "shared_secret": FIXTURE_PERSON_SECRET,
+        "issuer": FIXTURE_PERSON_ISSUER,
+        "audience": FIXTURE_PERSON_AUDIENCE,
+        "accounts": "personal",
+    }))?
+    .trusted_oidc;
     let authenticated = RuntimeDecisionState::local_console(ConsolePolicy::default(), None);
     let aggregate = console_json_router_with_aggregator(
         open.clone(),
@@ -324,6 +361,12 @@ image_generation = {live_images}
             }
         }))
         .route("/peers", get(move || async move { Json(json!(peers)) }))
+        .route("/person-token", get(|| async {
+            match fixture_person_token() {
+                Ok(token) => (axum::http::StatusCode::OK, Json(json!({"token": token, "principal": FIXTURE_PERSON}))),
+                Err(error) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": error.to_string()}))),
+            }
+        }))
         .route("/approval", post(move |Json(value): Json<Value>| {
             let runtime = approval_runtime.clone();
             async move {

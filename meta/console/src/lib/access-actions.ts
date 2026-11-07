@@ -6,6 +6,7 @@
 const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "agent.view": "View agents",
   "agent.send": "Message agents",
+  "schedule.manage": "Change agents' schedules",
   "agent.memory.read": "Read agent memory",
   "agent.memory.write": "Write agent memory",
   "agent.memory.delete": "Delete agent memory",
@@ -34,6 +35,7 @@ const ACCESS_ACTION_WORDS: Readonly<Record<string, string>> = {
   "topology.cross_authority": "Connect agents across teams",
   "mobpack.author": "Author team packages",
   "mobpack.deploy": "Deploy team packages",
+  "audit.view": "Read the console audit log",
   "access.admin": "Administer console access",
   "extension.read": "Read extension state",
   "extension.edit": "Edit extension state",
@@ -49,12 +51,14 @@ const FAMILY_WORDS: Readonly<Record<string, string>> = {
   "mob.memory": "team memory",
   memory: "memory",
   "memory.quarantine": "quarantine",
+  schedule: "schedule",
   gating: "approval",
   workgraph: "work item",
   runtime: "routing and wiring",
   topology: "topology",
   mobpack: "team package",
   access: "console access",
+  audit: "audit",
   extension: "extension",
 };
 

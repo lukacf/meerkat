@@ -129,7 +129,7 @@ export function authorLine(author: MemoryAuthor | undefined): string {
     case "distiller":
       return author.run_id ? `distiller run ${author.run_id}` : "distiller";
     case "operator":
-      return "operator";
+      return author.principal ? `operator ${author.principal}` : "operator";
     case "application":
       return "application";
   }
@@ -259,7 +259,7 @@ export function authorDisplay(
     case "distiller":
       return "The memory distiller";
     case "operator":
-      return "An operator";
+      return author.principal ? `${author.principal} (operator)` : "An operator";
     case "application":
       return "The application";
     default:

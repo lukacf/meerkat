@@ -81,7 +81,9 @@ impl QuarantineReviewer {
     /// the LLM-authored judgment stage (§10.2 lattice rules key off this).
     pub fn author(&self) -> MemoryAuthor {
         match self {
-            Self::Operator { .. } => MemoryAuthor::Operator,
+            Self::Operator { principal } => MemoryAuthor::Operator {
+                principal: principal.clone(),
+            },
             Self::Steward { run_id } => MemoryAuthor::Steward {
                 run_id: run_id.clone(),
             },
@@ -466,7 +468,7 @@ mod tests {
     fn reviewers_author_their_batches() {
         assert_eq!(
             QuarantineReviewer::Operator { principal: None }.author(),
-            MemoryAuthor::Operator
+            MemoryAuthor::Operator { principal: None }
         );
         assert_eq!(
             QuarantineReviewer::Steward {

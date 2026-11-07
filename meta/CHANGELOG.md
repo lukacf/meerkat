@@ -35,6 +35,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   answer `409` and `401`. `/console/mcp-apps/call-tool` answers `409`
   `caller_changed`, and a call whose caller's login ended while it ran gets
   the route's `403` `mcp_app_unavailable`.
+- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
+  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
+  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
+  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
+
+- The console's `meta/gating/decide` decides as the signed-in person on the
+  connection. A request that names `approver_id` is refused (`-32602`), and
+  a caller that is not a verified, current person (no token on an open
+  console, a service token, a token that names no human, a shared-account
+  token, or a login that ended while the decision waited) is refused with
+  the new refusal code `-32057`, kind `approver_unauthenticated`; nothing is
+  decided. A login that ended before the console took the request up is
+  `-32056` `caller_not_current`. The stdio RPC gateway still takes
+  `approver_id`.
+- Console memory quarantine reviews (`meta/memory/quarantine/decide`) and
+  WorkGraph goal confirmations (`meta/workgraph/goal/confirm`) follow the
+  same rule: a caller that is not a verified, current person is refused
+  with `-32057` `approver_unauthenticated`, and the reviewer recorded on a
+  quarantine decision is always the person.
+- A console WorkGraph claim (`meta/workgraph/claim`) is owned by its
+  caller: the console sets the owner from the connection, an `owner` that
+  names anyone else or carries a `display_name` is refused (`-32602`), and
+  an open console's caller without a token is refused with `-32057`, kind
+  `person_authentication_required`. Only the claim's owner, or an access
+  admin, releases it from the console (`meta/workgraph/release`; anyone
+  else gets `-32030` `access_denied`). The stdio RPC gateway is unchanged.
+
+- Changing who a console schedule sends as is an explicit takeover:
+  `meta/schedule/update` or `meta/schedule/resume` by a caller who is not
+  the schedule's sender needs `take_over_sender: true`, and without it is
+  refused with `-32009` `sender_takeover_required` (a new refusal kind, with
+  `sender`, who the schedule sends as) and changes nothing. The stock
+  Console asks before it takes a schedule over.
+- Console schedule writes need the new access action `schedule.manage`
+  beside `agent.send`. An access configuration that names no schedule action
+  grants it wherever a rule grants or denies `agent.send`, so its rules keep
+  their meaning.
+- Every console access write needs `checked_v1`: a `meta/access/*` write
+  without it (its payload at the top level) is refused with `-32602`
+  `revision_required` (a new refusal kind) and changes nothing.
+- On a console without an access controller, `meta/console/revoke_sessions`
+  revokes only the caller's own sessions: naming another principal is
+  refused with `-32030` `access_denied`, and a caller no token identified
+  revokes none. On the console route `principal` may be left out, an
+  access admin's request included: it then names the caller, whose own
+  sessions are revoked (such a request was refused with `-32602` before).
+- `meta/schedule/create`, `meta/schedule/pause` and `meta/schedule/delete`
+  refuse a non-null `expected_revision` or `take_over_sender` with `-32602`
+  and the new refusal kind `unsupported_param` (with `param`); 0.9.10
+  accepted and ignored them.
 
 - The labels only Meta writes are reserved: `side_chat_of`,
   `side_chat_of_session`, `side_chat_creator` and `console.private_to`.
@@ -88,6 +138,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console side chat's `memory` tool writes to the side chat's own
   identity: it no longer writes to the agent it was forked from, whose
   tools it inherits.
+- Console approval decisions take the approver only from the signed-in
+  person on the connection, checked again right before the decision is
+  applied. Before, an open console decided as whatever approver a request
+  named.
+- Memory quarantine reviews and WorkGraph goal confirmations on the console
+  take their reviewer from the signed-in person too, and a WorkGraph claim
+  takes its owner from its caller. Before, an open console recorded a
+  review with no reviewer and a claim with whatever owner a request named,
+  and anyone who could manage the WorkGraph released anyone's claim.
+- A console quarantine review, goal confirmation and WorkGraph release read
+  the caller's grants again right before they are applied, as a gating
+  decision does: a grant withdrawn while they waited is refused (`-32030`).
+
+- An access edit on the console always names the revision it was made
+  against, so no edit lands over one its client never saw.
+- On a console without an access controller, a caller can no longer end
+  another person's sessions.
 
 ### Upgrade
 
@@ -109,6 +176,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `Host` serves the router on its own server instead;
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
+- An access configuration that names the new `audit.view` action is refused
+  by earlier releases (unknown action): keep it out of a configuration an
+  earlier gateway may still load.
+
+- Console clients stop sending `approver_id` to `meta/gating/decide`.
+  People who decide approvals in the console sign in as themselves (an OIDC
+  issuer, or an `auth_config` with `"accounts": "personal"`); a host that
+  decides for someone else uses the stdio RPC gateway (`rpc_gateway`).
+  `meta_gateway` serves no stdio decide route, and the stock console sends
+  no `Authorization` header of its own, so a `meta_gateway` console decides
+  only behind a front that forwards a person's token to an OIDC or
+  `"accounts": "personal"` `auth_config`. A Forge console behind the stock
+  front signs everyone in as one shared account (`provider: "jwt"` without
+  `accounts`), so its approvals stay read-only until its front signs people
+  in with named accounts.
+- Console clients send WorkGraph claims without an `owner`. A claim made
+  through an earlier console carries the owner that request named (the
+  stock console named the signed-in subject, or `console-ops-lead`
+  without sign-in): only a caller with that principal, or an access admin,
+  releases it from the console. Claims the stock console makes carry no
+  lease, so someone else's claim ends when an access admin releases it,
+  when the host releases it on its stdio RPC gateway (`rpc_gateway`;
+  `meta_gateway` serves none), or when its item is closed.
+
+- An access configuration saved by this release names `schedule.manage`
+  wherever it grants `agent.send`, and an earlier Meta refuses to load a
+  configuration that names it. To roll back, remove `schedule.manage` from
+  the rules, or restore the configuration saved before the upgrade.
+- A client that writes the access policy over `/console/rpc` without
+  `checked_v1` reads `owner_instance` and `revision` from `meta/access/get`
+  and sends the edit inside `checked_v1`; the stock Console already does.
+- To end another person's sessions on a console without an access
+  controller, call `meta/console/revoke_sessions` on the runtime's RPC
+  surface, or install an access controller and revoke as an access admin.
 
 ### Added
 
@@ -124,6 +225,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+- An access admin releases anyone's WorkGraph claim from the console. The
+  release is bound to its revision, and the work graph's Released event
+  records the admin and the claim released (`break_glass`).
+
+### Changed
+
+- The stock console sends no approver with a decision and shows approvals
+  read-only unless `meta/console/whoami` reports a signed-in person.
+- A console approval decision's audit entry records the assurance the
+  console established (`deciding_assurance`) and a digest of the login it
+  was made in (`login_scope_digest`), never the token or the login itself.
+- The stock console offers memory quarantine decisions and WorkGraph goal
+  confirmations only to a signed-in person, claims WorkGraph items as the
+  signed-in caller (an open console's caller without a token gets no
+  Claim) and offers Release on the caller's own claims, and to an access
+  admin on any claim. Read-only approvals tell a caller who is not a
+  signed-in person to sign in as themselves to decide.
+- `meta/capabilities` on the console lists `meta/gating/decide`,
+  `meta/memory/quarantine/decide` and `meta/workgraph/goal/confirm` only
+  to a signed-in person, and `meta/workgraph/claim`,
+  `meta/workgraph/release` and `meta/workgraph/attention/break_glass_reassign`
+  only to a caller with a principal: every other caller is always refused
+  them.
+- A gating decision made on the host's stdio RPC gateway, or by an
+  embedding host through the library, records `deciding_assurance`
+  `device_trusted` in its audit entry.
+
+- A console schedule keeps its sender history: `sender_history` names who
+  it sent as before each takeover and when it was taken over (the newest
+  16), shown to callers who may send to its agent.
+- Access action `schedule.manage` restricts who changes an agent's console
+  schedules. Under enforced access each agent's experience affordances
+  carry `can_manage_schedules`, and the stock Console offers schedule
+  changes only where it is true.
+
+### Fixed
+
+- Concurrent console schedule edits no longer overwrite each other:
+  `meta/schedule/update` and `meta/schedule/resume` take
+  `expected_revision`, the stock Console sends the revision it showed, and
+  a change made from an older read is refused with
+  `schedule_revision_conflict`. A pause, a delete and a create take no
+  revision and make no takeover: one that names `expected_revision` or
+  `take_over_sender` is refused with `-32602` `unsupported_param` (with
+  `param`). Each write answers the schedule as it left it.
+- A Console WorkGraph action acts on the revision its card or row showed,
+  never on one read at the click; an action whose card showed none changes
+  nothing, says so, and reads the item again.
 
 - A console side chat records who opened it: `meta/fork_member` writes the
   caller's console principal (the one `meta/console/whoami` reports) into
@@ -131,7 +280,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`null` for an anonymous caller of an open console). The label counts
   only on a side chat Meerkat's roster verifies; a `side_chat_creator`
   label set any other way, or copied from the forked agent, is dropped on
-  every surface. It records the creator and grants nothing.
+  every surface. It records the creator and grants nothing, and the
+  console shows it only to the creator and to the admins of an enforced
+  access policy.
+
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
+  change (a draft store write, a deploy with `execute`, a validation with
+  `rkat_validate`), a refusal included, writes a row naming the actor
+  (kind, principal, a person's verified issuer and subject, assurance and a
+  digest of the login, never the token), the method, its target
+  identifiers, the outcome and the owner's receipt; sends, voice and live
+  media are left out, and a request the console cannot authenticate writes
+  none. A row is bounded (at most 16 identifiers each way beyond the
+  change's known ones, which it keeps first, and 4 KiB in all) and says
+  when it left anything out (`truncated`), and the change and its row run
+  on the server, so a caller that goes away cuts neither short. A tool call
+  answered with an error after it reached the member's app is `failed`,
+  not `refused`. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), in two record sets each bounded by
+  count and age, the changes and the MCP app tool calls, so tool calls
+  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
+  and `console_tool_call_audit_limits`), and read with
+  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
+  `audit.view` access action. Its reads, and `meta/gating/audit`, report
+  `retention`: `durable` where the records survive a restart, `process`
+  where the gateway keeps them in memory.
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
+  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
+  gating state.
+- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
+  `supersede_by`, which write on behalf of a named author (the default
+  ignores the author and writes as `remember`, `forget` and `supersede`
+  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
+  who revoked.
+
+### Changed
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+- Memory written from the console names the person who wrote it: its
+  author, `application` before, is now the operator with the caller's
+  principal (an operator naming no one for an anonymous caller of an open
+  console). A quarantine review made in the console names its reviewer on
+  the record it releases.
+- A console session revocation records who revoked (`revoked_by` in the
+  fence record and the answer), and an access edit its author, time and
+  revision (`last_edit` on `meta/access/get`).
+
+### Fixed
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
 
 - The console experience's side chat rows carry `side_chat_audience`:
   `private_to_you`, `private_to_creator` (an access admin viewing another

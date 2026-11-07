@@ -450,7 +450,7 @@ test("headless command execution models lifecycle, routing, and gating commands 
       command,
       target: controlTarget("gating"),
       params: command === CONSOLE_COMMAND_NAMES.decideGating
-        ? { pending_id: "pending-1", approver_id: "operator", decision: "approve" }
+        ? { pending_id: "pending-1", decision: "approve" }
         : {},
     })).accepted, true);
     await assert.rejects(
@@ -686,6 +686,46 @@ test("createHttpConsoleTransport uses stock console routes and typed RPC methods
     ]);
   } finally {
     Date.now = originalNow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("createHttpConsoleTransport reads who the connection acts as", async () => {
+  const replies: unknown[] = [
+    {
+      actor: { kind: "person", principal: "reviewer@example.com", assurance: "person_authenticated" },
+      posture: "enforced",
+      login_expires_at_ms: 1_800_000_000_000,
+      can_administer: false,
+      approver_ids: ["role:reviewer", ""],
+      caller_scope: "scope-1",
+    },
+    { actor: { kind: "service", principal: "svc:robot", assurance: "service_credential" } },
+    { actor: null },
+  ];
+  const methods: string[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    assert.equal(String(url).endsWith(CONSOLE_RPC_PATHS.jsonRpc), true);
+    const body = JSON.parse(String(init?.body || "{}"));
+    methods.push(body.method);
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: replies.shift() }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const transport = createHttpConsoleTransport({ baseUrl: "http://console.test" });
+    assert.deepEqual(await transport.whoami?.(), {
+      actorKind: "person",
+      principal: "reviewer@example.com",
+      approverIds: ["role:reviewer"],
+      canAdminister: false,
+      callerScope: "scope-1",
+      loginExpiresAtMs: 1_800_000_000_000,
+    });
+    assert.equal((await transport.whoami?.())?.actorKind, "service");
+    // A malformed answer never reads as a person.
+    assert.equal((await transport.whoami?.())?.actorKind, "anonymous");
+    assert.deepEqual(methods, [CONSOLE_RPC_METHODS.whoami, CONSOLE_RPC_METHODS.whoami, CONSOLE_RPC_METHODS.whoami]);
+  } finally {
     globalThis.fetch = previousFetch;
   }
 });

@@ -91,9 +91,9 @@ pub use metadata::{
     LifecycleEffectFailure, LifecycleEffectIntent, LifecycleEffectKind, LifecycleEffectVerb,
     LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionBacklog, LifecycleProjectionCursor,
     MemberIdleRetireOverrideRecord, MetadataScope, MetadataStoreError, PersistentMetadataStore,
-    RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method, dispatch_labels_delete,
-    dispatch_labels_get, dispatch_labels_set, labels_to_json_value, parse_labels_param,
-    parse_run_id_param,
+    RecordRetention, RuntimeMetadataTable, SqliteMetadataStore, dispatch_label_method,
+    dispatch_labels_delete, dispatch_labels_get, dispatch_labels_set, labels_to_json_value,
+    parse_labels_param, parse_run_id_param,
 };
 pub(crate) use metadata::{
     METADATA_TABLE, create_metadata_table, decode_identity_record, encode_identity_record,
@@ -1074,6 +1074,15 @@ pub struct GatingDecider {
     pub held_approver_ids: BTreeSet<String>,
 }
 
+/// What the caller established about a decider's authentication, recorded
+/// with the decision: the assurance and a digest of the login the decision
+/// was made in. Never the token or the login itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatingDecisionEvidence {
+    pub(crate) assurance: meerkat_core::ApprovalAssurance,
+    pub(crate) login_scope_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatingDecideRequest {
     pub pending_id: String,
@@ -1367,6 +1376,9 @@ pub struct MetaRuntimeHandle {
     gating_escalation_routes: GatingEscalationRoutes,
     /// Wakes live readers when the audit changes. Carries no data.
     gating_changes: tokio::sync::broadcast::Sender<()>,
+    /// How long this owner's gating state is kept: `Durable` once the
+    /// runtime keeps it in a durable metadata store, `Process` otherwise.
+    gating_retention: RecordRetention,
     memory_sequence: u64,
     memory_assertions: Vec<MemoryAssertion>,
     memory_conflicts: BTreeMap<MemoryConflictKey, MemoryConflictSignal>,

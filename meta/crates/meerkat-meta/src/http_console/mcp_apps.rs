@@ -424,6 +424,20 @@ async fn handle(
     request: Request,
     operation: Operation,
 ) -> axum::response::Response {
+    handle_noting_dispatch(state, headers, uri, request, operation, None).await
+}
+
+/// [`handle`], noting in `dispatched` the moment the operation enters the
+/// member's tool application ([`execute`]): from then on its tool may have
+/// run, whatever the route answers.
+async fn handle_noting_dispatch(
+    state: ConsoleJsonState,
+    headers: HeaderMap,
+    uri: Uri,
+    request: Request,
+    operation: Operation,
+    dispatched: Option<&std::sync::atomic::AtomicBool>,
+) -> axum::response::Response {
     let Some(auth) = console_write_auth_context(&state, &headers, &uri) else {
         return console_json_error(
             StatusCode::UNAUTHORIZED,
@@ -555,6 +569,9 @@ async fn handle(
             },
             Operation::Resolve => unreachable!(),
         };
+        if let Some(dispatched) = dispatched {
+            dispatched.store(true, std::sync::atomic::Ordering::Release);
+        }
         match execute(runtime, &request, operation, ingress.clone()).await {
             Ok(value) => value,
             Err(()) => return unavailable(),
@@ -603,7 +620,76 @@ pub(super) async fn call_tool(
     uri: Uri,
     Json(request): Json<Request>,
 ) -> axum::response::Response {
-    handle(state, headers, uri, request, Operation::CallTool).await
+    // Every tool call writes a row in the console audit log, among its tool
+    // calls, whatever its tool does: the console cannot tell whether a tool
+    // changes anything. The call and its row run on the server, so a caller
+    // that goes away cuts neither short. A caller the console cannot
+    // authenticate is answered 401 and writes none.
+    let intent = state.console_audit.as_ref().and_then(|log| {
+        let auth = console_write_auth_context(&state, &headers, &uri)?;
+        Some(audit::ConsoleAuditIntent::tool_call(
+            Arc::clone(log),
+            &auth,
+            crate::console_audit::target_of(&[
+                ("identity", Some(request.identity.as_str())),
+                ("tool", request.name.as_deref()),
+            ]),
+        ))
+    });
+    let Some(intent) = intent else {
+        return handle(state, headers, uri, request, Operation::CallTool).await;
+    };
+    let answered = intent
+        .run(
+            async move {
+                let dispatched = std::sync::atomic::AtomicBool::new(false);
+                let response = handle_noting_dispatch(
+                    state,
+                    headers,
+                    uri,
+                    request,
+                    Operation::CallTool,
+                    Some(&dispatched),
+                )
+                .await;
+                let (parts, body) = response.into_parts();
+                let body = axum::body::to_bytes(body, usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                audit::ToolCallAnswer {
+                    parts,
+                    body,
+                    dispatched: dispatched.load(std::sync::atomic::Ordering::Acquire),
+                }
+            },
+            lost_tool_call(),
+            audit::tool_call_row,
+        )
+        .await
+        .unwrap_or_else(lost_tool_call);
+    axum::response::Response::from_parts(answered.parts, axum::body::Body::from(answered.body))
+}
+
+/// The answer to a tool call whose task ended without one: a server error,
+/// as `console_json_error` answers it.
+fn lost_tool_call() -> audit::ToolCallAnswer {
+    let (mut parts, ()) = axum::http::Response::new(()).into_parts();
+    parts.status = StatusCode::INTERNAL_SERVER_ERROR;
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    audit::ToolCallAnswer {
+        parts,
+        body: axum::body::Bytes::from(
+            json!({
+                "error": "internal_error",
+                "message": "the tool call ended without an answer",
+            })
+            .to_string(),
+        ),
+        dispatched: false,
+    }
 }
 
 #[cfg(test)]
@@ -646,6 +732,7 @@ mod tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            console_audit: None,
         }
     }
 

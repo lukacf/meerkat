@@ -212,6 +212,7 @@ pub fn start_meta_runtime_with_options(
         gating_notice_queue: Vec::new(),
         gating_escalation_routes: GatingEscalationRoutes::default(),
         gating_changes: tokio::sync::broadcast::channel(64).0,
+        gating_retention: RecordRetention::Process,
         memory_sequence,
         memory_assertions,
         memory_conflicts,

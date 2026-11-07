@@ -169,6 +169,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A member's build-time memory, which every run of the member shares, no
   longer carries the operator memory of whoever spoke to it last.
 
+### Known limitations
+
+- Operator memory is not injected on governed sends: a Console send to an
+  agent whose input is governed (its host binds every input) recalls none
+  of the sender's operator memory.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

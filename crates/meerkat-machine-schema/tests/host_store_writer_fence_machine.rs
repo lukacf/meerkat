@@ -891,6 +891,65 @@ fn a_quarantine_records_each_conflicted_incarnation_under_its_key() {
     }
 }
 
+// A recorded incarnation reported for a key not quarantined yet adds that
+// key and leaves its record as it is: a chunk's conflict, recorded by the
+// open's listing under the chunk's own name, that its owner's load meets
+// later. Reported again for that key it changes nothing; a poisoned key
+// refuses it.
+#[test]
+fn a_recorded_incarnation_quarantines_a_new_key_and_keeps_its_record() {
+    const CHUNK: &str = "ch:rrt:rx~w.1~w.2";
+    for phase in [
+        Phase::Live,
+        Phase::Stopped,
+        Phase::Acquiring,
+        Phase::Proving,
+        Phase::Resuming,
+        Phase::WaitingOut,
+    ] {
+        let mut authority = authority_in(phase);
+        apply(&mut authority, quarantined(CHUNK, CHUNK, 2, &[]));
+        let owner = apply(&mut authority, quarantined("rt:rx", CHUNK, 7, &["z"]));
+        assert!(
+            matches!(
+                effects(&owner).as_slice(),
+                [Effect::ScopeQuarantineRecorded { key, name }]
+                    if key == "rt:rx" && name == CHUNK
+            ),
+            "{phase:?}: {:?}",
+            effects(&owner)
+        );
+        let state = authority.state();
+        assert_eq!(state.lifecycle_phase, phase);
+        assert!(state.quarantined_keys.contains(CHUNK));
+        assert!(state.quarantined_keys.contains("rt:rx"), "{phase:?}");
+        assert_eq!(state.quarantine_versions.get(CHUNK), Some(&2));
+        assert_eq!(
+            state.quarantine_commit_ids.get(CHUNK).map(|ids| ids.len()),
+            Some(0),
+            "the record is never overwritten"
+        );
+
+        let before = authority.state().clone();
+        let again = apply(&mut authority, quarantined("rt:rx", CHUNK, 7, &["z"]));
+        assert!(effects(&again).is_empty());
+        assert_eq!(authority.state(), &before);
+    }
+
+    let mut authority = authority_in(Phase::Live);
+    apply(&mut authority, quarantined(CHUNK, CHUNK, 2, &[]));
+    apply(
+        &mut authority,
+        poisoned("rt:rx", ScopePoisonCause::Unsettled),
+    );
+    let before = authority.state().clone();
+    assert_refused(
+        &apply(&mut authority, quarantined("rt:rx", CHUNK, 2, &[])),
+        WriterFenceRefusal::Poisoned,
+    );
+    assert_eq!(authority.state(), &before);
+}
+
 // The first poison cause stands; a repeat changes nothing.
 #[test]
 fn a_scope_poison_keeps_its_first_cause() {

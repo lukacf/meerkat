@@ -1,6 +1,6 @@
-//! Approval branch spike (grants and approvals, 0.9.11): an approved work
-//! runs in a one-time branch of the grantee, a member fork made at an empty
-//! prefix, and resolves its approval grant with the branch as executor.
+//! Approval branches: an approved work runs in a one-time branch of its
+//! grantee, a member fork made at an empty prefix, and resolves its approval
+//! grant with the branch as executor.
 //!
 //! One persistent mob on a governed machine with the real generated grant
 //! owner. The grantee (`data-agent`) first answers a question of its own, so
@@ -8,14 +8,15 @@
 //! seated as a member of its own. The approved work names the branch as its
 //! executor; its basis selects one target, the peer directory, whose lineage
 //! ends at a child grant issued to the branch (the approval grant), and no
-//! base. Its one tool call (`peers`) must resolve that grant.
+//! base; its controller lineage ends at a controller grant the grantee issued
+//! to the branch. Its one tool call (`peers`) must resolve the approval
+//! grant.
 //!
 //! Rows:
 //! - the quiescent case;
 //! - the grantee mid-turn while the branch is forked;
-//! - the branch's controller lineage as the design states it (the grantee's
-//!   own lineage), recorded for what the grant owner answers;
-//! - the grantee's own principal as the branch's executor;
+//! - the grantee's own controller lineage does not serve its branch (so the
+//!   branch runs under a controller grant of its own);
 //! - a control: the approval grant revoked, the operation is refused.
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -80,8 +81,8 @@ use meerkat_runtime::meerkat_machine::{
 };
 
 const MODEL: &str = "claude-sonnet-4-5";
-const ENDPOINT: &str = "https://approval-branch-spike.invalid/messages";
-const REALM: &str = "approval-branch-spike";
+const ENDPOINT: &str = "https://approval-branch.invalid/messages";
+const REALM: &str = "approval-branch";
 /// The requester's ordinary question to the grantee.
 const GRANTEE_PROMPT: &str = "Which sources can you read for me?";
 const GRANTEE_ANSWER: &str = "the grantee's own answer";
@@ -201,7 +202,7 @@ fn model_facts() -> ModelAuthorizationFacts {
 
 fn action(verb: &str) -> ActionRef {
     ActionRef {
-        feature: "approval-branch-spike".into(),
+        feature: "approval-branch".into(),
         action: verb.into(),
     }
 }
@@ -234,7 +235,7 @@ fn verb_bounds(verb: &str) -> ExecutionRestrictions {
     bounds
 }
 
-/// The grant owner's grants for one spike.
+/// The grant owner's grants for one fixture.
 struct Grants {
     owner: Arc<LocalGrantAuthority>,
     /// The grantee's controller grant (unrestricted lifetime, delegable).
@@ -386,8 +387,7 @@ impl AdmittedWorkPolicyOwner for Invocation {
         let grantee_work =
             claims.ingress_actor == host_ingress() && claims.logical_executor == data_agent();
         let approved_work = claims.ingress_actor == decision_ingress()
-            && (claims.logical_executor == branch_executor()
-                || claims.logical_executor == data_agent());
+            && claims.logical_executor == branch_executor();
         if claims.requester != requester() || !(grantee_work || approved_work) {
             return Err(denied().into());
         }
@@ -691,7 +691,7 @@ fn mob_definition() -> MobDefinition {
 }
 
 /// One persistent governed mob with the grantee seated.
-struct Spike {
+struct Fixture {
     _realm: Arc<support::MemberRealm>,
     handle: MobHandle,
     _machine: Arc<MeerkatMachine>,
@@ -703,7 +703,7 @@ struct Spike {
     grantee_session: SessionId,
 }
 
-impl Spike {
+impl Fixture {
     async fn new() -> Self {
         let realm = support::member_realm();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -1054,28 +1054,28 @@ fn assert_branch_saw_only_the_approved_work(controller: &ScriptedController) {
 /// answered its own question; the approved work is admitted there with the
 /// branch as executor and its one operation resolves the approval grant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spike_an_approved_work_runs_in_an_empty_prefix_branch_of_a_quiescent_grantee() {
-    let spike = Spike::new().await;
-    completed(spike.ask_grantee(1).await, "the grantee's own question").await;
+async fn an_approved_work_runs_in_an_empty_prefix_branch_of_a_quiescent_grantee() {
+    let fixture = Fixture::new().await;
+    completed(fixture.ask_grantee(1).await, "the grantee's own question").await;
 
-    let branch = spike
+    let branch = fixture
         .fork_branch()
         .await
         .expect("the grantee forks at an empty prefix");
-    let approval = spike.grants.approval_to(&branch_executor());
-    let turn = spike
+    let approval = fixture.grants.approval_to(&branch_executor());
+    let turn = fixture
         .run_approved_work(
             &branch,
             branch_executor(),
             approval,
-            spike.grants.branch_controller(),
+            fixture.grants.branch_controller(),
         )
         .await
         .expect("the approved work is admitted into the branch");
     completed(turn, "the approved work").await;
 
-    assert_the_approved_operation_ran(&spike.controller);
-    assert_branch_saw_only_the_approved_work(&spike.controller);
+    assert_the_approved_operation_ran(&fixture.controller);
+    assert_branch_saw_only_the_approved_work(&fixture.controller);
 }
 
 /// The grantee is mid-turn (its own question's model request is held) when
@@ -1083,67 +1083,68 @@ async fn spike_an_approved_work_runs_in_an_empty_prefix_branch_of_a_quiescent_gr
 /// turn: the fork is made, the approved work runs in the branch, and the
 /// grantee's turn then completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spike_an_approved_work_runs_in_an_empty_prefix_branch_of_a_grantee_mid_turn() {
-    let spike = Spike::new().await;
+async fn an_approved_work_runs_in_an_empty_prefix_branch_of_a_grantee_mid_turn() {
+    let fixture = Fixture::new().await;
     // A first question, answered, so the grantee's transcript is not empty.
-    completed(spike.ask_grantee(1).await, "the grantee's first question").await;
-    spike.controller.grantee_released.send_replace(false);
-    let entered = spike.controller.grantee_entered.load(Ordering::SeqCst);
-    let grantee_turn = spike.ask_grantee(2).await;
+    completed(fixture.ask_grantee(1).await, "the grantee's first question").await;
+    fixture.controller.grantee_released.send_replace(false);
+    let entered = fixture.controller.grantee_entered.load(Ordering::SeqCst);
+    let grantee_turn = fixture.ask_grantee(2).await;
     tokio::time::timeout(BOUND, async {
-        while spike.controller.grantee_entered.load(Ordering::SeqCst) == entered {
+        while fixture.controller.grantee_entered.load(Ordering::SeqCst) == entered {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("the grantee's second turn is at its model request");
 
-    let branch = spike
+    let branch = fixture
         .fork_branch()
         .await
         .expect("a grantee mid-turn forks at an empty prefix");
-    let approval = spike.grants.approval_to(&branch_executor());
-    let turn = spike
+    let approval = fixture.grants.approval_to(&branch_executor());
+    let turn = fixture
         .run_approved_work(
             &branch,
             branch_executor(),
             approval,
-            spike.grants.branch_controller(),
+            fixture.grants.branch_controller(),
         )
         .await
         .expect("the approved work is admitted into the branch");
     completed(turn, "the approved work").await;
-    assert_the_approved_operation_ran(&spike.controller);
-    assert_branch_saw_only_the_approved_work(&spike.controller);
+    assert_the_approved_operation_ran(&fixture.controller);
+    assert_branch_saw_only_the_approved_work(&fixture.controller);
     assert_eq!(
-        spike.controller.grantee_entered.load(Ordering::SeqCst),
+        fixture.controller.grantee_entered.load(Ordering::SeqCst),
         entered + 1,
         "the grantee's second turn was still held while the branch ran"
     );
 
-    spike.controller.grantee_released.send_replace(true);
+    fixture.controller.grantee_released.send_replace(true);
     completed(grantee_turn, "the grantee's held turn").await;
 }
 
-/// The design's controller lineage for the approved work is the grantee's
-/// own, inherited by the branch. The grant owner resolves a controller
-/// lineage only for its leaf's grantee: with the branch as executor, the
-/// grantee's own lineage is refused at admission. Recorded, not hidden.
+/// The grantee's own controller lineage does not serve its branch: the
+/// grant owner resolves a controller lineage only for its leaf's grantee, so
+/// with the branch as executor the grantee's own lineage is refused at
+/// admission. The branch runs under a controller grant of its own, a child
+/// of the grantee's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spike_the_grantees_own_controller_lineage_does_not_resolve_for_the_branch() {
-    let spike = Spike::new().await;
-    completed(spike.ask_grantee(1).await, "the grantee's own question").await;
-    let branch = spike
+async fn the_grantees_own_controller_lineage_does_not_resolve_for_the_branch() {
+    let fixture = Fixture::new().await;
+    completed(fixture.ask_grantee(1).await, "the grantee's own question").await;
+    let branch = fixture
         .fork_branch()
         .await
         .expect("the grantee forks at an empty prefix");
-    let approval = spike.grants.approval_to(&branch_executor());
-    let admitted = spike
+    let approval = fixture.grants.approval_to(&branch_executor());
+    let admitted = fixture
         .run_approved_work(
             &branch,
             branch_executor(),
             approval,
-            vec![spike.grants.grantee_controller.clone()],
+            vec![fixture.grants.grantee_controller.clone()],
         )
         .await;
     match admitted {
@@ -1157,7 +1158,7 @@ async fn spike_the_grantees_own_controller_lineage_does_not_resolve_for_the_bran
         }
     }
     assert!(
-        spike
+        fixture
             .controller
             .approved_requests
             .lock()
@@ -1167,56 +1168,30 @@ async fn spike_the_grantees_own_controller_lineage_does_not_resolve_for_the_bran
     );
 }
 
-/// The other reading of the design: the branch runs as the grantee's own
-/// principal, so the approval grant is issued to the grantee and the
-/// grantee's own controller lineage serves the approved work in the branch.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spike_with_the_grantee_as_executor_its_own_controller_lineage_serves_the_branch() {
-    let spike = Spike::new().await;
-    completed(spike.ask_grantee(1).await, "the grantee's own question").await;
-    let branch = spike
-        .fork_branch()
-        .await
-        .expect("the grantee forks at an empty prefix");
-    let approval = spike.grants.approval_to(&data_agent());
-    let turn = spike
-        .run_approved_work(
-            &branch,
-            data_agent(),
-            approval,
-            vec![spike.grants.grantee_controller.clone()],
-        )
-        .await
-        .expect("the approved work is admitted into the branch");
-    completed(turn, "the approved work").await;
-    assert_the_approved_operation_ran(&spike.controller);
-    assert_branch_saw_only_the_approved_work(&spike.controller);
-}
-
 /// Control: the operation's authority is the approval grant. Revoked
 /// before the approved work runs, the same operation is refused before
 /// entry, while the work itself is still admitted on its controller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spike_a_revoked_approval_grant_refuses_the_approved_operation() {
-    let spike = Spike::new().await;
-    completed(spike.ask_grantee(1).await, "the grantee's own question").await;
-    let branch = spike
+async fn a_revoked_approval_grant_refuses_the_approved_operation() {
+    let fixture = Fixture::new().await;
+    completed(fixture.ask_grantee(1).await, "the grantee's own question").await;
+    let branch = fixture
         .fork_branch()
         .await
         .expect("the grantee forks at an empty prefix");
-    let approval = spike.grants.approval_to(&branch_executor());
-    spike.grants.revoke(&approval);
-    let turn = spike
+    let approval = fixture.grants.approval_to(&branch_executor());
+    fixture.grants.revoke(&approval);
+    let turn = fixture
         .run_approved_work(
             &branch,
             branch_executor(),
             approval,
-            spike.grants.branch_controller(),
+            fixture.grants.branch_controller(),
         )
         .await
         .expect("the approved work is admitted on its controller lineage");
     completed(turn, "the approved work").await;
-    let feedback = spike
+    let feedback = fixture
         .controller
         .approved_feedback
         .lock()

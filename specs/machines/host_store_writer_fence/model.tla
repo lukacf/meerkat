@@ -66,6 +66,7 @@ UnchangedFrame_848ddefb03e90937 == UNCHANGED << token, granted, own_grant, step,
 UnchangedFrame_8df0ee4ccb177ce9 == UNCHANGED << granted, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 UnchangedFrame_9ce9f28fd4fa9a95 == UNCHANGED << token, granted, own_grant, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 UnchangedFrame_9db99e3860a37faf == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
+UnchangedFrame_9e7049abbfd129da == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 UnchangedFrame_a66417a329cf0764 == UNCHANGED << granted, own_grant, step, timed_out, waited_holder, stop_cause, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 UnchangedFrame_d76d071c1c5bf655 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, stop_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
 UnchangedFrame_f3d8f0e3133862c7 == UNCHANGED << token, granted, own_grant, step, timed_out, waited_holder, lost_cause, writer_stopped, open_listing_failed, quarantined_keys, quarantine_versions, quarantine_commit_ids, poisoned_scopes >>
@@ -880,9 +881,76 @@ ScopeQuarantinedWaitingOut(key, name, version, commit_ids) ==
     /\ UnchangedFrame_848ddefb03e90937
 
 
+ScopeQuarantinedNewKeyLive(key, name, version, commit_ids) ==
+    /\ phase = "Live"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Live"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
+ScopeQuarantinedNewKeyStopped(key, name, version, commit_ids) ==
+    /\ phase = "Stopped"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
+ScopeQuarantinedNewKeyAcquiring(key, name, version, commit_ids) ==
+    /\ phase = "Acquiring"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Acquiring"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
+ScopeQuarantinedNewKeyProving(key, name, version, commit_ids) ==
+    /\ phase = "Proving"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Proving"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
+ScopeQuarantinedNewKeyResuming(key, name, version, commit_ids) ==
+    /\ phase = "Resuming"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "Resuming"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
+ScopeQuarantinedNewKeyWaitingOut(key, name, version, commit_ids) ==
+    /\ phase = "WaitingOut"
+    /\ (name \in DOMAIN quarantine_versions)
+    /\ ~((key \in quarantined_keys))
+    /\ ~((key \in DOMAIN poisoned_scopes))
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ quarantined_keys' = (quarantined_keys \cup {key})
+    /\ UnchangedFrame_9e7049abbfd129da
+
+
 ScopeQuarantinedAgainLive(key, name, version, commit_ids) ==
     /\ phase = "Live"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -891,6 +959,7 @@ ScopeQuarantinedAgainLive(key, name, version, commit_ids) ==
 ScopeQuarantinedAgainStopped(key, name, version, commit_ids) ==
     /\ phase = "Stopped"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -899,6 +968,7 @@ ScopeQuarantinedAgainStopped(key, name, version, commit_ids) ==
 ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids) ==
     /\ phase = "Acquiring"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -907,6 +977,7 @@ ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids) ==
 ScopeQuarantinedAgainProving(key, name, version, commit_ids) ==
     /\ phase = "Proving"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -915,6 +986,7 @@ ScopeQuarantinedAgainProving(key, name, version, commit_ids) ==
 ScopeQuarantinedAgainResuming(key, name, version, commit_ids) ==
     /\ phase = "Resuming"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -923,6 +995,7 @@ ScopeQuarantinedAgainResuming(key, name, version, commit_ids) ==
 ScopeQuarantinedAgainWaitingOut(key, name, version, commit_ids) ==
     /\ phase = "WaitingOut"
     /\ (name \in DOMAIN quarantine_versions)
+    /\ (key \in quarantined_keys)
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -930,8 +1003,8 @@ ScopeQuarantinedAgainWaitingOut(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedLive(key, name, version, commit_ids) ==
     /\ phase = "Live"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -939,8 +1012,8 @@ ScopeQuarantinedPoisonedLive(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedStopped(key, name, version, commit_ids) ==
     /\ phase = "Stopped"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -948,8 +1021,8 @@ ScopeQuarantinedPoisonedStopped(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedAcquiring(key, name, version, commit_ids) ==
     /\ phase = "Acquiring"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "Acquiring"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -957,8 +1030,8 @@ ScopeQuarantinedPoisonedAcquiring(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedProving(key, name, version, commit_ids) ==
     /\ phase = "Proving"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -966,8 +1039,8 @@ ScopeQuarantinedPoisonedProving(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedResuming(key, name, version, commit_ids) ==
     /\ phase = "Resuming"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -975,8 +1048,8 @@ ScopeQuarantinedPoisonedResuming(key, name, version, commit_ids) ==
 
 ScopeQuarantinedPoisonedWaitingOut(key, name, version, commit_ids) ==
     /\ phase = "WaitingOut"
-    /\ ~((name \in DOMAIN quarantine_versions))
     /\ (key \in DOMAIN poisoned_scopes)
+    /\ (IF ~((name \in DOMAIN quarantine_versions)) THEN TRUE ELSE ~((key \in quarantined_keys)))
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_9db99e3860a37faf
@@ -1269,6 +1342,12 @@ Next ==
     \/ (phase = "Proving") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedProving(key, name, version, commit_ids)
     \/ (phase = "Resuming") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedResuming(key, name, version, commit_ids)
     \/ (phase = "WaitingOut") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedWaitingOut(key, name, version, commit_ids)
+    \/ (phase = "Live") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyLive(key, name, version, commit_ids)
+    \/ (phase = "Stopped") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyStopped(key, name, version, commit_ids)
+    \/ (phase = "Acquiring") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyAcquiring(key, name, version, commit_ids)
+    \/ (phase = "Proving") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyProving(key, name, version, commit_ids)
+    \/ (phase = "Resuming") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyResuming(key, name, version, commit_ids)
+    \/ (phase = "WaitingOut") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedNewKeyWaitingOut(key, name, version, commit_ids)
     \/ (phase = "Live") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainLive(key, name, version, commit_ids)
     \/ (phase = "Stopped") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainStopped(key, name, version, commit_ids)
     \/ (phase = "Acquiring") /\ \E key \in StringValues : \E name \in StringValues : \E version \in 0..2 : \E commit_ids \in SetOfStringValues : ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids)

@@ -35,9 +35,14 @@
 \*     waited out again).
 \*   AuditTokenNeverAboveTheStore: the writer commits with a token the store
 \*     granted.
+\*   AuditNoReacquireAfterFailedOpen: a realm whose open failed its listing
+\*     never acquires again.
+\*   AuditClassificationsMonotone (an action property): no quarantined key,
+\*     conflicted incarnation's record or poison is removed, and no record or
+\*     cause changes, before a reopen.
 \*
-\* Reachability (the runner): seven scenarios are checked as expected
-\* violations of their negations: a resume after a stop
+\* Reachability (the runner): seven scenarios of the fence part are checked
+\* as expected violations of their negations: a resume after a stop
 \* (ResumedAfterStop); a holder that was the writer's own late grant waited
 \* out, then a resume (WaitedOutOwnGrantResumed); a waited-out holder that
 \* renewed loses the realm (HolderRenewed); a foreign batch found after a
@@ -45,6 +50,11 @@
 \* resume on a takeover of that grant (ListingFailedResumed); the documented
 \* residual (Residual); and a holder nobody renewed, met again after an end
 \* recorded early, waited out again, then a resume (WaitedOutAgainResumed).
+\* Four of the scopes part: a quarantine and a poison kept across a stop, a
+\* re-acquire and a resume (QuarantineKeptAcrossReacquire,
+\* PoisonKeptAcrossReacquire), a re-acquire refused after a failed open
+\* listing (FailedOpenRefusesReacquire), and a chunk's conflict that
+\* quarantines its owner's key too (ChunkOwnerQuarantined).
 \* With --mutants the runner seeds one defect
 \* at a time into a copy of the generated model and requires TLC to refuse
 \* each with the property it breaks.
@@ -394,10 +404,12 @@ AuditOtherStops ==
 
 \* --- the scopes part: classification and the open's listing ----------------
 
-\* The conflicted incarnations the store may report (both of key "k1"), and
-\* the scopes a decision site may poison.
-AuditNames == {"k1~a", "k1~b"}
-AuditKeyOf(name) == "k1"
+\* The conflicted incarnations the store may report, each with the key it is
+\* reported under: two incarnations of key "k1", and a chunk "c", reported
+\* under its own name (the open's listing) and under its owner "k2" (the
+\* owner's load meets the chunk's conflict). The scopes a decision site may
+\* poison.
+AuditReports == {<< "k1", "k1~a" >>, << "k1", "k1~b" >>, << "c", "c" >>, << "k2", "c" >>}
 AuditScopeKeys == {"k1", "k2"}
 
 \* Every generated arm of a conflicted incarnation's report.
@@ -408,6 +420,12 @@ QuarantineArms(key, name, version, commit_ids) ==
     \/ ScopeQuarantinedProving(key, name, version, commit_ids)
     \/ ScopeQuarantinedResuming(key, name, version, commit_ids)
     \/ ScopeQuarantinedWaitingOut(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyLive(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyStopped(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyAcquiring(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyProving(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyResuming(key, name, version, commit_ids)
+    \/ ScopeQuarantinedNewKeyWaitingOut(key, name, version, commit_ids)
     \/ ScopeQuarantinedAgainLive(key, name, version, commit_ids)
     \/ ScopeQuarantinedAgainStopped(key, name, version, commit_ids)
     \/ ScopeQuarantinedAgainAcquiring(key, name, version, commit_ids)
@@ -471,8 +489,8 @@ AuditOpenListingFails ==
 \* meets the conflict, or the runtime store's open.
 AuditQuarantine ==
     /\ AuditPart = "scopes"
-    /\ \E name \in AuditNames, version \in 1..2, commit_ids \in {{}, {"c1"}} :
-          QuarantineArms(AuditKeyOf(name), name, version, commit_ids)
+    /\ \E report \in AuditReports, version \in 1..2, commit_ids \in {{}, {"c1"}} :
+          QuarantineArms(report[1], report[2], version, commit_ids)
     /\ w_q_early' = (w_q_early \/ (grants = 0 /\ quarantined_keys' # {}))
     /\ UNCHANGED << storeVars, otherVars, lateVars, proofVars, waitVars,
                     open_listed, w_failed_open, w_refused_after_failed_open, w_p_early >>
@@ -586,5 +604,12 @@ NotAuditWitnessPoisonKeptAcrossReacquire == ~AuditWitnessPoisonKeptAcrossReacqui
 
 AuditWitnessFailedOpenRefusesReacquire == w_refused_after_failed_open
 NotAuditWitnessFailedOpenRefusesReacquire == ~AuditWitnessFailedOpenRefusesReacquire
+
+\* A chunk's conflict recorded under the chunk's own name and met again for
+\* its owner: both keys quarantined over one record.
+AuditWitnessChunkOwnerQuarantined ==
+    /\ {"c", "k2"} \subseteq quarantined_keys
+    /\ "c" \in DOMAIN quarantine_versions
+NotAuditWitnessChunkOwnerQuarantined == ~AuditWitnessChunkOwnerQuarantined
 
 =============================================================================

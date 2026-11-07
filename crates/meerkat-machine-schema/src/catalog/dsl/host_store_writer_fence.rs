@@ -1247,11 +1247,30 @@ machine! {
             emit ScopeQuarantineRecorded { key: key, name: name }
         }
 
-        // A recorded incarnation again: its record stands.
+        // A recorded incarnation met for a key not quarantined yet, on a
+        // scope not poisoned: a chunk's conflict, recorded under the chunk's
+        // own name, that its owner's load meets. The key joins the set; the
+        // record stands as recorded.
+        transition ScopeQuarantinedNewKey {
+            per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
+            on input ScopeQuarantined { key, name, version, commit_ids }
+            guard "a_recorded_incarnation" { self.quarantine_versions.contains_key(name) }
+            guard "a_new_key" { !self.quarantined_keys.contains(key) }
+            guard "not_poisoned" { !self.poisoned_scopes.contains_key(key) }
+            update {
+                self.quarantined_keys.insert(key);
+            }
+            to Live
+            emit ScopeQuarantineRecorded { key: key, name: name }
+        }
+
+        // A recorded incarnation again, for a key already quarantined: the
+        // key and the record stand.
         transition ScopeQuarantinedAgain {
             per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
             on input ScopeQuarantined { key, name, version, commit_ids }
             guard "a_recorded_incarnation" { self.quarantine_versions.contains_key(name) }
+            guard "a_quarantined_key" { self.quarantined_keys.contains(key) }
             update {}
             to Live
         }
@@ -1260,8 +1279,10 @@ machine! {
         transition ScopeQuarantinedPoisoned {
             per_phase [Live, Stopped, Acquiring, Proving, Resuming, WaitingOut]
             on input ScopeQuarantined { key, name, version, commit_ids }
-            guard "a_new_incarnation" { !self.quarantine_versions.contains_key(name) }
             guard "poisoned" { self.poisoned_scopes.contains_key(key) }
+            guard "a_new_incarnation_or_key" {
+                !self.quarantine_versions.contains_key(name) || !self.quarantined_keys.contains(key)
+            }
             update {}
             to Live
             emit RequestRefused { reason: WriterFenceRefusal::Poisoned }

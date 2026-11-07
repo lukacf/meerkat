@@ -41,7 +41,10 @@
 #     re-acquired and resumed (QuarantineKeptAcrossReacquire);
 #   - the same for a poisoned scope (PoisonKeptAcrossReacquire);
 #   - a re-acquire refused after the open's listing failed
-#     (FailedOpenRefusesReacquire).
+#     (FailedOpenRefusesReacquire);
+#   - a chunk's conflict recorded under the chunk's own name and met again
+#     for its owner: both keys quarantined over one record
+#     (ChunkOwnerQuarantined).
 # With --mutants it seeds one defect at a time into a copy of the generated
 # model and requires TLC to refuse each with the property it breaks. The
 # fence part's:
@@ -63,6 +66,10 @@
 #   - quarantine_ignores_poison: a quarantine ignores the poison map
 #     (no_scope_is_quarantined_and_poisoned);
 #   - poison_ignores_quarantine: its mirror (the same invariant);
+#   - new_key_ignores_poison: a recorded incarnation met for a new key
+#     ignores the poison map (the same invariant);
+#   - new_key_overwrites_record: a recorded incarnation met for a new key
+#     overwrites its record's version (AuditClassificationsMonotone);
 #   - reacquire_after_failed_open: a re-acquire ignores the failed open
 #     listing (AuditNoReacquireAfterFailedOpen).
 # Witness and mutant runs use one worker, so TLC stops at the shallowest
@@ -194,7 +201,7 @@ tlc_args=("$@")
 check_part fence ResumedAfterStop WaitedOutOwnGrantResumed HolderRenewed ForeignAfterWait \
   ListingFailedResumed Residual WaitedOutAgainResumed
 check_part scopes QuarantineKeptAcrossReacquire PoisonKeptAcrossReacquire \
-  FailedOpenRefusesReacquire
+  FailedOpenRefusesReacquire ChunkOwnerQuarantined
 
 if [[ "${run_mutants}" == "true" ]]; then
   # Shared by every mutant edit: edit_arms rewrites, in each named arm of the
@@ -338,6 +345,24 @@ edit_arms(
     guard_on("quarantined_keys"),
     lambda line: "    /\\ TRUE",
 )
+PY
+
+  mutate scopes new_key_ignores_poison \
+    "Invariant no_scope_is_quarantined_and_poisoned is violated" <<'PY'
+edit_arms(
+    ["ScopeQuarantinedNewKey" + phase for phase in OPENED],
+    guard_on("poisoned_scopes"),
+    lambda line: "    /\\ TRUE",
+)
+PY
+
+  mutate scopes new_key_overwrites_record \
+    "Action property AuditClassificationsMonotone is violated" <<'PY'
+for phase in OPENED:
+    rewrite_frame(
+        "ScopeQuarantinedNewKey" + phase,
+        ["    /\\ quarantine_versions' = MapSet(quarantine_versions, name, version)"],
+    )
 PY
 
   mutate scopes reacquire_after_failed_open "Invariant AuditNoReacquireAfterFailedOpen is violated" <<'PY'

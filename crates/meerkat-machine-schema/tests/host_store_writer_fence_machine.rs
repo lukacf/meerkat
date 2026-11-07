@@ -826,7 +826,7 @@ fn a_realm_whose_open_listing_failed_never_reacquires() {
     );
 }
 
-// [P3-H] A quarantine has two parts that only grow: the key set and one
+// A quarantine has two parts that only grow: the key set and one
 // record per conflicted incarnation. A new name for a recorded key adds its
 // record and leaves the key set unchanged; a repeated name changes nothing,
 // even with another version or other ids.

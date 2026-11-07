@@ -665,8 +665,8 @@ fi
 # grant installed over an unseen foreign batch; no holder that renews is
 # waited out again; the token never above the store's; no re-acquire after a
 # failed open listing) and an action property (the classifications only
-# grow), requires its ten witnesses reached and refuses ten seeded defects
-# (--mutants). 15 machine steps reach every witness.
+# grow), requires its eleven witnesses reached and refuses twelve seeded
+# defects (--mutants). 15 machine steps reach every witness.
 writer_fence_audit="${workspace_root}/specs/machines/host_store_writer_fence/writer_fence_audit.sh"
 if [[ ! -x "${writer_fence_audit}" ]]; then
   echo "error: writer fence audit runner is missing from workspace runfiles: ${writer_fence_audit}" >&2

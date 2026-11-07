@@ -9228,6 +9228,69 @@ mod tests {
         );
     }
 
+    /// A resume folds a retirement whose abandonment marker exists as a plain
+    /// terminal (the respawn hold gone), and the marker's replay then takes
+    /// the recovered terminal arm. That arm names the identity's end, as the
+    /// live terminal abandonment does, so the resume ends its grants: no
+    /// incarnation after the abandoned one holds the name.
+    #[test]
+    fn a_recovered_abandonment_of_a_terminal_names_the_identitys_end() {
+        let (
+            mut authority,
+            identity,
+            runtime_id,
+            fence_token,
+            session_id,
+            _member_edge,
+            _external_edge,
+            _external_key,
+        ) = seed_preserving_retirement_with_topology();
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("retire the old runtime");
+        authority
+            .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+                generation: Generation(0),
+                session_id: Some(session_id),
+                disposal: MemberSessionDisposal::Archived,
+                preserve_machine_topology: false,
+            })
+            .expect("a plain terminal of the preserving retirement");
+        assert!(
+            !authority
+                .state()
+                .pending_respawn_topology
+                .contains(&identity)
+        );
+
+        let recovered = authority
+            .apply_signal(MobMachineSignal::ObserveRespawnTopologyAbandoned {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id,
+                fence_token,
+                generation: Generation(0),
+            })
+            .expect("the marker's replay");
+        assert_eq!(
+            authority.state().abandoned_respawn_topology.get(&identity),
+            Some(&Generation(0))
+        );
+        assert!(
+            recovered.effects().iter().any(|effect| matches!(
+                effect,
+                MobMachineEffect::IdentityEnded { agent_identity } if agent_identity == &identity
+            )),
+            "the recovered abandonment names the identity's end: {:?}",
+            recovered.effects()
+        );
+    }
+
     fn seed_autonomous_placed_kickoff()
     -> (MobMachineAuthority, AgentIdentity, PlacedKickoffObligation) {
         let identity = AgentIdentity::from("placed-kickoff-worker");

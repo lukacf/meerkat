@@ -9629,19 +9629,26 @@ impl AgentFactory {
                     // A hook a confined process could have defined, or one
                     // whose content the host does not trust as read here,
                     // keeps its slot and is refused at every invocation.
-                    let refused_hooks =
-                        if self.host_confinement.is_none() && self.hook_source_trust.is_none() {
-                            Vec::new()
-                        } else {
-                            layered.untrusted_entries(|source| {
-                                self.host_confinement
-                                    .as_ref()
-                                    .is_some_and(|host| host.untrusted_source(source.path))
-                                    || self.hook_source_trust.as_ref().is_some_and(|trust| {
-                                        trust.decide(source) == crate::HookSourceDecision::Untrusted
-                                    })
-                            })
-                        };
+                    let refused_hooks = if self.host_confinement.is_none()
+                        && self.hook_source_trust.is_none()
+                    {
+                        Vec::new()
+                    } else {
+                        layered.untrusted_entries(|source| {
+                            // Both policies see every read source: the
+                            // trust is asked once per source whatever
+                            // confinement said, so an auditing or
+                            // stateful trust observes each build's files.
+                            let confined = self
+                                .host_confinement
+                                .as_ref()
+                                .is_some_and(|host| host.untrusted_source(source.path));
+                            let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
+                                trust.decide(source) == crate::HookSourceDecision::Untrusted
+                            });
+                            confined || untrusted
+                        })
+                    };
                     let layered_hooks = layered.config;
                     // Run overrides execute through this engine too. With
                     // override entries and no base entries the engine is

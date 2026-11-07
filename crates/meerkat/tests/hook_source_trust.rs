@@ -15,14 +15,18 @@ use std::time::Duration;
 
 use meerkat::{
     AgentBuildConfig, AgentFactory, HookSource, HookSourceDecision, HookSourceDigest,
-    HookSourceTrust, LlmDoneOutcome, LlmEvent, LlmRequest,
+    HookSourceTrust, HostConfinement, LlmDoneOutcome, LlmEvent, LlmRequest,
 };
 use meerkat_client::LlmClient;
-use meerkat_core::confinement::ConfinementRefusal;
+use meerkat_core::confinement::{
+    ConfinementRefusal, ConfinementSpec, ExecutionConfinement, FilesystemAccess, IpNetworkAccess,
+    PathAccess, PlatformBaseline,
+};
 use meerkat_core::{
-    AgentEvent, AgentToolDispatcher, Config, HookAdapterConfig, HookCapability, HookEntryConfig,
-    HookFailureReason, HookId, HookPoint, Message, Provider, ToolCallView, ToolDef,
-    ToolDispatchOutcome, ToolError, ToolResult,
+    AgentEvent, AgentToolDispatcher, Config, ConfinementConfig, CustomConfinement,
+    HookAdapterConfig, HookCapability, HookEntryConfig, HookFailureReason, HookId, HookPoint,
+    LaunchConfinement, Message, Provider, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError,
+    ToolResult,
 };
 use serde_json::json;
 
@@ -247,6 +251,18 @@ async fn build_and_run_with(
     user_root: Option<&Path>,
     trust: Option<Arc<dyn HookSourceTrust>>,
 ) -> Run {
+    build_and_run_with_host(base, project, user_root, trust, None).await
+}
+
+/// [`build_and_run_with`], with host confinement installed when `host` is
+/// given.
+async fn build_and_run_with_host(
+    base: &Path,
+    project: &Path,
+    user_root: Option<&Path>,
+    trust: Option<Arc<dyn HookSourceTrust>>,
+    host: Option<&HostConfinement>,
+) -> Run {
     let client = Arc::new(ScriptedClient::default());
     let tool = Arc::new(GuardedTool::default());
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
@@ -265,6 +281,9 @@ async fn build_and_run_with(
     }
     if let Some(trust) = trust {
         factory = factory.with_hook_source_trust(trust);
+    }
+    if let Some(host) = host {
+        factory = factory.with_host_confinement(host);
     }
     let mut agent = tokio::time::timeout(
         Duration::from_secs(15),
@@ -486,5 +505,77 @@ async fn each_hook_source_is_decided_once_per_build() {
     assert!(
         refused.iter().all(|(id, _)| id.0.starts_with("project-")),
         "only project hooks are refused: {refused:?}"
+    );
+}
+
+/// A guarded host whose confined shell could write the project file.
+#[cfg(unix)]
+fn writing_host(writable: &Path) -> HostConfinement {
+    let requirement: ExecutionConfinement = ConfinementSpec {
+        baseline: PlatformBaseline::CommandRuntimeV1,
+        read: FilesystemAccess::Paths(vec![PathAccess::Subtree(writable.into())]),
+        write: FilesystemAccess::Paths(vec![PathAccess::Subtree(writable.into())]),
+        deny_read: vec![],
+        deny_write: vec![],
+        network: IpNetworkAccess::Denied,
+        unix_connect: vec![],
+        require_descendant_termination: false,
+    }
+    .try_into()
+    .unwrap();
+    HostConfinement::resolve(
+        &ConfinementConfig::for_all(LaunchConfinement::Custom(CustomConfinement {
+            working_directory: writable.to_path_buf(),
+            requirement,
+        })),
+        None,
+    )
+    .unwrap()
+}
+
+/// With host confinement installed beside the trust, a file confinement
+/// refuses on its own is still decided by the trust, once: both policies
+/// see every source the build read, so an auditing or stateful trust
+/// observes each file whatever confinement said.
+#[cfg(unix)]
+#[tokio::test]
+async fn confinement_refusing_a_file_does_not_skip_the_trust() {
+    let (_temp, base, project) = fixture();
+    let marker = base.join("project-hook-entered");
+    write_project_hooks(&project, vec![marker_guardrail("project-0", &marker)]);
+    let host = writing_host(&project);
+    assert!(
+        host.untrusted_source(&project_file(&project)),
+        "confinement refuses the project file on its own"
+    );
+    let trust = Arc::new(CountingTrust {
+        project_file: project_file(&project),
+        asked: Mutex::new(HashMap::new()),
+    });
+
+    let run = build_and_run_with_host(
+        &base,
+        &project,
+        None,
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+        Some(&host),
+    )
+    .await;
+
+    assert_eq!(
+        *trust.asked.lock().unwrap(),
+        HashMap::from([(project_file(&project), 1)]),
+        "the trust is asked once although confinement already refused the file"
+    );
+    assert!(!marker.exists(), "the refused hook never ran");
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 0, "its tool is blocked");
+    assert_eq!(
+        refused_hooks(&run.events),
+        vec![(
+            HookId::new("project-0"),
+            HookFailureReason::ConfinementRefused {
+                refusal: ConfinementRefusal::UntrustedConfigurationSource
+            }
+        )]
     );
 }

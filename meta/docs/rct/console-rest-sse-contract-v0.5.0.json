@@ -525,6 +525,24 @@
             "kind": "candidate_launch"
           },
           "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the console schedule writes (meta/schedule/create, update, pause, resume and delete), the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
+        },
+        "approver_unauthenticated": {
+          "status": 200,
+          "code": -32057,
+          "message": "string",
+          "data": {
+            "kind": "approver_unauthenticated"
+          },
+          "applicability": "Console approval decisions (meta/gating/decide, meta/memory/quarantine/decide and meta/workgraph/goal/confirm): the caller is not a verified, current person (no token on an open console, a service token, a token that names no human, a shared-account token), or the person's login ended (its token expired or its sessions were revoked) while the decision waited. A login that ended before the console took the request up is -32056 caller_not_current instead. Nothing was decided."
+        },
+        "person_authentication_required": {
+          "status": 200,
+          "code": -32057,
+          "message": "string",
+          "data": {
+            "kind": "person_authentication_required"
+          },
+          "applicability": "A console WorkGraph claim or release (meta/workgraph/claim, meta/workgraph/release) made on an open console without a token: a claim is owned by its caller, and such a caller owns nothing. Nothing was changed."
         }
       },
       "policy_error_inventory": "policy_error_refs supplement each endpoint or method's local errors array. Endpoint references are conditional on the dispatched method, not all requests.",
@@ -603,6 +621,36 @@
               "method_capabilities"
             ]
           }
+        },
+        "meta/console/whoami": {
+          "request": {
+            "note": "Takes no params. Read-only, so a read-only console serves it too."
+          },
+          "success": {
+            "required_fields": [
+              "actor",
+              "posture",
+              "login_expires_at_ms",
+              "can_administer",
+              "approver_ids",
+              "caller_scope"
+            ],
+            "actor_kind_values": [
+              "person",
+              "service",
+              "token_principal",
+              "anonymous"
+            ],
+            "note": "Who the console acts as for the calling request, from the connection alone: actor {kind, principal, assurance}. Only a person may decide an approval (meta/gating/decide refuses every other caller with approver_unauthenticated), so the stock client offers approval decisions only when actor.kind is person. caller_scope is the opaque value a change may send back as expected_caller_scope."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32601
+              ],
+              "note": "A gateway that predates the method answers method not found; a client then treats the caller as not a person."
+            }
+          ]
         },
         "meta/console/send": {
           "policy_error_refs": [
@@ -1315,7 +1363,8 @@
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
             "#/surfaces/rpc/policy_errors/access_denied",
-            "#/surfaces/rpc/policy_errors/candidate_launch"
+            "#/surfaces/rpc/policy_errors/candidate_launch",
+            "#/surfaces/rpc/policy_errors/approver_unauthenticated"
           ],
           "request": {
             "required_fields": [
@@ -1323,19 +1372,18 @@
               "decision"
             ],
             "optional_fields": [
-              "approver_id",
               "reason"
             ],
-            "conditional_required_fields": {
-              "approver_id": "Required only when HTTP has no resolved principal; otherwise the principal is used regardless of the supplied approver_id."
-            },
+            "refused_fields": [
+              "approver_id"
+            ],
             "decision_values": [
               "approve",
               "reject",
               "escalate",
               "deny"
             ],
-            "note": "deny is an HTTP compatibility alias for reject. SDK/stdin requires approver_id and accepts only approve/reject/escalate."
+            "note": "The HTTP console takes the approver from the connection: a verified, current person decides as its access principal, with the approver ids it holds through the access configuration. A request that carries approver_id is invalid params (-32602). deny is an HTTP compatibility alias for reject. SDK/stdin requires approver_id and accepts only approve/reject/escalate, and its decisions record deciding_assurance device_trusted."
           },
           "success": {
             "body": "gating_decision_result"
@@ -1345,6 +1393,8 @@
               "codes": [
                 -32004,
                 -32602,
+                -32057,
+                -32056,
                 -32000,
                 -32601
               ]
@@ -1850,7 +1900,8 @@
         "meta/memory/quarantine/decide": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/approver_unauthenticated"
           ],
           "request": {
             "required_fields": [
@@ -1867,7 +1918,7 @@
               "release",
               "tombstone"
             ],
-            "note": "expected_content_hash is the record.content_hash returned by meta/memory/panel/record. The reviewer recorded in audit is the authenticated console principal; no reviewer field is accepted."
+            "note": "expected_content_hash is the record.content_hash returned by meta/memory/panel/record. The reviewer recorded in audit is the signed-in person on the connection; no reviewer field is accepted. Right before the review is applied the console checks the person and reads the caller's grants again: a grant withdrawn while the review waited is -32030."
           },
           "success": {
             "required_fields": [
@@ -1888,6 +1939,8 @@
           "errors": [
             {
               "codes": [
+                -32057,
+                -32056,
                 -32043,
                 -32602,
                 -32603,
@@ -2005,15 +2058,16 @@
         "meta/workgraph/claim": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/person_authentication_required"
           ],
           "request": {
             "required_fields": [
               "id",
-              "expected_revision",
-              "owner"
+              "expected_revision"
             ],
             "optional_fields": [
+              "owner",
               "lease_seconds",
               "namespace"
             ]
@@ -2026,6 +2080,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32030,
                 -32041,
                 -32042,
@@ -2039,7 +2094,8 @@
         "meta/workgraph/release": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/person_authentication_required"
           ],
           "request": {
             "required_fields": [
@@ -2048,7 +2104,8 @@
             ],
             "optional_fields": [
               "namespace"
-            ]
+            ],
+            "note": "The claim's owner releases it, and so does an access admin: an admin's release of someone else's claim is a break-glass release, and the work graph's Released event records the admin and the released claim under break_glass. Anyone else is -32030 access_denied. The release is bound to expected_revision, and the caller's grants are read again after the item read."
           },
           "success": {
             "required_fields": [
@@ -2058,6 +2115,7 @@
           "errors": [
             {
               "codes": [
+                -32057,
                 -32030,
                 -32041,
                 -32042,
@@ -2104,7 +2162,8 @@
         "meta/workgraph/goal/confirm": {
           "policy_error_refs": [
             "#/surfaces/rpc/policy_errors/read_only",
-            "#/surfaces/rpc/policy_errors/access_denied"
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/approver_unauthenticated"
           ],
           "request": {
             "required_fields": [
@@ -2114,7 +2173,8 @@
             "optional_fields": [
               "evidence",
               "namespace"
-            ]
+            ],
+            "note": "Only a signed-in person confirms, as itself. After the evidence read, right before the confirmation is applied, the console checks the person and reads the caller's grants again: a grant withdrawn while the confirmation waited is -32030."
           },
           "success": {
             "required_fields": [
@@ -2125,6 +2185,8 @@
           "errors": [
             {
               "codes": [
+                -32057,
+                -32056,
                 -32030,
                 -32041,
                 -32042,

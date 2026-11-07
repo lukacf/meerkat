@@ -1133,10 +1133,10 @@ delivery that needed it asks for the build once more. When that fails too,
 the delivery answers a typed retryable error (the artifact refusal itself,
 typed, when the host's installed artifacts refused the tools), and a later
 delivery, or the mob's own retry of work the member owes, tries again.
-While a member's tools are not
-published, its identity status reports `customizer_tools_pending` with the
-reason. A tool from an earlier build that the latest build no longer
-declares is refused, never routed to stale handlers.
+While a member's tools are not published, its identity status reports
+`customizer_tools_pending` with the reason. A tool from an earlier build
+that the latest build no longer declares is refused, never routed to stale
+handlers.
 
 `meta/identity/resolved_tools` lists a member's tools without building it:
 a live member's live tools, or, for a member that is not materialized, the

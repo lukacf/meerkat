@@ -115,8 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - The held-completion marks (`<state>/held-completion-owed/`, and the
   host store's documents) and the identity rotation records are still
-  written exactly as 0.9.10 writes them, for a rollback to 0.9.10 only:
-  nothing online reads them. The gateway's identity census
+  written for a rollback to 0.9.10 only, with the contents 0.9.10 writes:
+  a rotation's record is written after Core's answer (see Changed), and a
+  rotation Core finishes on its own (a reset or delete a stop interrupted,
+  which Core finishes at the next start) removes its record once the
+  lifecycle projection reads the rotation's end. Nothing online reads
+  them. The gateway's identity census
   (`held_completion_owed`) and the offline `identity-reset` read the marks
   as diagnostics until the mirror is removed (the reset only refuses on a
   mark). A stale mark stays for a rollback's read, which drops it.

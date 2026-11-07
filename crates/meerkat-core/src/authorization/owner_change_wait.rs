@@ -135,6 +135,23 @@ impl OwnerChangeChurn {
         }
     }
 
+    /// A waiting state for a host's own operation on `session_id` outside the
+    /// agent's dispatch (a governed input's bind, waiting out its binder's
+    /// "not now" answers): each wait is reported to `observer`, the operation
+    /// refusal observer the host installed, on `surface`, as
+    /// [`super::OperationRefusalDisposition::WaitedForOwnerChange`] of a
+    /// `ReprepareRequired` refusal, which makes no claim about tool code.
+    #[must_use]
+    pub fn reporting_to(
+        observer: std::sync::Arc<dyn super::OperationRefusalObserver>,
+        session_id: crate::types::SessionId,
+        surface: super::OperationRefusalSurface,
+    ) -> Self {
+        Self::reporting(Some(
+            super::RefusalObserverBinding::new(observer, session_id).wait_report(None, surface),
+        ))
+    }
+
     /// After a `ReprepareRequired` refusal of an operation of `work`: when
     /// `work` reports an owner change in progress on its own publication,
     /// wait for that change, and for any later one, to complete. The first
@@ -933,5 +950,67 @@ mod tests {
                 .await;
             assert!(!shared.settled(), "one deadline for every wait: {shared:?}");
         }
+    }
+
+    /// Every observation an observer received.
+    #[derive(Default)]
+    struct Observed(std::sync::Mutex<Vec<crate::authorization::OperationRefusalObservation>>);
+
+    impl crate::authorization::OperationRefusalObserver for Observed {
+        fn observe(&self, observation: &crate::authorization::OperationRefusalObservation) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(observation.clone());
+        }
+    }
+
+    /// A host's own churn reports each of its waits to the observer it
+    /// names, for its session and on its surface: a settled "not now" wait,
+    /// then one past the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_host_churn_reports_its_waits_to_its_observer() {
+        let observed = Arc::new(Observed::default());
+        let session = crate::types::SessionId::new();
+        let mut churn = OwnerChangeChurn::reporting_to(
+            observed.clone(),
+            session.clone(),
+            crate::authorization::OperationRefusalSurface::GovernedInput,
+        );
+        let settled = churn
+            .wait_until_clear(NotNowWait::pause(), None, SITE, None)
+            .await;
+        let held = churn
+            .wait_until_clear(
+                NotNowWait::until_clear(|| true),
+                Some(Duration::from_millis(300)),
+                SITE,
+                None,
+            )
+            .await;
+        let observations = observed
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(observations.len(), 2, "{observations:?}");
+        for (observation, wait) in observations.iter().zip([settled, held]) {
+            assert_eq!(observation.session_id(), &session);
+            assert_eq!(observation.run_id(), None);
+            assert_eq!(observation.operation_id(), None);
+            assert_eq!(
+                observation.surface(),
+                &crate::authorization::OperationRefusalSurface::GovernedInput
+            );
+            assert_eq!(
+                observation.disposition(),
+                crate::authorization::OperationRefusalDisposition::WaitedForOwnerChange {
+                    waited_ms: u64::try_from(wait.waited().as_millis()).unwrap_or(u64::MAX),
+                    settled: wait.settled(),
+                }
+            );
+        }
+        assert!(settled.settled(), "{settled:?}");
+        assert!(!held.settled(), "{held:?}");
     }
 }

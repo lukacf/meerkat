@@ -3712,7 +3712,7 @@ mod tests {
             },
             make_provenanced_tool_def("durable"),
             &serde_json::to_vec(&CallbackSpecification {
-                arguments: queued_args.to_owned(),
+                arguments: queued_args.clone(),
                 tool_binding_sha256: meerkat_core::ToolBindingDigest::of_catalog_entry(
                     &callback_catalog_entry(
                         make_provenanced_tool_def("durable"),

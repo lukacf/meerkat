@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the new refusal kind `unsupported_param` (with `param`); 0.9.10
   accepted and ignored them.
 
+- Rust: `ConsoleUiConfig` gains `sign_out` (`Option<ConsoleSignOutConfig>`,
+  `#[serde(default)]`). A host that builds the struct literally adds
+  `sign_out: None` to keep today's behaviour.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -168,6 +172,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   controller, call `meta/console/revoke_sessions` on the runtime's RPC
   surface, or install an access controller and revoke as an access admin.
 
+- Hosts that pass `storageNamespace` to the stock console: messages queued
+  under the namespace alone are offered once, as **Older queued messages**,
+  to the first user who loads the console after the upgrade; drafts kept
+  under it start empty.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -186,6 +195,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An access admin releases anyone's WorkGraph claim from the console. The
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).
+
+- The stock console's top bar names who the console acts as (the signed-in
+  person, a shared account, a service, or nobody on an open console), with
+  **Sign out** when the console configuration names `[sign_out]`: `href`, a
+  same-origin path, and `method`, `"get"` (a link, the default) or `"post"`
+  (a form, for a front whose sign-out takes a POST).
+- Approval cards in the stock console say whom a request waits for: **For
+  you**, or **Waiting for** the approver it names (with no decision offered).
+  A request for you that someone else decides keeps its card, saying how and
+  by whom, read from the gating audit.
 
 ### Changed
 
@@ -223,6 +242,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `meta/member_status`, `meta/inspect_identity` and the console's per-member
   progress, where it reported `read_failed`. The Meta SDKs pass the value
   through, as they pass any reason they do not name.
+
+- The stock console reads `meta/console/whoami` once per console instance
+  and names that caller (`expected_caller_scope`) on every console request,
+  voice and MCP Apps tool calls included; a later answer for someone else
+  never changes whom it names. Its first change waits for that read. While
+  no read has answered, no console request that names a caller leaves: a
+  message sent then reads **Not sent**, a queued message stays queued, the
+  console commands that read (approvals and other panels) are refused too,
+  and the top bar shows no identity chip, so no **Sign out**. The console
+  reads its caller again with its next experience read, and loads again at
+  once when another tab of the console learns it. A change refused with
+  `caller_changed` reads **Not sent**, and the console loads again as the
+  caller the gateway now serves; a voice call, an MCP Apps tool call or a
+  blob upload refused that way, or with an ended login, does the same as a
+  send.
+- Console requests do not follow redirects (`redirect: "manual"`), and a
+  queued message the stock console sends on its own (when its agent becomes
+  idle) waits for a fresh read of the console experience first.
+- The stock console keeps a host's `storageNamespace` combined with the
+  server's `storage_scope` instead of in its place, so users of one browser
+  never share queued messages or drafts. Its display settings, the sidebar's
+  and the activity rail's collapse, and the agent list's category order and
+  collapse are kept per signed-in user; a value an earlier console kept for
+  everyone using the browser is read once, by the first user who loads it.
+- Importing **Older queued messages** removes the earlier copy (the first
+  console's unscoped queue, the predecessor console's queue, or a queue kept
+  under a host namespace alone), so no other user of the browser is offered
+  it. **Sign out** removes the user's queued messages and drafts from the
+  browser, in every tab of the console; preferences stay. Both also remove
+  the copy of a queue the storage lock keeps in IndexedDB on an origin
+  without Web Locks, and the browser leaves for the sign-out once that is
+  done, or after at most 1.5 seconds.
 
 ### Fixed
 
@@ -287,6 +338,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A Console WorkGraph action acts on the revision its card or row showed,
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.
+
+- Switching the signed-in user in one tab of the stock console clears the
+  previous user's views, approvals, host items and queued messages at once,
+  in every tab of that console in the browser. Before, other tabs noticed
+  at their next 15-second experience read, and could send the previous
+  user's queued message under the new login.
+- An ended login (a 401, `caller_not_current`, or a front that redirects a
+  console request to its sign-in page) shows one sign-in state instead of
+  stale data. Approvals are no longer marked denied for good and the
+  timeline stream no longer stops without a word; signing in again in
+  another tab, or coming back to the tab, brings the console back, with
+  the message the person was writing and its images.
+- A console send that a front redirected to its sign-in page reads
+  **Not sent** (the request never reached the gateway). Before, it read as
+  an unknown outcome that no check could settle.
+- Two tabs of the stock console on a plain-HTTP origin (no Web Locks) no
+  longer lose queued-message updates: the storage lock's IndexedDB fallback
+  waits until the other tab's queue write is visible before it changes the
+  queue.
+- Pins set in two tabs of the stock console are both kept, and every tab
+  follows them. A tab left open no longer rewrites the panel layout another
+  tab arranged each time it reloads the console experience.
+- **Needs you** and the sidebar's Approvals count only the approval
+  requests that wait for you, not the ones routed to another approver.
+  Before, they counted every pending request, and a request decided
+  elsewhere vanished at the next poll.
 
 ## [0.9.10] - 2026-11-04
 

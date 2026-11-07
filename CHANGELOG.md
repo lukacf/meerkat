@@ -447,12 +447,15 @@ them.
   a Chat Completions client GitHub Copilot's stream discipline (a finish
   reason is required, only choice 0 is read); both Copilot Chat Completions
   routes set it.
-- `meerkat-llm-core`: `LlmClient::prompt_token_limit` states the most input
-  tokens one request may carry on the client's account and model, when the
-  provider states one (default `None`; wrappers delegate). A GitHub Copilot
-  route states the account model's prompt limit (the tighter of
-  `max_prompt_tokens` and `max_context_window_tokens` less the most output
-  tokens the account lets a request ask, the limit its gate enforces).
+- `meerkat-llm-core`: `LlmClient::prompt_token_limit(output_budget)` states
+  the most input tokens one request that asks for `output_budget` output
+  tokens may carry on the client's account and model, when the provider
+  states a limit (default `None`; wrappers delegate). The factory passes the
+  session's own output budget, through a prepared controller too, and a
+  GitHub Copilot route states the account model's prompt limit for it (the
+  tighter of `max_prompt_tokens` and `max_context_window_tokens` less that
+  budget): the limit its gate enforces on the session's requests, also when
+  the account states no output limit.
 - `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
   model, state }` refuses a model the account lists under a policy that is
   not `enabled`, naming the state.

@@ -1500,8 +1500,9 @@ impl CopilotCapabilityGatedClient {
 /// The most input tokens one request that asks for `output_budget` output
 /// tokens may carry on an account model: the tighter of its stated prompt
 /// limit and its context window less that budget, either alone when only
-/// one is stated. The gate's check of a measured prompt and the limit
-/// stated to the factory (for the compaction threshold) both read it.
+/// one is stated. The gate's check of a measured prompt (for the request's
+/// own budget) and the limit stated to the factory (for the session's
+/// budget, the compaction threshold) both read it.
 fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) -> Option<u32> {
     let window_room = limits
         .max_context_window_tokens
@@ -1527,11 +1528,10 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     }
 
     /// The account model's own prompt limit ([`account_prompt_limit`]) for
-    /// the most output its account lets a request ask: never above the limit
-    /// the gate enforces on a request it admits.
+    /// `output_budget`, the session's output budget: the limit the gate
+    /// enforces on the session's requests, which ask for that budget.
     fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
-        let limits = &self.capabilities.limits;
-        account_prompt_limit(limits, limits.max_output_tokens.unwrap_or(0))
+        account_prompt_limit(&self.capabilities.limits, output_budget)
             .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
@@ -5911,11 +5911,11 @@ mod tests {
     /// The gate and the compaction threshold read one prompt limit: the
     /// tighter of the stated prompt limit and the context window less the
     /// request's output budget. The gate takes the request's own budget; the
-    /// limit stated to the factory takes the most output the account lets a
-    /// request ask, so it never exceeds what the gate admits. (Fails-old: with
-    /// only the window stated the factory read the whole window, above the
-    /// gate's limit; with both stated the gate read the prompt limit alone,
-    /// above the window.)
+    /// limit stated to the factory takes the session's budget, which the
+    /// session's requests ask for, so it is the limit the gate enforces on
+    /// them. (Fails-old: with only the window stated the factory read the
+    /// whole window, above the gate's limit; with both stated the gate read
+    /// the prompt limit alone, above the window.)
     #[test]
     fn the_gate_and_the_compaction_threshold_read_one_prompt_limit() {
         let gated = |input_tokens, limits| {
@@ -5935,7 +5935,7 @@ mod tests {
         assert_eq!(
             gated(0, window_only.clone()).prompt_token_limit(32_000),
             Some(96_000),
-            "the window less the most output a request may ask"
+            "the window less the session's output budget"
         );
         let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
         request.max_tokens = 32_000;

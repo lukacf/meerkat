@@ -829,13 +829,15 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Whether `input_id` may join the current run `run_id` at a live
-    /// boundary without mixing requesters: its batch key (its governed
-    /// binding's, its requester's, or none) is the key of the batch the run
-    /// staged. The machine decides (`live_boundary_joins_run_batch`, which
-    /// mirrors the `JoinLiveBoundaryDurableAppend` guard
-    /// `live_join_same_requester` and the `StageForRun` guard
-    /// `homogeneous_run_authority`); an input of another requester takes the
-    /// queued fallback and waits for a run of its own.
+    /// boundary: without mixing requesters (its batch key, its governed
+    /// binding's, its requester's, or none, is the key of the batch the run
+    /// staged), and without overtaking a steer of another requester (no
+    /// stageable Steer-lane input admitted before it waits with another
+    /// key). The machine decides (`live_boundary_joins_run_batch`, which
+    /// mirrors the `JoinLiveBoundaryDurableAppend` and
+    /// `ResolveLiveBoundaryContextReceipt` guards `live_join_same_requester`
+    /// and `steer_lane_fifo_across_requesters`); an input it refuses keeps
+    /// its place in the Steer lane and waits for a run of its own.
     pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
         let input = Self::dsl_key(input_id);
         let run = mm_dsl::RunId::from_domain(run_id);

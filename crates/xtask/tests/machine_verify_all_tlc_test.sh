@@ -639,20 +639,27 @@ fi
 
 # The requester batch rule (inputs of different requesters never share a
 # run: each run stages one batch key, which includes an ungoverned input's
-# requester, and a live-boundary join must carry the key the run staged) is
+# requester, and a live-boundary join must carry the key the run staged) and
+# the Steer lane's order across requesters (no Steer input is staged or
+# joined while a Steer input admitted before it waits with another key) are
 # structural in the MeerkatMachine ci sweep, which takes one step. A
 # hand-written audit over the same generated model runs one runtime-loop run
 # whose batch input carries one key and a late Steer input of another key
 # (or none), through admission, the durable join and its resolutions,
-# normalization, staging into the running run or a follow-up run, and every
-# run-ending arm, under every generated invariant plus two safety invariants
-# (a run's bound inputs share one key; the late input never joins the batch
-# input's run), once per pair of different keys. It requires two witnesses
-# reached (a late input of the same key joins; one of another key runs in a
-# run of its own) and refuses two seeded defects (--mutants): the join
-# without its live_join_same_requester guard, and admission that records a
-# batch key only for a governed binding. 14 steps reach both witnesses with
-# room; deeper bounds run by hand.
+# normalization, receipts, staging into the running run or a follow-up run,
+# every run-ending arm, and a fence gap's suspension and resume, under every
+# generated invariant plus two safety invariants (a run's bound inputs share
+# one key; the late input never joins the batch input's run), once per pair
+# of different keys. It then runs an earlier Steer input of another key ahead
+# of a late one of the batch input's key under the order property, once per
+# such pair. It requires four witnesses reached (a late input of the same key
+# joins; one of another key runs in a run of its own; an earlier input of
+# another key runs first; the late input joins once that one left the lane)
+# and refuses five seeded defects (--mutants): the join without its
+# live_join_same_requester guard, admission that records a batch key only
+# for a governed binding, ResumeRun staging no key, and the join and
+# StageForRun without the order guard. 14 steps reach every witness and
+# mutant; deeper bounds run by hand.
 requester_batch_audit="${workspace_root}/specs/machines/meerkat_machine/requester_batch_audit.sh"
 if [[ ! -x "${requester_batch_audit}" ]]; then
   echo "error: requester batch audit runner is missing from workspace runfiles: ${requester_batch_audit}" >&2

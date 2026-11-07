@@ -133,27 +133,15 @@ async fn different_requesters_never_share_a_run() {
 }
 
 /// A steer from another person never joins a person's running turn, at any
-/// boundary: it waits for a run of its own. The person's own steer still
-/// joins their turn.
+/// boundary: it waits for a run of its own. The person's own steer, admitted
+/// before it, still joins their turn. (One admitted after it waits behind
+/// it: an_earlier_steer_of_another_requester_runs_before_a_later_one.)
 #[tokio::test]
 async fn a_steer_from_another_requester_waits_for_its_own_run() {
     let rig = DurableSteerRig::ephemeral().await;
     let mut outcomes = observe_boundary_work(&rig);
     let mut settled = Vec::new();
     let busy = start_busy_turn_for(&rig, person("a")).await;
-
-    let from_b = steer_from("from b", person("b"));
-    let b = from_b.id().clone();
-    rig.admit(from_b).await;
-    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &b).await;
-    rig.script
-        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
-        .await;
-    assert!(
-        rig.script.applied_durable().is_empty(),
-        "another person's steer never joins the running turn"
-    );
-    assert_eq!(rig.phase(&b).await, Some(InputLifecycleState::Queued));
 
     // The person's own steer joins their running turn.
     let from_a = steer_from("from a", person("a"));
@@ -163,6 +151,21 @@ async fn a_steer_from_another_requester_waits_for_its_own_run() {
     rig.script.step(RunnerStep::BoundaryThenToolCalls);
     rig.wait_for_applied_durable(1).await;
     assert_eq!(rig.script.applied_durable(), vec![a.clone()]);
+
+    // Another person's steer joins at no later boundary.
+    let from_b = steer_from("from b", person("b"));
+    let b = from_b.id().clone();
+    rig.admit(from_b).await;
+    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &b).await;
+    rig.script
+        .step_and_wait(RunnerStep::BoundaryThenToolCalls)
+        .await;
+    assert_eq!(
+        rig.script.applied_durable(),
+        vec![a.clone()],
+        "another person's steer never joins the running turn"
+    );
+    assert_eq!(rig.phase(&b).await, Some(InputLifecycleState::Queued));
 
     // The person's turn answers; the other person's steer runs alone.
     rig.script.step(RunnerStep::Finish);

@@ -26295,6 +26295,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "input_controller_not_held" {
                 !self.input_controller_holds.contains(input_id)
             }
+            // The Steer lane is first in, first out across requesters: a
+            // Steer-lane input stages only while no stageable Steer-lane
+            // input admitted before it waits with another batch key (another
+            // requester's, or none where it has one, or the reverse). Such an
+            // input waits for a run of its own, so a later input of another
+            // key waits behind it rather than overtake it, through the
+            // runtime loop or a live-boundary realization. Inputs of one key
+            // keep their own order rules. A held input, or recovered governed
+            // work waiting for its destination, is not stageable and holds
+            // nothing back, as the runtime loop's plan passes it over.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
+            }
             // Destination homogeneity follows from `homogeneous_run_authority`:
             // the batch key includes the exact target.
             update {
@@ -26646,6 +26673,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && self.current_run_id.get("value") == run_id
             }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            // Request-only context enters a run as its input's own
+            // contribution, so it takes the durable join's requester rule:
+            // the input's batch key is the key of the batch the run staged,
+            // and an input with a requester never enters a run that staged
+            // no batch (a direct service turn).
+            guard "live_join_same_requester" {
+                (self.authority_staged_run == Some(run_id)
+                    && self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id))
+                || (self.authority_staged_run != Some(run_id)
+                    && !self.input_authority_batch_keys.contains_key(input_id))
+            }
+            // It keeps the Steer lane's order across requesters too, as
+            // StageForRun and the durable join do.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
+            }
             update {
                 if self.live_boundary_context_sequence_by_run.contains_key(run_id) {
                     self.live_boundary_context_sequence_by_run.insert(
@@ -26795,6 +26852,28 @@ macro_rules! meerkat_catalog_machine_dsl {
                     && self.authority_staged_batch == self.input_authority_batch_keys.get_cloned(input_id))
                 || (self.authority_staged_run != Some(run_id)
                     && !self.input_authority_batch_keys.contains_key(input_id))
+            }
+            // The Steer lane is first in, first out across requesters, as
+            // StageForRun keeps it: an input joins only while no stageable
+            // Steer-lane input admitted before it waits with another batch
+            // key. Such an input waits for a run of its own, and this one
+            // waits behind it.
+            guard "steer_lane_fifo_across_requesters" {
+                self.input_lane.get_cloned(input_id) != Some(InputLane::Steer)
+                || for_all(waiting_input_id in self.input_lane.keys(),
+                    self.input_lane.get_cloned(waiting_input_id) != Some(InputLane::Steer)
+                    || self.input_phases.get_cloned(waiting_input_id) != Some(InputPhase::Queued)
+                    || self.input_authority_batch_keys.get_cloned(waiting_input_id)
+                        == self.input_authority_batch_keys.get_cloned(input_id)
+                    || !self.input_admission_seq.contains_key(waiting_input_id)
+                    || !self.input_admission_seq.contains_key(input_id)
+                    || self.input_admission_seq.get_cloned(input_id).get("value")
+                        <= self.input_admission_seq.get_cloned(waiting_input_id).get("value")
+                    || self.input_controller_holds.contains(waiting_input_id)
+                    || (self.scoped_context_required == true
+                        && self.scoped_context_binding == None
+                        && self.scoped_context_generation == 0
+                        && self.input_authority_bindings.contains_key(waiting_input_id)))
             }
             guard "turn_at_model_boundary" { self.turn_phase == TurnPhase::CallingLlm }
             guard "no_cancel_after_boundary" { self.cancel_after_boundary == false }
@@ -40959,6 +41038,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                     if !state.input_recovery_lanes.contains_key(input_id) {
                         return None;
                     }
+                    // Mirrors the StageForRun guard
+                    // `steer_lane_fifo_across_requesters`.
+                    if !steer_lane_fifo_admits(state, input_id) {
+                        return None;
+                    }
                     // No run-association check: the association is attribution
                     // that `StageForRun` rebinds, and refusing a queued input
                     // for carrying one wedged the fifo lane forever (0.8.22).
@@ -40971,14 +41055,19 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
 
             /// Whether `input_id` may join the current run `run_id` at a live
-            /// boundary without mixing requesters: the input's batch key (its
-            /// governed binding's, its requester's, or none) is the key of the
-            /// batch the run staged, or the run staged no batch and the input
-            /// has no key. An input of another requester waits for a run of
-            /// its own. Mirrors the `JoinLiveBoundaryDurableAppend` guard
-            /// `live_join_same_requester`, which `StageForRun`'s
-            /// `homogeneous_run_authority` implies for a run that staged a
-            /// batch.
+            /// boundary: inputs of different requesters never share a run (the
+            /// input's batch key, its governed binding's, its requester's, or
+            /// none, is the key of the batch the run staged, or the run staged
+            /// no batch and the input has no key), and the Steer lane is first
+            /// in, first out across requesters (no stageable Steer-lane input
+            /// admitted before it waits with another key). An input it refuses
+            /// waits in its lane for a run of its own. Mirrors the
+            /// `JoinLiveBoundaryDurableAppend` and
+            /// `ResolveLiveBoundaryContextReceipt` guards
+            /// `live_join_same_requester` and
+            /// `steer_lane_fifo_across_requesters`, which `StageForRun`'s
+            /// `homogeneous_run_authority` and its own order guard imply for a
+            /// run that staged a batch.
             #[must_use]
             pub fn live_boundary_joins_run_batch(
                 state: &MeerkatMachineState,
@@ -40986,11 +41075,36 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id: &RunId,
             ) -> bool {
                 let key = state.input_authority_batch_keys.get(input_id);
-                if state.authority_staged_run.as_ref() == Some(run_id) {
+                let same_requester = if state.authority_staged_run.as_ref() == Some(run_id) {
                     state.authority_staged_batch.as_ref() == key
                 } else {
                     key.is_none()
+                };
+                same_requester && steer_lane_fifo_admits(state, input_id)
+            }
+
+            // Mirrors the `steer_lane_fifo_across_requesters` guard of
+            // StageForRun, JoinLiveBoundaryDurableAppend and
+            // ResolveLiveBoundaryContextReceipt: a Steer-lane input runs only
+            // while no stageable Steer-lane input admitted before it waits
+            // with another batch key.
+            fn steer_lane_fifo_admits(state: &MeerkatMachineState, input_id: &String) -> bool {
+                if state.input_lane.get(input_id) != Some(&InputLane::Steer) {
+                    return true;
                 }
+                let key = state.input_authority_batch_keys.get(input_id);
+                let sequence = state.input_admission_seq.get(input_id);
+                state.input_lane.iter().all(|(waiting_input_id, lane)| {
+                    *lane != InputLane::Steer
+                        || state.input_phases.get(waiting_input_id) != Some(&InputPhase::Queued)
+                        || state.input_authority_batch_keys.get(waiting_input_id) == key
+                        || match (sequence, state.input_admission_seq.get(waiting_input_id)) {
+                            (Some(sequence), Some(waiting)) => sequence <= waiting,
+                            _ => true,
+                        }
+                        || !controller_stageable(state, waiting_input_id)
+                        || !scoped_context_stageable(state, waiting_input_id)
+                })
             }
 
             // Mirrors the StageForRun `scoped_context_attached` guard: only

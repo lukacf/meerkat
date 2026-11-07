@@ -815,10 +815,10 @@ fn enter_init(status: i32) -> Result<(), SetupFailure> {
     Ok(())
 }
 
-// The namespace's init: closes every descriptor but `status` (std's
-// exec-error pipe among them, so `Command::spawn` returns once the command
-// execs or reports its setup failure through its own copy), ignores the
-// asynchronous signals (`INIT_IGNORED`), reaps every process of the
+// The namespace's init: ignores the asynchronous signals (`INIT_IGNORED`),
+// then closes every descriptor but `status` (std's exec-error pipe among
+// them, so `Command::spawn` returns once the command execs or reports its
+// setup failure through its own copy), reaps every process of the
 // namespace, and ends once the command does. Init cannot end the way the
 // command did when that was a signal: a pid namespace's init does not get a
 // signal it raises on itself without a handler. So it writes the command's
@@ -827,17 +827,24 @@ fn enter_init(status: i32) -> Result<(), SetupFailure> {
 // it reads (`relay`). Init's exit kills the rest of the namespace.
 // Allocation-free raw syscalls only; it never returns into std's exec.
 fn init(command: libc::pid_t, status: i32) -> ! {
-    let closed = close_all_but(&[status]);
-    if !closed {
-        // Cannot release std's error pipe: end the launch rather than leave
-        // spawn blocked on it while the command runs.
-        unsafe { libc::kill(command, libc::SIGKILL) };
-    }
+    // The ignores come first, before init releases its copy of std's
+    // exec-error pipe below: once every copy is closed `Command::spawn`
+    // returns, and the host may signal the launch's group at once (a
+    // cancellation's SIGTERM). Until then init holds whatever dispositions
+    // it inherited from the host process, whose handlers would run here.
+    // They cannot be installed before init forks the command, because an
+    // ignored disposition survives the command's exec.
     let mut ignored = true;
     for signal in INIT_IGNORED {
         ignored &= unsafe { libc::signal(signal, libc::SIG_IGN) } != libc::SIG_ERR;
     }
     if !ignored {
+        unsafe { libc::kill(command, libc::SIGKILL) };
+    }
+    let closed = close_all_but(&[status]);
+    if !closed {
+        // Cannot release std's error pipe: end the launch rather than leave
+        // spawn blocked on it while the command runs.
         unsafe { libc::kill(command, libc::SIGKILL) };
     }
     let mut wait_status = 0;

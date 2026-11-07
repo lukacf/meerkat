@@ -30,16 +30,17 @@ pub(crate) mod dsl;
 mod durable;
 mod reconstruction;
 pub use approval::{
-    ApprovalChildRefusal, ConsumeUseRefusal, GrantChildTerms, GrantUse, MCP_OPERATION_FEATURE,
-    grant_child_terms_digest, mcp_operation_binding,
+    ApprovalChildRefusal, ApprovalUseAnswer, ApprovalUseCurrentness, ConsumeUseRefusal,
+    GrantChildTerms, GrantUse, MCP_OPERATION_FEATURE, RetainedGrant, grant_child_terms_digest,
+    mcp_operation_binding,
 };
 pub use dsl::{
     ChildApprovalRule, GrantApproval, GrantDecisionAssurance, GrantDecisionTier, GrantDeviceTrust,
-    GrantOperationBinding,
+    GrantOperationBinding, GrantPrincipal,
 };
 use dsl::{
     GrantAuthorityEffect, GrantAuthorityInput, GrantAuthorityMachineAuthority,
-    GrantAuthorityMachineMutator, GrantPrincipal, GrantRecord,
+    GrantAuthorityMachineMutator, GrantRecord,
 };
 #[cfg(test)]
 pub(crate) use durable::with_last_issued_restrictions;
@@ -218,6 +219,10 @@ pub struct LocalGrantAuthority {
     publication: LocalAuthorizationPublication,
     clock: Arc<dyn LocalAuthorizationClock>,
     durable: Option<durable::DurableCustody>,
+    /// The host's currentness owner for the deciders of approval-carried
+    /// grants, asked at each use's spend at entry. Without one, such a
+    /// spend is unavailable.
+    approval_currentness: Option<Arc<dyn ApprovalUseCurrentness>>,
 }
 
 impl std::fmt::Debug for LocalGrantAuthority {
@@ -481,6 +486,7 @@ impl LocalGrantAuthority {
             publication,
             clock,
             durable: None,
+            approval_currentness: None,
         })
     }
 

@@ -206,6 +206,7 @@ mod reconcile_cadence_tests {
 pub(crate) mod actor;
 mod actor_turn_executor;
 mod admission_close;
+mod approval_branch;
 mod boot_plan;
 pub mod bridge;
 pub mod bridge_protocol;

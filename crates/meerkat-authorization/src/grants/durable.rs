@@ -394,6 +394,7 @@ impl LocalGrantAuthority {
             publication,
             clock,
             durable: Some(DurableCustody::new(store)),
+            approval_currentness: None,
         })
     }
 }

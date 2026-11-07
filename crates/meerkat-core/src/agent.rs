@@ -2278,7 +2278,11 @@ impl ToolDispatchContext {
 
     /// Spend this dispatch's retained review once for the decision staging
     /// returned (`entering`, or this context's own when staging refreshed
-    /// nothing). R1 and ungoverned entries spend nothing.
+    /// nothing). R1 and ungoverned entries spend nothing. Then the entering
+    /// decision's own entry spend, once: a use of a grant that serves a
+    /// counted number of uses, acknowledged by its owner before the effect
+    /// ([`crate::authorization::PreparedOperationAuthorization::spend_at_entry`]).
+    /// Its refusal refuses the entry.
     fn spend_review_entry(
         &self,
         entering: Option<Self>,
@@ -2289,6 +2293,9 @@ impl ToolDispatchContext {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
             _ => crate::approval::review::ReviewedEntryCustody::none(),
         };
+        if let Some(check) = current.prepared_authorization() {
+            check.spend_at_entry()?;
+        }
         Ok((entering, custody))
     }
 

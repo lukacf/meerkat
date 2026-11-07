@@ -406,6 +406,10 @@ impl PreparedOperationAuthorization for AuditedPrepared {
         self.inner.check_current(binding)
     }
 
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
+    }
+
     fn observe(
         &self,
         binding: &PreparedAuthorizationBinding,

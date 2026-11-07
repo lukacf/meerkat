@@ -927,6 +927,17 @@ pub enum ToolOperationTarget {
     /// that owner states it itself, which an in-process dispatcher can: like
     /// every target, it is the dispatching owner's fact, never a permission.
     BuiltinOperation { operation: BuiltinToolOperation },
+    /// One hold of a decision for the approver id `approver_id`: the target
+    /// the owner of an access offer states for the call, from the child rule
+    /// of the grant the offer would be a child of. A hold asks a person for a
+    /// decision and grants nothing.
+    DecisionHold {
+        approver_id: crate::approval::decision::ApproverId,
+    },
+    /// One reply of an approval-carried work to its own requester: the target
+    /// the owner of `reply_to_requester` states for the call. Its authority
+    /// is Core's rule for that work, never a grant lineage.
+    RequesterReply,
 }
 
 /// A builtin tool operation that its registration owner states as a typed
@@ -1022,7 +1033,9 @@ impl ToolOperationTarget {
             | Self::PeerSend { .. }
             | Self::PeerDirectoryRead
             | Self::MemoryOperation { .. }
-            | Self::BuiltinOperation { .. } => None,
+            | Self::BuiltinOperation { .. }
+            | Self::DecisionHold { .. }
+            | Self::RequesterReply => None,
         }
     }
 }

@@ -15,6 +15,8 @@
 //! acknowledged by the store first, and advances the owner's revision, so a
 //! decision prepared before the spend is stale after it.
 
+use std::sync::Arc;
+
 use meerkat_authorization_contracts::constraints::{
     ActionRef, AudienceRef, DomainRestriction, ExactRestriction, ExecutionRestrictions,
     LifetimeBound, ProcessorRef,
@@ -80,7 +82,8 @@ impl UseFacts {
 /// window is its length, since the offer is held before the approval that
 /// starts it. Its digest is the approved request's digest exactly when the
 /// issued terms equal the approved ones.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrantChildTerms {
     /// The parent grant.
     pub parent: EvidenceId,
@@ -233,6 +236,48 @@ pub enum ApprovalChildRefusal {
     /// The owner cannot say now; nothing was issued.
     #[error("grant authority unavailable")]
     Unavailable,
+}
+
+/// The host's answer, at a use's spend, for the person who decided the
+/// decision an approval-carried grant carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ApprovalUseAnswer {
+    /// The person still holds the decision's approver id.
+    Current,
+    /// The person was revoked or forbidden by policy since deciding: the use
+    /// is refused and nothing is spent.
+    NotCurrent,
+    /// The host cannot answer now: nothing is spent, and the entry fails as
+    /// an unavailable owner does.
+    Unsettled,
+}
+
+/// The host's currentness owner for the deciders of approval-carried grants,
+/// asked at each use's spend at entry
+/// ([`LocalGrantAuthority::spend_use_at_entry`]). Answer for the person as
+/// they decided, not for a login: a login's natural expiry is not a
+/// revocation. Synchronous and bounded; it is asked with no grant lock held.
+pub trait ApprovalUseCurrentness: Send + Sync {
+    /// Whether the person who decided `approval`'s decision may still do so.
+    fn approver_answer(&self, approval: &GrantApproval) -> ApprovalUseAnswer;
+}
+
+/// The immutable facts of one grant this owner retains, as it was issued:
+/// who holds it, for whom, within which bounds, under which child rule and
+/// with which approval. Identity only: it says nothing about whether the
+/// grant is current, which resolving its lineage decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetainedGrant {
+    pub grantee: PrincipalRef,
+    pub represented_subject: Option<PrincipalRef>,
+    /// The grant's own effective bounds.
+    pub restrictions: ExecutionRestrictions,
+    /// The rule every child of the grant must meet, if any.
+    pub child_approval: Option<ChildApprovalRule>,
+    /// The approval the grant carries, if it is an approval-carried child.
+    pub approval: Option<GrantApproval>,
 }
 
 /// Why a use was not spent.
@@ -544,6 +589,141 @@ impl LocalGrantAuthority {
         // Spent and acknowledged: every observation prepared before the
         // spend fails its final currentness check.
         let _ = publication.publish();
+        Ok(())
+    }
+
+    /// This owner with `currentness`, the host's owner of whether the
+    /// deciders of approval-carried grants are still current, asked at each
+    /// use's spend at entry ([`Self::spend_use_at_entry`]).
+    #[must_use]
+    pub fn with_approval_use_currentness(
+        mut self,
+        currentness: Arc<dyn ApprovalUseCurrentness>,
+    ) -> Self {
+        self.approval_currentness = Some(currentness);
+        self
+    }
+
+    /// Spend one use of the approval-carried leaf of `references` at the
+    /// operation's entry: the host's currentness owner answers for the
+    /// person who decided the leaf's decision, outside every grant lock, and
+    /// [`Self::consume_use`] spends with that answer. An owner composed
+    /// without a currentness owner, or an unsettled answer, spends nothing
+    /// and is unavailable.
+    ///
+    /// # Errors
+    /// As [`Self::consume_use`]; `Denied` for a leaf that carries no
+    /// approval.
+    pub fn spend_use_at_entry(
+        &self,
+        references: &[GrantLineageRef],
+        executor: &PrincipalRef,
+        represented_subject: Option<&PrincipalRef>,
+        use_: GrantUse<'_>,
+    ) -> Result<(), ConsumeUseRefusal> {
+        let reference = references.last().ok_or(ConsumeUseRefusal::Denied)?;
+        let approval = self
+            .retained_grant(reference)
+            .map_err(|refusal| match refusal {
+                GrantRefusal::Unavailable => ConsumeUseRefusal::Unavailable,
+                _ => ConsumeUseRefusal::Denied,
+            })?
+            .approval
+            .ok_or(ConsumeUseRefusal::Denied)?;
+        let currentness = self
+            .approval_currentness
+            .as_ref()
+            .ok_or(ConsumeUseRefusal::Unavailable)?;
+        let approver_current = match currentness.approver_answer(&approval) {
+            ApprovalUseAnswer::Current => true,
+            ApprovalUseAnswer::NotCurrent => false,
+            ApprovalUseAnswer::Unsettled => return Err(ConsumeUseRefusal::Unavailable),
+        };
+        self.consume_use(
+            references,
+            executor,
+            represented_subject,
+            use_,
+            approver_current,
+        )
+    }
+
+    /// The immutable facts of the grant `reference` names exactly, as this
+    /// owner retains it. It decides nothing about currentness.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Denied`] when `reference` names no grant of this
+    /// owner exactly; [`GrantRefusal::Unavailable`] when the owner cannot
+    /// say now.
+    pub fn retained_grant(
+        &self,
+        reference: &GrantLineageRef,
+    ) -> Result<RetainedGrant, GrantRefusal> {
+        let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        if let Some(durable) = &self.durable {
+            durable.check_available()?;
+        }
+        let record = exact_record(&owner, reference)?;
+        Ok(RetainedGrant {
+            grantee: record.grantee.principal().clone(),
+            represented_subject: record
+                .represented_subject
+                .as_ref()
+                .map(|subject| subject.principal().clone()),
+            restrictions: record.restrictions.clone(),
+            child_approval: record.child_approval.clone(),
+            approval: record.approval.clone(),
+        })
+    }
+
+    /// Whether `intent` would be issued as a usable child now, decided from
+    /// the same current facts an issuance reads, without issuing anything:
+    /// the parent lineage is a current controller lineage of the issuer,
+    /// the parent's grantee and represented subject are the issuer's and the
+    /// intent's, the parent may delegate, and the derived bounds are a
+    /// controller's (an unrestricted lifetime) that admit every processor
+    /// in `processors`. The issuance itself decides again.
+    ///
+    /// # Errors
+    /// [`ChildGrantRefusal::Denied`] when it would be refused;
+    /// [`ChildGrantRefusal::Unavailable`] when the owner cannot say now.
+    pub fn child_admissible(
+        &self,
+        intent: &crate::grants::ChildGrantIntent,
+        processors: &[ProcessorRef],
+    ) -> Result<(), crate::grants::ChildGrantRefusal> {
+        use crate::grants::ChildGrantRefusal;
+        let refused = |refusal: GrantRefusal| match refusal {
+            GrantRefusal::Unavailable => ChildGrantRefusal::Unavailable,
+            _ => ChildGrantRefusal::Denied,
+        };
+        self.resolve_controller_lineage(
+            &intent.parent_lineage,
+            &intent.issuer,
+            intent.represented_subject.as_ref(),
+        )
+        .map_err(refused)?;
+        let parent_reference = intent
+            .parent_lineage
+            .last()
+            .ok_or(ChildGrantRefusal::Denied)?;
+        let parent = self.retained_grant(parent_reference).map_err(refused)?;
+        if parent.grantee != intent.issuer
+            || parent.represented_subject != intent.represented_subject
+        {
+            return Err(ChildGrantRefusal::Denied);
+        }
+        let derived = DerivedChildRestrictions::new(parent.restrictions, intent.requested.clone())
+            .map_err(|_| ChildGrantRefusal::Denied)?;
+        let effective = derived.effective();
+        let admits_processors = processors.iter().all(|processor| {
+            effective.processors.check(processor)
+                == meerkat_authorization_contracts::constraints::BoundMatch::Matches
+        });
+        if !admits_processors || !matches!(effective.lifetime.bound(), LifetimeBound::Unrestricted)
+        {
+            return Err(ChildGrantRefusal::Denied);
+        }
         Ok(())
     }
 }

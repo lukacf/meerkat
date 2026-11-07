@@ -53,6 +53,12 @@ pub use store::{
     DecisionStore, InMemoryDecisionStore, UnreadableDecision, decision_is_due, decision_owes_work,
 };
 
+/// The authority label of an approval branch: a one-time member forked from
+/// a grantee to run the approved work of one durable decision, whose id is
+/// the label's value. A host treats a member with this label as private to
+/// no person: no conversation, viewer or memory of anyone's reaches it.
+pub const APPROVAL_BRANCH_LABEL: &str = "decision.approval_branch";
+
 /// A durable decision value is not valid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

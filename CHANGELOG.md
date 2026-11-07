@@ -383,6 +383,99 @@ them.
   spends nothing. `grant_child_terms_digest` is over the terms' RFC 8785
   canonical JSON.
 
+- `meerkat-runtime` (feature `local-authorization`): approval-carried
+  governed child grants, the `grant.child` decision kind
+  (`approval_grants`). An agent offers the agent that asked it, for that
+  work's requester, one exact operation of a governed MCP source it reaches
+  under a grant whose children need a person's decision (`access_offer`):
+  Core takes the offering grant from the calling work's own lineage for the
+  operation's server, the requester and the origin from the calling work
+  (in a peer work, the work the asking agent sent; else the calling work),
+  computes the operation's digest from its exact arguments, and holds a
+  `grant.child` decision for the offering grant's rule's approver id. Its
+  held request (`grant.child.v1`, `GrantChildRequest`) carries the exact
+  terms the grant is issued with, whose digest is the decision's request
+  digest, and its rendering (`grant.render-v1`) every term the approver
+  approves. An offer is refused at hold, typed (`AccessOfferRefusal`), when
+  nothing approved could run: `no_child_approval_rule`,
+  `reply_route_unavailable`, `approval_branch_unavailable` (with its reason:
+  `not_branchable`, `controller_cannot_admit_child`, or `subject_mismatch`
+  when the offering grant acts for another principal than the asking
+  agent's controller grant, so an approved work has one represented
+  subject), `uses_over_policy` and `window_over_policy` (`ApprovalGrantPolicy`:
+  one use and a 15-minute window by default). The executor
+  (`GrantDecisionExecutor`, from `ApprovalGrants::executor`, for the
+  `DecisionExecutorLoop` of the runtime that holds the grant owner's
+  single-writer custody) executes an approved offer only for a person's
+  decision whose effective terms are still the presented ones
+  (`terms_changed` otherwise): it opens a one-time approval branch of the
+  asking agent (a member forked from it at an empty prefix, labelled
+  `decision.approval_branch` with the decision id), issues the branch a
+  controller grant, a child of the asking agent's own (depth 0, processed by
+  the branch only, its id derived from the decision and recovered on
+  retry), and the approval-carried grant, and records the decision
+  executed. Its notice tells the origin that access was approved, with no
+  content, and admits the approved work into the branch
+  (`ApprovalCarriedIngress`): the request's requester, the decision ingress
+  as its ingress actor, the grant's represented subject, the branch as its
+  executor, one target lineage (the bound operation's, ending at the
+  approval-carried grant) and no base, enrolled in the host's custody of
+  originals before its admission, in the origin's realm and ingress domain.
+  It runs the approved operation once and replies once
+  (`reply_to_requester`: Core's rule of the approved work, never a grant;
+  the same text again answers the first delivery, another text is refused
+  `reply_already_delivered`). The branch is retired, and its controller
+  grant revoked, when its work ends or its grant's window does
+  (`ApprovalGrants::sweep_branches` retires what a restart left open). A
+  declined, expired, withdrawn or refused offer tells its origin how it
+  ended, with no content. Hosts compose it (`ApprovalGrants`,
+  `ApprovalGrantsConfiguration`) from their decision owner, their grant
+  owner, their approval branches (`ApprovalBranchHost`), their requester
+  reply route (`RequesterReplyRoute`, with `can_deliver`) and the native
+  custody that revokes a retired branch's controller grant
+  (`ApprovalControllerCustody`, implemented by `MeerkatMachine`), give
+  their agents the `decisions` tools (`ApprovalGrants::tools`,
+  `DecisionsToolDispatcher`), and compose their grant owner with
+  `DecisionApprovalUseCurrentness`.
+
+- `meerkat-core`, `meerkat-authorization-contracts`: the operation targets
+  of the `decisions` tools, `ToolOperationTarget::DecisionHold` and
+  `ToolOperationTarget::RequesterReply`, and their grant targets,
+  `GrantTarget::DecisionHold` (a hold of a decision for one approver id,
+  covered only by a lineage selected for exactly it) and
+  `GrantTarget::RequesterReply` (selected by no basis). Both enums are
+  non-exhaustive. `meerkat_core::approval::decision::APPROVAL_BRANCH_LABEL`
+  names the approval branch label.
+
+- `meerkat-core`, `meerkat-authorization`: a governed operation's effect
+  entry spends what its prepared decision spends
+  (`PreparedOperationAuthorization::spend_at_entry`, a provided method that
+  spends nothing; wrappers forward it), once, after the review it spends:
+  for an operation whose lineage ends at an approval-carried grant, one use
+  (`LocalWorkPolicy::entry_spend`, `GrantUseSpend`,
+  `LocalGrantAuthority::spend_use_at_entry`), asking the host's currentness
+  owner for the person who decided (`ApprovalUseCurrentness`,
+  `ApprovalUseAnswer`; `LocalGrantAuthority::with_approval_use_currentness`):
+  a person no longer current refuses the entry and spends nothing, and an
+  unsettled answer, or an owner without a currentness owner, is
+  unavailable and spends nothing. `LocalGrantAuthority::retained_grant`
+  reads a retained grant's immutable facts (`RetainedGrant`), and
+  `child_admissible` whether a child grant would be issued now, without
+  issuing it. The grant-backed policy admits a reply to the requester only
+  in an approval-carried work (`grant_policy::requester_reply_values`,
+  `REQUESTER_REPLY_FEATURE`, `REQUESTER_REPLY_ACTION`), under the host's
+  work-owner bounds and the approval grant's window. `GrantPrincipal` is
+  exported and `GrantChildTerms` deserializes.
+
+- `meerkat-mob`: approval branches.
+  `MobHandle::open_approval_branch` forks a grantee at an empty prefix into
+  the one-time branch of a decision (its identity from
+  `MobHandle::approval_branch_identity`), labelled
+  `decision.approval_branch`, exempt from the definition's wiring and wired
+  to no parent; opening it again finds it.
+  `MobHandle::retire_approval_branch` retires it and
+  `MobHandle::approval_branches` lists the open ones.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -514,6 +607,11 @@ them.
   unavailable there. A journal of plain grants is read by both releases.
   Before a rollback, revoke the approval-carried grants or let them
   expire.
+
+- A runtime store that retains a work whose basis names a hold of a
+  decision (an access offer's calling work) or an approved work cannot be
+  read by 0.9.10 (it does not know their grant targets). Before a rollback,
+  let such works end.
 
 ### Known limitations
 

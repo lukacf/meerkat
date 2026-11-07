@@ -46,7 +46,11 @@
 //!   realm. Renews and re-acquires never overlap, and a re-acquire runs on
 //!   a task of its own, so a dropped caller never leaves a granted token
 //!   unrecorded. A grant whose listing fails stays this writer's own: the
-//!   next re-acquire meets it as the holder and takes its lease over.
+//!   next re-acquire meets it as the holder and takes its lease over. A
+//!   re-acquire compares only with what the open's listing installed: the
+//!   open holds the gate a re-acquire takes until that listing is in place,
+//!   and the re-acquire of a realm whose open failed before it neither
+//!   acquires nor lists.
 //! - **An acquire the realm gave up on** (it runs under the realm's acquire
 //!   timeout) may still be granted by a store that completes a request its
 //!   caller dropped: a token this writer never recorded then holds the fence.
@@ -712,8 +716,10 @@ pub struct SpiRealm {
     reacquire_in_flight: StdMutex<Option<SharedReacquire>>,
     /// The version of every visible scope as this writer last saw or wrote
     /// it: a re-acquire compares a fresh listing with it to prove no other
-    /// writer committed while this one was stopped.
-    known_heads: StdMutex<HashMap<(ScopeKind, String), ScopeVersion>>,
+    /// writer committed while this one was stopped. `None` until the open's
+    /// listing installs it: a re-acquire compares only with a baseline the
+    /// open installed, and without one it neither acquires nor lists.
+    known_heads: StdMutex<Option<HashMap<(ScopeKind, String), ScopeVersion>>>,
     /// Scopes a batch with an unknown outcome touched, with every version
     /// (`None`: absent) each may be at: the batch may or may not have
     /// landed. A re-acquire accepts any of them; a later landed batch
@@ -922,6 +928,14 @@ fn writer_stopped(cause: &str) {
     tracing::warn!(%cause, "host store writer stopped; it resumes only on a fresh acquire");
 }
 
+/// The refusal of a re-acquire with no baseline to compare its listing
+/// with: the open failed before its listing installed one.
+fn no_baseline() -> SpiError {
+    SpiError::LeaseLapsed(
+        "the realm's open did not install its listing, which a re-acquire compares with".into(),
+    )
+}
+
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -945,6 +959,13 @@ impl SpiRealm {
     /// Acquire the realm's fence, start renewing it, wait out a superseded
     /// holder's lease, and list every head (after the acquire, before
     /// the first commit). Chunks whose owner no longer exists are deleted.
+    ///
+    /// That listing installs the baseline a re-acquire compares with. The
+    /// open holds the gate a re-acquire takes from before the renewal starts
+    /// until the baseline is in place: a renew that fails meanwhile stops the
+    /// writer, and its re-acquire waits for the open's listing instead of
+    /// listing beside it and comparing with no baseline. Renews do not take
+    /// the gate, so they keep the lease through the listing.
     ///
     /// # Errors
     /// [`SpiError::Held`] when an exclusive acquire meets a live holder; the
@@ -977,7 +998,7 @@ impl SpiRealm {
             slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
-            known_heads: StdMutex::new(HashMap::new()),
+            known_heads: StdMutex::new(None),
             uncertain: StdMutex::new(HashMap::new()),
             poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
@@ -989,6 +1010,9 @@ impl SpiRealm {
             renew_timeout,
             me: me.clone(),
         });
+        // No re-acquire lists until this open's listing installed the
+        // baseline it compares with.
+        let listing = realm.fence_gate.write().await;
         realm.spawn_renewal();
         if !grant.superseded_lease.is_zero() {
             // The superseded holder stops writing the self-fence margin
@@ -997,6 +1021,7 @@ impl SpiRealm {
             tokio::time::sleep(grant.superseded_lease).await;
         }
         realm.list_all().await?;
+        drop(listing);
         realm.sweep_ownerless_chunks().await;
         Ok(realm)
     }
@@ -1347,8 +1372,15 @@ impl SpiRealm {
         if let Some(waiting) = self.wait_out_holder(Instant::now()) {
             return Err(waiting);
         }
-        // No batch with the old token may be in flight.
+        // No batch with the old token may be in flight, and the open's
+        // listing is over: the open holds the gate until it installed the
+        // baseline.
         let _no_commits = self.fence_gate.write().await;
+        // Without that baseline the open failed, and its realm is never
+        // served: nothing to compare a listing with, so no acquire either.
+        if lock(&self.known_heads).is_none() {
+            return Err(no_baseline());
+        }
         let started = Instant::now();
         let Some(mut step) = self.begin_reacquire()? else {
             return Ok(());
@@ -1366,8 +1398,15 @@ impl SpiRealm {
                 AcquireNext::Prove(grant) => break grant,
             }
         };
-        let listed = match self.list_versions().await {
-            Ok(listed) => listed,
+        let checked = match self.list_versions().await {
+            Ok(listed) => match self.listing_matches(&listed) {
+                Some(clean) => Ok((listed, clean)),
+                None => Err(no_baseline()),
+            },
+            Err(error) => Err(error),
+        };
+        let (listed, clean) = match checked {
+            Ok(checked) => checked,
             Err(error) => {
                 // The grant stays this writer's own: the next re-acquire takes
                 // its lease over.
@@ -1381,7 +1420,7 @@ impl SpiRealm {
                 return Err(error);
             }
         };
-        let outcome = if self.listing_matches(&listed) {
+        let outcome = if clean {
             WriterFenceListingOutcome::Clean
         } else {
             WriterFenceListingOutcome::ForeignBatch
@@ -1399,7 +1438,7 @@ impl SpiRealm {
         {
             return Err(self.lost_realm());
         }
-        *lock(&self.known_heads) = listed;
+        *lock(&self.known_heads) = Some(listed);
         lock(&self.uncertain).clear();
         // The listing may have outlasted the window counted from the
         // acquire: renew once with the new token and count the window from
@@ -1617,22 +1656,24 @@ impl SpiRealm {
     /// Whether a fresh listing shows only batches this writer wrote: every
     /// scope at the version this writer last saw or wrote, or, for a scope a
     /// batch with an unknown outcome touched, at any version that batch
-    /// leaves possible.
-    fn listing_matches(&self, listed: &HashMap<(ScopeKind, String), ScopeVersion>) -> bool {
+    /// leaves possible. `None` while the open has not installed the
+    /// baseline: such a listing proves nothing either way.
+    fn listing_matches(&self, listed: &HashMap<(ScopeKind, String), ScopeVersion>) -> Option<bool> {
         let known = lock(&self.known_heads);
+        let known = known.as_ref()?;
         let uncertain = lock(&self.uncertain);
         let keys: HashSet<&(ScopeKind, String)> = known
             .keys()
             .chain(listed.keys())
             .chain(uncertain.keys())
             .collect();
-        keys.into_iter().all(|key| {
+        Some(keys.into_iter().all(|key| {
             let seen = listed.get(key).copied();
             match uncertain.get(key) {
                 Some(possible) => possible.contains(&seen) || seen == known.get(key).copied(),
                 None => seen == known.get(key).copied(),
             }
-        })
+        }))
     }
 
     /// The version of every visible scope, from one listing.
@@ -1658,13 +1699,16 @@ impl SpiRealm {
     }
 
     /// Record what a landed batch did to the scope versions this writer
-    /// knows.
+    /// knows. Nothing commits before the open's listing installed them.
     fn record_landed(&self, batch: &CommitBatch) {
         let mut known = lock(&self.known_heads);
         let mut uncertain = lock(&self.uncertain);
         for update in batch.updates() {
             let key = (update.scope.kind, update.scope.name.as_str().to_string());
             uncertain.remove(&key);
+            let Some(known) = known.as_mut() else {
+                continue;
+            };
             if update.delete {
                 known.remove(&key);
             } else {
@@ -1840,7 +1884,7 @@ impl SpiRealm {
         }
         *lock(&self.listed) = listed;
         *lock(&self.chunks) = chunks;
-        *lock(&self.known_heads) = known;
+        *lock(&self.known_heads) = Some(known);
         Ok(())
     }
 

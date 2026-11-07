@@ -201,6 +201,17 @@ them.
   The writer now keeps such a grant as its own and the next re-acquire
   takes its lease over, then lists again. Affects 0.9.5 through 0.9.10.
 
+- `meerkat-runtime`: a renew failure during a slow open no longer poisons
+  the host store realm. The open starts renewing the fence before it lists
+  every head, and a re-acquire compares its own listing with what the open
+  listed. A renew that failed while the open still listed stopped the
+  writer, and its re-acquire compared with a listing the open had not
+  installed yet, read the realm's own scopes as another writer's batches,
+  and poisoned the realm until a reopen ("another writer committed while
+  this one was stopped"). A re-acquire now waits for the open's listing, and
+  the realm of an open whose listing failed never re-acquires. Affects 0.9.5
+  through 0.9.10.
+
 - `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
   again later for a member whose session the store refuses until its realm
   is reopened. Such a member's status carried `read_failed` on the wire, so

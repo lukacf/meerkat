@@ -1650,6 +1650,85 @@ mod tests {
         assert!(error.is_retryable());
     }
 
+    /// On the Copilot route an item the stream added with no id, which no
+    /// event names with one (so no slot holds it), and which never completed
+    /// before `[DONE]` ends the response as the retryable mismatch too, as on
+    /// the plain route, and nothing is committed. (Fails-old: the Copilot
+    /// route checked only its slots, so the call was dropped and the turn
+    /// ended as complete.)
+    #[tokio::test]
+    async fn copilot_done_without_a_terminal_response_refuses_an_uncompleted_item_without_an_id() {
+        let mut events = a_call_started_but_never_completed();
+        // The call is added with an empty id and nothing names it after.
+        events[4]["item"]["id"] = json!("");
+        events.truncate(5);
+        let events = copilot_events(events, true).await;
+        assert_copilot_mismatch(
+            &events,
+            "output_index 1 was announced but never completed",
+            "an id-less call at [DONE]",
+        );
+    }
+
+    /// A Responses stub that sends `payload` as the whole body, as given.
+    async fn body_stub(payload: String) -> (OpenAiClient, tokio::task::JoinHandle<()>) {
+        async fn respond(State(payload): State<String>) -> impl axum::response::IntoResponse {
+            ([("content-type", "text/event-stream")], payload)
+        }
+        let app = Router::new()
+            .route("/v1/responses", post(respond))
+            .with_state(payload);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            OpenAiClient::new_with_base_url("unused".into(), url),
+            server,
+        )
+    }
+
+    /// A body that ends cleanly in the middle of an event (part of its data,
+    /// no blank line after it) ends the response as the retryable incomplete
+    /// response on every Responses route, as a body cut anywhere else does:
+    /// the event the end cut is no malformed event. (Fails-old: the cut
+    /// event's data was parsed as a whole event and failed as a
+    /// non-retryable parse error.)
+    #[tokio::test]
+    async fn a_body_cut_mid_event_is_an_incomplete_response() {
+        let answer = message("msg_1", "final_answer", "Done.");
+        let payload = format!(
+            "data: {}\n\ndata: {}\n\ndata: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"delta\":\"Do",
+            json!({"type":"response.created","response":{"id":"resp_1"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":answer}),
+        );
+        for copilot in [false, true] {
+            let (client, server) = body_stub(payload.clone()).await;
+            let client = if copilot {
+                client.with_copilot_responses_item_identity()
+            } else {
+                client
+            };
+            let request = LlmRequest::new("gpt-5.5", vec![]);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            let Some(Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            })) = events.last()
+            else {
+                panic!(
+                    "copilot {copilot}: the request ends with an error, not {:?}",
+                    events.last()
+                );
+            };
+            assert!(
+                matches!(error, LlmError::IncompleteResponse { .. }) && error.is_retryable(),
+                "copilot {copilot}: {error:?}"
+            );
+        }
+    }
+
     /// A reasoning item may carry its text in content parts
     /// (`response.content_part.added/done` with a `reasoning_text` part), as
     /// the Responses event schema allows: on the Copilot route such a part

@@ -32197,10 +32197,13 @@ macro_rules! mob_catalog_machine_dsl {
             on input SealDeclaredRoster { desired }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            // The negation of SealDeclaredRosterRefused's guard, written
+            // over the same expression, so the two arms are exclusive by
+            // construction.
             guard "no_unlisted_entry_to_end" {
-                for_all(id in self.identity_entry_origins.keys(),
-                    desired.contains(id) == true
-                    || unlist_entry_verdict(
+                !exists(id in self.identity_entry_origins.keys(),
+                    desired.contains(id) == false
+                    && unlist_entry_verdict(
                         true,
                         self.identity_entry_origins.get_cloned(id) == Some(IdentityEntryOrigin::Declared)
                             && self.identity_entry_unreadable.contains(id) == false,
@@ -32210,7 +32213,7 @@ macro_rules! mob_catalog_machine_dsl {
                             || self.identity_entry_removing.contains(id) == true
                             || self.identity_entry_constructions_held.contains_key(id) == true
                             || self.identity_entry_constructions_activating.contains_key(id) == true,
-                        self.identity_to_runtime.contains_key(id) == true) != UnlistEntryVerdict::Removed)
+                        self.identity_to_runtime.contains_key(id) == true) == UnlistEntryVerdict::Removed)
             }
             update {
                 for id in self.identity_entry_origins.keys() {

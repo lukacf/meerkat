@@ -7112,7 +7112,8 @@ pub trait SpawnMemberCustomizer: Send + Sync {
     /// applied. Every placed spawn and rebuild asks it, whatever its source,
     /// and before the spawn reaches the member host. An error refuses the
     /// spawn and reaches its caller unchanged; nothing is compiled or sent.
-    /// The default admits every profile.
+    /// The default admits every profile, so a customizer that composes others
+    /// forwards it to each of them, as [`SpawnMemberCustomizerChain`] does.
     fn check_placed_profile(
         &self,
         ctx: &SpawnCustomizationContext,

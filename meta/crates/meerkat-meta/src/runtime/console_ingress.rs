@@ -1568,8 +1568,9 @@ pub fn validate_console_token(decisions: &RuntimeDecisionState, token: &str) -> 
 }
 
 /// [`validate_console_token`] under the Console's session fence record: a
-/// token issued before its principal's fence (or carrying no `iat` once the
-/// principal has one) is not valid.
+/// token issued before its principal's fence or its login's (a sign-out of
+/// that login, or of the principal's older logins), or carrying no `iat`
+/// once either is set, is not valid.
 pub fn validate_console_token_under_session_fences(
     decisions: &RuntimeDecisionState,
     fences: &ConsoleSessionFences,
@@ -2113,8 +2114,9 @@ impl ConsoleSessionFences {
     /// The observation verifies the human's retained token again (signature,
     /// issuer, audience, `exp` and `nbf` within the verifier's leeway, the
     /// route policy it was accepted with, the same caller, and this record's
-    /// fence for its principal) under this record's publication, and writes
-    /// nothing. It does no I/O; it may allocate.
+    /// fences for its principal and for its login, a sign-out included)
+    /// under this record's publication, and writes nothing. It does no I/O;
+    /// it may allocate.
     ///
     /// Refused ([`ConsoleHumanNotCurrent`]) when the human is not current or
     /// was not built from a retained verification, when it was accepted

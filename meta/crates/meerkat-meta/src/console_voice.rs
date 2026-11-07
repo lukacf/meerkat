@@ -444,8 +444,8 @@ impl RequestSlot {
     /// End this request's voice session once the authentication of the
     /// caller that opened it lapses: the Console's verifier no longer
     /// accepts the opening token, on its expiry or on a session fence set
-    /// for its principal. The same rule ends an open stream. A session that
-    /// ends first stops the watch.
+    /// for its principal or its login (a sign-out). The same rule ends an
+    /// open stream. A session that ends first stops the watch.
     fn end_when_authentication_lapses(
         self: &Arc<Self>,
         mut authentication: crate::http_sse::StreamAuthentication,

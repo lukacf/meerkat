@@ -1738,11 +1738,14 @@ objective, as a host human input submitted with `HandlingMode::Queue` is. It
 stays in the member's input store, its waiter ends with
 `BoundedTurnFailure::RequeuedAcrossStop`, and the mob's next start runs it
 once, in admission order, before new work; a same-key replay after the
-restart re-attaches to its result. Do not resubmit it. If it is older than
-`max_age`, measured from its admission, when a start finds it still queued
-(every such start checks again), it ends as abandoned (`requeue_expired`)
-without running, and a same-key replay answers
-`BoundedTurnFailure::RequeueExpired`: resubmit it if it is still wanted.
+restart re-attaches to its result. Do not resubmit it. If more than
+`max_age` has passed since the Shutdown kept it when a start finds it still
+queued (every such start checks again), it ends as abandoned
+(`requeue_expired`) without running, and a same-key replay answers
+`BoundedTurnFailure::RequeueExpired`: resubmit it if it is still wanted. The
+age counts from the Shutdown, not from the input's admission: `max_age`
+bounds how long the member may stay down, however long the input waited
+before the Shutdown.
 Steer, ephemeral, event, directed and objective-bound inputs that are not
 bound to the running turn's run, and peer messages, end as stopped. A
 member's kickoff is bound to its objective, so a kickoff still queued at a

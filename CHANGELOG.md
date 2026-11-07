@@ -158,6 +158,15 @@ them.
   enum is exhaustive, so a downstream exhaustive match needs the new arm, or
   a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`: the max age of a graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, `RequeueMaxAge`) is
+  measured from the stop that kept an input, not from the input's admission
+  (see Fixed). A kept input now runs at a start that comes within `max_age`
+  of that stop, however long before the stop it was admitted, so a host
+  that used `max_age` to bound how old an input may be when it runs must
+  bound that itself; see the upgrading guide.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -547,6 +556,26 @@ them.
   `ToolChoiceUnsupported` refusal (`ModelDoesNotSupportForcedToolChoice`)
   before any request is sent, instead of being sent and answered with that
   400, which mapped to the same typed refusal.
+
+- `meerkat-runtime`: a kept input's requeue age is measured from the
+  graceful stop that kept it, not from its admission, so a run admitted long
+  before a restart is no longer ended as `requeue_expired` after a short
+  restart. A graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, which `rkat-rpc`'s, the
+  REST server's and a mob's default graceful shutdowns use with a 15-minute
+  max age for sessions with per-round commits) marks each input it keeps
+  with the stop's time, and the next start now ends the input as
+  `RequeueExpired` only when more than `max_age` has passed since that time:
+  `max_age` bounds the outage after which kept work still runs. The start
+  measured the age from the input's admission instead, so every run
+  admitted more than 15 minutes before a graceful restart, however short the
+  restart, was settled as `RequeueExpired` instead of resumed (its session
+  stream ending it with a `RunFailed`), and a queued input admitted that
+  long before ended `RequeueExpired` without running. A later graceful stop
+  that keeps an input again, before a start runs it, still replaces its
+  mark with its own time and max age, so the age counts from the last stop
+  that kept it. Every mark written since 0.9.5 carries the stop's time, so
+  no migration is needed. Affects 0.9.5 through 0.9.10.
 
 ### Upgrade notes
 

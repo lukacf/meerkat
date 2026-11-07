@@ -958,8 +958,10 @@ pub enum MobError {
     /// restore ([`MobError::structured_data`] of it: a session builder's
     /// typed refusal of the member's build, a provider-auth refusal), when it
     /// had some. Every later answer for the Broken member carries the same
-    /// data, so a host classifies the failure by its data, never by `reason`.
-    /// `None` for a failure without structured data.
+    /// data, so a host in the same process classifies the failure by its
+    /// data, never by `reason`. It is this Rust error's only: the RPC, REST
+    /// and MCP surfaces do not project it, and a wire client sees the
+    /// error's kind alone. `None` for a failure without structured data.
     #[error(
         "member {member_id} failed to restore {}: {reason}",
         format_member_restore_target(.session_id.as_ref())

@@ -163,9 +163,11 @@ them.
   builder's typed refusal of the member's build, a provider-auth refusal),
   `None` for a failure without any. Every answer for the Broken member (a
   wake's, a later wake's, a revival's, a refused member handle's) carries
-  it, so a host classifies the failure by its data instead of parsing
-  `reason`. A pattern that names every field of the variant names it too,
-  or adds `..`; code that builds the variant sets it.
+  it, so a host in the same process classifies the failure by its data
+  instead of parsing `reason`. The field is the Rust error's only: the RPC,
+  REST and MCP surfaces do not carry it, and a wire client sees the
+  error's kind alone. A pattern that names every field of the variant
+  names it too, or adds `..`; code that builds the variant sets it.
 
 - `meerkat-machine-kernels`, `meerkat-machine-schema`: MobMachine
   records a build preparation the host asked to retry and ends it (see

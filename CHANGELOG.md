@@ -232,6 +232,35 @@ them.
   itself (see Changed). The struct is `#[non_exhaustive]`, so the field is
   additive.
 
+- `meerkat-mob`: `MobHandle::admit_external_work`, MobMachine's admission
+  of external work for a member, asked as an unkeyed member send asks it
+  (`SubmitWork` of `WorkOrigin::External` at the member's current
+  incarnation), under `ControlScope::SendCommand`, with nothing submitted;
+  and `MobHandle::admit_member_host_door`, the admission of a door that acts
+  on a member's session as its host: the door's own scope, and
+  `ControlScope::AdminHost` when the member is an identity entry or its name
+  is reserved unreadable (`MobError::IdentityMember` otherwise). Both are
+  decided in the mob actor's own step, from its machine state.
+
+- `meerkat-mob-mcp`: `MobMcpState::mob_member_send_keyed_as_host`, the
+  host's own keyed member send: a member continuation committed as
+  internal work, never asked the external admission, under the host doors'
+  rule (an identity entry needs `ControlScope::AdminHost`, which the owner
+  holds). A host that delivers keyed sends to its own identity entries uses
+  it; `mob_member_send_keyed` is the external door (see Changed).
+
+- `meerkat`: `ContinuationOwnerService::submit_external_work_for_member_incarnation`
+  commits a member continuation as external work. Its drain asks the
+  member's owner again before anything is reserved or admitted, through the
+  new `ContinuationAddressResolver::external_work_refusal` (forwarded by
+  `ContinuationHostBindings::external_work_refusal` and
+  `RuntimeDeliveryHost::external_work_refusal`), and a refusal settles the
+  row refused for good. The trait methods have defaults that refuse
+  nothing, so an existing implementation is unchanged. The mark rides the
+  committed row, where a release that predates it ignores it and admits the
+  row as before, and it is not part of the submission's digest, so a replay
+  of a key committed before it answers the first receipt.
+
 ### Changed
 
 - `meerkat-mob`: external work (a member send from outside the mob,
@@ -257,6 +286,42 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
+- `meerkat-mob-mcp`, `meerkat-rpc`: the keyed member send
+  (`mob/member_send` with `idempotency_key`, `meerkat_mob_member_send` with
+  a key, `MobMcpState::mob_member_send_keyed`) asks MobMachine the same
+  external admission as the unkeyed send before its first commit, and
+  answers exactly as the unkeyed send does, for every caller:
+  `identity_member` for an identity entry or a member whose name is
+  reserved unreadable, `NotExternallyAddressable` for a member whose
+  runtime admits no external work, where it committed a continuation that
+  reached the member's session. Nothing is committed (the key's status
+  stays not committed). Its delivery asks again: a keyed send committed
+  before its member became an identity entry, or before its member's
+  runtime stopped admitting external work, settles `refused` with reason
+  `authority_denied`, final, and nothing is admitted. A replay of a
+  committed key still answers its first receipt and its status.
+
+- `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-web-runtime`: the doors that
+  act on a member's session as its host (`mob/turn_start`,
+  `mob/append_system_context`, `meerkat_mob_append_system_context`, the web
+  runtime's `mob_append_system_context`, `mob/member_live_open` and
+  `mob/member_live_control`) reach an identity entry, or a member whose name
+  is reserved unreadable, only for a principal that holds
+  `ControlScope::AdminHost`. Any other caller is refused
+  `MobError::IdentityMember` (`identity_member`) before anything runs, where
+  a `SendCommand` or `Live` principal reached the entry's session. On every
+  other member the doors are unchanged, and the owner holds every scope, so
+  a local console is unchanged. `mob/append_system_context` now renders a
+  mob refusal with its structured data (`data.kind`), as the other mob doors
+  do.
+
+- `meerkat-mob-mcp`, `meerkat-rpc`: `mob/submit_work` with
+  `origin: internal` acts as the mob's host and needs
+  `ControlScope::AdminHost`. A caller without it is refused `ScopeDenied`
+  (`required: admin_host`) before anything is submitted, where any
+  `SendCommand` principal could choose the internal origin. The default
+  `external` origin is unchanged, and the owner holds every scope.
 
 ### Fixed
 

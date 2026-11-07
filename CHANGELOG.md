@@ -340,6 +340,10 @@ them.
   not `enabled`, naming the state.
 - `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
   refuses a model the account lists with an empty endpoint list.
+- `meerkat-llm-core`: `streaming::SseEventReader` reads a Server-Sent Events
+  body as the format defines its events (an event ends at its blank line,
+  its `data:` lines join with a line break, and the end of the body reads
+  the last line and the last event), one `streaming::SseStep` per line.
 
 - `meerkat-anthropic`: `AnthropicClientBuilder::thinking_binding_controls_supported`
   declares whether the client's backend documents Anthropic's thinking-block
@@ -386,6 +390,20 @@ them.
   with the outage's retryable error without calling the exchange (for at
   most an hour); the first turn after it tries the exchange again. Without
   `Retry-After` the next turn tries it at once, as before.
+- `Retry-After` given as an HTTP date (IMF-fixdate, or the obsolete RFC 850
+  and asctime forms) is read as the delay until that date, none once it is
+  past: by every provider's error classification (a rate limit's retry hint,
+  `LlmError::parse_retry_after`) and by GitHub Copilot's transport (the token
+  exchange's pacing and outage, GitHub's rate limits). Before, only a number
+  of seconds was read.
+- `meerkat-openai`: the OpenAI Responses stream (every Responses route,
+  GitHub Copilot's included) is read as the SSE format defines its events:
+  an event ends at its blank line and the `data:` lines of one event join
+  with a line break, so an event whose data spans several lines is one event
+  instead of a parse error, and at the end of the body its last line counts
+  even without a line break. An empty `data:` field is still a parse error.
+  A body that writes events on consecutive lines with no blank line between
+  them is read as one event.
 - GitHub Copilot: a session's default compaction threshold stays below the
   account model's prompt limit. The model-aware default (four-fifths of the
   model's context window or input ceiling) now also takes the selected
@@ -565,6 +583,9 @@ them.
   the retryable incomplete-response error, so the turn is tried again and
   nothing of the response is committed. A finish reason still completes a
   turn with or without `[DONE]`. Other routes are unchanged.
+- `meerkat-llm-core`: a `Retry-After` number of seconds too large for
+  milliseconds is the largest delay instead of an overflow
+  (`LlmError::parse_retry_after`).
 
 ### Security
 

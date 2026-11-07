@@ -1620,7 +1620,7 @@ mod tests {
             "data: [DONE]",
             "",
         ]
-        .join("\n");
+        .join("\n\n");
         ([("content-type", "text/event-stream")], payload)
     }
 

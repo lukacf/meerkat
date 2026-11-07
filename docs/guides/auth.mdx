@@ -250,7 +250,8 @@ GitHub sign-in by a token exchange and replaces before it expires. A temporary
 failure of that exchange (a network failure or timeout, HTTP 408, 429 or 5xx,
 or a GitHub API rate limit) does not fail turns: the current token, minted from
 the current sign-in, keeps serving until it expires, and the exchange is tried
-again after its `Retry-After` (at least a second later), or after 30 seconds
+again after its `Retry-After` (a number of seconds or an HTTP date; at least a
+second later), or after 30 seconds
 without one. Once no valid token is left, a turn fails with a retryable error
 (rate limited, server error, network timeout), which the agent loop retries;
 when the exchange sent `Retry-After`, every turn until then fails the same way

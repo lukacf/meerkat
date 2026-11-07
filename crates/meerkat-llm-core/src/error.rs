@@ -741,16 +741,24 @@ impl LlmError {
         Self::from_http_status(status, message, retry_after_ms)
     }
 
+    /// A `Retry-After` value as the milliseconds to wait: a number of seconds
+    /// (a fractional one too), or an HTTP date (RFC 9110 section 5.6.7:
+    /// IMF-fixdate, or the obsolete RFC 850 and asctime forms every recipient
+    /// reads), the delay until that date, none once it is past. A number of
+    /// seconds too large for milliseconds is the largest delay. Anything else
+    /// gives no hint.
     pub fn parse_retry_after(value: &str) -> Option<u64> {
-        if let Ok(secs) = value.trim().parse::<u64>() {
-            return Some(secs * 1000);
+        let value = value.trim();
+        if let Ok(secs) = value.parse::<u64>() {
+            return Some(secs.saturating_mul(1000));
         }
-        if let Ok(secs) = value.trim().parse::<f64>()
+        if let Ok(secs) = value.parse::<f64>()
             && secs > 0.0
         {
             return Some((secs * 1000.0) as u64);
         }
-        None
+        let delay = http_date(value)?.signed_duration_since(chrono::Utc::now());
+        Some(u64::try_from(delay.num_milliseconds()).unwrap_or(0))
     }
 
     pub fn failure_reason(&self) -> LlmFailureReason {
@@ -929,6 +937,21 @@ impl LlmError {
             }
         }
     }
+}
+
+/// An HTTP date (RFC 9110 section 5.6.7): IMF-fixdate (`Sun, 06 Nov 1994
+/// 08:49:37 GMT`), or the obsolete RFC 850 (`Sunday, 06-Nov-94 08:49:37
+/// GMT`) and asctime (`Sun Nov  6 08:49:37 1994`) forms, all in UTC.
+fn http_date(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone as _;
+
+    if let Ok(date) = chrono::DateTime::parse_from_rfc2822(value) {
+        return Some(date.with_timezone(&chrono::Utc));
+    }
+    ["%A, %d-%b-%y %H:%M:%S GMT", "%a %b %e %H:%M:%S %Y"]
+        .iter()
+        .find_map(|format| chrono::NaiveDateTime::parse_from_str(value, format).ok())
+        .map(|date| chrono::Utc.from_utc_datetime(&date))
 }
 
 #[cfg(test)]

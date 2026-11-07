@@ -364,12 +364,14 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 return Err(CopilotHttpTransportError::ResponseTooLarge);
             }
             let status = response.status().as_u16();
+            // A number of seconds or an HTTP date, read as every provider
+            // answer's `Retry-After` is.
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(StdDuration::from_secs);
+                .and_then(meerkat_llm_core::LlmError::parse_retry_after)
+                .map(StdDuration::from_millis);
             let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
                 .and_then(|value| value.parse::<u64>().ok());
             let header_rate_limited = github_rate_limited(

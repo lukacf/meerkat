@@ -727,13 +727,17 @@ drops, a delegation already running finishes, and one Meerkat admitted that
 has not started yet (still waiting behind the channel's worker limit, or
 admitted as the channel closed) starts after the close: its request is
 committed to the session and it runs on its closed channel's own delegation
-authority. Its result reaches the session instead of the closed channel: a
-durable fork's result merges into the member as a new turn, and an existing
-member's own turn already holds it. Until a durable fork's result has merged,
-a channel reopened on the session is told that work from the earlier call is
-still finishing. Only blocked work (a worker handed its item back to wait for
-another item) is cancelled: at the close, or when its worker hands it back
-after the close.
+authority, with the reasoning preference the channel sealed. Words the user
+spoke to continue the request while it waited join its task, as on an open
+channel; a request whose held words cannot join it is not run without them,
+and ends as failed. Its result reaches the session instead of the closed
+channel: a durable fork's result merges into the member as a new turn, and
+an existing member's own turn already holds it. Until a durable fork's result
+has merged, a channel reopened on the session is told that work from the
+earlier call is still finishing. Only blocked work (a worker handed its item
+back to wait for another item) is cancelled: at the close, or when its worker
+hands it back after the close. One narrow case cannot run after the close
+(see [Limitations and known gaps](#limitations-and-known-gaps)).
 
 On open and reopen, the selected canonical dialogue is supplied in native
 `session.input` at provider session creation. User text and visible assistant
@@ -1331,6 +1335,7 @@ least one release.
 - **Live rows wait for a running member turn.** Transcript rows commit in arrival order behind a running turn of the member, so the persisted transcript can lag the conversation by that turn's length (on a WebSocket or WebRTC channel, by each member turn queued behind it while turns run back to back; that channel's voice and events keep flowing meanwhile); rows handed to a channel close are held in memory until they commit and are lost if the process exits first, and a row released mid-close can commit ahead of an earlier held row (see [Transcript rows while the member's turn runs](#transcript-rows-while-the-members-turn-runs)).
 - **Ordinary Realtime refresh is not instruction/history replay.** Supported mutable settings such as visible tools can refresh; canonical `System`-sequence changes, model/provider swaps, and canonical transcript or user-content-registry rewrites require `live/close` + `live/open`. The adapter remains fixed to PCM 24 kHz mono, including after reopen.
 - **GPT Live may delegate a question asked over its own playback.** Public `gpt-live-1` sessions use client delegation for the whole session, and the provider's delegation events carry no typed reason, so Meerkat cannot keep a single turn native. A question that starts while the assistant is still speaking, before the cue for a delegated result has been sent, can be routed to the executor even when it asks about the conversation itself. The user then hears the answer late, in the same voice, once the executor's turn has finished and its result has been spoken after at least 1.6 s of output silence; occasionally the voice instead resumes its earlier readout and never answers, and the question has to be asked again.
+- **A delegated request can be cancelled when a retirement closes the channel.** A GPT Live request admitted in the roughly 1 ms before the channel's control loop claims it is cancelled, and recorded as cancelled, when a retirement of the channel cancels that loop before the provider stream ends: the request's control payload never reached the loop, so it cannot run after the close. A close that lets the provider stream end first runs it after the close.
 
 ## See also
 

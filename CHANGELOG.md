@@ -268,16 +268,30 @@ them.
   executed nor recorded, and nothing said so. A delegation admitted before
   the close now starts after it once a worker slot frees, on its operation's
   own closed channel: the generated `ReconcileLiveDelegationTranscript*`,
-  `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`
-  and `RequeueUnstartedLiveDelegation` guards also admit a channel that
-  carries no runtime, fence or generation binding at all, on the exact
-  operation join, as `ResolveLiveDelegationWorkerStart` already did, and a
-  worker started that way takes no worker slot of the closed channel. It
-  settles like a worker that was running at the close: an owned fork's
-  result merges into the source member exactly once, and an existing member
-  keeps the request, its executor input and its answer in its own session.
-  Only blocked work the close finds, or work a worker hands back blocked
-  after the close, is still cancelled. Affects 0.8.41 through 0.9.10.
+  `AuthorizeLiveDelegationWorkerStart`, `AuthorizeLiveConsequentialEffect`,
+  `RequeueUnstartedLiveDelegation` and steer (`AuthorizeLiveDelegationSteer`,
+  `ResolveLiveDelegationSteerDelivery`, `ReconcileLiveDelegationSteer*`)
+  guards also admit a channel that carries no runtime, fence or generation
+  binding at all, on the exact operation join and while the session is
+  still registered, as `ResolveLiveDelegationWorkerStart` now does too, and
+  a worker started that way takes no worker slot of the closed channel. The
+  words the user spoke to continue the request while it waited join its
+  task as on an open channel; a held continuation that cannot join retires
+  the start instead of running the request without it, recorded as failed.
+  The worker keeps the member-turn reasoning preference the channel sealed:
+  the machine copies it per operation at admission, so it outlives the
+  channel's own. It settles like a worker that was running at the close: an
+  owned fork's result merges into the source member exactly once, and an
+  existing member keeps the request, its executor input and its answer in
+  its own session. A blocked hand-back on the unbound channel settles
+  Cancelled in the machine, as does blocked work the close finds. A
+  delegation the channel loop had not claimed yet when a retirement
+  cancelled the loop is cancelled at the close in the machine instead of
+  staying admitted with no schedule (it cannot run: its control payload
+  never arrived). A start deferred after its spoken request was committed
+  (a busy source at the fork cut, or a WorkGraph claim refusal) keeps that
+  commit for its retry; the retry committed the request again, the session
+  refused, and the request was retired. Affects 0.8.41 through 0.9.10.
 
 - `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5
   with no thinking configured) no longer fails after a mid-session tool

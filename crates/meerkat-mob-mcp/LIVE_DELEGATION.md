@@ -52,7 +52,9 @@ not the separate Responses/function-bridge execution contract.
   member's session, and a request admitted before the close that has not
   started yet runs after it, on the operation's own closed channel. Its
   request row, executor input and answer commit to the member's canonical
-  session as for a turn that ran while the channel was open.
+  session as for a turn that ran while the channel was open; words the user
+  spoke to continue the request while it waited join its task, and the turn
+  keeps the reasoning preference the channel sealed.
 - Terminal, result eligibility, cancellation, and release remain generated
   lifecycle decisions. For borrowed members, authorized worker retirement means
   releasing delegation custody, not retiring the underlying member.

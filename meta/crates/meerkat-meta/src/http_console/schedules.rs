@@ -689,6 +689,7 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
             runtime_governed: self.runtime.native_work_governed(),
             access: self.access.clone(),
             verification: None,
+            sender: Some(scheduled_sender(sender, &self.decisions)),
         };
         let request = ConsoleSendRequest {
             identity: send.identity.clone(),
@@ -716,6 +717,44 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
         .await
         .map(|_accepted| ())
         .map_err(|error| scheduled_send_failure(&error))
+    }
+}
+
+/// Who a fire sends as: the sender the schedule recorded, named as that
+/// caller's live sends name it. A person's fire on a console that requires
+/// sign-in carries the person's qualified principal (its verified `sub` in
+/// its issuer's trust domain) to the agent's run as its requester, as the
+/// person's live send would; no other fire names one.
+fn scheduled_sender(
+    sender: &ConsoleScheduleSender,
+    decisions: &RuntimeDecisionState,
+) -> crate::console_aggregator::ConsoleSender {
+    let kind = match sender {
+        ConsoleScheduleSender::Anonymous => ConsoleActorKind::Anonymous,
+        ConsoleScheduleSender::Human { .. } => ConsoleActorKind::Person,
+        ConsoleScheduleSender::Principal { provider, .. }
+            if provider == console_provider_name(&crate::AuthProvider::ServiceIdentity) =>
+        {
+            ConsoleActorKind::Service
+        }
+        ConsoleScheduleSender::Principal { .. } => ConsoleActorKind::TokenPrincipal,
+    };
+    let requester = match sender {
+        ConsoleScheduleSender::Human {
+            issuer, subject, ..
+        } if console_sends_name_requesters(decisions) => {
+            crate::runtime::console_human_principal(issuer, subject).ok()
+        }
+        ConsoleScheduleSender::Human { .. }
+        | ConsoleScheduleSender::Anonymous
+        | ConsoleScheduleSender::Principal { .. } => None,
+    };
+    crate::console_aggregator::ConsoleSender {
+        kind,
+        assurance: kind.assurance(),
+        display_name: sender.principal().map(ToString::to_string),
+        caller_scope: console_caller_scope(&sender.scope()),
+        requester,
     }
 }
 

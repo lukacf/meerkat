@@ -189,6 +189,7 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
             &[],
             &accepted,
             None,
+            None,
         )
         .await?;
     for spec in &scheduled_targets {

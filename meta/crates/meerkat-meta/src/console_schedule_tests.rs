@@ -1518,6 +1518,103 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
     Ok(())
 }
 
+/// The requester of the agent's turn that committed the user row `content`
+/// of `identity`, once the turn committed it.
+async fn turn_requester(
+    fixture: &Fixture,
+    identity: &str,
+    content: &str,
+) -> Option<meerkat_core::TurnRequester> {
+    let member = fixture
+        .runtime
+        .handle()
+        .get_member(&meerkat_mob::ids::AgentIdentity::from(identity))
+        .await
+        .expect("roster read")
+        .expect("the agent is listed");
+    let session = member
+        .bridge_session_id()
+        .expect("the agent has a session")
+        .to_string();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let page = fixture
+                .runtime
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("history read");
+            if let Some(requester) = page.messages.iter().find_map(|message| match message {
+                meerkat_core::Message::User(user) if user.text_content() == content => {
+                    Some(user.identity.requester.clone())
+                }
+                _ => None,
+            }) {
+                return requester;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent committed the scheduled send")
+}
+
+/// A fire's input carries the schedule's sender as its requester on a
+/// console that requires sign-in: the person who last defined the schedule
+/// is the direct requester of the agent's turn, as of a live send of
+/// theirs, and the fire's frame names that sender.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_fire_requester_is_schedule_sender() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-requester").await?;
+    let controller = enforced(vec![grant(
+        "erin-drives-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN).under(&controller)).await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let signed_in = doors(
+        &fixture,
+        console_decisions(true, false, &[ERIN]),
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(
+        sent[0].payload["sender"]["kind"],
+        json!("person"),
+        "{sent:#?}"
+    );
+    assert_eq!(
+        sent[0].payload["sender"]["display_name"],
+        json!(ERIN),
+        "{sent:#?}"
+    );
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the agent admitted the scheduled send"
+    );
+    let erin = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject_of(ERIN),
+        meerkat_core::TrustDomainId::new(format!("oidc-issuer:{ISSUER}"))?,
+    )?;
+    assert_eq!(
+        turn_requester(&fixture, "alpha", "Post the morning summary.").await,
+        Some(meerkat_core::TurnRequester::direct(erin)),
+        "the fired turn's requester is the schedule's sender"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// On a console without sign-in, a fire sends as the console's shared
 /// account, deduplicated in that account's scope, as its live sends are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

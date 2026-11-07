@@ -2515,6 +2515,9 @@ struct InternalBridgeWork<'a> {
     /// Selected skills for the explicit human lane, resolved natively by
     /// the target member. Empty on every other lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The original requester of the explicit human lane's turn, carried to
+    /// the member's admitted input. Absent on every other lane.
+    requester: Option<&'a meerkat_core::PrincipalRef>,
 }
 
 /// Which lane a submission runs in.
@@ -2656,12 +2659,17 @@ async fn submit_internal_bridge_work(
                 BridgeError::Mob(format!("member not found: {member_id}"))
             }
         })?;
-    let spec = internal_bridge_work_spec(
+    let mut spec = internal_bridge_work_spec(
         work.content,
         work.system_prompt,
         work.injected_context,
         work.interaction_id,
     );
+    // The original requester rides only the explicit human lane (refused on
+    // every other lane before this), onto the member's admitted input.
+    if let Some(requester) = work.requester {
+        spec = spec.with_requester(requester.clone());
+    }
     if let Some(expected_session) = work.host_human_session {
         if entry.bridge_session_id() != Some(expected_session) {
             return Err(BridgeError::HostHumanInput(
@@ -3761,6 +3769,11 @@ pub struct BridgeDelivery {
     /// references); every other lane refuses a nonempty selection typed
     /// instead of delivering the turn without it.
     pub skill_references: Vec<meerkat_core::skills::SkillKey>,
+    /// The original requester of this turn: the authenticated person the
+    /// host sends for. Only the explicit local host-human lane carries it, to
+    /// the member's admitted input; every other lane refuses one typed
+    /// instead of delivering the turn without it.
+    pub requester: Option<meerkat_core::PrincipalRef>,
 }
 
 impl BridgeDelivery {
@@ -3773,6 +3786,7 @@ impl BridgeDelivery {
             interaction_id: None,
             delivery_identity: None,
             skill_references: Vec::new(),
+            requester: None,
         }
     }
 }
@@ -9597,6 +9611,12 @@ impl MobSessionBridge {
                 "selected skills are carried only on the local host-human lane".to_string(),
             ));
         }
+        let requester = delivery.requester.as_ref();
+        if requester.is_some() && host_human_session.is_none() {
+            return Err(BridgeAdmissionError::InvalidInput(
+                "a requester is carried only on the local host-human lane".to_string(),
+            ));
+        }
         let mid = self.member_id_for_runtime_id(runtime_id).await?;
         // One admission budget for the whole attempt, shared by every actor
         // round trip below: the serialized hops must not each cost a budget.
@@ -9646,6 +9666,7 @@ impl MobSessionBridge {
                 delivery_identity,
                 host_human_session,
                 skill_references,
+                requester,
             },
             handling_mode,
             &deadline,

@@ -1098,6 +1098,7 @@ async fn console_human_reset_refuses_old_prepared_session_and_old_worker_fence()
             &[],
             HandlingMode::Queue,
             &accepted,
+            None,
         )
         .await
         .is_err()
@@ -1133,6 +1134,7 @@ async fn console_human_redispatch_into_a_moved_session_fails_and_delivers_nothin
             request.clone(),
             Some(h.session_id.to_string().as_str()),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
         .unwrap()

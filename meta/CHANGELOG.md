@@ -46,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   turn's requester instead (`RecallCoordinator::operator_context_for_turn`
   and `AgentMemoryRuntimeInjector::operator_context_for_turn`).
 
+- The console send routes refuse the `origin_kind` values reserved for
+  Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
+  `system`): `POST /console/send` answers `400` `reserved_origin_kind`, and
+  `meta/console/send` (JSON and multipart RPC) answers invalid params
+  (`-32602`). Nothing is recorded for a refused send. `operator` and
+  `operator_probe` are accepted as before.
+- Rust: `BridgeDelivery` gains the public field `requester`, so code that
+  builds it literally sets it (`None` keeps the previous behaviour).
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -113,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+- Console messages record their sender: each `user_input` frame a console
+  send makes names its `sender` (`kind`, `assurance`, `display_name` and
+  `caller_scope`, as `meta/console/whoami` reports the caller), set from the
+  caller the Console authenticated. A scheduled fire names the schedule's
+  sender. The senders survive a restart. Rust: the frame's sender is
+  `ConsoleSender`, its kind `ConsoleActorKind`.
+- On a console that requires sign-in, a person's console send, and a
+  schedule's fire for a person, carries the person's qualified principal
+  (the verified `sub` in its issuer's trust domain) to the agent's run as
+  its original requester, which Meerkat stores with the admitted input and
+  hands to tool dispatch. The stored frame keeps it; no view returns it. A
+  service's, a token principal's and an anonymous caller's sends carry none,
+  no send on an Open console does, and neither does a send to an external
+  member.
 
 ### Changed
 

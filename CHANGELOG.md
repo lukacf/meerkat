@@ -64,9 +64,10 @@ them.
   placed member is gone, so the kernel `generated::mob::TransitionId` loses
   `PrepareMemberInstructionDeliveryPlacedRunning` and
   `PrepareMemberInstructionDeliveryPlacedStopped`, and the discriminant of
-  every variant after them moves. `TransitionId` has no repr and
-  (de)serializes by variant name, so only an integer cast, or a match or a
-  serialized value that names one of the two variants, observes it.
+  every `TransitionId::*` variant after them moves down by two.
+  `TransitionId` has no repr and (de)serializes by variant name, so only an
+  integer cast, or a match or a serialized value that names one of the two
+  variants, observes it.
 
 - `meerkat-runtime`: `SupervisorBridgeCommandKind` gains
   `RecordMemberInstructionTarget` and `ReleaseMemberInstructionTarget`,

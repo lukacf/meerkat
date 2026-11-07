@@ -1076,15 +1076,138 @@ async fn each_owner_keeps_personal_accounts_in_a_realm_of_their_own() {
     assert_ne!(keys[0], keys[2]);
 }
 
+const NOTES_URL: &str = "https://notes.example.test/mcp";
+
+/// A stock Meta composition of `definition` over `storage`, with the agent
+/// mob tools installed as both gateways install them, whose `notes` server
+/// is personal; kept alive with its working directory.
+struct Hosted {
+    runtime: crate::MobRuntime,
+    _dir: tempfile::TempDir,
+}
+
+async fn hosted(
+    definition: meerkat_mob::MobDefinition,
+    storage: meerkat_mob::MobStorage,
+) -> Hosted {
+    let dir = tempfile::tempdir().expect("dir");
+    let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blobs: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(crate::blob_store::Base64BlobStoreAdapter::new(Arc::new(
+            crate::blob_store::ObjectStoreBlobStore::memory(),
+        )));
+    let machine = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent(store.clone(), blobs.clone())
+            .expect("runtime machine"),
+    );
+    let jobs: Arc<dyn meerkat::DetachedJobStore> = Arc::new(meerkat::MemoryDetachedJobStore::new());
+    let mut builder = meerkat::FactoryAgentBuilder::new(
+        meerkat::AgentFactory::new(dir.path())
+            .builtins(false)
+            .comms(true),
+        meerkat::Config::default(),
+    );
+    builder.default_detached_job_store = Some(Arc::clone(&jobs));
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        builder,
+        4,
+        Arc::new(meerkat_store::MemoryStore::new()),
+        store.clone(),
+        blobs,
+    ));
+    let spec = crate::MobBootstrapSpec::new(definition, storage, service)
+        .with_session_runtime_adapter(machine)
+        .expect("adopt the runtime owner")
+        .with_runtime_delivery(crate::MobRuntimeDelivery::new(store, jobs))
+        .with_agent_mob_tools(Arc::new(std::sync::RwLock::new(None)))
+        .expect("install the agent mob tools")
+        .with_personal_mcp_accounts(accounts());
+    let runtime = Box::pin(crate::MobRuntime::bootstrap(spec))
+        .await
+        .expect("bootstrap");
+    Hosted { runtime, _dir: dir }
+}
+
+/// A spawn of `profile` as `member`, placed on another host.
+fn placed(profile: &str, member: &str) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = meerkat_mob::SpawnMemberSpec::new(profile, member);
+    spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
+        "12D3KooWRemoteHost",
+    ));
+    spec
+}
+
+/// The refusal a member placed on another host gets for the `notes` server.
+fn hosted_elsewhere() -> PersonalAccountRefusal {
+    PersonalAccountRefusal::Unsupported {
+        server: "notes".to_string(),
+        reason: UnsupportedPersonalServer::HostedElsewhere,
+    }
+}
+
+/// Whether a placed spawn ended with that refusal: it stopped at the check
+/// of the profile it resolved, before Core compiled the member's portable
+/// spec or opened its host ladder, so nothing reached the other host. Past
+/// that check the spawn ends otherwise: the compile refuses a personal
+/// shape's account selection, and the host ladder refuses this placement.
+fn is_hosted_refusal(result: &Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>) -> bool {
+    matches!(
+        result,
+        Err(meerkat_mob::MobError::WiringError(message))
+            if *message == hosted_elsewhere().to_string()
+    )
+}
+
+/// Assert `result` is that refusal, typed: kind
+/// `personal_accounts_unsupported`, reason `HostedElsewhere`, server `notes`.
+fn assert_hosted_refusal(
+    result: &Result<meerkat_mob::SpawnResult, meerkat_mob::MobError>,
+    what: &str,
+) {
+    let expected = hosted_elsewhere();
+    assert_eq!(expected.kind(), "personal_accounts_unsupported");
+    assert!(
+        is_hosted_refusal(result),
+        "{what}: expected `{expected}`, got {result:?}"
+    );
+}
+
+/// The members a mob holds.
+async fn members(handle: &meerkat_mob::MobHandle) -> Vec<String> {
+    handle
+        .list_members()
+        .await
+        .into_iter()
+        .map(|entry| entry.agent_identity.to_string())
+        .collect()
+}
+
+/// The `notes` server's name in each shape personal accounts do not take.
+fn renamed_shapes() -> [(&'static str, McpServerConfig); 3] {
+    let mut fixed = http_server("notes", NOTES_URL);
+    if let meerkat_core::mcp_config::McpTransportConfig::Http(http) = &mut fixed.transport {
+        http.oauth_account = Some("bob@example.test".to_string());
+    }
+    [
+        ("no account selection", http_server("notes", NOTES_URL)),
+        ("a fixed oauth_account", fixed),
+        (
+            "another URL",
+            http_server("notes", "https://other.example.test/mcp"),
+        ),
+    ]
+}
+
 /// A member placed on another host is built there from a portable spec that
 /// carries its profile's MCP servers, and that host would serve a personal
-/// server with its own credentials: such a spawn (and a placed member's
-/// rebuild, through the same check) is refused, typed. The same member kept
-/// on this host, or placed with a profile that declares no personal server,
-/// is not.
-#[test]
-fn hosted_member_refuses_personal_server() {
-    let definition = meerkat_mob::MobDefinition::from_toml(
+/// server with its own credentials: a placed spawn whose definition profile,
+/// or whose own override profile, declares one is refused, typed, before
+/// anything is compiled or sent. A placed spawn whose profile declares no
+/// personal server is not refused for one.
+#[tokio::test]
+async fn hosted_member_refuses_personal_server() {
+    let definition = meerkat_mob::MobDefinition::from_toml(&format!(
         r#"
 [mob]
 id = "team"
@@ -1094,57 +1217,200 @@ model = "gpt-5.5"
 
 [[profiles.assistant.tools.mcp_servers]]
 name = "notes"
-url = "https://notes.example.test/mcp"
+url = "{NOTES_URL}"
 oauth_account_selection = "discover"
 
 [profiles.plain]
 model = "gpt-5.5"
+"#
+    ))
+    .expect("definition");
+    let plain = definition
+        .profiles
+        .get(&meerkat_mob::ProfileName::from("plain"))
+        .and_then(meerkat_mob::ProfileBinding::as_inline)
+        .expect("the plain profile")
+        .clone();
+    let hosted = hosted(definition, meerkat_mob::MobStorage::in_memory()).await;
+    let handle = hosted.runtime.handle();
+
+    assert_hosted_refusal(
+        &handle.spawn_spec(placed("assistant", "member-1")).await,
+        "the definition's profile",
+    );
+
+    let mut overridden = placed("plain", "member-2");
+    let mut profile = plain;
+    profile.tools.mcp_servers = vec![personal_http_server("notes", NOTES_URL)];
+    overridden.override_profile = Some(profile);
+    assert_hosted_refusal(
+        &handle.spawn_spec(overridden).await,
+        "the spawn's own profile",
+    );
+
+    let unrelated = handle.spawn_spec(placed("plain", "member-3")).await;
+    assert!(
+        !is_hosted_refusal(&unrelated),
+        "no personal server: {unrelated:?}"
+    );
+    assert!(members(&handle).await.is_empty());
+    let _ = handle.shutdown().await;
+}
+
+/// A realm profile's own MCP servers ride a placed member's portable spec as
+/// the definition's do: a placed spawn of a role whose realm profile declares
+/// a personal server in its personal shape is refused, typed, before anything
+/// is compiled or sent.
+#[tokio::test]
+async fn hosted_member_refuses_a_realm_profiles_personal_server() {
+    use meerkat_mob::store::RealmProfileStore as _;
+
+    let definition = meerkat_mob::MobDefinition::from_toml(
+        r#"
+[mob]
+id = "team"
+
+[profiles.plain]
+model = "gpt-5.5"
+
+[profiles.shared]
+realm_profile = "org-assistant"
 "#,
     )
     .expect("definition");
-    let guard = accounts().placement_guard(&definition);
-    let placed = |profile: &str| {
-        let mut spec = meerkat_mob::SpawnMemberSpec::new(profile, "member-1");
-        spec.placement = Some(meerkat_mob::machines::mob_machine::HostId::from(
-            "12D3KooWRemoteHost",
-        ));
-        spec
-    };
-
-    let refused = guard.refusal(&placed("assistant"));
-    assert_eq!(
-        refused,
-        Some(PersonalAccountRefusal::Unsupported {
-            server: "notes".to_string(),
-            reason: UnsupportedPersonalServer::HostedElsewhere,
-        })
-    );
-    assert_eq!(
-        refused.map(|refusal| refusal.kind()),
-        Some("personal_accounts_unsupported")
-    );
-
-    assert_eq!(
-        guard.refusal(&meerkat_mob::SpawnMemberSpec::new("assistant", "member-2")),
-        None,
-        "a member kept on this host"
-    );
-    assert_eq!(guard.refusal(&placed("plain")), None, "no personal server");
-
-    let mut overridden = placed("plain");
     let mut profile = definition
         .profiles
-        .values()
-        .find_map(meerkat_mob::ProfileBinding::as_inline)
-        .expect("a profile")
+        .get(&meerkat_mob::ProfileName::from("plain"))
+        .and_then(meerkat_mob::ProfileBinding::as_inline)
+        .expect("the plain profile")
         .clone();
-    profile.tools.mcp_servers = vec![personal_http_server(
-        "notes",
-        "https://notes.example.test/mcp",
-    )];
-    overridden.override_profile = Some(profile);
-    assert!(
-        guard.refusal(&overridden).is_some(),
-        "a spawn's own profile that adds a personal server"
+    profile.tools.mcp_servers = vec![personal_http_server("notes", NOTES_URL)];
+    let realm = Arc::new(meerkat_mob::store::InMemoryRealmProfileStore::new());
+    realm
+        .create("org-assistant", &profile)
+        .await
+        .expect("the realm profile");
+    let storage = meerkat_mob::MobStorage::in_memory().with_realm_profile_store(Some(realm));
+    let hosted = hosted(definition, storage).await;
+    let handle = hosted.runtime.handle();
+
+    assert_hosted_refusal(
+        &handle.spawn_spec(placed("shared", "member-1")).await,
+        "the realm profile",
     );
+    assert!(members(&handle).await.is_empty());
+    let _ = handle.shutdown().await;
+}
+
+/// The same for a realm profile that declares a server under a personal
+/// server's name in another shape: with no account selection, with a fixed
+/// `oauth_account`, or at another URL. A portable profile carries each of
+/// them, and the other host would serve it with its own account, so each is
+/// refused, typed, before anything is compiled or sent.
+#[tokio::test]
+async fn hosted_member_refuses_a_realm_profile_naming_a_personal_server_in_another_shape() {
+    use meerkat_mob::store::RealmProfileStore as _;
+
+    let mut toml = String::from("[mob]\nid = \"team\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n");
+    for index in 0..3 {
+        toml.push_str(&format!(
+            "\n[profiles.shared-{index}]\nrealm_profile = \"org-{index}\"\n"
+        ));
+    }
+    let definition = meerkat_mob::MobDefinition::from_toml(&toml).expect("definition");
+    let plain = definition
+        .profiles
+        .get(&meerkat_mob::ProfileName::from("plain"))
+        .and_then(meerkat_mob::ProfileBinding::as_inline)
+        .expect("the plain profile")
+        .clone();
+    let realm = Arc::new(meerkat_mob::store::InMemoryRealmProfileStore::new());
+    let shapes = renamed_shapes();
+    for (index, (_, server)) in shapes.iter().enumerate() {
+        let mut profile = plain.clone();
+        profile.tools.mcp_servers = vec![server.clone()];
+        realm
+            .create(&format!("org-{index}"), &profile)
+            .await
+            .expect("the realm profile");
+    }
+    let storage = meerkat_mob::MobStorage::in_memory().with_realm_profile_store(Some(realm));
+    let hosted = hosted(definition, storage).await;
+    let handle = hosted.runtime.handle();
+
+    for (index, (shape, _)) in shapes.iter().enumerate() {
+        assert_hosted_refusal(
+            &handle
+                .spawn_spec(placed(
+                    &format!("shared-{index}"),
+                    &format!("member-{index}"),
+                ))
+                .await,
+            shape,
+        );
+    }
+    assert!(members(&handle).await.is_empty());
+    let _ = handle.shutdown().await;
+}
+
+/// An agent's child mob declares its own profiles (the agent mob tools create
+/// it as an agent's `mob_create` does): a placed spawn there whose profile
+/// declares a personal server, in its personal shape or under its name in
+/// another shape, is refused, typed, before anything is compiled or sent.
+#[tokio::test]
+async fn hosted_member_refuses_an_agent_created_child_mobs_personal_server() {
+    let root = meerkat_mob::MobDefinition::from_toml(
+        "[mob]\nid = \"team\"\n\n[profiles.plain]\nmodel = \"gpt-5.5\"\n",
+    )
+    .expect("root definition");
+    let hosted = hosted(root, meerkat_mob::MobStorage::in_memory()).await;
+    let state = hosted
+        .runtime
+        .agent_mob_mcp_state()
+        .expect("the agent mob tools");
+
+    let mut toml = format!(
+        r#"
+[mob]
+id = "child"
+
+[profiles.personal]
+model = "gpt-5.5"
+
+[[profiles.personal.tools.mcp_servers]]
+name = "notes"
+url = "{NOTES_URL}"
+oauth_account_selection = "discover"
+"#
+    );
+    toml.push_str("\n[profiles.renamed]\nmodel = \"gpt-5.5\"\n");
+    let mut child_definition =
+        meerkat_mob::MobDefinition::from_toml(&toml).expect("child definition");
+    if let Some(meerkat_mob::ProfileBinding::Inline(profile)) = child_definition
+        .profiles
+        .get_mut(&meerkat_mob::ProfileName::from("renamed"))
+    {
+        profile.tools.mcp_servers = vec![http_server("notes", NOTES_URL)];
+    }
+    let child_id = state
+        .mob_create_definition_with_owner_bridge_session(
+            child_definition,
+            meerkat_core::SessionId::new(),
+            true,
+            false,
+        )
+        .await
+        .expect("create the child mob");
+    let child = state.handle_for(&child_id).await.expect("the child mob");
+
+    assert_hosted_refusal(
+        &child.spawn_spec(placed("personal", "member-1")).await,
+        "the child mob's profile, in the personal shape",
+    );
+    assert_hosted_refusal(
+        &child.spawn_spec(placed("renamed", "member-2")).await,
+        "the child mob's profile, under the name in another shape",
+    );
+    assert!(members(&child).await.is_empty());
+    let _ = hosted.runtime.handle().shutdown().await;
 }

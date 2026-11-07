@@ -12,8 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   `/cancel-sign-in` and `/callback`) refuse a caller that is not a verified,
   current person (no token on a console without sign-in, a service token, a
   token that names no person, a shared-account token, or a person whose
-  login ended before the route forwarded the answer; an answer already
-  forwarded is then not applied) with `403` and
+  login ended while the answer waited, before the route forwarded it; an
+  answer already forwarded is then not applied) with `403` and
   `{"error": "approver_unauthenticated"}`, a new refusal kind (the one the
   Meta console uses for approval decisions); nothing is answered.
 - Console setup: an answer from a login that has no open setup prompt is

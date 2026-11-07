@@ -2119,6 +2119,37 @@ impl IdentityRuntimeError {
                 "kind": "session_not_held_by_identity", "identity": identity,
                 "session_id": session_id.to_string(),
             })),
+            // A governed bind's typed refusal: nothing was submitted.
+            Self::GovernedInput(super::bridge::GovernedInputError::Refused(refusal)) => {
+                Some(serde_json::json!({
+                    "kind": "governed_input_refused",
+                    "refusal": refusal.kind.as_str(),
+                    "submitted": false,
+                    "retryable": false,
+                }))
+            }
+            // Every bind answered "not now" until the door's budget ended:
+            // nothing was submitted, and the same input can be sent again.
+            Self::GovernedInput(super::bridge::GovernedInputError::Held(hold)) => {
+                Some(serde_json::json!({
+                    "kind": "governed_input_held",
+                    "condition": hold.condition.as_str(),
+                    "waited_ms": u64::try_from(hold.waited.as_millis()).unwrap_or(u64::MAX),
+                    "binds": hold.binds,
+                    "input_id": hold.input_id.to_string(),
+                    "submitted": false,
+                    "retryable": true,
+                }))
+            }
+            // The submission's outcome is unknown: its receipt says where it
+            // is read by key.
+            Self::GovernedInput(super::bridge::GovernedInputError::AdmissionUnresolved {
+                receipt,
+                ..
+            }) => Some(serde_json::json!({
+                "kind": "governed_admission_unresolved",
+                "receipt": receipt,
+            })),
             _ => None,
         }
     }
@@ -10922,107 +10953,180 @@ impl IdentityRuntime {
         ),
         IdentityRuntimeError,
     > {
-        use super::bridge::{GovernedDoor, GovernedInputError};
-        {
-            let entries = self.entries.read().await;
-            let entry = entries
-                .get(identity)
-                .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
-            // Only the external door refuses an internal-only identity; the
-            // trusted host's internal door reaches any identity.
-            if door == GovernedDoor::External
-                && entry.spec.addressability == AgentAddressability::InternalOnly
-            {
-                return Err(IdentityRuntimeError::NotAddressable(NotAddressable {
-                    identity: identity.clone(),
-                    addressability: entry.spec.addressability,
-                }));
-            }
-        }
-        // A target Core does not hold yet (or whose first-boot row is still
-        // to carry out) is seated first, and woken below before its binding
-        // is read.
-        self.seat_for_admission(identity, expected_alias, None)
-            .await?;
-        let lifecycle_lock = self.lifecycle_lock_for(identity).await;
-        let _lifecycle_guard = lifecycle_lock.lock().await;
-        if let Some(expected_alias) = expected_alias {
-            self.ensure_expected_member_alias_current(identity, expected_alias)
-                .await?;
-        }
-        // The registered row is read with the Active/session check, under
-        // the lifecycle lock this operation holds through native submission
-        // and which every row writer takes: the binder checks the row the
-        // input is admitted under.
-        let spec = self
-            .entries
-            .read()
-            .await
-            .get(identity)
-            .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
-            .spec
-            .clone();
-        let operation = match door {
-            GovernedDoor::External => "send",
-            GovernedDoor::TrustedHostInternal => "dispatch",
+        use super::bridge::{
+            GovernedBindError, GovernedBindRefusal, GovernedDoor, GovernedHold, GovernedInputError,
+            GovernedWaitBudget,
         };
-        // A hosted identity (placed on a host, or bound to an external
-        // runtime) has no local session actor to bind for, and its host owns
-        // its materialization: it is refused before any wake.
-        if durable_spec_is_hosted(&spec) {
-            return Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Unsupported(
-                    "governed input requires a local session-backed member".to_string(),
-                ),
-            ));
-        }
-        // Core's dispatch would wake a Dormant member only after the bind
-        // below, and the wake decides the member's session (a seat's first
-        // wake creates it, a missing one moves to its successor): Core wakes
-        // it first, so the binding read below is the woken member's.
-        if let Some(bridge) = self.bridge.as_ref() {
-            bridge
-                .wake_for_governed_input(identity)
+        let budget = binder.wait_budget();
+        // One deadline and one set of free rebinds for the whole send, armed
+        // by its first wait and never re-armed (Core's owner-change churn).
+        let mut churn = meerkat_core::authorization::OwnerChangeChurn::new();
+        let mut waited = std::time::Duration::ZERO;
+        let mut binds: u32 = 0;
+        let (_lifecycle_guard, bridge, runtime_id, session_id, token, completion_baseline, bound) = loop {
+            {
+                let entries = self.entries.read().await;
+                let entry = entries
+                    .get(identity)
+                    .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
+                // Only the external door refuses an internal-only identity;
+                // the trusted host's internal door reaches any identity.
+                if door == GovernedDoor::External
+                    && entry.spec.addressability == AgentAddressability::InternalOnly
+                {
+                    return Err(IdentityRuntimeError::NotAddressable(NotAddressable {
+                        identity: identity.clone(),
+                        addressability: entry.spec.addressability,
+                    }));
+                }
+            }
+            // A target Core does not hold yet (or whose first-boot row is
+            // still to carry out) is seated first, and woken below before its
+            // binding is read.
+            self.seat_for_admission(identity, expected_alias, None)
+                .await?;
+            let lifecycle_guard = self.lifecycle_lock_for(identity).await.lock_owned().await;
+            if let Some(expected_alias) = expected_alias {
+                self.ensure_expected_member_alias_current(identity, expected_alias)
+                    .await?;
+            }
+            // The registered row is read with the Active/session check, under
+            // the lifecycle lock this operation holds through native
+            // submission and which every row writer takes: the binder checks
+            // the row the input is admitted under.
+            let spec = self
+                .entries
+                .read()
+                .await
+                .get(identity)
+                .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?
+                .spec
+                .clone();
+            let operation = match door {
+                GovernedDoor::External => "send",
+                GovernedDoor::TrustedHostInternal => "dispatch",
+            };
+            // A hosted identity (placed on a host, or bound to an external
+            // runtime) has no local session actor to bind for, and its host
+            // owns its materialization: it is refused before any wake.
+            if durable_spec_is_hosted(&spec) {
+                return Err(IdentityRuntimeError::GovernedInput(
+                    GovernedInputError::Unsupported(
+                        "governed input requires a local session-backed member".to_string(),
+                    ),
+                ));
+            }
+            // Core's dispatch would wake a Dormant member only after the bind
+            // below, and the wake decides the member's session (a seat's first
+            // wake creates it, a missing one moves to its successor): Core
+            // wakes it first, so the binding read below is the woken member's.
+            if let Some(bridge) = self.bridge.as_ref() {
+                bridge
+                    .wake_for_governed_input(identity)
+                    .await
+                    .map_err(|error| self.admission_error(identity, error))?;
+            }
+            let (live, scope) = self.live_delivery_target(identity, operation).await?;
+            let runtime_id = Some(live.agent_runtime_id);
+            let session_id = live.session_id;
+            let token = Self::scope_fence(scope.as_ref());
+            let completion_baseline = self.credited_completion_cursor(identity, token).await;
+            let (Some(bridge), Some(runtime_id), Some(session_id)) =
+                (self.bridge.as_ref(), runtime_id, session_id)
+            else {
+                return Err(IdentityRuntimeError::GovernedInput(
+                    GovernedInputError::Unsupported(
+                        "no session bridge, bound runtime or session for the identity".to_string(),
+                    ),
+                ));
+            };
+            // The session actor's actual controller, pinned by its owner.
+            let controller = bridge
+                .governed_controller(&runtime_id, &session_id)
                 .await
                 .map_err(|error| self.admission_error(identity, error))?;
-        }
-        let (live, scope) = self.live_delivery_target(identity, operation).await?;
-        let runtime_id = Some(live.agent_runtime_id);
-        let session_id = live.session_id;
-        let token = Self::scope_fence(scope.as_ref());
-        let completion_baseline = self.credited_completion_cursor(identity, token).await;
-        let (Some(bridge), Some(runtime_id), Some(session_id)) =
-            (self.bridge.as_ref(), runtime_id, session_id)
-        else {
-            return Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Unsupported(
-                    "no session bridge, bound runtime or session for the identity".to_string(),
-                ),
-            ));
+            let context = super::bridge::GovernedBindContext {
+                session_id: session_id.clone(),
+                controller,
+                spec,
+            };
+            // The trusted host binds for exactly this session, under the
+            // lease. The bind runs under the identity's lifecycle lock: a
+            // protected section, where the host never waits. Every fact above
+            // is read again for each bind: nothing carries over a wait.
+            binds = binds.saturating_add(1);
+            let (answer, effect) = meerkat_core::protected_section::within_marked(
+                meerkat_core::protected_section::ProtectedSection::GovernedBind,
+                binder.try_bind(&context, input.clone()),
+            )
+            .await;
+            let not_now = match answer {
+                Ok(bound) => {
+                    break (
+                        lifecycle_guard,
+                        bridge,
+                        runtime_id,
+                        session_id,
+                        token,
+                        completion_baseline,
+                        bound,
+                    );
+                }
+                Err(GovernedBindError::Refused(refusal)) => {
+                    return Err(IdentityRuntimeError::GovernedInput(
+                        GovernedInputError::Refused(refusal),
+                    ));
+                }
+                Err(GovernedBindError::NotNow(not_now)) => not_now,
+            };
+            // Release the identity before any wait: its other lifecycle
+            // operations run while this send waits.
+            drop(lifecycle_guard);
+            // "Not now" after a durable effect of this attempt is a binder
+            // fault: the send never waits or binds again after one.
+            debug_assert!(
+                effect.is_none(),
+                "a governed binder answered not now after the durable effect {effect:?}"
+            );
+            if let Some(effect) = effect {
+                return Err(IdentityRuntimeError::GovernedInput(
+                    GovernedInputError::Refused(GovernedBindRefusal::unavailable(format!(
+                        "the binder answered not now after a durable effect ({effect})"
+                    ))),
+                ));
+            }
+            let held = |waited| {
+                IdentityRuntimeError::GovernedInput(GovernedInputError::Held(GovernedHold {
+                    condition: not_now.condition,
+                    waited,
+                    binds,
+                    input_id: input.id().clone(),
+                    idempotency_key: input.header().idempotency_key.clone(),
+                }))
+            };
+            let GovernedWaitBudget::Bounded(within) = budget else {
+                return Err(held(waited));
+            };
+            let mut closed = self.foreground_cancel.subscribe();
+            let wait = tokio::select! {
+                biased;
+                _ = closed.wait_for(|closed| *closed) => {
+                    return Err(IdentityRuntimeError::Internal(
+                        "identity runtime is shutting down".to_string(),
+                    ));
+                }
+                wait = churn.wait_until_clear(not_now.until, Some(within), "governed_bind", None) => wait,
+            };
+            waited += wait.waited();
+            if !wait.settled() {
+                return Err(held(waited));
+            }
         };
-        // The session actor's actual controller, pinned by its owner.
-        let controller = bridge
-            .governed_controller(&runtime_id, &session_id)
-            .await
-            .map_err(|error| self.admission_error(identity, error))?;
-        let context = super::bridge::GovernedBindContext {
-            session_id: session_id.clone(),
-            controller,
-            spec,
-        };
-        // The trusted host binds for exactly this session, under the lease.
-        // The bind runs under the identity's lifecycle lock: a protected
-        // section, where the host never waits.
         let super::bridge::BoundGovernedInput {
             input: bound,
             settlement,
             entry_fence,
-        } = meerkat_core::protected_section::within(
-            meerkat_core::protected_section::ProtectedSection::GovernedBind,
-            binder.bind(&context, input),
-        )
-        .await
-        .map_err(|reason| IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))?;
+        } = bound;
         let header = bound.header();
         if header.authority_association.is_none() || header.ingress_context.is_none() {
             // Nothing was submitted: the custody is withdrawn.
@@ -11031,6 +11135,24 @@ impl IdentityRuntime {
                 GovernedInputError::Unbound,
             ));
         }
+        // Where this submission's outcome is read by its key, through Core,
+        // when its answer is lost: the raw key and the digest of the exact
+        // association it is submitted under.
+        let receipt = match (
+            header.idempotency_key.as_ref(),
+            header.authority_association.as_ref(),
+        ) {
+            (Some(key), Some(association)) => association.digest().ok().map(|digest| {
+                Box::new(super::bridge::GovernedSubmissionReceipt {
+                    v: super::bridge::GOVERNED_SUBMISSION_RECEIPT_VERSION,
+                    session_id: session_id.clone(),
+                    idempotency_key: key.clone(),
+                    association_digest: digest,
+                    input_id: bound.id().clone(),
+                })
+            }),
+            _ => None,
+        };
         // Custody whose submission's native admission is unresolved goes to
         // the host binder, the custody's owner, from this runtime-owned
         // operation: never left to a caller that may be gone, never dropped.
@@ -11042,7 +11164,10 @@ impl IdentityRuntime {
                 );
                 binder.retain_unresolved(settlement, &detail);
             }
-            IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved { detail })
+            IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved {
+                detail,
+                receipt: receipt.clone(),
+            })
         };
         // The member session's native admission settles this custody; the
         // host custody follows that settlement, never an error's kind.

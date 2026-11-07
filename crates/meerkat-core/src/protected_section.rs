@@ -23,6 +23,14 @@
 //! answer only before an attempt's first durable effect: a binder reads the
 //! mark with [`effect_recorded`], and the section's owner gets it back from
 //! [`within_marked`].
+//!
+//! The attempt also records its decision point with [`note_decided`]: where
+//! its binder passed its last "not now" site. Durable write funnels call the
+//! write witness [`assert_effect_marked`], which in a debug build panics on a
+//! write inside a [`ProtectedSection::GovernedBind`] attempt that has neither
+//! passed its decision point nor recorded an effect: a "not now" after that
+//! write would leave it behind for the next bind. Work an attempt hands to a
+//! blocking thread reaches the attempt through its [`EffectMark`].
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -55,12 +63,38 @@ pub enum ProtectedSection {
     HostStoreTransaction,
 }
 
-/// The asynchronous section a future runs in, with its attempt's effect
-/// mark (shared by every section nested inside the outermost one).
+/// One attempt of an outermost asynchronous section: the section it began
+/// as, its effect mark and its decision point, each recorded once and never
+/// cleared.
+struct Attempt {
+    outermost: ProtectedSection,
+    effect: OnceLock<&'static str>,
+    decided: OnceLock<&'static str>,
+}
+
+impl Attempt {
+    fn new(outermost: ProtectedSection) -> Self {
+        Self {
+            outermost,
+            effect: OnceLock::new(),
+            decided: OnceLock::new(),
+        }
+    }
+
+    /// A durable write now would precede a possible "not now" unmarked.
+    fn write_is_unmarked(&self) -> bool {
+        self.outermost == ProtectedSection::GovernedBind
+            && self.effect.get().is_none()
+            && self.decided.get().is_none()
+    }
+}
+
+/// The asynchronous section a future runs in, with its attempt (shared by
+/// every section nested inside the outermost one).
 #[derive(Clone)]
 struct TaskScope {
     section: ProtectedSection,
-    effect: Arc<OnceLock<&'static str>>,
+    attempt: Arc<Attempt>,
 }
 
 thread_local! {
@@ -70,6 +104,8 @@ thread_local! {
     static TASK_SCOPE: RefCell<Option<TaskScope>> = const { RefCell::new(None) };
     /// A wait its owner lists as known, running on this thread.
     static KNOWN_WAIT: Cell<Option<&'static str>> = const { Cell::new(None) };
+    /// The attempt a blocking thread entered through its [`EffectMark`].
+    static ENTERED_ATTEMPT: RefCell<Option<Arc<Attempt>>> = const { RefCell::new(None) };
 }
 
 /// A synchronous section, entered by [`enter`] and left when dropped. It
@@ -123,10 +159,8 @@ impl<F: Future> Future for Scoped<F> {
     }
 }
 
-fn enclosing_effect() -> Arc<OnceLock<&'static str>> {
-    TASK_SCOPE
-        .with(|scope| scope.borrow().as_ref().map(|scope| scope.effect.clone()))
-        .unwrap_or_default()
+fn enclosing_attempt() -> Option<Arc<Attempt>> {
+    TASK_SCOPE.with(|scope| scope.borrow().as_ref().map(|scope| scope.attempt.clone()))
 }
 
 /// Run `future` as `section`: every poll of it runs inside the section.
@@ -148,16 +182,16 @@ pub async fn within_marked<F>(
 where
     F: Future,
 {
-    let effect = enclosing_effect();
+    let attempt = enclosing_attempt().unwrap_or_else(|| Arc::new(Attempt::new(section)));
     let output = Scoped {
         scope: TaskScope {
             section,
-            effect: effect.clone(),
+            attempt: attempt.clone(),
         },
         future: Box::pin(future),
     }
     .await;
-    (output, effect.get().copied())
+    (output, attempt.effect.get().copied())
 }
 
 /// The section the current code runs in, if any: the synchronous one of
@@ -176,7 +210,7 @@ pub fn current() -> Option<ProtectedSection> {
 pub fn note_effect(effect: &'static str) {
     TASK_SCOPE.with(|scope| {
         if let Some(scope) = scope.borrow().as_ref() {
-            let _ = scope.effect.set(effect);
+            let _ = scope.attempt.effect.set(effect);
         }
     });
 }
@@ -191,8 +225,107 @@ pub fn effect_recorded() -> Option<&'static str> {
         scope
             .borrow()
             .as_ref()
-            .and_then(|scope| scope.effect.get().copied())
+            .and_then(|scope| scope.attempt.effect.get().copied())
     })
+}
+
+/// Record that the current attempt passed its decision point at `site`: its
+/// binder's last "not now" site, after which it never answers "not now", so
+/// a durable write after it needs no effect mark. The first decision stays;
+/// nothing clears it. Outside an asynchronous section this records nothing.
+/// Only the write witness ([`assert_effect_marked`]) and tests read it.
+pub fn note_decided(site: &'static str) {
+    TASK_SCOPE.with(|scope| {
+        if let Some(scope) = scope.borrow().as_ref() {
+            let _ = scope.attempt.decided.set(site);
+        }
+    });
+}
+
+/// The decision point the current attempt recorded with [`note_decided`],
+/// if any. For tests that pin where a binder records it.
+#[must_use]
+pub fn decision_recorded() -> Option<&'static str> {
+    TASK_SCOPE.with(|scope| {
+        scope
+            .borrow()
+            .as_ref()
+            .and_then(|scope| scope.attempt.decided.get().copied())
+    })
+}
+
+/// The current attempt's effect mark, for work the attempt hands to another
+/// thread (a blocking write), where no section is in scope: it records into
+/// the outermost section's mark, as [`note_effect`] does, and the thread
+/// enters the attempt with [`EffectMark::enter`] so that the write witness
+/// sees it there.
+#[derive(Clone)]
+pub struct EffectMark(Arc<Attempt>);
+
+impl EffectMark {
+    /// Record `effect`; the first effect recorded stays.
+    pub fn note(&self, effect: &'static str) {
+        let _ = self.0.effect.set(effect);
+    }
+
+    /// Enter this attempt on the current thread until the guard drops, for
+    /// the write witness ([`assert_effect_marked`]) only: it enters no
+    /// section, so a wait there is not witnessed.
+    pub fn enter(&self) -> EnteredAttempt {
+        let previous = ENTERED_ATTEMPT.with(|entered| entered.replace(Some(self.0.clone())));
+        EnteredAttempt {
+            previous,
+            _thread_bound: PhantomData,
+        }
+    }
+}
+
+impl std::fmt::Debug for EffectMark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EffectMark")
+            .field("effect", &self.0.effect.get())
+            .field("decided", &self.0.decided.get())
+            .finish()
+    }
+}
+
+/// An attempt entered on a thread by [`EffectMark::enter`], left when
+/// dropped. It stays on the thread that entered it.
+#[must_use = "the attempt is left when the guard is dropped"]
+pub struct EnteredAttempt {
+    previous: Option<Arc<Attempt>>,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+impl Drop for EnteredAttempt {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ENTERED_ATTEMPT.with(|entered| *entered.borrow_mut() = previous);
+    }
+}
+
+/// The current attempt's [`EffectMark`], when the current code runs in an
+/// asynchronous section.
+#[must_use]
+pub fn effect_mark() -> Option<EffectMark> {
+    enclosing_attempt().map(EffectMark)
+}
+
+/// The write witness: the current code is about to make the durable write
+/// `site` (a grant, a record). In a debug build this panics when it runs in
+/// a [`ProtectedSection::GovernedBind`] attempt that has neither passed its
+/// decision point ([`note_decided`]) nor recorded an effect
+/// ([`note_effect`]). The attempt is the current task's, or the one this
+/// thread entered through an [`EffectMark`]. A release build checks nothing.
+#[track_caller]
+pub fn assert_effect_marked(site: &'static str) {
+    debug_assert!(
+        !enclosing_attempt()
+            .or_else(|| ENTERED_ATTEMPT.with(|entered| entered.borrow().clone()))
+            .is_some_and(|attempt| attempt.write_is_unmarked()),
+        "protected-section write: {site} writes inside a GovernedBind attempt before its \
+         decision point, with no effect marked"
+    );
 }
 
 /// About to wait at `site` (take a lock another actor may hold across I/O,
@@ -310,8 +443,108 @@ mod tests {
         );
         assert_eq!(mark, Some("test.first"));
         assert_eq!(effect_recorded(), None, "the mark ends with its attempt");
-        let (_, fresh) = within_marked(ProtectedSection::GovernedBind, async {}).await;
+        let ((), fresh) = within_marked(ProtectedSection::GovernedBind, async {}).await;
         assert_eq!(fresh, None, "every outermost section starts unmarked");
+    }
+
+    /// Work an attempt hands to another thread records into the attempt's
+    /// mark through its handle; outside a section there is no handle.
+    #[tokio::test]
+    async fn an_effect_noted_on_another_thread_marks_the_attempt() {
+        assert!(effect_mark().is_none());
+        let (noted, mark) = within_marked(ProtectedSection::GovernedBind, async {
+            let handle = effect_mark().expect("inside a section");
+            tokio::task::spawn_blocking(move || handle.note("test.blocking_write"))
+                .await
+                .expect("the blocking write");
+            effect_recorded()
+        })
+        .await;
+        assert_eq!(noted, Some("test.blocking_write"));
+        assert_eq!(mark, Some("test.blocking_write"));
+    }
+
+    /// The write witness: inside a bind attempt a write needs the attempt's
+    /// effect mark or its decision point first; elsewhere nothing is
+    /// witnessed. The first decision stays.
+    #[tokio::test]
+    async fn a_bind_write_needs_a_mark_or_the_decision_point() {
+        assert_effect_marked("test.outside");
+        let unmarked = within(ProtectedSection::GovernedBind, async {
+            within(ProtectedSection::GovernedEntry, async {
+                std::panic::catch_unwind(|| assert_effect_marked("test.unmarked")).is_err()
+            })
+            .await
+        })
+        .await;
+        assert_eq!(
+            unmarked,
+            cfg!(debug_assertions),
+            "a nested section's write is the bind attempt's"
+        );
+        within(ProtectedSection::GovernedBind, async {
+            note_effect("test.mark");
+            assert_effect_marked("test.marked");
+        })
+        .await;
+        let decided = within(ProtectedSection::GovernedBind, async {
+            let before = decision_recorded();
+            note_decided("test.decided");
+            note_decided("test.later");
+            assert_effect_marked("test.after_decision");
+            (before, decision_recorded())
+        })
+        .await;
+        assert_eq!(decided, (None, Some("test.decided")));
+        assert_eq!(
+            decision_recorded(),
+            None,
+            "the decision ends with its attempt"
+        );
+        within(ProtectedSection::HostStoreTransaction, async {
+            assert_effect_marked("test.other_section");
+        })
+        .await;
+    }
+
+    /// A blocking thread sees the attempt for the write witness only once it
+    /// enters the attempt's handle, and leaves it with the guard.
+    #[tokio::test]
+    async fn a_blocking_write_is_witnessed_through_the_attempt_handle() {
+        let (entered, outside, marked) = within(ProtectedSection::GovernedBind, async {
+            let handle = effect_mark().expect("inside a section");
+            let blocking = handle.clone();
+            let entered = tokio::task::spawn_blocking(move || {
+                let caught = {
+                    let _entered = blocking.enter();
+                    assert_eq!(current(), None, "entering is not a section");
+                    std::panic::catch_unwind(|| assert_effect_marked("test.blocking_unmarked"))
+                        .is_err()
+                };
+                assert_effect_marked("test.left");
+                caught
+            })
+            .await
+            .expect("the blocking write");
+            let outside = tokio::task::spawn_blocking(|| {
+                std::panic::catch_unwind(|| assert_effect_marked("test.not_entered")).is_err()
+            })
+            .await
+            .expect("the blocking write");
+            let blocking = handle.clone();
+            let marked = tokio::task::spawn_blocking(move || {
+                let _entered = blocking.enter();
+                blocking.note("test.blocking_mark");
+                std::panic::catch_unwind(|| assert_effect_marked("test.blocking_marked")).is_err()
+            })
+            .await
+            .expect("the blocking write");
+            (entered, outside, marked)
+        })
+        .await;
+        assert_eq!(entered, cfg!(debug_assertions));
+        assert!(!outside, "a thread that did not enter sees no attempt");
+        assert!(!marked);
     }
 
     /// A panicking poll leaves no section behind.

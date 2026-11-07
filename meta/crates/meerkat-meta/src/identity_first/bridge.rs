@@ -3090,9 +3090,14 @@ pub enum GovernedInputError {
     /// The member's session changed or is missing; the input was not
     /// retargeted.
     BindingChanged,
-    /// The trusted host binder could not bind the input for the member's
-    /// session.
-    Bind(String),
+    /// The trusted host binder refused the input for the member's session:
+    /// nothing was submitted and no custody existed.
+    Refused(GovernedBindRefusal),
+    /// Every bind of the send answered "not now" until its door's wait
+    /// budget ended (or the door waits for nothing): nothing was submitted,
+    /// no custody existed, and the same input can be sent again as is. Not a
+    /// refusal, not a native outcome.
+    Held(GovernedHold),
     /// The input reached admission without its authority association or
     /// trusted ingress observation.
     Unbound,
@@ -3107,7 +3112,12 @@ pub enum GovernedInputError {
     /// The input may have run. The host's settlement custody was neither
     /// promoted nor withdrawn: it was handed to the binder's
     /// [`GovernedInputBinder::retain_unresolved`].
-    AdmissionUnresolved { detail: String },
+    AdmissionUnresolved {
+        detail: String,
+        /// Where the submission's outcome is read by its key, through Core,
+        /// when the bound input carried its raw key.
+        receipt: Option<Box<GovernedSubmissionReceipt>>,
+    },
     /// The bound input's host entry fence refused it at the final protected
     /// entry, immediately before native admission: nothing was submitted and
     /// the host's settlement custody was withdrawn.
@@ -3246,12 +3256,24 @@ impl std::fmt::Display for GovernedInputError {
             Self::BindingChanged => f.write_str(
                 "governed input binding changed or is missing; input was not retargeted",
             ),
-            Self::Bind(reason) => write!(f, "governed input could not be bound: {reason}"),
+            Self::Refused(refusal) => write!(
+                f,
+                "governed input refused ({}): {}",
+                refusal.kind.as_str(),
+                refusal.detail
+            ),
+            Self::Held(hold) => write!(
+                f,
+                "governed input held ({}) after {} binds and {} ms; nothing was submitted",
+                hold.condition.as_str(),
+                hold.binds,
+                hold.waited.as_millis()
+            ),
             Self::Unbound => f.write_str(
                 "governed input carries no authority association or ingress observation",
             ),
             Self::Mob(error) => write!(f, "governed input refused: {error}"),
-            Self::AdmissionUnresolved { detail } => write!(
+            Self::AdmissionUnresolved { detail, .. } => write!(
                 f,
                 "governed input admission is unresolved: {detail}; the input may have run \
                  and its settlement is retained unsettled by the host"
@@ -3478,19 +3500,185 @@ impl GovernedEntryRecord {
 /// Meta never mints, alters, drops or retargets the association; it carries
 /// the bound input to the member's native admission under the identity's
 /// lease and settles the custody from that admission's answer.
+///
+/// Meta calls [`Self::try_bind`] under the identity's lifecycle lock: a
+/// protected section ([`meerkat_core::protected_section`]), where the binder
+/// never blocks, sleeps or waits for a lock another actor may hold across
+/// I/O. Whatever it cannot answer now it answers [`GovernedBindError::NotNow`]:
+/// Meta then releases the lock, waits for the answer's
+/// [`GovernedNotNow::until`] within [`Self::wait_budget`], reads the
+/// identity's target, row and controller again and binds again, on the same
+/// binder, for the same input (the same input id and idempotency key).
+/// "Not now" is an answer only before the attempt's first durable effect
+/// ([`meerkat_core::protected_section::effect_recorded`]); after one, the
+/// binder answers what its door shipped.
 #[async_trait]
 pub trait GovernedInputBinder: Send + Sync {
-    async fn bind(
+    /// Bind the raw input for the member's exact current session now, or
+    /// say why not.
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String>;
+    ) -> Result<BoundGovernedInput, GovernedBindError>;
+
+    /// How long this door waits, in total, for its binds' "not now" answers:
+    /// Core's owner-change bound unless the door says otherwise.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::Bounded(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND)
+    }
 
     /// Take back custody whose submission's native admission is unresolved,
     /// to keep it until the host can settle it from the native owner's
     /// actual record. Called from the runtime-owned operation, whether or
     /// not its caller is still waiting.
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str);
+}
+
+/// Why a governed bind bound nothing.
+#[derive(Debug)]
+pub enum GovernedBindError {
+    /// This send ends here; nothing was submitted.
+    Refused(GovernedBindRefusal),
+    /// Not answerable now. Nothing was written, staged, issued or enrolled
+    /// for this send that a later bind would see as an earlier attempt.
+    NotNow(GovernedNotNow),
+}
+
+impl From<GovernedBindRefusal> for GovernedBindError {
+    fn from(refusal: GovernedBindRefusal) -> Self {
+        Self::Refused(refusal)
+    }
+}
+
+/// A binder's refusal: its kind, and a detail for operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GovernedBindRefusal {
+    pub kind: GovernedBindRefusalKind,
+    pub detail: String,
+}
+
+impl GovernedBindRefusal {
+    pub fn new(kind: GovernedBindRefusalKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    /// A [`GovernedBindRefusalKind::Denied`] refusal.
+    pub fn denied(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Denied, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Closed`] refusal.
+    pub fn closed(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Closed, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Unavailable`] refusal.
+    pub fn unavailable(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Unavailable, detail)
+    }
+
+    /// A [`GovernedBindRefusalKind::Withheld`] refusal.
+    pub fn withheld(detail: impl Into<String>) -> Self {
+        Self::new(GovernedBindRefusalKind::Withheld, detail)
+    }
+}
+
+/// Why a binder refused. A closed set: adding a kind is Breaking, in Rust
+/// and on the wire (`refusal` in the structured data).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedBindRefusalKind {
+    /// A verdict on this input: authority, access, consent, conflicting
+    /// custody, a changed source.
+    Denied,
+    /// The input's owner ended: source admission stopped, retired,
+    /// cancelled, revoked, expired.
+    Closed,
+    /// No verdict: the host could not decide or complete the bind and offers
+    /// no wait (a failed read or write). What it wrote stays in its own
+    /// custody. Never a "not now".
+    Unavailable,
+    /// The host binds nothing for this send by design: a preparation that
+    /// only reads the bind context. Not a verdict on the input.
+    Withheld,
+}
+
+impl GovernedBindRefusalKind {
+    /// The kind's stable wire name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Closed => "closed",
+            Self::Unavailable => "unavailable",
+            Self::Withheld => "withheld",
+        }
+    }
+}
+
+/// A binder's "not now": its typed condition and what Meta awaits before it
+/// binds again.
+#[derive(Debug)]
+pub struct GovernedNotNow {
+    /// Typed and advisory (an open set): Core's own not-ready vocabulary.
+    pub condition: meerkat_core::authorization::ControllerReadinessFailure,
+    /// What Meta awaits, outside every protected section and only within the
+    /// door's budget, before it binds again.
+    pub until: meerkat_core::authorization::NotNowWait,
+}
+
+/// A door's wait budget for its binds' "not now" answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedWaitBudget {
+    /// Wait up to this long in total, clamped to Core's owner-change bound.
+    Bounded(std::time::Duration),
+    /// Never wait: the door gets [`GovernedInputError::Held`] at the first
+    /// "not now" and decides itself.
+    None,
+}
+
+/// Every bind of a send answered "not now" until its door's budget ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GovernedHold {
+    /// The last answer's condition.
+    pub condition: meerkat_core::authorization::ControllerReadinessFailure,
+    /// The send's total wait.
+    pub waited: std::time::Duration,
+    /// Binds made, each answered "not now".
+    pub binds: u32,
+    /// The held input: sending exactly this input again enters the loop
+    /// again.
+    pub input_id: meerkat_core::lifecycle::InputId,
+    /// Its raw idempotency key, unchanged.
+    pub idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
+}
+
+/// The version of [`GovernedSubmissionReceipt`] this build writes and reads.
+pub const GOVERNED_SUBMISSION_RECEIPT_VERSION: u8 = 1;
+
+/// An opaque, versioned locator of one governed submission: where its
+/// outcome is read by key, through Core
+/// ([`meerkat_runtime::MeerkatMachine::governed_input_by_key`], with the
+/// reader's own association, whose digest must equal `association_digest`).
+/// It is no evidence of admission and no permission. A reader refuses a
+/// version it does not know, as unresolved, never as absence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedSubmissionReceipt {
+    /// [`GOVERNED_SUBMISSION_RECEIPT_VERSION`].
+    pub v: u8,
+    /// The session the submission was made to.
+    pub session_id: meerkat_core::types::SessionId,
+    /// The submitter's raw idempotency key (Core qualifies it).
+    pub idempotency_key: meerkat_runtime::IdempotencyKey,
+    /// The submitted association's digest.
+    pub association_digest: meerkat_runtime::AssociationDigest,
+    /// The submitted input: a secondary witness only (a deduplicated
+    /// submission's canonical input is another one).
+    pub input_id: meerkat_core::lifecycle::InputId,
 }
 
 /// The session owner's actor operations, captured where the concrete session
@@ -9498,6 +9686,7 @@ impl MobSessionBridge {
         let Some(custody) = custody.submit() else {
             return Err(governed(GovernedInputError::AdmissionUnresolved {
                 detail: "the native admission custody was already handed off".to_string(),
+                receipt: None,
             }));
         };
         let turn = match door {

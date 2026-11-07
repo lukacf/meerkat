@@ -16,9 +16,10 @@ use governed_support::*;
 use meerkat_meta::identity_first::contracts::{ContinuityStore, LeaseProvider};
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentRuntimeId, BoundGovernedInput, DurabilityPolicy, DurableAgentSpec,
-    GovernedAdmission, GovernedBindContext, GovernedDeliveryCustody, GovernedEntryFence,
-    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntime, IdentityRuntimeConfig,
+    GovernedAdmission, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome, GovernedEntryPermit,
+    GovernedEntryRefusal, GovernedInputBinder, GovernedInputError, GovernedNotNow,
+    GovernedSettlement, GovernedWaitBudget, IdentityRuntime, IdentityRuntimeConfig,
     IdentityRuntimeError, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge,
     NativeInputAdmissionSettlement, SessionBridge, TurnOutcome, TurnOutput, TurnTracking,
 };
@@ -87,8 +88,13 @@ struct FixtureBinder {
     rows: Mutex<Vec<DurableAgentSpec>>,
     /// The registered row the input was authored from.
     authored_from: Option<DurableAgentSpec>,
-    /// Holds the bind (entered, released) after it is handed the row.
+    /// Holds the bind (entered, released): until released, each bind is
+    /// entered and answers "not now", to be bound again once released.
     hold: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// Whether the hold was released.
+    released: Arc<AtomicBool>,
+    /// This door's wait budget for its "not now" answers.
+    budget: GovernedWaitBudget,
     /// The host's final-entry fence the bound input carries, if any.
     fence: Option<Arc<dyn GovernedEntryFence>>,
 }
@@ -116,6 +122,24 @@ impl FixtureBinder {
         ))
     }
 
+    /// [`Self::held`] at a door whose wait budget is `budget`.
+    fn held_within(
+        fixture: &Arc<Fixture>,
+        row: DurableAgentSpec,
+        entered: &Arc<tokio::sync::Notify>,
+        release: &Arc<tokio::sync::Notify>,
+        budget: Duration,
+    ) -> Arc<Self> {
+        let mut binder = Self::build(
+            fixture,
+            Binding::Original,
+            Some(row),
+            Some((Arc::clone(entered), Arc::clone(release))),
+        );
+        binder.budget = GovernedWaitBudget::Bounded(budget);
+        Arc::new(binder)
+    }
+
     fn build(
         fixture: &Arc<Fixture>,
         binding: Binding,
@@ -131,6 +155,10 @@ impl FixtureBinder {
             rows: Mutex::new(Vec::new()),
             authored_from,
             hold,
+            released: Arc::new(AtomicBool::new(false)),
+            budget: GovernedWaitBudget::Bounded(
+                meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            ),
             fence: None,
         }
     }
@@ -154,19 +182,31 @@ impl FixtureBinder {
 
 #[async_trait]
 impl GovernedInputBinder for FixtureBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         self.contexts.lock().expect("contexts").push((
             context.session_id.clone(),
             context.controller.selection().clone(),
         ));
         self.rows.lock().expect("rows").push(context.spec.clone());
-        if let Some((entered, release)) = &self.hold {
+        if let Some((entered, release)) = &self.hold
+            && !self.released.load(Ordering::SeqCst)
+        {
+            // Not answerable until the test releases the hold: answer "not
+            // now", waiting holding nothing, and bind again once released.
             entered.notify_one();
-            release.notified().await;
+            let release = Arc::clone(release);
+            let released = Arc::clone(&self.released);
+            return Err(GovernedBindError::NotNow(GovernedNotNow {
+                condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+                until: meerkat_core::authorization::NotNowWait::new(async move {
+                    release.notified().await;
+                    released.store(true, Ordering::SeqCst);
+                }),
+            }));
         }
         if self
             .authored_from
@@ -179,7 +219,10 @@ impl GovernedInputBinder for FixtureBinder {
                 custody: Arc::clone(&self.custody),
                 settled: AtomicBool::new(false),
             });
-            return Err("the input was authored from another registered row".to_string());
+            return Err(GovernedBindRefusal::denied(
+                "the input was authored from another registered row",
+            )
+            .into());
         }
         let bound = match self.binding {
             Binding::Original => {
@@ -207,6 +250,10 @@ impl GovernedInputBinder for FixtureBinder {
             }),
             entry_fence: self.fence.clone(),
         })
+    }
+
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        self.budget
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -291,6 +338,7 @@ mod losing {
             Err(BridgeAdmissionError::GovernedInput(match self.lose {
                 LostAnswer::Unresolved => GovernedInputError::AdmissionUnresolved {
                     detail: "the admission answer was lost".to_string(),
+                    receipt: None,
                 },
                 LostAnswer::PostAdmissionInternal | LostAnswer::CustodyLost => {
                     GovernedInputError::Mob(Box::new(MobError::Internal(
@@ -1139,7 +1187,7 @@ async fn an_input_authored_from_a_superseded_row_is_refused_at_bind_and_submits_
     assert!(
         matches!(
             &error,
-            IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(_))
+            IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(_))
         ),
         "{error}"
     );
@@ -1169,11 +1217,10 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
         .spec;
     let row_b = with_instructions(&row_a, "Answer in one sentence.");
 
-    // The bind for an input authored from row A is held after it was handed
-    // the row, inside the delivery's lifecycle custody.
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let binder = FixtureBinder::held(&fixture, row_a.clone(), &entered, &release);
+    // The input authored from row A is bound against row A, and its native
+    // admission is held in flight, inside the delivery's lifecycle custody.
+    fixture.adapter.gate.hold();
+    let binder = FixtureBinder::authored_from(&fixture, row_a.clone());
     let send = tokio::spawn({
         let runtime = Arc::clone(&runtime);
         let identity = identity.clone();
@@ -1184,9 +1231,13 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
                 .await
         }
     });
-    tokio::time::timeout(WAIT, entered.notified())
-        .await
-        .expect("the bind is entered");
+    tokio::time::timeout(WAIT, async {
+        while fixture.adapter.gate.entered() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the admission is in flight");
 
     // The real writer is polled once and parks on the identity's lifecycle
     // lock: it has not committed row B while the admission is in flight.
@@ -1211,7 +1262,7 @@ async fn a_row_change_waits_behind_an_admission_checked_against_the_old_row() {
 
     // The queued change does not refuse the input: row A is valid at bind
     // and the input is admitted and settled once.
-    release.notify_one();
+    fixture.adapter.gate.release();
     let sent = tokio::time::timeout(WAIT, send)
         .await
         .expect("the send completes")
@@ -1403,7 +1454,7 @@ async fn a_send_held_past_its_budget_answers_a_retryable_hold_and_its_replay_adm
         .spec;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let binder = FixtureBinder::held(&fixture, row.clone(), &entered, &release);
+    let binder = FixtureBinder::held_within(&fixture, row.clone(), &entered, &release, HOLD_BUDGET);
     let input = raw_prompt();
 
     let sent = tokio::time::timeout(

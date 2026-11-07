@@ -812,6 +812,9 @@ impl PrivateOriginals {
         store: Arc<dyn ToolkitStore>,
         owner: Arc<ToolkitOriginalOwner>,
     ) -> Result<Self, PrivateOriginalError> {
+        // Test builds witness every store write of a bind attempt.
+        #[cfg(test)]
+        crate::write_witness::install();
         scope.validate().map_err(|_| PrivateOriginalError::Denied)?;
         store
             .capabilities()
@@ -1581,6 +1584,8 @@ impl PrivateOriginals {
             .await
             .map_err(|_| OriginalWriterError::Unavailable)?
         {
+            // A bind attempt's durable effect: no "not now" may follow it.
+            meerkat_core::protected_section::note_effect("original.source_cancellation");
             let cancelled = self.persist_source_cancellation(Arc::new(stored)).await?;
             // No first binding may be published after parent cancellation.
             if record.final_association.is_none() {
@@ -1607,6 +1612,8 @@ impl PrivateOriginals {
             // association or task authority on its later replay.
             return Err(OriginalWriterError::OperationCancelled);
         }
+        // A bind attempt's durable effect: no "not now" may follow it.
+        meerkat_core::protected_section::note_effect("original.first_binding");
         // The same source owner retains the exact entered binding operation
         // before I/O, including when commit succeeds but its reply is lost.
         self.owner.retain_first_binding_write(

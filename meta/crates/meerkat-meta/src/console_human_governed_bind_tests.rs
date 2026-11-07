@@ -180,7 +180,21 @@ struct ReviewedBinder {
 
 #[async_trait::async_trait]
 impl GovernedInputBinder for ReviewedBinder {
-    async fn bind(
+    async fn try_bind(
+        &self,
+        context: &GovernedBindContext,
+        input: meerkat_runtime::Input,
+    ) -> Result<BoundGovernedInput, crate::identity_first::GovernedBindError> {
+        self.bind_reviewed(context, input)
+            .await
+            .map_err(|detail| crate::identity_first::GovernedBindRefusal::denied(detail).into())
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
+}
+
+impl ReviewedBinder {
+    async fn bind_reviewed(
         &self,
         context: &GovernedBindContext,
         input: meerkat_runtime::Input,
@@ -235,8 +249,6 @@ impl GovernedInputBinder for ReviewedBinder {
             entry_fence: None,
         })
     }
-
-    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {}
 }
 
 struct RecordedSettlement(Arc<Mutex<Vec<GovernedAdmission>>>);

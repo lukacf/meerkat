@@ -163,6 +163,28 @@ describe("#306: identity refusals carry Core's typed answers", () => {
     );
   });
 
+  it("maps a held governed send to the retryable error with its kind", async () => {
+    // Every bind of a governed send answered "not now" until its door's budget
+    // ended: nothing was submitted, and the same input may be sent again.
+    const data = {
+      kind: "governed_input_held",
+      condition: "source_held",
+      waited_ms: 300,
+      binds: 3,
+      input_id: "0193f0a4-6c1e-7c3a-9a1b-2f4e5d6c7b8a",
+      submitted: false,
+      retryable: true,
+    };
+    const err = await refusal({ code: -32052, message: "refused", data });
+    assert.ok(err instanceof IdentityHistoryUnavailableError);
+    assert.equal(err.retryable, true);
+    assert.deepEqual(
+      [err.kind, err.identity, err.sessionId],
+      ["governed_input_held", null, null],
+    );
+    assert.deepEqual(err.data, data);
+  });
+
   it("maps a host-adopted identity to a typed error", async () => {
     const err = await refusal({
       code: -32053,

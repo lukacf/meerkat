@@ -20,13 +20,13 @@ struct RefuseAfterActualBind {
 
 #[async_trait::async_trait]
 impl GovernedInputBinder for RefuseAfterActualBind {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
-        let bound = self.inner.bind(context, input).await?;
+        let bound = self.inner.try_bind(context, input).await?;
         let held = self
             .inner
             .delegate
@@ -62,9 +62,14 @@ impl GovernedInputBinder for RefuseAfterActualBind {
         };
         assert!(self.observation.lock().unwrap().replace(observed).is_none());
         // The actual pending guard is still retained by the real binder.
-        // Meta receives a Bind error, never this input, settlement or fence.
+        // Meta receives a refusal, never this input, settlement or fence.
         drop(bound);
-        Err("fixture refused after actual workflow binding".into())
+        Err(
+            meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(
+                "fixture refused after actual workflow binding",
+            )
+            .into(),
+        )
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {

@@ -481,7 +481,12 @@ impl PrivateOriginals {
                 let issuance_lifetime = lifetime.clone();
                 let issuance_console = console.clone();
                 let issuance_login = approved_login.clone();
+                // The bind attempt, for the blocking writer's issuance.
+                let issuance_attempt = meerkat_core::protected_section::effect_mark();
                 let issued = tokio::task::spawn_blocking(move || {
+                    let _attempt = issuance_attempt
+                        .as_ref()
+                        .map(meerkat_core::protected_section::EffectMark::enter);
                     // The blocking writer retains the same A or approved B
                     // login if its waiting binder disappears.
                     with_controller_login(
@@ -529,20 +534,27 @@ impl PrivateOriginals {
                                     },
                                 )? {
                                     Some(issued) => issued,
-                                    None => grants
-                                        .issue_child(
-                                            &caller,
-                                            parent.last().ok_or(GrantRefusal::Denied)?,
-                                            child_id,
-                                            executor.clone(),
-                                            bounds,
-                                        )
-                                        .inspect_err(|error| {
-                                            binding_grant_failure(
-                                                "binding.controller.child_issue",
-                                                error,
+                                    None => {
+                                        // A bind attempt's durable effect: no
+                                        // "not now" may follow it.
+                                        if let Some(attempt) = &issuance_attempt {
+                                            attempt.note("original.controller_grant");
+                                        }
+                                        grants
+                                            .issue_child(
+                                                &caller,
+                                                parent.last().ok_or(GrantRefusal::Denied)?,
+                                                child_id,
+                                                executor.clone(),
+                                                bounds,
                                             )
-                                        })?,
+                                            .inspect_err(|error| {
+                                                binding_grant_failure(
+                                                    "binding.controller.child_issue",
+                                                    error,
+                                                )
+                                            })?
+                                    }
                                 };
                                 let mut lineage = parent;
                                 lineage.push(child);

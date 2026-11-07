@@ -39,9 +39,9 @@ pub(crate) use close::WorkflowCloseObservation;
 pub(crate) use close::WorkflowTerminalRecovery;
 use meerkat_authorization_contracts::{constraints::DelegationDepth, grant::GrantLineageRef};
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedBindContext, GovernedEntryFence, GovernedEntryOutcome,
-    GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, IdentityRuntimeError, TurnTracking,
+    BoundGovernedInput, GovernedBindContext, GovernedBindError, GovernedEntryFence,
+    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder,
+    GovernedInputError, GovernedSettlement, IdentityRuntimeError, TurnTracking,
 };
 use meerkat_runtime::{Input, PromptInput};
 use meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin;
@@ -1785,8 +1785,7 @@ impl PreparedWorkflowLaunch {
             waiters: Mutex::new(Vec::new()),
         });
         let publication = source.owner.publication();
-        let _change = publication
-            .begin_owner_change()
+        let _change = crate::no_wait::wait_at("launch.stage", || publication.begin_owner_change())
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let prior = held.setup_workflow.get_or_init(|| candidate);
         if prior.reference != self.reference
@@ -2043,11 +2042,13 @@ impl PreparedWorkflowLaunch {
                     },
                 },
             },
-            // Exact selected Meta returns Bind before creating native admission
-            // custody or calling the bridge. Mob follows NotAdmitted custody,
-            // and EntryRefused follows a fence that prevented submission.
+            // Exact selected Meta returns a refused bind before creating native
+            // admission custody or calling the bridge. Mob follows NotAdmitted
+            // custody, and EntryRefused follows a fence that prevented
+            // submission. A held send (every bind answered "not now") is not
+            // a refusal: it stays uncertain below, never a failed launch.
             Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
+                GovernedInputError::Refused(_)
                 | GovernedInputError::Mob(_)
                 | GovernedInputError::EntryRefused(_),
             )) => WorkflowLaunchObservation::NotAdmitted,
@@ -2232,17 +2233,33 @@ impl WorkflowBinder {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for WorkflowBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.bind_launch(context, input)
+            .await
+            .map_err(crate::private_originals::governed_submit::BindFailure::into_error)
+    }
+    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {
+        self.delegate.retain_unresolved(settlement, detail);
+    }
+}
+
+impl WorkflowBinder {
+    async fn bind_launch(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, crate::private_originals::governed_submit::BindFailure> {
+        use crate::private_originals::governed_submit::BindFailure;
         let source = self
             .planning
             .selection
             .source
             .upgrade()
-            .ok_or_else(|| "The workflow source owner is unavailable".to_owned())?;
+            .ok_or_else(|| BindFailure::closed("The workflow source owner is unavailable"))?;
         if let Some(session) = source
             .owner
             .dedicated_workflow_session(
@@ -2255,7 +2272,7 @@ impl GovernedInputBinder for WorkflowBinder {
                 || context.spec.addressability
                     != meerkat_mobkit::identity_first::AgentAddressability::InternalOnly)
         {
-            return Err("The dedicated workflow member changed".into());
+            return Err(BindFailure::denied("The dedicated workflow member changed"));
         }
         let mut bound = self
             .delegate
@@ -2267,7 +2284,9 @@ impl GovernedInputBinder for WorkflowBinder {
             )
             .await?;
         if bound.entry_fence.is_some() {
-            return Err("The planning input has a conflicting entry owner".into());
+            return Err(BindFailure::denied(
+                "The planning input has a conflicting entry owner",
+            ));
         }
         self.attempt.bind(&context.session_id);
         let fence = LaunchFence {
@@ -2281,9 +2300,6 @@ impl GovernedInputBinder for WorkflowBinder {
         };
         bound.entry_fence = Some(Arc::new(fence));
         Ok(bound)
-    }
-    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {
-        self.delegate.retain_unresolved(settlement, detail);
     }
 }
 
@@ -2436,9 +2452,10 @@ impl HeldSetupWorkflow {
             .upgrade()
             .ok_or(PrivateOriginalError::Unavailable)?;
         let publication = source.owner.publication();
-        let _change = publication
-            .begin_owner_change()
-            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        let _change = crate::no_wait::wait_at("launch.workflow_accepted", || {
+            publication.begin_owner_change()
+        })
+        .map_err(|_| PrivateOriginalError::Unavailable)?;
         let controller = source
             .owner
             .workflow_controller(&self.planning)

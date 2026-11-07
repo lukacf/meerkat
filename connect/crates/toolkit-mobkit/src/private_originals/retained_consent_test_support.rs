@@ -3,8 +3,8 @@
 use super::*;
 use async_trait::async_trait;
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedBindContext, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, IdentityRuntimeError,
+    BoundGovernedInput, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedInputBinder, GovernedInputError, GovernedSettlement, IdentityRuntimeError,
 };
 use meerkat_runtime::{Input, PromptInput};
 use std::sync::atomic::{AtomicU8, AtomicU16, Ordering};
@@ -102,7 +102,7 @@ impl PrivateOriginals {
         if !matches!(
             result,
             Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
+                GovernedInputError::Refused(_)
             ))
         ) || !*binder.completed.lock().map_err(|poisoned| {
             // Release the poisoned guard before any diagnostic I/O.
@@ -192,7 +192,23 @@ struct RestoreOnlyBinder {
 }
 #[async_trait]
 impl GovernedInputBinder for RestoreOnlyBinder {
-    async fn bind(
+    async fn try_bind(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.restore(context, input)
+            .await
+            .map_err(|detail| GovernedBindRefusal::unavailable(detail).into())
+    }
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
+        // This binder never produces a settlement. The native owner cannot
+        // reach submission or unresolved admission through this implementation.
+    }
+}
+
+impl RestoreOnlyBinder {
+    async fn restore(
         &self,
         context: &GovernedBindContext,
         _input: Input,
@@ -253,10 +269,6 @@ impl GovernedInputBinder for RestoreOnlyBinder {
         // produced. The sole admitted input remains the predecessor's original.
         Err("restored existing original; preparation admits no new input".into())
     }
-    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
-        // This binder never produces a settlement. The native owner cannot
-        // reach submission or unresolved admission through this implementation.
-    }
 }
 
 // This module is test-support only. No payload, identifier, or native facts
@@ -306,7 +318,8 @@ fn native_failure_kind(error: &IdentityRuntimeError) -> &'static str {
         IdentityRuntimeError::GovernedInput(error) => match error {
             GovernedInputError::Unsupported(..) => "GovernedInputError::Unsupported",
             GovernedInputError::BindingChanged => "GovernedInputError::BindingChanged",
-            GovernedInputError::Bind(..) => "GovernedInputError::Bind",
+            GovernedInputError::Refused(..) => "GovernedInputError::Refused",
+            GovernedInputError::Held(..) => "GovernedInputError::Held",
             GovernedInputError::Unbound => "GovernedInputError::Unbound",
             GovernedInputError::Mob(..) => "GovernedInputError::Mob",
             GovernedInputError::AdmissionUnresolved { .. } => {

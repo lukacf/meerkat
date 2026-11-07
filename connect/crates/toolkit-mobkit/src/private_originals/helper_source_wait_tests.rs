@@ -302,6 +302,37 @@ async fn submission_waits_out_a_held_source_collection() {
     assert_admitted_after(&found, HOLD);
 }
 
+// The helper preparation's capture binder meets the held collection
+// inside Core's governed bind and answers "not now" with nothing captured;
+// Meta waits outside the identity's lock and binds the same binder again.
+// RED on the base: the binder refuses and the preparation binds again
+// itself, in a send of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_preparation_held_at_its_capture_answers_not_now_once() {
+    let found = finds_with_hold_at(Site::PrepareBind, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.not_now,
+        vec![(Site::HelperNotNow, "prepare".to_owned())],
+        "the capture answered not now once"
+    );
+}
+
+// The helper submission's binder meets the held collection at its
+// source check, before any write of the send, and answers "not now"; Meta
+// waits outside the identity's lock and binds again; admitted once.
+// RED on the base: the check refuses inside the bind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_submission_held_at_its_source_check_answers_not_now_once() {
+    let found = finds_with_hold_at(Site::SubmitBind, 1, collection_held(), 0, false).await;
+    assert_admitted_after(&found, HOLD);
+    assert_eq!(
+        found.not_now,
+        vec![(Site::HelperNotNow, "submit".to_owned())],
+        "the source check answered not now once"
+    );
+}
+
 // Negative controls, held past Core's owner-change bound: each step answers
 // tool_unavailable once its one deadline ran out, before the hold ended, and
 // nothing is retained.

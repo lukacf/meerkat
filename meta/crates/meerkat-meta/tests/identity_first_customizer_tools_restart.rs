@@ -65,10 +65,10 @@ use meerkat_meta::UnifiedRuntimeBuilder;
 use meerkat_meta::identity_first::contracts::{AgentCustomizer, RosterProvider, TopologyProvider};
 use meerkat_meta::identity_first::{
     AgentAddressability, AgentBuildContext, AgentBuildDraft, AgentIdentity, BoundGovernedInput,
-    CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityBootstrapMode, IdentityLifecycleState,
-    IdentityRuntimeError, IdentityStatus, LocalExternalToolOverlay, ManagedPeerEdge, MemberRestore,
-    RosterContext, RosterError, TopologyContext, TopologyError,
+    CustomizerError, DurableAgentSpec, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedInputBinder, GovernedInputError, GovernedSettlement, IdentityBootstrapMode,
+    IdentityLifecycleState, IdentityRuntimeError, IdentityStatus, LocalExternalToolOverlay,
+    ManagedPeerEdge, MemberRestore, RosterContext, RosterError, TopologyContext, TopologyError,
 };
 use meerkat_meta::mob_handle_runtime::SessionCreatedContext;
 use meerkat_mob::{MobDefinition, ProfileName};
@@ -3139,18 +3139,18 @@ impl RefusingBinder {
 
 #[async_trait]
 impl GovernedInputBinder for RefusingBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         let handed = HandedBind {
             session_id: context.session_id.clone(),
             controller: context.controller.selection().clone(),
             builds: self.customizer.builds().len(),
         };
         self.binds.lock().unwrap().push(handed);
-        Err(BIND_REFUSED.to_string())
+        Err(GovernedBindRefusal::denied(BIND_REFUSED).into())
     }
 
     fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -3357,8 +3357,8 @@ async fn a_governed_input_after_a_clean_restart_makes_one_customize_build_and_no
     assert!(
         matches!(
             &sent,
-            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                if reason.as_str() == BIND_REFUSED
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.detail == BIND_REFUSED
         ),
         "the governed input reaches the host's bind: {sent:?}"
     );
@@ -3463,8 +3463,8 @@ async fn a_builder_runtime_pins_the_member_controller_so_governed_input_reaches_
         assert!(
             matches!(
                 outcome,
-                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                    if reason.as_str() == BIND_REFUSED
+                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                    if refusal.detail == BIND_REFUSED
             ),
             "the governed {door} reaches the host's bind: {outcome:?}"
         );

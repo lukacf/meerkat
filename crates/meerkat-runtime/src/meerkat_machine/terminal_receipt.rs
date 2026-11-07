@@ -210,9 +210,18 @@ impl MeerkatMachine {
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
     ) -> Result<Option<Sourced<InputTerminalReceiptObservation>>, RuntimeDriverError> {
         let qualified = crate::input_authority::qualify_idempotency_key(association, raw_key)?;
-        // RED skeleton: the read does not run yet.
-        let _ = (session_id, qualified);
-        Ok(None)
+        let read = crate::stack_relief::box_in_own_frame(|| {
+            self.read_input_terminal_receipt(
+                session_id,
+                InteractionSelector::IdempotencyKey(qualified.0.clone()),
+                ReceiptRelease::Observation,
+            )
+        })
+        .await?;
+        Ok(read.map(|read| Sourced {
+            source: read.source,
+            report: crate::terminal_status::observe_input_terminal_receipt(read.report),
+        }))
     }
 
     /// The shared receipt read of [`Self::input_terminal_receipt`] and

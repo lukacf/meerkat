@@ -321,15 +321,23 @@ impl PrivateOriginals {
                             .map_err(|_| HostLifetimeError::Unavailable)?
                         {
                             Some(leaf) => leaf,
-                            None => grants
-                                .issue_child(
-                                    &facts.application,
-                                    &child.parent,
-                                    child.id.clone(),
-                                    facts.route.logical_executor.clone(),
-                                    child.requested.clone(),
-                                )
-                                .map_err(|_| HostLifetimeError::Unavailable)?,
+                            None => {
+                                // A bind attempt's durable effect: no "not
+                                // now" may follow it.
+                                meerkat_core::protected_section::note_effect(
+                                    "original.service_setup_grant",
+                                );
+                                crate::no_wait::wait_at("service_setup.issue_child", || {
+                                    grants.issue_child(
+                                        &facts.application,
+                                        &child.parent,
+                                        child.id.clone(),
+                                        facts.route.logical_executor.clone(),
+                                        child.requested.clone(),
+                                    )
+                                })
+                                .map_err(|_| HostLifetimeError::Unavailable)?
+                            }
                         };
                         child
                             .observe(&grants, &facts, leaf)

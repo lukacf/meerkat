@@ -9,34 +9,258 @@
 //! violation, which a debug build reports.
 //!
 //! [`KNOWN_SITES`] lists the sites that still wait inside a protected
-//! section, each with the change that removes it. A listed site is not
-//! reported. The list only shrinks: the source guard in this module's tests
-//! fails for a listed site that no longer exists, and for a site that names
-//! itself without being listed while a row reaches it inside a section.
+//! section, each with what it waits for, the change that removes it and one
+//! test that reaches it there. A listed site is not
+//! reported. The list only shrinks: the tests fail for a listed site that no
+//! longer names itself in this crate, and a debug build reports a site that
+//! waits inside a section without being listed, at the first row that
+//! reaches it there.
 
-/// Sites that still wait inside a protected section, with the change that
-/// removes each (`site`, `owner`).
-pub(crate) const KNOWN_SITES: &[(&str, &str)] = &[];
+/// A site that still waits inside a protected section.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the baseline's own tests read its description")
+)]
+pub(crate) struct KnownSite {
+    /// The site, as its wait names itself.
+    pub(crate) site: &'static str,
+    /// What it waits for.
+    pub(crate) primitive: &'static str,
+    /// The change that removes it.
+    pub(crate) owner: &'static str,
+    /// One test that reaches it inside a section.
+    pub(crate) test: &'static str,
+}
+
+/// Sites that still wait inside a protected section. Every one names the
+/// later change that prepares outside protection what these sites now wait for
+/// inside it.
+pub(crate) const KNOWN_SITES: &[KnownSite] = &[
+    KnownSite {
+        site: "custody_recovery.enroll",
+        primitive: "the recovery control lock (a std mutex), then the publication writer",
+        owner: "the send enrolls its recovery custody before its bind (governed bind; \
+            post-write: the first custody attempt is written first)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "custody_recovery.cold_publish",
+        primitive: "the recovery control lock (a std mutex), then the publication writer",
+        owner: "a restored original is published without the recovery control lock (historical \
+            admission callback)",
+        test: "private_originals::governed_submit::tests::first_input_tests::persistent::custody_recovery_cold_native_tests::installed_promoted_attempt_restores_from_same_native_input_without_resubmission",
+    },
+    KnownSite {
+        site: "original_ingress.wait_for_lock",
+        primitive: "a bounded try-lock spin with sleeps on a std mutex",
+        owner: "native admission reads answer from published custody without spinning (native \
+            admission reads)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.admitted_guard",
+        primitive: "the originals collection (a std mutex), taken blocking",
+        owner: "the admitted-custody check reads published custody; first sends, the Console \
+            delegate and the peer bind are prepared outside protection",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.admitted_guard.change",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "as original_ingress.admitted_guard (its slow path takes the publication)",
+        test: "private_originals::governed_submit::tests::first_input_tests::first_send_not_now::a_first_send_held_inside_an_owner_change_at_the_admitted_check_waits_as_shipped",
+    },
+    KnownSite {
+        site: "original_ingress.admitted_guard.recheck",
+        primitive: "the originals collection (a std mutex), taken blocking",
+        owner: "as original_ingress.admitted_guard (its slow path rereads the collection)",
+        test: "private_originals::governed_submit::tests::first_input_tests::first_send_not_now::a_first_send_held_inside_an_owner_change_at_the_admitted_check_waits_as_shipped",
+    },
+    KnownSite {
+        site: "original_ingress.source_writer",
+        primitive: "the source writer (a tokio mutex)",
+        owner: "the first binding (controller grant and binding record) is written before the \
+            send, outside protection",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.first_binding_write",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "as original_ingress.source_writer (the binding record's retention)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.publish_binding",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "as original_ingress.source_writer (the binding's publication)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.record_candidate",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "the candidate is staged with the recovery enrollment, before the bind",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.rebind_candidate",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "as original_ingress.record_candidate (a replay's rebind of its candidate)",
+        test: "private_originals::setup_workflow::launch::tests::replay_tests::repeated_policy_change_stops_after_one_replay",
+    },
+    KnownSite {
+        site: "original_ingress.enroll_settlement",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "as original_ingress.record_candidate (the candidate's settlement enrollment)",
+        test: "private_originals::setup_workflow::launch::tests::replay_tests::deadline_during_the_writer_wait_never_replays",
+    },
+    KnownSite {
+        site: "original_ingress.admit",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "an accepted candidate is promoted by its custody machine, after the entry \
+            (governed entry settlement)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+    KnownSite {
+        site: "original_ingress.withdraw_candidate",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "a refused candidate is withdrawn by its custody machine, outside protection",
+        test: "private_originals::governed_submit::tests::custody_recovery_tests::a_candidate_the_bind_cannot_enroll_is_withdrawn_inside_the_bind",
+    },
+    KnownSite {
+        site: "launch.workflow_accepted",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "the launch records its acceptance through its machine, after the entry \
+            (governed entry settlement)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_the_admitted_check_waits_as_shipped_and_starts_once",
+    },
+    KnownSite {
+        site: "launch.stage",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "the launch stages its workflow custody before its bind, outside protection",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_the_admitted_check_waits_as_shipped_and_starts_once",
+    },
+    KnownSite {
+        site: "class_callbacks.exclusion",
+        primitive: "the class callback exclusion (a tokio mutex)",
+        owner: "a class input's callback grants are issued before the send (its first binding), \
+            outside protection",
+        test: "private_originals::governed_submit::tests::dynamic_member_native_tests::native_operations_tests::a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped_wait",
+    },
+    KnownSite {
+        site: "class_callbacks.issue_root",
+        primitive: "the grant publication's writer, inside the root grant's issuance",
+        owner: "as class_callbacks.exclusion (the callback root grant's issuance)",
+        test: "private_originals::governed_submit::tests::dynamic_member_native_tests::native_operations_tests::a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped_wait",
+    },
+    KnownSite {
+        site: "class_callbacks.issue_leaf",
+        primitive: "the grant publication's writer, inside each callback leaf's issuance",
+        owner: "as class_callbacks.exclusion (the callback leaf grants' issuance)",
+        test: "private_originals::governed_submit::tests::dynamic_member_native_tests::native_operations_tests::a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped_wait",
+    },
+    KnownSite {
+        site: "service_setup.issue_child",
+        primitive: "the grant publication's writer, inside the child grant's issuance",
+        owner: "a service setup's child grants are issued before the send (its first binding), \
+            outside protection",
+        test: "private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::a_batch_task_first_send_marks_its_service_setup_grant_and_keeps_its_shipped_wait",
+    },
+    KnownSite {
+        site: "collector.disposition",
+        primitive: "the collector's originals (a std mutex)",
+        owner: "collector reads answer from published state (native admission reads)",
+        test: "private_originals::governed_submit::tests::dynamic_member_native_tests::native_operations_tests::a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped_wait",
+    },
+    KnownSite {
+        site: "collector.current_original",
+        primitive: "the collector's originals (a std mutex)",
+        owner: "collector reads answer from published state (native admission reads)",
+        test: "installed_host::tests::gateway_identity::collector::public_occurrence_reads_and_retains_native_audit_before_joined_close",
+    },
+    KnownSite {
+        site: "store.begin_record_change",
+        primitive: "the publication writer (begin_owner_change)",
+        owner: "a store transaction never takes the shared publication writer (host store \
+            transaction)",
+        test: "private_originals::setup_workflow::launch::tests::first_send_not_now_tests::a_first_launch_held_at_input_preparation_keeps_its_shipped_refusal",
+    },
+];
 
 fn known(site: &str) -> bool {
-    KNOWN_SITES.iter().any(|(known, _)| *known == site)
+    KNOWN_SITES.iter().any(|known| known.site == site)
+}
+
+/// The known sites this test process reached inside a protected section.
+#[cfg(test)]
+static REACHED: std::sync::Mutex<std::collections::BTreeSet<&str>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Test builds: whether this test process reached the known site `site`
+/// inside a protected section.
+#[cfg(test)]
+pub(crate) fn reached_inside_a_section(site: &str) -> bool {
+    REACHED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(site)
+}
+
+/// Test builds: record the first time this test process reaches each known
+/// site inside a protected section; when `TOOLKIT_KNOWN_WAIT_LOG` names a
+/// directory, also write it there (`site`, then the selected test), so that
+/// every listed site can name a test that reaches it.
+#[cfg(test)]
+fn record_known_wait(site: &'static str) {
+    use std::io::Write;
+    if meerkat_core::protected_section::current().is_none()
+        || !REACHED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(site)
+    {
+        return;
+    }
+    let Some(directory) = std::env::var_os("TOOLKIT_KNOWN_WAIT_LOG") else {
+        return;
+    };
+    let test = std::env::args()
+        .skip(1)
+        .find(|argument| !argument.starts_with('-'))
+        .unwrap_or_default();
+    let path =
+        std::path::Path::new(&directory).join(format!("known-waits-{}.tsv", std::process::id()));
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{site}\t{test}");
+    }
 }
 
 /// About to take a lock another actor may hold across I/O (or to spin or
 /// sleep) at `site`.
 #[track_caller]
 pub(crate) fn may_wait(site: &'static str) {
-    if !known(site) {
+    if known(site) {
+        #[cfg(test)]
+        record_known_wait(site);
+    } else {
         meerkat_core::protected_section::assert_may_wait(site);
     }
 }
 
-/// Run `wait`, which takes the shared publication writer (or another owner's
-/// waiting lock) at `site`. A listed site runs as a known wait.
+/// Run `wait`, which waits at `site` (for the shared publication writer, or
+/// another owner's lock). A listed site runs as a known wait; any other is
+/// reported inside a section, as [`may_wait`] reports it.
+#[track_caller]
 pub(crate) fn wait_at<T>(site: &'static str, wait: impl FnOnce() -> T) -> T {
     if known(site) {
+        #[cfg(test)]
+        record_known_wait(site);
         meerkat_core::protected_section::known_wait(site, wait)
     } else {
+        meerkat_core::protected_section::assert_may_wait(site);
         wait()
     }
 }
@@ -45,7 +269,20 @@ pub(crate) fn wait_at<T>(site: &'static str, wait: impl FnOnce() -> T) -> T {
 /// (`file`, `type`, `call`, `owner`): each still waits and names the change
 /// that removes it.
 #[cfg(test)]
-const KNOWN_CALLS: &[(&str, &str, &str, &str)] = &[];
+const KNOWN_CALLS: &[(&str, &str, &str, &str)] = &[
+    (
+        "src/private_originals/governed_submit.rs",
+        "OriginalBinder",
+        "enroll(",
+        "custody_recovery.enroll",
+    ),
+    (
+        "src/private_originals/setup_helpers.rs",
+        "SubmitHelperBinder",
+        "enroll(",
+        "custody_recovery.enroll",
+    ),
+];
 
 #[cfg(test)]
 mod tests {
@@ -64,11 +301,17 @@ mod tests {
         "NativeInputAdmissionCustody",
     ];
 
-    /// Protected traits whose implementing type is a whole source owner, not
-    /// a decision: only the trait impl's own body is scanned, never the
-    /// owner's other impls (its writers run outside every section, and the
-    /// runtime witness covers what the trait methods reach).
-    const OWNER_TRAITS: &[&str] = &["AuthenticatedOriginalSource"];
+    /// Protected traits whose implementing type is an owner handle, not a
+    /// decision (a whole source owner, an entry fence or permit over a login
+    /// or a launch attempt): only the trait impl's own body is scanned,
+    /// never the handle's other impls, whose methods run outside every
+    /// section (a presenter's wait for a login's retirement, a writer). The
+    /// runtime witness covers what the trait methods reach.
+    const OWNER_TRAITS: &[&str] = &[
+        "AuthenticatedOriginalSource",
+        "GovernedEntryFence",
+        "GovernedEntryPermit",
+    ];
 
     /// Calls that can wait for another actor: a blocking lock or writer, a
     /// spin, a sleep, an awaited writer or wait helper. Each is matched at a
@@ -457,11 +700,55 @@ mod tests {
             .collect();
         let stale: Vec<_> = super::KNOWN_SITES
             .iter()
-            .filter(|(site, _)| !sources.contains(&format!("\"{site}\"")))
+            .filter(|known| !sources.contains(&format!("\"{}\"", known.site)))
+            .map(|known| known.site)
             .collect();
         assert!(
             stale.is_empty(),
             "known sites that no longer exist: {stale:#?}"
+        );
+    }
+
+    /// Every known site names what it waits for, the change that removes it, and one
+    /// test of this crate that reaches it inside a section.
+    #[test]
+    fn every_known_site_names_its_primitive_owner_and_a_reaching_test() {
+        /// Every Rust file under `dir`, tests included: the reaching tests
+        /// live in test modules.
+        fn every_rust_file(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+                if path.is_dir() {
+                    every_rust_file(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        every_rust_file(&root.join("src"), &mut files);
+        let sources: String = files
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .collect();
+        let incomplete: Vec<_> = super::KNOWN_SITES
+            .iter()
+            .filter(|known| {
+                let name = known.test.rsplit("::").next().unwrap_or_default();
+                known.primitive.is_empty()
+                    || known.owner.is_empty()
+                    || name.is_empty()
+                    || !sources.contains(&format!("fn {name}("))
+            })
+            .map(|known| known.site)
+            .collect();
+        assert!(
+            incomplete.is_empty(),
+            "known sites without a primitive, an owner or a reaching test: \
+             {incomplete:#?}"
         );
     }
 

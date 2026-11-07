@@ -604,17 +604,21 @@ impl CustodyRecovery {
         &self,
         register: impl FnOnce(bool) -> Result<T, PrivateOriginalError>,
     ) -> Result<T, PrivateOriginalError> {
-        crate::no_wait::may_wait("custody_recovery.enroll");
-        let control = self
-            .control
-            .state
-            .lock()
-            .map_err(|_| PrivateOriginalError::Unavailable)?;
-        let readiness = self.control.readiness();
-        if control.admission_stopped || readiness.stopped() {
-            return Err(PrivateOriginalError::Unavailable);
-        }
-        register(readiness.selected())
+        // The control lock is held by a recovery round, a stop or an
+        // acceptance, and staging inside it takes the shared publication:
+        // the whole enrollment waits.
+        crate::no_wait::wait_at("custody_recovery.enroll", || {
+            let control = self
+                .control
+                .state
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?;
+            let readiness = self.control.readiness();
+            if control.admission_stopped || readiness.stopped() {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            register(readiness.selected())
+        })
     }
 
     pub(super) fn changed(&self) {
@@ -1449,26 +1453,30 @@ impl PrivateOriginals {
                 &actor.executor_actor_identity(),
                 entry.input(),
                 |admitted| {
-                    crate::no_wait::may_wait("custody_recovery.recovered_publish");
-                    let _control = self
-                        .custody_recovery
-                        .control
-                        .state
-                        .lock()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    if self.custody_recovery.control.readiness().stopped() {
-                        return Err(PrivateOriginalError::Unavailable);
-                    }
-                    let _writer = self
-                        .owner
-                        .try_source_writer()
-                        .map_err(cold_service_admission::writer_error)?;
-                    stamp
-                        .check_current()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    self.owner
-                        .recover_retained_custody(&original, admitted)
-                        .map_err(cold_service_admission::writer_error)
+                    // The control lock, then the shared publication: the
+                    // whole publication waits inside the historical
+                    // admission callback.
+                    crate::no_wait::wait_at("custody_recovery.recovered_publish", || {
+                        let _control = self
+                            .custody_recovery
+                            .control
+                            .state
+                            .lock()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        if self.custody_recovery.control.readiness().stopped() {
+                            return Err(PrivateOriginalError::Unavailable);
+                        }
+                        let _writer = self
+                            .owner
+                            .try_source_writer()
+                            .map_err(cold_service_admission::writer_error)?;
+                        stamp
+                            .check_current()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        self.owner
+                            .recover_retained_custody(&original, admitted)
+                            .map_err(cold_service_admission::writer_error)
+                    })
                 },
             )
             .await;

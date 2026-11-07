@@ -2734,13 +2734,17 @@ struct CurrentHumanBinder {
 
 #[async_trait::async_trait]
 impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &crate::identity_first::GovernedBindContext,
         input: meerkat_runtime::Input,
-    ) -> Result<crate::identity_first::BoundGovernedInput, String> {
-        human_still_sends(&self.human, self.access.as_ref(), &self.identity)?;
-        let mut bound = self.inner.bind(context, input).await?;
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
+        // The human is verified again at every bind, a bind after a wait
+        // included.
+        human_still_sends(&self.human, self.access.as_ref(), &self.identity)
+            .map_err(crate::identity_first::GovernedBindRefusal::denied)?;
+        let mut bound = self.inner.try_bind(context, input).await?;
         // Checked again at the final protected entry, after every await
         // between here and native admission, ahead of the host's own fence.
         bound.entry_fence = Some(Arc::new(CurrentHumanFence {
@@ -2750,6 +2754,10 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
             inner: bound.entry_fence.take(),
         }));
         Ok(bound)
+    }
+
+    fn wait_budget(&self) -> crate::identity_first::GovernedWaitBudget {
+        self.inner.wait_budget()
     }
 
     fn retain_unresolved(

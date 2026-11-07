@@ -718,8 +718,9 @@ async fn admission_fence_refuses_retained_original_and_returns_helper_feedback_t
         assert!(
             matches!(refused,
             Err(meerkat_mobkit::identity_first::IdentityRuntimeError::GovernedInput(
-                meerkat_mobkit::identity_first::GovernedInputError::Bind(ref message)))
-                if message == "Toolkit source admission is stopped"),
+                meerkat_mobkit::identity_first::GovernedInputError::Refused(ref refusal)))
+                if refusal.kind == meerkat_mobkit::identity_first::GovernedBindRefusalKind::Closed
+                    && refusal.detail == "Toolkit source admission is stopped"),
             "the actual retained binder must refuse before native admission"
         );
         assert_eq!(

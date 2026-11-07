@@ -1577,3 +1577,64 @@ async fn partial_standing_parent_issue_retains_ids_and_retires_without_activatio
         _ => panic!("partial standing Add control timed out"),
     }
 }
+
+/// A class input's first send issues its callback root grant inside
+/// the bind, before the shared binder's checks. Held at the admitted-custody
+/// check, it waits there as shipped and is admitted once: no "not now"
+/// escapes, and the mark there names the callback grant.
+///
+/// RED with the first-send marks dropped: the mark there is unset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped_wait() {
+    use crate::private_originals::governed_submit::tests::first_input_tests::first_send_not_now::{
+        clear_probe, hold_at_key,
+    };
+    use crate::source_hold_probe::Site;
+    let fixture = Box::pin(start()).await;
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 5,
+        Box::pin(async {
+            let f = &fixture;
+            let session = add(f, ADDED).await;
+            ready(f, &session).await;
+            let submission = original(f, "class-input-first-send").await;
+            let seen = hold_at_key(
+                Site::OriginalAdmitted,
+                submission.original.original.as_str(),
+            );
+            let submitted = f.source.submit_authenticated_original(submission).await;
+            clear_probe().await;
+            assert!(
+                matches!(submitted, Ok(PrivateOriginalSubmission::Admitted { .. })),
+                "the shipped wait, then admitted: {}",
+                submission_context(&submitted)
+            );
+            assert_eq!(
+                f.machine
+                    .session_input_states(&session)
+                    .await
+                    .unwrap()
+                    .report
+                    .len(),
+                1,
+                "admitted once"
+            );
+            assert!(seen.at(Site::OriginalNotNow).is_empty(), "never not now");
+            let admitted = seen.at(Site::OriginalAdmitted);
+            assert_eq!(admitted.len(), 1, "one bind: the check waited in place");
+            assert_eq!(
+                admitted[0].1,
+                Some("original.callback_grant"),
+                "the check runs after the first send's callback grant issuance"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match result {
+        Ok(Ok(())) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+        _ => panic!("class input first send timed out"),
+    }
+}

@@ -80,14 +80,21 @@ struct HeldBinder {
 #[cfg(all(feature = "native-host", unix))]
 #[async_trait::async_trait]
 impl meerkat_mobkit::identity_first::GovernedInputBinder for HeldBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &meerkat_mobkit::identity_first::GovernedBindContext,
         input: meerkat_runtime::Input,
-    ) -> Result<meerkat_mobkit::identity_first::BoundGovernedInput, String> {
+    ) -> Result<
+        meerkat_mobkit::identity_first::BoundGovernedInput,
+        meerkat_mobkit::identity_first::GovernedBindError,
+    > {
         self._review
-            .retain_io(self.inner.bind(context, input))
+            .retain_io(self.inner.try_bind(context, input))
             .await
+    }
+
+    fn wait_budget(&self) -> meerkat_mobkit::identity_first::GovernedWaitBudget {
+        self.inner.wait_budget()
     }
 
     fn retain_unresolved(

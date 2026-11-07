@@ -98,29 +98,28 @@ struct ObserveInstalledBinder {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for ObserveInstalledBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
         // The native HTTP handler has already captured its real verified Human
         // and selected the actual installed binder. Pause before that binder's
         // first operation so retirement must invalidate its retained login.
         if self.observation.pause {
             self.observation.entered.add_permits(1);
-            let permit = self
-                .observation
-                .release
-                .acquire()
-                .await
-                .map_err(|_| "fixture gate closed")?;
+            let permit = self.observation.release.acquire().await.map_err(|_| {
+                meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(
+                    "fixture gate closed",
+                )
+            })?;
             permit.forget();
         }
         *self.observation.raw.lock().unwrap() = Some(input.clone());
-        let result = self.inner.bind(context, input).await;
+        let result = self.inner.try_bind(context, input).await;
         match &result {
             Ok(bound) => *self.observation.bound.lock().unwrap() = Some(bound.input.clone()),
-            Err(error) => *self.observation.failure.lock().unwrap() = Some(error.clone()),
+            Err(error) => *self.observation.failure.lock().unwrap() = Some(format!("{error:?}")),
         }
         self.observation.finished.add_permits(1);
         result

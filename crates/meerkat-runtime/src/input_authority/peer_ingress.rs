@@ -209,11 +209,12 @@ impl PeerIngressWaiter {
         until: meerkat_core::authorization::NotNowWait,
     ) -> meerkat_core::authorization::OwnerChangeWait {
         meerkat_core::protected_section::assert_may_wait("peer_ingress.not_now_waiter");
-        // RED skeleton: the wait does not run yet.
-        drop(until);
-        meerkat_core::authorization::OwnerChangeWait::NotSettled {
-            waited: std::time::Duration::ZERO,
-        }
+        let remaining = self
+            .deadline
+            .saturating_duration_since(crate::tokio::time::Instant::now());
+        meerkat_core::authorization::OwnerChangeChurn::new()
+            .wait_until_clear(until, Some(remaining), "peer_ingress_bind", None)
+            .await
     }
 }
 

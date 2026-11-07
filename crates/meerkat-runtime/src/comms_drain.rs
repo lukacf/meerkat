@@ -866,24 +866,50 @@ async fn accept_routed_peer_ingress(
     // only this claim: no drain, session, runtime or recovery lock.
     let (input, custody) = match governed {
         None => (input, None),
-        Some(origin) => match bind_governed_peer_ingress(
-            adapter,
-            session_id,
-            crate::input_authority::PeerIngressOrigin::Comms(origin),
-            input,
-            expected_member,
-            None,
-        )
-        .await
-        {
-            GovernedPeerBind::Unbound(input) => (input, None),
-            GovernedPeerBind::Bound { input, custody } => (input, Some(custody)),
-            GovernedPeerBind::Refused(refusal) => {
-                refuse_peer_ingress_before_admission(adapter, claim, refusal.to_string())?;
-                return Ok(None);
+        Some(origin) => {
+            // A volatile delivery keeps nothing to retry once it is handed
+            // off, so a pending answer parks it here: Core offers it again
+            // after a backoff, until one deadline from its first offer, and
+            // then drops it with a typed warning. A durable claim keeps its
+            // path: released, it stays the session's FIFO head.
+            let volatile = matches!(claim, RoutedPeerIngressClaim::Volatile);
+            let deadline = crate::tokio::time::Instant::now()
+                + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+            let mut backoff = Duration::from_millis(1);
+            loop {
+                match bind_governed_peer_ingress(
+                    adapter,
+                    session_id,
+                    crate::input_authority::PeerIngressOrigin::Comms(origin.clone()),
+                    input.clone(),
+                    expected_member,
+                    None,
+                )
+                .await
+                {
+                    GovernedPeerBind::Unbound(input) => break (input, None),
+                    GovernedPeerBind::Bound { input, custody } => break (input, Some(custody)),
+                    GovernedPeerBind::Refused(refusal) => {
+                        refuse_peer_ingress_before_admission(adapter, claim, refusal.to_string())?;
+                        return Ok(None);
+                    }
+                    GovernedPeerBind::Pending(error) if volatile => {
+                        let now = crate::tokio::time::Instant::now();
+                        if now >= deadline {
+                            tracing::warn!(
+                                %session_id,
+                                %error,
+                                "comms_drain: dropped a volatile peer delivery whose binding stayed pending past its deadline"
+                            );
+                            return Ok(None);
+                        }
+                        crate::tokio::time::sleep(backoff.min(deadline - now)).await;
+                        backoff = (backoff * 2).min(Duration::from_millis(64));
+                    }
+                    GovernedPeerBind::Pending(error) => return Err(error),
+                }
             }
-            GovernedPeerBind::Pending(error) => return Err(error),
-        },
+        }
     };
     let residency = || match expected_member {
         Some(expected) => {

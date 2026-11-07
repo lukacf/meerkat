@@ -1342,13 +1342,14 @@ struct CountingBinder(AtomicUsize);
 
 #[async_trait]
 impl crate::identity_first::GovernedInputBinder for CountingBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         _context: &crate::identity_first::GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<crate::identity_first::BoundGovernedInput, String> {
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Err("counted, not bound".to_string())
+        Err(crate::identity_first::GovernedBindRefusal::denied("counted, not bound").into())
     }
 
     fn retain_unresolved(

@@ -1125,4 +1125,4 @@ pub(in crate::private_originals) mod dedicated;
 mod planning_source_evidence_tests;
 
 #[path = "first_send_not_now_tests.rs"]
-mod first_send_not_now;
+pub(in crate::private_originals) mod first_send_not_now;

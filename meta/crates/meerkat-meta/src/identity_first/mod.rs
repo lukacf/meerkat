@@ -36,13 +36,15 @@ pub use bridge::{
     ActorCallObservation, ActorCommandTimeout, BoundGovernedInput, BridgeAdmissionError,
     BridgeDelivery, BridgeError, BridgeMemberReload, BridgeTurnError, BridgeTurnReceipt,
     CommittedBoundaryRecoverer, CommittedBoundaryRepair, CompactionFloorRegistry,
-    ControllerPinSource, GovernedAdmission, GovernedAdmissionRecord, GovernedBindContext,
-    GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
-    GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, MemberInspection, MemberLifecycleFact, MemberLifecycleFactRecord,
-    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
-    MobSessionBridge, NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind,
-    ResumeSessionOutcome, SessionBridge,
+    ControllerPinSource, GOVERNED_SUBMISSION_RECEIPT_VERSION, GovernedAdmission,
+    GovernedAdmissionRecord, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedBindRefusalKind, GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence,
+    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedHold,
+    GovernedInputBinder, GovernedInputError, GovernedNotNow, GovernedSettlement,
+    GovernedSubmissionReceipt, GovernedWaitBudget, MemberInspection, MemberLifecycleFact,
+    MemberLifecycleFactRecord, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, MobSessionBridge, NativeInputAdmissionSettlement,
+    QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
 };
 pub use build_preparer::IdentityBuildPreparer;
 pub use contracts::*;

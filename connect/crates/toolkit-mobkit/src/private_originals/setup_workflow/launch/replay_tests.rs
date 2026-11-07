@@ -58,18 +58,19 @@ struct InjectAfterBind {
 
 #[async_trait::async_trait]
 impl GovernedInputBinder for InjectAfterBind {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        use meerkat_mobkit::identity_first::GovernedBindRefusal;
         let call = self.shared.calls.fetch_add(1, Ordering::AcqRel);
         self.shared
             .inputs
             .lock()
             .unwrap()
             .push(serde_json::to_value(&input).unwrap());
-        let bound = self.inner.bind(context, input).await?;
+        let bound = self.inner.try_bind(context, input).await?;
         self.shared
             .bound
             .lock()
@@ -96,8 +97,14 @@ impl GovernedInputBinder for InjectAfterBind {
                         std::thread::sleep(hold);
                         drop(change);
                     }));
-                if !holding.await.map_err(|_| "fixture change hold failed")? {
-                    return Err("fixture publication change unavailable".into());
+                if !holding
+                    .await
+                    .map_err(|_| GovernedBindRefusal::unavailable("fixture change hold failed"))?
+                {
+                    return Err(GovernedBindRefusal::unavailable(
+                        "fixture publication change unavailable",
+                    )
+                    .into());
                 }
             }
             Some(Inject::HeldWriter(hold)) => {
@@ -112,7 +119,9 @@ impl GovernedInputBinder for InjectAfterBind {
                         let _ = held.send(());
                         tokio::time::sleep(hold).await;
                     }));
-                holding.await.map_err(|_| "fixture writer hold failed")?;
+                holding
+                    .await
+                    .map_err(|_| GovernedBindRefusal::unavailable("fixture writer hold failed"))?;
             }
             None => {}
         }
@@ -738,8 +747,11 @@ fn only_the_exact_policy_changed_answer_is_a_replay() {
         )),
         IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved {
             detail: "native admission settled None".into(),
+            receipt: None,
         }),
-        IdentityRuntimeError::GovernedInput(GovernedInputError::Bind("refused".into())),
+        IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(
+            meerkat_mobkit::identity_first::GovernedBindRefusal::denied("refused"),
+        )),
         IdentityRuntimeError::GovernedInput(GovernedInputError::Unbound),
     ] {
         assert_eq!(launch_replay(&error, &attempt), None);
@@ -1060,6 +1072,7 @@ fn only_the_fence_recorded_busy_writer_is_a_replay() {
         )),
         IdentityRuntimeError::GovernedInput(GovernedInputError::AdmissionUnresolved {
             detail: "native admission settled None".into(),
+            receipt: None,
         }),
     ] {
         assert_eq!(launch_replay(&error, &attempt), None);

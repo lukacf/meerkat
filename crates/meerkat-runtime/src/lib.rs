@@ -615,6 +615,12 @@ pub use input_state::{
 /// names, re-exported so a host or the facade can name it without its own
 /// dependency on the authorization contracts crate.
 pub use meerkat_authorization_contracts::work_association::OriginalWorkRef;
+/// The versioned digest a governed submission's receipt names its authority
+/// association by (`InputAuthorityAssociation::digest`), re-exported for the
+/// same reason; see [`MeerkatMachine::governed_input_by_key`].
+pub use meerkat_authorization_contracts::work_association::{
+    ASSOCIATION_DIGEST_VERSION, AssociationDigest, AssociationDigestError,
+};
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::McpObservationRefusal;
 #[cfg(not(target_arch = "wasm32"))]

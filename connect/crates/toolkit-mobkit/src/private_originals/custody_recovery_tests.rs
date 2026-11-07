@@ -258,3 +258,74 @@ async fn poisoned_source_control_before_actual_callback_preserves_receipt_withou
 async fn admission_fence_refuses_bound_source_submission_and_preserves_accepted_callback() {
     exercise(CloseOrder::AdmissionFenceBeforeCallback).await;
 }
+
+/// The baseline's evidence for `original_ingress.withdraw_candidate`:
+/// a first send whose shared publication writer fails (an owner change
+/// panicked, on a thread of its own) right after its candidate was staged
+/// cannot enroll the candidate's settlement, so the bind drops the candidate
+/// inside the governed bind, and its withdrawal waits there, a known site.
+/// Nothing is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_candidate_the_bind_cannot_enroll_is_withdrawn_inside_the_bind() {
+    let fixture = Fixture::new(DeliveryMode::Normal, false).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT * 3, async {
+        fixture
+            .source
+            .start_custody_recovery(fixture.native.mob_runtime().continuation_source_announcer())
+            .unwrap();
+        let owner = fixture.owner.clone();
+        crate::source_hold_probe::install(Arc::new(move |site, _key| {
+            if site == crate::source_hold_probe::Site::OriginalStaged {
+                let owner = owner.clone();
+                std::thread::spawn(move || {
+                    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let publication = owner.publication();
+                        let _change = publication.begin_owner_change().unwrap();
+                        panic!("an owner change fails after the candidate was staged");
+                    }));
+                    assert!(failed.is_err());
+                })
+                .join()
+                .unwrap();
+            }
+            None
+        }));
+        let result = fixture.submit().await;
+        tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+            .await
+            .unwrap();
+        assert!(
+            !matches!(result, Ok(PrivateOriginalSubmission::Admitted { .. })),
+            "nothing is admitted: {}",
+            submission_context(&result)
+        );
+        assert!(
+            crate::no_wait::reached_inside_a_section("original_ingress.withdraw_candidate"),
+            "the candidate is withdrawn inside the bind"
+        );
+        assert_eq!(
+            fixture.native_inputs().await,
+            Ok((0, 0)),
+            "nothing admitted"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    fixture.source.stop_custody_recovery();
+    let native_cleanup = fixture.shutdown().await;
+    let source_cleanup = fixture.source.join_custody_recovery().await;
+    match checked {
+        Ok(Ok(())) => {
+            assert!(
+                native_cleanup.is_ok(),
+                "native cleanup failed: {native_cleanup:?}"
+            );
+            assert!(
+                source_cleanup.is_ok(),
+                "source cleanup failed: {source_cleanup:?}"
+            );
+        }
+        Ok(Err(_)) => panic!("the withdrawal row timed out"),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}

@@ -10,6 +10,7 @@
 //! release.
 use super::*;
 use crate::source_hold_probe::{Hold, Site};
+use meerkat_core::protected_section::ProtectedSection;
 
 /// How long the probe holds the source collection.
 const HOLD: Duration = Duration::from_millis(300);
@@ -17,10 +18,13 @@ const HOLD: Duration = Duration::from_millis(300);
 /// What the probe saw: each site it was asked at, its key, and the
 /// attempt's effect mark there.
 #[derive(Default)]
-struct Seen(Mutex<Vec<(Site, String, Option<&'static str>)>>);
+pub(in crate::private_originals) struct Seen(Mutex<Vec<(Site, String, Option<&'static str>)>>);
 
 impl Seen {
-    fn at(&self, site: Site) -> Vec<(String, Option<&'static str>)> {
+    pub(in crate::private_originals) fn at(
+        &self,
+        site: Site,
+    ) -> Vec<(String, Option<&'static str>)> {
         self.0
             .lock()
             .unwrap()
@@ -33,30 +37,48 @@ impl Seen {
 
 /// Install a probe that holds the source collection at `site` on its first
 /// hit, and records every site it is asked at with the effect mark there.
-fn hold_at(site: Site) -> Arc<Seen> {
+pub(in crate::private_originals) fn hold_at(site: Site) -> Arc<Seen> {
+    hold_where(site, None, false)
+}
+
+/// [`hold_at`], holding only at `site`'s first hit for the original `key`.
+pub(in crate::private_originals) fn hold_at_key(site: Site, key: &str) -> Arc<Seen> {
+    hold_where(site, Some(key.to_owned()), false)
+}
+
+/// [`hold_at`], holding the collection inside an owner change on the
+/// owner's publication, as another original's first binding write does.
+fn hold_in_change_at(site: Site) -> Arc<Seen> {
+    hold_where(site, None, true)
+}
+
+fn hold_where(site: Site, only: Option<String>, owner_change: bool) -> Arc<Seen> {
     let seen = Arc::new(Seen::default());
     let recorder = seen.clone();
     crate::source_hold_probe::install(Arc::new(move |at, key| {
+        let selected = only.as_deref().is_none_or(|only| only == key);
         let first = !recorder
             .0
             .lock()
             .unwrap()
             .iter()
-            .any(|(seen, ..)| *seen == at);
+            .any(|(seen, seen_key, _)| {
+                *seen == at && only.as_deref().is_none_or(|only| only == seen_key)
+            });
         recorder.0.lock().unwrap().push((
             at,
             key.to_owned(),
             meerkat_core::protected_section::effect_recorded(),
         ));
-        (at == site && first).then_some(Hold {
-            owner_change: false,
+        (at == site && selected && first).then_some(Hold {
+            owner_change,
             duration: HOLD,
         })
     }));
     seen
 }
 
-async fn clear_probe() {
+pub(in crate::private_originals) async fn clear_probe() {
     tokio::task::spawn_blocking(crate::source_hold_probe::clear)
         .await
         .unwrap();
@@ -211,5 +233,82 @@ async fn a_first_send_whose_grant_was_issued_marks_only_its_binding_write() {
             .and_then(|(_, mark)| *mark),
         Some("original.first_binding"),
         "the grant was found, not issued: only the binding write marks"
+    );
+}
+
+/// The write witness's decision point is placed where the shared binder
+/// passes its admitted-custody check, and nowhere earlier: on a Find's first
+/// send every store write of the bind attempt before that check sees no
+/// decision (the first binding write among them, marked by the grant before
+/// it), and every write after it sees exactly the check's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_send_records_its_decision_at_the_admitted_check_and_nowhere_earlier() {
+    let fixture = FirstFixture::new(true).await;
+    let _ = crate::write_witness::take();
+    let result = fixture.submit().await;
+    let completion = fixture.finish(&result).await;
+    let writes: Vec<_> = crate::write_witness::take()
+        .into_iter()
+        .filter(|write| write.section == ProtectedSection::GovernedBind)
+        .collect();
+    let inputs = fixture.inputs().await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(
+        completion.is_ok(),
+        "{completion:?}: {}",
+        submission_context(&result)
+    );
+    assert_eq!(inputs, Ok(1), "admitted once");
+    let decided = writes
+        .iter()
+        .position(|write| write.decided.is_some())
+        .unwrap_or(writes.len());
+    let (before, after) = writes.split_at(decided);
+    assert!(
+        before
+            .iter()
+            .any(|write| write.write == "toolkit_store.compare_and_swap"
+                && write.effect == Some("original.controller_grant")),
+        "the first binding write precedes the decision point: {writes:?}"
+    );
+    assert!(
+        !after.is_empty()
+            && after
+                .iter()
+                .all(|write| write.decided == Some("original.admitted")),
+        "every write after the admitted-custody check sees that decision: {writes:?}"
+    );
+}
+
+/// A first send whose source is held inside an owner change at its
+/// admitted-custody check waits there as shipped, on the check's slow path
+/// (it waits out the owner change, then reads the collection again), and is
+/// admitted once; no "not now" escapes. Those two waits are baseline sites
+/// inside the bind (`original_ingress.admitted_guard.change` and
+/// `original_ingress.admitted_guard.recheck`, owner B).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_send_held_inside_an_owner_change_at_the_admitted_check_waits_as_shipped() {
+    let fixture = FirstFixture::new(true).await;
+    let seen = hold_in_change_at(Site::OriginalAdmitted);
+    let result = fixture.submit().await;
+    let completion = fixture.finish(&result).await;
+    clear_probe().await;
+    let inputs = fixture.inputs().await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(
+        completion.is_ok(),
+        "{completion:?}: {}",
+        submission_context(&result)
+    );
+    assert_eq!(inputs, Ok(1), "admitted once");
+    assert!(seen.at(Site::OriginalNotNow).is_empty(), "never not now");
+    let admitted = seen.at(Site::OriginalAdmitted);
+    assert_eq!(admitted.len(), 1, "one bind: the check waited in place");
+    assert_eq!(
+        admitted[0].1,
+        Some("original.controller_grant"),
+        "the check runs after the first send's grant issuance"
     );
 }

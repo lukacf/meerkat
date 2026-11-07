@@ -730,7 +730,7 @@ async fn queued_peer_retries_after_actual_held_turn_without_replacing_source_cus
             held: OnceLock::new(), pending: OnceLock::new(), authentication: auth,
             event_key: peer.event_key(), console: None, approved_login: None,
         };
-        let bound = binder.bind(&context, offered.clone()).await.unwrap();
+        let bound = binder.try_bind(&context, offered.clone()).await.unwrap();
         assert!(bound.entry_fence.is_none());
         assert_eq!(serde_json::to_value(&bound.input).unwrap(), serde_json::to_value(&exact).unwrap());
         let current = peer.for_current_offer(bound.input, offered.clone()).unwrap();
@@ -964,7 +964,7 @@ async fn fresh_host_restores_exact_peer_delivery_and_admits_new_receiver_work() 
         offered["header"]["timestamp"] = serde_json::to_value(
             exact.header().timestamp + std::time::Duration::from_secs(1)).unwrap();
         let offered: Input = serde_json::from_value(offered).unwrap();
-        let bound = binder.bind(&bind_context, offered.clone()).await.unwrap();
+        let bound = binder.try_bind(&bind_context, offered.clone()).await.unwrap();
         assert!(bound.entry_fence.is_none());
         assert_eq!(serde_json::to_value(&bound.input).unwrap(), serde_json::to_value(&exact).unwrap());
         let current = ingress.for_current_offer(bound.input, offered.clone()).unwrap();
@@ -1233,6 +1233,173 @@ async fn completed_peer_run_refuses_unused_recorder_effect_ticket_without_revoki
     fixture.close().await;
     match checked {
         Ok(result) => result.expect("Recorder ticket control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// How long a peer leg holds the source collection.
+const SOURCE_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The sites a probe saw, each with the attempt's effect mark there.
+type SeenSites = Arc<std::sync::Mutex<Vec<(crate::source_hold_probe::Site, Option<&'static str>)>>>;
+
+/// A probe that holds the source collection at each of `sites` on its first
+/// hit there, and records every site with the attempt's effect mark there.
+fn hold_first_at(sites: &'static [crate::source_hold_probe::Site]) -> SeenSites {
+    let seen: SeenSites = Arc::default();
+    let recorder = seen.clone();
+    crate::source_hold_probe::install(Arc::new(move |site, _key| {
+        let mut seen = recorder.lock().unwrap();
+        let first = !seen.iter().any(|(at, _)| *at == site);
+        seen.push((site, meerkat_core::protected_section::effect_recorded()));
+        (first && sites.contains(&site)).then_some(crate::source_hold_probe::Hold {
+            owner_change: false,
+            duration: SOURCE_HOLD,
+        })
+    }));
+    seen
+}
+
+/// From the first hit at the admitted-custody check on: its hits and the
+/// "not now" answers.
+fn from_first_admitted_check(
+    seen: &[(crate::source_hold_probe::Site, Option<&'static str>)],
+) -> (usize, usize) {
+    use crate::source_hold_probe::Site;
+    let tail = seen
+        .iter()
+        .skip_while(|(site, _)| *site != Site::OriginalAdmitted)
+        .collect::<Vec<_>>();
+    (
+        tail.iter()
+            .filter(|(site, _)| *site == Site::OriginalAdmitted)
+            .count(),
+        tail.iter()
+            .filter(|(site, _)| *site == Site::OriginalNotNow)
+            .count(),
+    )
+}
+
+/// One durable peer delivery with the probe installed: the sender's message
+/// is accepted, admitted once and its recorder call succeeds. Answers what
+/// the probe saw.
+async fn deliver_held(
+    fixture: &Fixture,
+    sites: &'static [crate::source_hold_probe::Site],
+) -> Vec<(crate::source_hold_probe::Site, Option<&'static str>)> {
+    let receiver = add(fixture, ADDED).await;
+    let sender = add(fixture, SENDER).await;
+    ready(fixture, &receiver).await;
+    ready(fixture, &sender).await;
+    wire_pair(fixture).await;
+    let recipient = peer(fixture, ADDED).await;
+    *fixture.factory.next_call.lock().unwrap() = Some("memory");
+    *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"action":"remember",
+        "title":"Held source collection", "body":"The delivery is admitted once"});
+    let seen = hold_first_at(sites);
+    let sent = send(fixture, &sender, &recipient).await;
+    assert!(
+        matches!(
+            &sent,
+            Ok(meerkat_core::SendReceipt::PeerMessageSent {
+                delivery: meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved {
+                    outcome: meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted
+                },
+                ..
+            })
+        ),
+        "the delivery is accepted: {sent:?}"
+    );
+    let admitted = completed(fixture, &receiver, 1).await;
+    tool_succeeded(&admitted, "memory");
+    assert_eq!(
+        native_input_states(fixture, &receiver).await.len(),
+        1,
+        "exactly one native admission"
+    );
+    seen.lock().unwrap().clone()
+}
+
+async fn close_held(fixture: Fixture) {
+    tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+        .await
+        .unwrap();
+    fixture.close().await;
+}
+
+/// The peer entry-note leg: the first offer binds its
+/// source (its first-binding writes are marked), then meets the source held
+/// at the input preparation's check and gets the shipped refusal, so the PI
+/// answers pending and Core offers again. A re-offer's bind writes nothing:
+/// the PI's entry note is its only mark. Held again at the admitted-custody
+/// check, it waits there in place and is bound: one hit there, no "not now".
+///
+/// RED with the PI's entry note dropped: the check answers "not now", the PI
+/// maps it to pending, and the next offer binds: two hits, a "not now".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reoffered_peer_delivery_held_at_the_admitted_check_waits_there_and_binds() {
+    use crate::source_hold_probe::Site;
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let seen =
+                deliver_held(&fixture, &[Site::OriginalPrepare, Site::OriginalAdmitted]).await;
+            assert!(
+                seen.iter()
+                    .position(|(site, _)| *site == Site::OriginalPrepare)
+                    < seen
+                        .iter()
+                        .position(|(site, _)| *site == Site::OriginalAdmitted),
+                "the first offer stopped at the input preparation: {seen:?}"
+            );
+            assert_eq!(
+                from_first_admitted_check(&seen),
+                (1, 0),
+                "the re-offer's check waited in place and bound, no not now: {seen:?}"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    close_held(fixture).await;
+    match checked {
+        Ok(result) => result.expect("the re-offered peer leg did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// The peer entry-note leg's control: a first peer delivery held at
+/// the admitted-custody check only. Its first-binding writes (the controller
+/// grant, the binding record) are marked before the check, so it waits in
+/// place with or without the PI's entry note: one hit, no "not now". This is
+/// why the leg needs a re-offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_peer_delivery_held_at_the_admitted_check_waits_there_with_or_without_the_note() {
+    use crate::source_hold_probe::Site;
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let seen = deliver_held(&fixture, &[Site::OriginalAdmitted]).await;
+            assert_eq!(
+                from_first_admitted_check(&seen),
+                (1, 0),
+                "the first delivery's check waited in place: {seen:?}"
+            );
+            assert!(
+                seen.iter()
+                    .find(|(site, _)| *site == Site::OriginalAdmitted)
+                    .is_some_and(|(_, mark)| mark.is_some()),
+                "the first binding's marks precede the check: {seen:?}"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    close_held(fixture).await;
+    match checked {
+        Ok(result) => result.expect("the first peer delivery control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

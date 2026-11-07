@@ -41,6 +41,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected refusal before second native lookup".into(),
+                    receipt: None,
                 },
             ));
         }
@@ -111,6 +112,7 @@ impl ObservedBridge {
                 return Err(BridgeAdmissionError::GovernedInput(
                     GovernedInputError::AdmissionUnresolved {
                         detail: "injected loss after native fresh acceptance".into(),
+                        receipt: None,
                     },
                 ));
             }
@@ -269,6 +271,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected loss after actual helper fresh acceptance".into(),
+                    receipt: None,
                 },
             ));
         }

@@ -3393,6 +3393,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The host's trust over the convention hook sources, installed with
+    /// [`Self::with_hook_source_trust`]: asked about each source over the
+    /// bytes the build read.
+    #[cfg(not(target_arch = "wasm32"))]
+    hook_source_trust: Option<Arc<dyn crate::HookSourceTrust>>,
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
     /// The host's HTTP egress profile, retained by newly built routers.
@@ -3519,6 +3524,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_mob", &self.enable_mob);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("shell_confinement", &self.shell_confinement);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("hook_source_trust", &self.hook_source_trust.is_some());
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         d.field("mcp_stdio_launch_profile", &self.mcp_stdio_launch_profile);
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4708,6 +4715,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4918,6 +4927,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5294,6 +5305,23 @@ impl AgentFactory {
             return env.with_host_launch_guard(guard);
         }
         env
+    }
+
+    /// Install the host's trust over the convention hook sources
+    /// (`<context_root>/.rkat/config.toml`, `<user_config_root>/.rkat/config.toml`).
+    /// Each build asks it about every such file it read hooks from, with the
+    /// SHA-256 of the exact bytes it parsed ([`crate::HookSource`]), so the
+    /// decision covers the content consumed rather than a check the host made
+    /// before the build: a file changed after the host's check is judged as
+    /// changed. Every hook of an untrusted source keeps its slot and is
+    /// refused at each invocation with
+    /// [`meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource`];
+    /// none of them runs. Without one, every source is trusted (unless the
+    /// host confinement says otherwise).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
+        self.hook_source_trust = Some(trust);
+        self
     }
 
     /// Install a stock host's resolved OS process confinement: each launch
@@ -9602,14 +9630,29 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    // A hook a confined process could have defined keeps its
-                    // slot and is refused at every invocation.
-                    let refused_hooks = self
-                        .host_confinement
-                        .as_ref()
-                        .map_or_else(Vec::new, |host| {
-                            layered.untrusted_entries(|source| host.untrusted_source(source))
-                        });
+                    // A hook a confined process could have defined, or one
+                    // whose content the host does not trust as read here,
+                    // keeps its slot and is refused at every invocation.
+                    let refused_hooks = if self.host_confinement.is_none()
+                        && self.hook_source_trust.is_none()
+                    {
+                        Vec::new()
+                    } else {
+                        layered.untrusted_entries(|source| {
+                            // Both policies see every read source: the
+                            // trust is asked once per source whatever
+                            // confinement said, so an auditing or
+                            // stateful trust observes each build's files.
+                            let confined = self
+                                .host_confinement
+                                .as_ref()
+                                .is_some_and(|host| host.untrusted_source(source.path));
+                            let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
+                                trust.decide(source) == crate::HookSourceDecision::Untrusted
+                            });
+                            confined || untrusted
+                        })
+                    };
                     let layered_hooks = layered.config;
                     // Run overrides execute through this engine too. With
                     // override entries and no base entries the engine is

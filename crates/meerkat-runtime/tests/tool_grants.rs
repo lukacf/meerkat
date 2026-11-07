@@ -52,9 +52,9 @@ use meerkat_runtime::tool_grant::{
     ToolGrantClockError, ToolGrantExpiryDriver, ToolGrantIssueBody, ToolGrantIssueExecutor,
     ToolGrantIssueRequest, ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRequestHost,
     ToolGrantRequestNotice, ToolGrantRequestNotices, ToolGrantRequestOrigin,
-    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantRunObserver,
-    ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
-    hold_tool_grant_request, tool_grant_requests_of,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantService,
+    ToolGrantServiceError, ToolGrantStatus, ToolGrantSubjectObserver, ToolGrantSubjectPresence,
+    ToolGrantWindow, hold_tool_grant_request, tool_grant_requests_of,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -1616,10 +1616,15 @@ impl HostRuns {
 }
 
 #[async_trait::async_trait]
-impl ToolGrantRunObserver for HostRuns {
-    async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
-        let key = ToolGrantSubject::session(session_id.clone()).key();
-        self.runs.lock().unwrap().get(key.as_str()).cloned()
+impl ToolGrantSubjectObserver for HostRuns {
+    async fn presence(&self, subject: &ToolGrantSubject) -> ToolGrantSubjectPresence {
+        let key = subject.key().as_str().to_owned();
+        if self.ended.lock().unwrap().contains(&key) {
+            return ToolGrantSubjectPresence::Ended;
+        }
+        ToolGrantSubjectPresence::Held {
+            current_run: self.runs.lock().unwrap().get(&key).cloned(),
+        }
     }
 }
 
@@ -1651,7 +1656,7 @@ impl RequestRig {
         let executor = Arc::new(
             ToolGrantIssueExecutor::new(
                 Arc::clone(&grants),
-                Arc::clone(&runs) as Arc<dyn ToolGrantRunObserver>,
+                Arc::clone(&runs) as Arc<dyn ToolGrantSubjectObserver>,
                 Arc::clone(&notices) as Arc<dyn ToolGrantRequestNotices>,
             )
             .expect("the executor"),

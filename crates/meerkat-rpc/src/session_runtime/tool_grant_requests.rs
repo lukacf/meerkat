@@ -12,7 +12,8 @@
 //! ([`SessionRuntime::nudge_tool_grant_request_executor`]), and every
 //! [`TOOL_GRANT_EXECUTOR_INTERVAL`] for the deadlines. A pass issues approved
 //! grants (grant rows only: an issued grant wakes nothing) and delivers each
-//! ended request's notice to its session as an input, like any input. The
+//! ended request's notice to its subject: a session's as an input, like any
+//! input, and a member identity's through the mob's member input. The
 //! runtime's shutdown stops the loop before its registrations are torn down.
 //! While the loop runs, the runtime takes its agents' grant requests
 //! (`request_tool_grant`), naming the realm's agent `rkat-agent` as their
@@ -34,7 +35,7 @@ use meerkat_core::approval::consent::{
 use meerkat_core::approval::decision::{DecisionPrincipalKey, StoredDecision};
 use meerkat_core::tool_grant::ToolGrantSubject;
 use meerkat_core::types::SessionId;
-use meerkat_core::{DecisionGovernanceConfig, PrincipalKind, PrincipalRef, RunId, TrustDomainId};
+use meerkat_core::{DecisionGovernanceConfig, PrincipalKind, PrincipalRef, TrustDomainId};
 use meerkat_runtime::decision::{
     DecisionApproverCurrentness, DecisionError, DecisionExecutor, DecisionExecutorLoop,
     DecisionExecutorLoopError, DecisionPassOutcome,
@@ -42,7 +43,8 @@ use meerkat_runtime::decision::{
 use meerkat_runtime::tool_grant::wire::wire_tool_grant_target;
 use meerkat_runtime::tool_grant::{
     TOOL_GRANT_ISSUE_KIND, ToolGrantRequestHost, ToolGrantRequestNotice, ToolGrantRequestNotices,
-    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRunObserver,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectObserver,
+    ToolGrantSubjectPresence,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -99,15 +101,28 @@ impl DecisionApproverCurrentness for ListedOperatorApprovers {
     }
 }
 
-/// The runs of the sessions this runtime serves.
-struct RuntimeRuns(Weak<SessionRuntime>);
+/// The grant subjects this runtime serves: its sessions, and the member
+/// identities of the mobs it runs.
+struct RuntimeSubjects(Weak<SessionRuntime>);
 
 #[async_trait::async_trait]
-impl ToolGrantRunObserver for RuntimeRuns {
-    async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
-        let runtime = self.0.upgrade()?;
-        runtime.runtime_adapter().current_run(session_id).await
+impl ToolGrantSubjectObserver for RuntimeSubjects {
+    async fn presence(&self, subject: &ToolGrantSubject) -> ToolGrantSubjectPresence {
+        match self.0.upgrade() {
+            Some(runtime) => runtime.tool_grant_subject_presence(subject).await,
+            None => ToolGrantSubjectPresence::Unknown,
+        }
     }
+}
+
+/// Why a member identity subject's mob is not at hand.
+#[cfg(feature = "mob")]
+enum MobAbsence {
+    /// No mob runs under the id, or another incarnation of it does: the
+    /// identity ended.
+    Ended,
+    /// The mob could not be read now.
+    Unknown,
 }
 
 /// The request notices of this runtime's sessions.
@@ -122,6 +137,11 @@ impl ToolGrantRequestNotices for RuntimeNotices {
         let runtime = self.0.upgrade()?;
         runtime.deliver_tool_grant_request_notice(notice).await
     }
+}
+
+/// The key a request's notice is delivered under: one delivery per decision.
+fn notice_key(notice: &ToolGrantRequestNotice) -> String {
+    format!("{TOOL_GRANT_ISSUE_KIND}:{}", notice.decision_id)
 }
 
 /// The payload of a request notice input: the decision, how the request
@@ -259,7 +279,7 @@ impl SessionRuntime {
         let executor = self
             .runtime_adapter()
             .tool_grant_issue_executor(
-                Arc::new(RuntimeRuns(weak.clone())),
+                Arc::new(RuntimeSubjects(weak.clone())),
                 Arc::new(RuntimeNotices(weak.clone())),
             )
             .map_err(|error| error.to_string())?;
@@ -343,26 +363,231 @@ impl SessionRuntime {
         }
     }
 
-    /// Deliver a request notice to its session as an input, like any input
-    /// (a dormant session is loaded for it), once per decision: a repeated
-    /// delivery answers the input admitted first. A session that no longer
-    /// exists fails the notice; any other refusal (a session another process
-    /// hosts, a runtime not accepting input now) leaves it to a later pass.
+    /// What this runtime sees of a grant subject now: a session is held,
+    /// running its current run here; a member identity is held while its mob
+    /// runs the incarnation the subject names and its roster holds the
+    /// identity, running the current run of the session its member holds.
+    async fn tool_grant_subject_presence(
+        &self,
+        subject: &ToolGrantSubject,
+    ) -> ToolGrantSubjectPresence {
+        match subject {
+            ToolGrantSubject::Session { session_id } => ToolGrantSubjectPresence::Held {
+                current_run: self.runtime_adapter().current_run(session_id).await,
+            },
+            ToolGrantSubject::Identity {
+                mob_id,
+                mob_incarnation,
+                identity,
+            } => {
+                self.member_presence(mob_id, mob_incarnation, identity)
+                    .await
+            }
+        }
+    }
+
+    /// The mob `mob_id` while it runs the incarnation `mob_incarnation`.
+    #[cfg(feature = "mob")]
+    async fn subject_mob(
+        &self,
+        mob_id: &str,
+        mob_incarnation: &str,
+    ) -> Result<meerkat_mob::MobHandle, MobAbsence> {
+        let Some(state) = self.mob_state() else {
+            return Err(MobAbsence::Unknown);
+        };
+        match state.handle_for(&meerkat_mob::MobId::from(mob_id)).await {
+            Ok(handle)
+                if handle.live_incarnation().incarnation().to_string() == mob_incarnation =>
+            {
+                Ok(handle)
+            }
+            Ok(_) | Err(meerkat_mob::MobError::MobNotFound(_)) => Err(MobAbsence::Ended),
+            Err(_) => Err(MobAbsence::Unknown),
+        }
+    }
+
+    /// What this runtime sees of a member identity now.
+    #[cfg(feature = "mob")]
+    async fn member_presence(
+        &self,
+        mob_id: &str,
+        mob_incarnation: &str,
+        identity: &str,
+    ) -> ToolGrantSubjectPresence {
+        let handle = match self.subject_mob(mob_id, mob_incarnation).await {
+            Ok(handle) => handle,
+            Err(MobAbsence::Ended) => return ToolGrantSubjectPresence::Ended,
+            Err(MobAbsence::Unknown) => return ToolGrantSubjectPresence::Unknown,
+        };
+        let member = meerkat_mob::AgentIdentity::from(identity);
+        match handle.member(&member).await {
+            Ok(_) => {}
+            Err(meerkat_mob::MobError::MemberNotFound(_)) => {
+                return ToolGrantSubjectPresence::Ended;
+            }
+            Err(_) => return ToolGrantSubjectPresence::Unknown,
+        }
+        let current_run = match handle.resolve_bridge_session_id(&member).await {
+            Some(session_id) => self.runtime_adapter().current_run(&session_id).await,
+            None => None,
+        };
+        ToolGrantSubjectPresence::Held { current_run }
+    }
+
+    /// A server without mobs cannot tell what a member identity is: a
+    /// decision about one waits for a host that can.
+    #[cfg(not(feature = "mob"))]
+    async fn member_presence(
+        &self,
+        _mob_id: &str,
+        _mob_incarnation: &str,
+        _identity: &str,
+    ) -> ToolGrantSubjectPresence {
+        ToolGrantSubjectPresence::Unknown
+    }
+
+    /// Deliver a request notice to its subject, once per decision: a
+    /// session's as an input of the session, a member identity's through the
+    /// mob's member input.
     async fn deliver_tool_grant_request_notice(
         self: &Arc<Self>,
         notice: &ToolGrantRequestNotice,
     ) -> Option<ApprovalConsentDeliveryState> {
-        let ToolGrantSubject::Session { session_id } = &notice.subject else {
-            return Some(ApprovalConsentDeliveryState::Failed {
-                reason: "this host delivers request notices to sessions only".to_owned(),
-            });
+        match &notice.subject {
+            ToolGrantSubject::Session { session_id } => {
+                self.deliver_session_tool_grant_request_notice(session_id, notice)
+                    .await
+            }
+            ToolGrantSubject::Identity {
+                mob_id,
+                mob_incarnation,
+                identity,
+            } => {
+                self.deliver_member_tool_grant_request_notice(
+                    notice,
+                    mob_id,
+                    mob_incarnation,
+                    identity,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Deliver a member identity's request notice through the mob's member
+    /// input for the identity: a keyed member send under the notice's key,
+    /// so a repeated delivery answers the first, admitted into the session
+    /// the identity's member holds when it is delivered (never one it held
+    /// before). Its text is the notice's event type and fields as JSON. An
+    /// identity whose mob is gone or was replaced, or that has no member
+    /// left, fails the notice; a send committed and not admitted yet, a
+    /// member another host serves, or a mob that cannot be read now leaves
+    /// it to a later pass.
+    #[cfg(feature = "mob")]
+    async fn deliver_member_tool_grant_request_notice(
+        &self,
+        notice: &ToolGrantRequestNotice,
+        mob_id: &str,
+        mob_incarnation: &str,
+        identity: &str,
+    ) -> Option<ApprovalConsentDeliveryState> {
+        use meerkat_contracts::WireContinuationStatus;
+        use meerkat_mob::{MemberSendIdempotencyRefusal, MobError};
+
+        let no_member = || {
+            Some(ApprovalConsentDeliveryState::Failed {
+                reason: format!("the identity {identity} of mob {mob_id} has no member left"),
+            })
         };
+        let handle = match self.subject_mob(mob_id, mob_incarnation).await {
+            Ok(handle) => handle,
+            Err(MobAbsence::Ended) => return no_member(),
+            Err(MobAbsence::Unknown) => return None,
+        };
+        let state = self.mob_state()?;
+        let member = meerkat_mob::AgentIdentity::from(identity);
+        let content = meerkat_core::types::ContentInput::Text(format!(
+            "{TOOL_GRANT_REQUEST_EVENT}: {}",
+            notice_payload(notice)
+        ));
+        let sent = state
+            .mob_member_send_keyed(
+                &meerkat_mob::MobId::from(mob_id),
+                member.clone(),
+                content,
+                meerkat_core::types::HandlingMode::Queue,
+                &notice_key(notice),
+            )
+            .await;
+        match sent {
+            Ok(receipt) => match receipt.status {
+                WireContinuationStatus::Admitted {
+                    session_id,
+                    input_id,
+                } => SessionId::parse(&session_id).ok().map(|session_id| {
+                    ApprovalConsentDeliveryState::Admitted {
+                        session_id,
+                        input_id,
+                    }
+                }),
+                WireContinuationStatus::Pending => None,
+                // The mob incarnation the send was bound to was replaced.
+                WireContinuationStatus::Stranded => no_member(),
+                WireContinuationStatus::Refused { reason } => {
+                    Some(ApprovalConsentDeliveryState::Failed { reason })
+                }
+            },
+            Err(MobError::MemberNotFound(_) | MobError::MobNotFound(_)) => no_member(),
+            // Only a first commit captures the member's delivery scope, so no
+            // earlier send of the notice was committed: a member that left
+            // the roster has no session binding left to scope it to, and one
+            // in the roster without a binding here is served elsewhere.
+            Err(MobError::DeliveryScopeUnavailable { .. }) => match handle.member(&member).await {
+                Err(MobError::MemberNotFound(_)) => no_member(),
+                _ => None,
+            },
+            Err(MobError::MemberSendIdempotency {
+                refusal:
+                    MemberSendIdempotencyRefusal::Unavailable { .. }
+                    | MemberSendIdempotencyRefusal::Inconsistent { .. },
+                ..
+            }) => None,
+            Err(error @ MobError::MemberSendIdempotency { .. }) => {
+                Some(ApprovalConsentDeliveryState::Failed {
+                    reason: error.to_string(),
+                })
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// A server without mobs cannot reach a member: the notice stays owed
+    /// for a host that can.
+    #[cfg(not(feature = "mob"))]
+    async fn deliver_member_tool_grant_request_notice(
+        &self,
+        _notice: &ToolGrantRequestNotice,
+        _mob_id: &str,
+        _mob_incarnation: &str,
+        _identity: &str,
+    ) -> Option<ApprovalConsentDeliveryState> {
+        None
+    }
+
+    /// Deliver a session's request notice to it as an input, like any input
+    /// (a dormant session is loaded for it): a repeated delivery answers the
+    /// input admitted first. A session that no longer exists fails the
+    /// notice; any other refusal (a session another process hosts, a runtime
+    /// not accepting input now) leaves it to a later pass.
+    async fn deliver_session_tool_grant_request_notice(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        notice: &ToolGrantRequestNotice,
+    ) -> Option<ApprovalConsentDeliveryState> {
         let context = ExternalEventRuntimeContext {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(format!(
-                "{TOOL_GRANT_ISSUE_KIND}:{}",
-                notice.decision_id
-            ))),
+            idempotency_key: Some(meerkat_runtime::IdempotencyKey::new(notice_key(notice))),
             correlation_id: None,
         };
         match self

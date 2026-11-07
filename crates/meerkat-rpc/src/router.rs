@@ -9868,15 +9868,27 @@ mod tests {
             )
             .await;
             super::tool_grant_rpc::approve_as_a_person(&runtime, &orphaned_id);
-            let ended = until("the second request's notice settles", || async {
-                runtime.nudge_tool_grant_request_executor();
-                runtime
-                    .decision_service()
-                    .get(&orphaned_id)
-                    .ok()
-                    .and_then(|row| row.notice_receipt)
+            let ended = tokio::time::timeout(PROBE_BOUND, async {
+                loop {
+                    runtime.nudge_tool_grant_request_executor();
+                    if let Some(receipt) = runtime
+                        .decision_service()
+                        .get(&orphaned_id)
+                        .ok()
+                        .and_then(|row| row.notice_receipt)
+                    {
+                        return receipt;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
             })
-            .await;
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the second request's notice settles within the bound: {:?}",
+                    runtime.decision_service().get(&orphaned_id)
+                )
+            });
             assert!(
                 matches!(ended, ApprovalConsentDeliveryState::Failed { .. }),
                 "an identity with no member left ends the notice failed: {ended:?}"

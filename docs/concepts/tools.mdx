@@ -268,11 +268,13 @@ confinement all still apply to every call it opens.
   `ToolGrantSubject::member`), a target (one tool name, or a built-in family
   with the names it provides, which `meerkat::tool_family_names` answers) and
   a window of at most the host policy's maximum lifetime, 24 hours by default.
-  A grant can also be scoped to one run of its session
+  A grant can also be scoped to one run of its subject
   (`ToolGrantRequest::run_scope`; over JSON-RPC, `scope: {"kind":
-  "current_run"}` takes the run the session is running now and is refused
-  with `run_not_active` when it runs none): it then admits uses of that run
-  only, and ends with it.
+  "current_run"}` takes the run the subject is running now, an identity's
+  being the run of the session its member holds, and is refused with
+  `run_not_active` when it runs none): it then admits uses of that run
+  only, and ends with it; a member's end of its run ends the run-scoped
+  grants of its identity and of its session.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
   `RuntimeStore`. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
@@ -303,7 +305,9 @@ confinement all still apply to every call it opens.
   window starting then; a review stage's allow never issues one. A list
   shows an open request as `requested` and, with ended grants, a recently
   rejected, expired, withdrawn or refused one as `declined`; the session
-  receives an input when its request ends.
+  receives an input when its request ends (a member identity's request
+  reaches the session its member holds then, through the mob's member
+  input).
 - **Adjudication.** Every model-request boundary opens the gated names a live
   grant admits at that moment, in the boundary's run, and every gated call is
   adjudicated again immediately before it is handed to its tool, so a call at

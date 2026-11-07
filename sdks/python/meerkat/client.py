@@ -2676,9 +2676,10 @@ class MeerkatClient:
         the member's gate (its profile's joined with its role's), must gate
         it. Bound the grant by exactly one of ``duration_ms`` and
         ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
-        ``scope="current_run"`` also scopes the grant to the run the session
-        is running now: it opens the target in that run only and ends with
-        it, and a session that runs no turn refuses it (error ``data``
+        ``scope="current_run"`` also scopes the grant to the run the subject
+        is running now (an identity's: the run of the session its member
+        holds on the server): it opens the target in that run only and ends
+        with it, and a subject that runs no turn refuses it (error ``data``
         ``{"kind": "run_not_active"}``). Omitted, or ``"window"``, the grant
         lasts for its window. ``decision_ref`` records the host's reference
         to the decision it made before issuing, as attribution. Returns the
@@ -2716,21 +2717,26 @@ class MeerkatClient:
 
     async def request_tool_grant(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         tool: str | None = None,
         family: str | None = None,
         duration_ms: int,
         scope: str | None = None,
         reason: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """Ask for a grant of a session's grant-gated tool name or tool family
+        """Ask for a grant of a subject's grant-gated tool name or tool family
         that a person approves.
 
-        Name exactly one of ``tool`` and ``family``, as for :meth:`grant_tool`.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``), as for :meth:`grant_tool`. Name exactly
+        one of ``tool`` and ``family``, as for :meth:`grant_tool`.
         ``duration_ms`` bounds the grant from its issuance, at most the
         server's maximum lifetime; ``scope="current_run"`` also scopes it to
-        the run the session is running now. The server holds a durable
+        the run the subject is running now (an identity's: the run of the
+        session its member holds on the server). The server holds a durable
         decision of kind ``tool_grant.issue`` and issues nothing: once a
         person approves the decision, the server issues the grant under the
         id the result names. Returns ``{"grant": {...}, "decision": {...}}``:
@@ -2750,7 +2756,7 @@ class MeerkatClient:
             else {"kind": "family", "family": family}
         )
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "target": target,
             "duration_ms": duration_ms,
         }

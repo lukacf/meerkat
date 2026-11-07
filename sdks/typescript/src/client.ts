@@ -2239,8 +2239,9 @@ export class MeerkatClient {
    * the member's gate (its profile's joined with its role's), must gate the
    * target; a family grant's `target.names` are the names the server took
    * for it. `options.scope` `"current_run"` also scopes the grant to the run
-   * the session is running now: it opens the target in that run only and
-   * ends with it; a session that runs no turn refuses it (`data.kind`
+   * the subject is running now (an identity's: the run of the session its
+   * member holds on the server): it opens the target in that run only and
+   * ends with it; a subject that runs no turn refuses it (`data.kind`
    * `"run_not_active"`). Omitted, or `"window"`, the grant lasts for its
    * window. `options.decisionRef` records the host's reference to the
    * decision it made before issuing, as attribution. Throws `INVALID_ARGS`
@@ -2288,11 +2289,14 @@ export class MeerkatClient {
   }
 
   /**
-   * Ask for a grant of a session's grant-gated tool name or tool family that
-   * a person approves. `target` names exactly one of `tool` and `family`, as
-   * for `grantTool`; `durationMs` bounds the grant from its issuance, at most
-   * the server's maximum lifetime; `options.scope` `"current_run"` also
-   * scopes it to the run the session is running now. The server holds a
+   * Ask for a grant of a subject's grant-gated tool name or tool family that
+   * a person approves. The subject is a session id, or a mob member identity
+   * (`{ mobId, identity }`), as for `grantTool`. `target` names exactly one
+   * of `tool` and `family`, as for `grantTool`; `durationMs` bounds the grant
+   * from its issuance, at most the server's maximum lifetime;
+   * `options.scope` `"current_run"` also scopes it to the run the subject is
+   * running now (an identity's: the run of the session its member holds on
+   * the server). The server holds a
    * durable decision of kind `tool_grant.issue` and issues nothing: once a
    * person approves the decision, the server issues the grant under the id
    * the result names. The result is the request as a list shows it (status
@@ -2304,7 +2308,7 @@ export class MeerkatClient {
    * `family`.
    */
   async requestToolGrant(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     target: { tool: string; family?: never } | { family: string; tool?: never },
     durationMs: number,
     options?: { reason?: string; scope?: "window" | "current_run" },
@@ -2317,7 +2321,7 @@ export class MeerkatClient {
       );
     }
     const params: RpcRequestToolGrantParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
       target:
         tool !== undefined
           ? { kind: "tool", name: tool }

@@ -494,7 +494,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "tool_grants/request",
-                "Ask for a grant of a session's grant-gated tool name or family, which a person approves through a durable decision",
+                "Ask for a grant of a session's or a mob member identity's grant-gated tool name or family, which a person approves through a durable decision",
                 "RequestToolGrantParams",
                 "RequestToolGrantResult",
             ),

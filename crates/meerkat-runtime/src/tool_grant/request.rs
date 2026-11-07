@@ -16,12 +16,16 @@
 //!   [`ToolGrantIssuer::Approval`](meerkat_core::tool_grant::ToolGrantIssuer::Approval)
 //!   with the decision's id, for `[now, now + duration)`. A replayed execution
 //!   meets the grant it issued and settles executed. It refuses a decision no
-//!   person decided (`not_a_human_decision`), a run-scoped request whose run
-//!   is over (`run_ended`), and a body this version cannot read
-//!   (`unreadable_request`).
+//!   person decided (`not_a_human_decision`), a request whose subject ended
+//!   (`subject_ended`: a member identity whose mob is gone or was replaced,
+//!   or whose member left the roster), a run-scoped request whose run is
+//!   over (`run_ended`), and a body this version cannot read
+//!   (`unreadable_request`). The host's [`ToolGrantSubjectObserver`] answers
+//!   what the subject is now.
 //! - A request's end owes its requester a notice, which the executor hands
-//!   to the host's [`ToolGrantRequestNotices`]: the subject's session reads
-//!   that its request was approved or declined.
+//!   to the host's [`ToolGrantRequestNotices`]: the subject's session (for a
+//!   member identity, the session its member holds when the notice is
+//!   delivered) reads that its request was approved or declined.
 //! - [`tool_grant_requests_of`] reads a subject's requests, which a list
 //!   projects: open and approved ones as `requested`, and the rejected,
 //!   expired, withdrawn and refused ones due from a bound on as `declined`.
@@ -45,7 +49,6 @@ use meerkat_core::approval::decision::{
     DecisionRequestBody, DecisionSubjectKey, DecisionTier, Sha256Digest, StoredDecision,
 };
 use meerkat_core::tool_grant::{ToolGrantId, ToolGrantSubject, ToolGrantTarget};
-use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
 use super::service::{ToolGrantService, ToolGrantServiceError};
@@ -513,13 +516,32 @@ pub trait ToolGrantRequestNotices: Send + Sync {
     ) -> Option<ApprovalConsentDeliveryState>;
 }
 
-/// Which run a session runs now, as the host that serves it sees it.
+/// What the host that serves a grant subject sees of it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolGrantSubjectPresence {
+    /// The subject can hold a grant, and runs `current_run` here now (`None`
+    /// when it runs none here).
+    Held { current_run: Option<RunId> },
+    /// The subject ended: a member identity whose mob is gone or was
+    /// replaced, or whose member left the roster. Its grants ended with it,
+    /// and none is issued to it after.
+    Ended,
+    /// The host cannot tell now: the decision is asked about again at a
+    /// later pass.
+    Unknown,
+}
+
+/// What a host sees of the grant subjects it serves.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait ToolGrantRunObserver: Send + Sync {
-    /// The run `session_id` runs now: `None` when it runs none, or when this
-    /// host does not serve it.
-    async fn current_run(&self, session_id: &SessionId) -> Option<RunId>;
+pub trait ToolGrantSubjectObserver: Send + Sync {
+    /// What `subject` is now. A session is held, running its current run
+    /// on this host. A member identity is held while its mob runs the
+    /// incarnation the subject names and its roster holds the identity,
+    /// running the current run of the session its member holds on this
+    /// host; otherwise it ended.
+    async fn presence(&self, subject: &ToolGrantSubject) -> ToolGrantSubjectPresence;
 }
 
 /// The executor of `tool_grant.issue` decisions: see the module
@@ -527,7 +549,7 @@ pub trait ToolGrantRunObserver: Send + Sync {
 pub struct ToolGrantIssueExecutor {
     kind: DecisionKind,
     grants: Arc<ToolGrantService>,
-    runs: Arc<dyn ToolGrantRunObserver>,
+    subjects: Arc<dyn ToolGrantSubjectObserver>,
     notices: Arc<dyn ToolGrantRequestNotices>,
 }
 
@@ -541,20 +563,20 @@ impl std::fmt::Debug for ToolGrantIssueExecutor {
 
 impl ToolGrantIssueExecutor {
     /// The executor that issues approved requests through `grants`, asks
-    /// `runs` whether a run-scoped request's run still runs, and hands
-    /// notices to `notices`.
+    /// `subjects` whether a request's subject still holds grants and a
+    /// run-scoped request's run still runs, and hands notices to `notices`.
     ///
     /// # Errors
     /// Never in practice: the decision kind is a valid token.
     pub fn new(
         grants: Arc<ToolGrantService>,
-        runs: Arc<dyn ToolGrantRunObserver>,
+        subjects: Arc<dyn ToolGrantSubjectObserver>,
         notices: Arc<dyn ToolGrantRequestNotices>,
     ) -> Result<Self, DecisionContractError> {
         Ok(Self {
             kind: tool_grant_issue_kind()?,
             grants,
-            runs,
+            subjects,
             notices,
         })
     }
@@ -598,13 +620,18 @@ impl DecisionExecutor for ToolGrantIssueExecutor {
             Ok(body) => body,
             Err(_) => return Self::refused("unreadable_request"),
         };
-        if let Some(run_id) = &body.run_scope {
-            let ToolGrantSubject::Session { session_id } = &body.subject else {
-                return Self::refused("run_ended");
-            };
-            if self.runs.current_run(session_id).await.as_ref() != Some(run_id) {
-                return Self::refused("run_ended");
-            }
+        let current_run = match self.subjects.presence(&body.subject).await {
+            ToolGrantSubjectPresence::Held { current_run } => current_run,
+            // An ended identity's grants ended with it, and none is issued
+            // after: a later member of its name never holds one asked for
+            // this one.
+            ToolGrantSubjectPresence::Ended => return Self::refused("subject_ended"),
+            ToolGrantSubjectPresence::Unknown => return DecisionExecution::Released,
+        };
+        if let Some(run_id) = &body.run_scope
+            && current_run.as_ref() != Some(run_id)
+        {
+            return Self::refused("run_ended");
         }
         // The window starts at the clock reading the commit is admitted at.
         let Ok(now_ms) = self.grants.now_ms() else {

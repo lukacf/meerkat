@@ -423,7 +423,9 @@ them.
   run-scoped tool grants over JSON-RPC. `tool_grants/grant` takes
   `scope` (`ToolGrantScopeRequest`, closed): `{"kind": "window"}`, the
   default, or `{"kind": "current_run"}`, which scopes the grant to the run
-  the session is running now; a session that runs no turn refuses it with
+  its subject is running now (a mob member identity's: the run of the
+  session its member holds on the server, whose end ends the grant); a
+  subject that runs no turn refuses it with
   invalid params whose data is `{"kind": "run_not_active"}`
   (`WireToolGrantErrorData`), and nothing is issued. Every grant carries its
   `scope` (`WireToolGrantScope`: `window`, or `current_run` with the
@@ -446,11 +448,17 @@ them.
   `ToolGrantIssuer::Approval`, for `[now, now + duration)`; a replayed
   execution meets the grant it issued (`ToolGrantService::issued_for`) and
   settles executed. It refuses a decision no person decided
-  (`not_a_human_decision`), a run-scoped request whose run is over
+  (`not_a_human_decision`), a request whose subject ended (`subject_ended`:
+  a member identity whose mob is gone or was replaced, or whose member left
+  the roster, so a later member of the name never holds a grant asked for
+  an earlier one), a run-scoped request whose run is over
   (`run_ended`) and a body this version cannot read (`unreadable_request`),
   and hands each ended request's notice (`ToolGrantRequestNotice`) to the
-  host's `ToolGrantRequestNotices`; the host's `ToolGrantRunObserver`
-  answers a session's current run. `tool_grant_requests_of` reads a
+  host's `ToolGrantRequestNotices`; the host's `ToolGrantSubjectObserver`
+  answers what the subject is now (`ToolGrantSubjectPresence`: held, with
+  its current run, a session's own or the run of the session a member
+  identity's member holds; ended; or unknown, asked again at a later pass).
+  `tool_grant_requests_of` reads a
   subject's requests (the ended ones from a deadline bound on), and
   `MeerkatMachine::list_tool_grant_requests` lists them with the ended ones
   whose deadline is within the grant policy's maximum lifetime of now;
@@ -480,8 +488,9 @@ them.
 
 - `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
   `tool_grants/request` (`RequestToolGrantParams`, closed, and
-  `RequestToolGrantResult`): a host asks for a grant of a session's gated
-  tool name or family that a person approves; `rkat-rpc` is the requester
+  `RequestToolGrantResult`): a host asks for a grant of a session's or a mob
+  member identity's gated tool name or family that a person approves;
+  `rkat-rpc` is the requester
   and `operator` the approver id. `rkat-rpc` runs the executor of
   `tool_grant.issue` decisions (`SessionRuntime::start_tool_grant_request_executor`,
   started with the router and stopped with the runtime): a decide or
@@ -491,14 +500,18 @@ them.
   (`[governance.decisions] operator_approver_ids`). Each ended request's
   session receives a `tool_grant_request` external event, like any input,
   with the decision, the outcome (`granted` with the grant id, `rejected`,
-  `expired`, `withdrawn`, or `refused` with a reason) and the target. While
+  `expired`, `withdrawn`, or `refused` with a reason) and the target. A
+  member identity's notice goes through the mob's member input instead, a
+  keyed member send under the decision's key admitted into the session its
+  member holds then; an identity with no member left ends it failed. While
   the executor runs, `rkat-rpc` takes its agents' requests, naming the
   realm's agent `rkat-agent` as their requester. `tool_grants/list` lists
   open and approved requests as `requested` and, with `include_ended`, the
   rejected, expired, withdrawn and refused ones whose deadline is within the
   grant policy's maximum lifetime of now as `declined`, the wire statuses
-  reserved since 0.9.9. Python `request_tool_grant`, TypeScript
-  `requestToolGrant`.
+  reserved since 0.9.9. Python `request_tool_grant` (a session, or `mob_id`
+  and `identity`), TypeScript `requestToolGrant` (a session id, or
+  `{ mobId, identity }`).
 
 - Member grant gate: a mob profile declares `tools.grant_gated`
   (`grant_gated = { families = [...], tools = [...] }` in TOML; on

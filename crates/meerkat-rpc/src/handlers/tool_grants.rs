@@ -10,11 +10,13 @@
 //! mob's roster. List and audit resolve the mob only, so a retired
 //! identity's history stays readable. Every refusal of a request these
 //! methods check is the typed `tool_grant_request_refused` refusal, but a
-//! `current_run` grant to a session that runs no turn, refused as
+//! `current_run` grant to a subject that runs no turn, refused as
 //! `run_not_active`.
 //!
-//! A `current_run` grant takes the run the runtime records for the session
-//! now. `tool_grants/request` checks its subject, target and scope the same
+//! A `current_run` grant takes the run the runtime records now for the
+//! session serving the subject: a session's own, or the session an
+//! identity's member holds here. `tool_grants/request` checks its subject,
+//! target and scope the same
 //! way and holds a durable decision of kind `tool_grant.issue` (this host is
 //! its requester) instead of issuing anything: the runtime's executor of the
 //! kind issues the grant once a person approved it. `tool_grants/list` lists
@@ -317,35 +319,36 @@ fn target_of(
 }
 
 /// The run a requested scope binds: none for a window, and for
-/// `current_run` the run the runtime records for the subject's session now,
-/// which a session that runs none refuses as `run_not_active`. An identity
-/// subject's `current_run` is refused the same way.
+/// `current_run` the run the runtime records now for the session serving the
+/// subject here (a session's own, or the session an identity's member
+/// holds), which a subject that runs none refuses as `run_not_active`.
 #[allow(clippy::result_large_err)]
 async fn run_scope_of(
     id: Option<RpcId>,
     scope: Option<ToolGrantScopeRequest>,
-    subject: &ToolGrantSubject,
+    subject: &GrantSubject,
     runtime: &SessionRuntime,
 ) -> Result<Option<RunId>, RpcResponse> {
     match scope {
         None | Some(ToolGrantScopeRequest::Window {}) => Ok(None),
         Some(ToolGrantScopeRequest::CurrentRun {}) => {
-            let ToolGrantSubject::Session { session_id } = subject else {
-                return Err(run_not_active(
-                    id,
-                    "a current_run grant names a session's run".to_owned(),
-                ));
+            let current_run = match &subject.serving {
+                Some(session_id) => runtime.runtime_adapter().current_run(session_id).await,
+                None => None,
             };
-            match runtime.runtime_adapter().current_run(session_id).await {
-                Some(run_id) => Ok(Some(run_id)),
-                None => Err(run_not_active(
-                    id,
-                    format!(
-                        "the session {session_id} runs no turn now: a current_run grant needs \
-                         a run"
+            current_run.map(Some).ok_or_else(|| {
+                let idle = match &subject.subject {
+                    ToolGrantSubject::Session { session_id } => {
+                        format!("the session {session_id} runs no turn now")
+                    }
+                    ToolGrantSubject::Identity {
+                        mob_id, identity, ..
+                    } => format!(
+                        "no member of the identity {identity} in mob {mob_id} runs a turn here now"
                     ),
-                )),
-            }
+                };
+                run_not_active(id, format!("{idle}: a current_run grant needs a run"))
+            })
         }
     }
 }
@@ -389,7 +392,7 @@ pub async fn handle_grant(
         Ok(target) => target,
         Err(response) => return response,
     };
-    let run_scope = match run_scope_of(id.clone(), params.scope, &subject.subject, &runtime).await {
+    let run_scope = match run_scope_of(id.clone(), params.scope, &subject, &runtime).await {
         Ok(run_scope) => run_scope,
         Err(response) => return response,
     };
@@ -426,7 +429,8 @@ pub async fn handle_grant(
 /// decision is held for the approver id `operator` until the request's
 /// deadline. Nothing is issued here: the runtime's executor of the kind
 /// issues the grant, under the id the answer names, once a person approved
-/// it. A request names a session subject.
+/// it. A request names a session or a mob member identity, as a grant does;
+/// an identity's notice goes through the mob's member input.
 pub async fn handle_request(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -440,13 +444,6 @@ pub async fn handle_request(
         Ok(decisions) => decisions,
         Err(response) => return response,
     };
-    if matches!(params.subject, ToolGrantSubjectRequest::Identity { .. }) {
-        return RpcResponse::error(
-            id,
-            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            "this server holds grant requests for sessions only",
-        );
-    }
     let subject = match subject_for_grant(id.clone(), &params.subject, &runtime).await {
         Ok(subject) => subject,
         Err(response) => return response,
@@ -455,7 +452,7 @@ pub async fn handle_request(
         Ok(target) => target,
         Err(response) => return response,
     };
-    let run_scope = match run_scope_of(id.clone(), params.scope, &subject.subject, &runtime).await {
+    let run_scope = match run_scope_of(id.clone(), params.scope, &subject, &runtime).await {
         Ok(run_scope) => run_scope,
         Err(response) => return response,
     };

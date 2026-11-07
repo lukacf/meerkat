@@ -20,8 +20,8 @@ use crate::tool_grant::{
     ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantIssueBody,
     ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantListing, ToolGrantPolicy,
     ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestHost, ToolGrantRequestNotices,
-    ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantRunObserver, ToolGrantService,
-    ToolGrantServiceError, hold_tool_grant_request, tool_grant_requests_of,
+    ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
+    ToolGrantSubjectObserver, hold_tool_grant_request, tool_grant_requests_of,
 };
 
 impl MeerkatMachine {
@@ -216,17 +216,18 @@ impl MeerkatMachine {
     }
 
     /// The executor of `tool_grant.issue` decisions over this runtime's grant
-    /// service, asking `runs` for a session's current run and handing each
-    /// ended request's notice to `notices`.
+    /// service, asking `subjects` what a request's subject is now (whether it
+    /// still holds grants, and its current run) and handing each ended
+    /// request's notice to `notices`.
     ///
     /// # Errors
     /// Never in practice: the decision kind is a valid token.
     pub fn tool_grant_issue_executor(
         &self,
-        runs: Arc<dyn ToolGrantRunObserver>,
+        subjects: Arc<dyn ToolGrantSubjectObserver>,
         notices: Arc<dyn ToolGrantRequestNotices>,
     ) -> Result<ToolGrantIssueExecutor, DecisionContractError> {
-        ToolGrantIssueExecutor::new(Arc::clone(&self.tool_grant_service), runs, notices)
+        ToolGrantIssueExecutor::new(Arc::clone(&self.tool_grant_service), subjects, notices)
     }
 
     /// `session_id`'s scoped tool grant seam, carried on its runtime

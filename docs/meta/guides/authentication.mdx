@@ -4,7 +4,7 @@ description: "JWT validation, OIDC discovery, provider configuration, and email 
 icon: "lock"
 ---
 
-*Mirrored from Meerkat Meta main at [133d11d1bbf1](https://github.com/lukacf/meerkat/commit/133d11d1bbf16d302740ab999ab7224c45362a3a) on 2026-11-05; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [b9e2ea2a3c68](https://github.com/lukacf/meerkat/commit/b9e2ea2a3c6845fddcaa6e3c1a4696c7362ad1b8) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Meta authenticates protected console, REST, JSON-RPC, Flow Editor, and SSE
 requests with JWTs. Signature and claim validation establishes a principal;
@@ -139,6 +139,16 @@ its historical behaviour. The recorded discovery document names the real key
 source (the fetched `jwks_uri`, or `inline` for `jwks_json`), so a public
 issuer's host can never read as the HS256 development host.
 
+**Shared and personal accounts.** A front that signs everyone in as one
+account mints every holder of its password the same `sub`. The console cannot
+tell those people apart, so such a token never counts as a person: the caller
+is identified as its principal and can act as today. A `provider: "jwt"`
+configuration counts as shared unless it declares `"accounts": "personal"`,
+which a front that mints one token per person sets. `provider: "oidc"` tokens
+name persons unless the configuration declares `"accounts": "shared"`. Any
+other value is refused. `meta/console/whoami` reports the result as
+`actor.kind`.
+
 The result is the fixed trusted snapshot described next: the console does not
 refetch the JWKS, so an issuer key rotation needs a restart of the host (or a
 refreshable `JwksCache` on the host's own front, see below). Google rotates its
@@ -157,6 +167,7 @@ TrustedOidcRuntimeConfig {
     jwks_json: jwks_json_text,
     audience: "meerkat-console".to_string(),
     require_verified_email: false,
+    shared_account_tokens: false,
 }
 ```
 
@@ -250,7 +261,12 @@ In the reference app router, these surfaces remain public even when
 
 Console JSON, JSON-RPC, timeline, blob, Flow Editor RPC, and all Meta SSE
 surfaces honor `require_app_auth`. When enabled, they accept either
-`Authorization: Bearer <token>` or an exact `auth_token` query parameter.
+`Authorization: Bearer <token>` or an exact `auth_token` query parameter. A
+console write (`POST /console/rpc`, `/console/rpc/multipart`,
+`/console/send`, `/console/send/recover`, the MCP Apps routes and the Flow
+Editor RPC `/flow-editor/rpc`) takes its token only in the header: one whose
+only token is in the query string is refused 401, on an open console too,
+because a token in a URL reaches proxy logs and browser history.
 Query values are percent-decoded, so callers must URL-encode reserved
 characters. Prefer the header except where a browser or SSE bootstrap requires
 a query token.

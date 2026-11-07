@@ -736,8 +736,8 @@ pub enum QueuedInputsOnShutdown {
     /// every queued input ends as stopped. The default before 0.9.5.
     Stop,
     /// Keep a durable member's work for the mob's next start: its running
-    /// turn and its eligible queued inputs, unless they are older than the
-    /// bound by then.
+    /// turn and its eligible queued inputs, unless more than the bound has
+    /// passed since the Shutdown by then.
     ///
     /// The Shutdown holds the member's run starts and does not cancel its
     /// running turn itself: it unregisters the member's runtime with this
@@ -762,7 +762,7 @@ pub enum QueuedInputsOnShutdown {
     /// input still ends as stopped. The waiter of a kept input
     /// is answered [`RequeuedAcrossStop`](super::BoundedTurnFailure::RequeuedAcrossStop):
     /// do not resubmit it; a same-key replay after the restart re-attaches
-    /// to it, and one older than the bound by then ends
+    /// to it, and one kept longer than the bound by then ends
     /// [`RequeueExpired`](super::BoundedTurnFailure::RequeueExpired).
     ///
     /// This is a guarantee only for members whose run starts the Shutdown
@@ -822,7 +822,9 @@ impl QueuedInputsOnShutdown {
     }
 }
 
-/// The age bound of a requeued input, measured from its admission.
+/// The age bound of a requeued input, measured from the graceful Shutdown
+/// that kept it, not from its admission: how long after that Shutdown the
+/// mob's next start still runs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequeueMaxAge(Duration);
 

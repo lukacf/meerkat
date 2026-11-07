@@ -100,19 +100,6 @@ them.
   appended last, so no existing variant's implicit discriminant moves. Every
   enum named here is exhaustive, so a downstream exhaustive match needs the
   new arms, or a wildcard arm.
-- `meerkat-core`: `HttpAuthorizationContent` gains the public field
-  `initiator: HttpRequestInitiator`, a new enum (`User`, the default, and
-  `Agent`) that says who a provider request continues. Code that builds the
-  struct with a literal sets the field or adds `..Default::default()`.
-- `meerkat-copilot`: `CopilotModelPolicyState` keeps a policy state other
-  than `enabled` and `disabled` as the account states it: the variant
-  `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
-  It still serializes as the state string. New
-  `CopilotModelPolicyState::as_str`.
-- `meerkat-copilot`: `CopilotModel::supported_endpoints` and
-  `CopilotModelOffering::supported_endpoints` are
-  `Option<Vec<CopilotEndpoint>>`: `None` when the catalog entry states no
-  list, `Some(vec![])` for an explicitly empty one.
 
 - Behaviour-only (not measured by the gate): `meerkat-runtime`: Core checks
   the binding of an in-process peer delivery that governed work sent against
@@ -154,11 +141,90 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-core`: consent decisions keep the login they were decided in
+  (see Changed). `ApprovalConsentApprover` gains the public field
+  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
+  it literally must set it (`None` records no login, as before).
+
+- `meerkat-core`: durable decisions keep the login they were decided in as
+  its digest (see Changed). `DecisionEvidence::Human` gains the field
+  `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
+  the variant literally, or matches it without `..`, must name it (`None`
+  records no login).
+
 - `meerkat-core`: `model_profile::capabilities::BetaFeature` gains
   `ThinkingBindingControls` (wire label `thinking_binding_controls`),
   appended last, so no existing variant's implicit discriminant moves. The
   enum is exhaustive, so a downstream exhaustive match needs the new arm, or
   a wildcard arm.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`: the max age of a graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, `RequeueMaxAge`) is
+  measured from the stop that kept an input, not from the input's admission
+  (see Fixed). A kept input now runs at a start that comes within `max_age`
+  of that stop, however long before the stop it was admitted, so a host
+  that used `max_age` to bound how old an input may be when it runs must
+  bound that itself; see the upgrading guide.
+
+- `meerkat-core`: `HttpAuthorizationContent` gains the public field
+  `initiator: HttpRequestInitiator`, a new enum (`User`, the default, and
+  `Agent`) that says who a provider request continues. Code that builds the
+  struct with a literal sets the field or adds `..Default::default()`.
+- `meerkat-copilot`: `CopilotModelPolicyState` keeps a policy state other
+  than `enabled` and `disabled` as the account states it: the variant
+  `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
+  It still serializes as the state string. New
+  `CopilotModelPolicyState::as_str`.
+- `meerkat-copilot`: `CopilotModel::supported_endpoints` and
+  `CopilotModelOffering::supported_endpoints` are
+  `Option<Vec<CopilotEndpoint>>`: `None` when the catalog entry states no
+  list, `Some(vec![])` for an explicitly empty one.
+
+- `meerkat-contracts`: `WireMemberPreviewUnavailable` gains `StoreRefused`
+  (wire `store_refused`), appended last. The enum is exhaustive, so a
+  downstream exhaustive match needs an arm; so does an exhaustive switch over
+  the Web SDK's `WireMemberPreviewUnavailable` type, which gains
+  `"store_refused"`.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`,
+  `meerkat-contracts`: a member status read whose session the store refuses
+  until its realm is reopened answers `preview_unavailable: "store_refused"`
+  (`mob/member_status`, and the members of `mob/wait_kickoff` and
+  `mob/wait_ready`), where 0.9.10 sent `read_failed`;
+  `MemberPreviewUnavailable::StoreRefused` serializes as `store_refused` and
+  reads back from it. A client that keeps the closed vocabulary of an earlier
+  release (the Python and TypeScript SDKs through 0.9.10) fails such a read
+  with `INVALID_RESPONSE`: update the SDK with the server.
+
+- Python and TypeScript SDKs (not measured by the gate): a member's preview
+  marker (`preview_unavailable` in Python, `previewUnavailable` in
+  TypeScript, on member status snapshots and on the members of the kickoff
+  and ready waits) is now `WireMemberPreviewUnavailable |
+  MobMemberPreviewUnavailableUnknown`. A reason the SDK does not know reads
+  as `{"unknown": <value>}` instead of failing the read with
+  `INVALID_RESPONSE`; code that treats the field as a known reason must
+  handle the unknown form. A value that is not a string still fails closed.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a host store
+  commit whose batch is still unsettled at the self-fence deadline of the
+  fence token it carries fails with `SpiError::UnsettledAtFenceWindow`, and
+  through the runtime store with `RuntimeStoreError::UnsettledAtFenceWindow`.
+  Before, it was retried until its retry budget ran out and then failed with
+  `SpiError::Host` (`RuntimeStoreError::WriteFailed`), unless a retry sent
+  past the deadline landed. While renews fail, the retry budget is therefore
+  cut at the self-fence window. Through the session service, a checkpoint
+  write (a round commit or a closing save) that stops so answers the
+  teardown class (`AgentError::SessionDurableProjectionAuthorityUnknown`),
+  where a failed checkpoint write answered `AgentError::InternalError`. See
+  Fixed.
+
+- `meerkat-core`: `service::MobToolsBuildArgs`, the arguments
+  `MobToolsFactory::build_mob_tools` receives, gains the public fields
+  `provider: Provider` and `self_hosted_server_id: Option<String>`: the
+  provider route the owning agent's build resolved for its `model` (see
+  Fixed). Code that builds it literally, or destructures it without `..`,
+  must name them; a factory that only reads its fields is unaffected.
 
 ### Added
 
@@ -317,11 +383,62 @@ them.
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
 
+- Credential and configuration administration admissions settle a typed
+  record to a recorder the host supplies. A host's `AdministrationEntry`
+  can state, on the admission it grants, the administrator it
+  authenticated (`EnteredAdministration::administered_by`, with an
+  `AdministeringPrincipal`: a qualified principal and optionally the digest
+  of their login) and its `AdministrationRecorder`. When the update
+  settles, its owner hands the recorder one `AdministrationRecord`, also
+  after the caller stopped waiting: the administrator, the login digest,
+  what changed (`AdministeredChange`: an MCP service secret set or removed,
+  an MCP OAuth client profile installed, replaced or removed, or a realm
+  configuration patch and the generation it published), whether it
+  committed or its outcome is unknown (`AdministrationOutcome`), and when.
+  The `_entered` forms record this way: `set_mcp_service_secret_entered`,
+  `remove_mcp_service_secret_entered`, the `_client_profile_entered`
+  updates, `ConfigRuntime::patch_entered` and
+  `McpRealmPersistTarget::add_entered`. No record carries a value or
+  secret: a client profile's record names its slot by the server name, the
+  realm and the credential binding, never by the server URL, which can
+  carry credentials. Core keeps no copy: the host keeps the record in its
+  own audit. An admission that states no administrator records nothing.
+  `HostAuthenticationScope::digest` is the one login digest form (`sha256:`
+  and the lowercase hex SHA-256 of the scope's text).
+
+- `meerkat-schedule`: `dispatch_schedule_list_where`, the
+  `meerkat_schedule_list` tool's own listing over only the schedules a
+  predicate admits, for a host that hides some of a realm's schedules from
+  its agents. The predicate is applied before the creation order, the cursor
+  and the page cut, so pages stay full and every row is the tool's bounded
+  summary. The `meerkat` facade re-exports it.
+
 - OpenAI `gpt-6.1-terra` (GPT-6.1 Terra) is cataloged as a Supported OpenAI
   model: 1.05M context with a separate 922K input ceiling, 128K output,
   text/image input, the Sol/Luna effort ladder (`none` through `max`), and the
   GPT-6 Responses prompt-cache defaults (implicit mode with the `30m` TTL,
   `12h` on request). The OpenAI default stays `gpt-6-astra`.
+
+- `meerkat-anthropic`: `AnthropicClientBuilder::thinking_binding_controls_supported`
+  declares whether the client's backend documents Anthropic's thinking-block
+  binding controls. It defaults to `true`, as on the Claude API; the
+  provider runtime sets it from the backend: on for the Claude API, Google
+  Cloud and Microsoft Foundry, off for Amazon Bedrock, which Anthropic's
+  preserved-thinking documentation does not list, and for the GitHub Copilot
+  route.
+
+- `meerkat-models`: the Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5
+  rows list the `thinking-binding-controls-2026-08-01` beta (feature
+  `thinking_binding_controls`), so their model profiles' `beta_headers`
+  show it.
+
+- `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
+  `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
+  host-plane operator releases a work item's claim it does not own, bound
+  to the request's revision. The Released event records the operator and
+  the released claim under `break_glass`, as
+  `break_glass_reassign_attention` records its move.
+
 - `meerkat-llm-core`: `LlmRequest::initiator` says who a request continues,
   from its last message; `PreparedLlmRequest::agent_initiated` marks a
   request-local call (a compaction summary, a tool's own model call) as the
@@ -346,18 +463,20 @@ them.
   its `data:` lines join with a line break, and the end of the body reads
   the last line and the last event), one `streaming::SseStep` per line.
 
-- `meerkat-anthropic`: `AnthropicClientBuilder::thinking_binding_controls_supported`
-  declares whether the client's backend documents Anthropic's thinking-block
-  binding controls. It defaults to `true`, as on the Claude API; the
-  provider runtime sets it from the backend: on for the Claude API, Google
-  Cloud and Microsoft Foundry, off for Amazon Bedrock, which Anthropic's
-  preserved-thinking documentation does not list, and for the GitHub Copilot
-  route.
+- `meerkat-runtime`: `SpiError::UnsettledAtFenceWindow { token, attempts,
+  last }` and `RuntimeStoreError::UnsettledAtFenceWindow { cause }`: a host
+  store commit that stopped at its fence token's self-fence deadline with
+  its outcome unknown, so a caller classifies it by type. Both enums are
+  `#[non_exhaustive]`.
 
-- `meerkat-models`: the Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5
-  rows list the `thinking-binding-controls-2026-08-01` beta (feature
-  `thinking_binding_controls`), so their model profiles' `beta_headers`
-  show it.
+- `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
+  `store_refused` value of a member's `preview_unavailable`
+  (`WireMemberPreviewUnavailable::StoreRefused`): the store refuses the
+  member's session until its realm is reopened. The SDKs read it as a known
+  reason; the Python and TypeScript SDKs read a reason a later server adds as
+  `MobMemberPreviewUnavailableUnknown`, and the Web SDK, whose runtime is the
+  same release, keeps its closed vocabulary. `mob_check_member` gives such a
+  member a note of its own (see Fixed).
 
 ### Changed
 
@@ -368,6 +487,42 @@ them.
   add once, at the first boundary after its release settles, where every
   later boundary reported it again. It stays listed as awaiting sign-in, and
   a later sign-in gets the typed refusal from `McpRouter::retry_authorized`.
+
+- `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
+  decision kind it registers instead of the whole store, so two runtimes on
+  one store each execute their own kinds. A kind another executor holds is
+  not executed: the loop starts without it, each pass lists it as unclaimed
+  and asks for its claim again, and the loop takes the kind over once that
+  executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
+  whatever kinds it registers. See Breaking for the change to `start`.
+
+- Consent decisions record a digest of the login they were decided in:
+  `consent.approver.authentication_scope_digest`, the digest of the decision
+  event's `HostAuthenticationScope`, never the scope itself. The qualified
+  decider stays in `consent.approver.principal`, which tells apart two trust
+  domains that issue the same id; `decision.actor` stays the bare id. A row
+  decided earlier reads with no digest (see Upgrade notes).
+
+- Durable decisions record a digest of the login they were decided in, and
+  no longer the login itself: a human decision's evidence
+  (`DecisionEvidence::Human`) keeps `authentication_scope_digest`, the
+  digest of the decision event's `HostAuthenticationScope`, and
+  `AttestedDecision::evidence` no longer writes `authentication_scope`.
+  Evidence recorded before keeps that field: it decodes, and keeps its bytes
+  and the digest its decision binds, so the decision reads and executes as
+  before (see Upgrade notes for a rollback).
+
+- `meerkat-anthropic`: on an Anthropic account created before 2026-08-31,
+  which Anthropic does not hold to thinking-block binding, a replayed
+  thinking block whose system prompt, tools or earlier messages changed is
+  now dropped by the API (and logged) instead of reaching the model, since
+  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
+  the `drop_block` control on every account (see Fixed). A request that
+  forces a tool call with thinking omitted keeps its previous shape, with no
+  thinking and no control: the client refuses a forced tool call beside
+  explicit thinking, and a forced call skips thinking on the models that
+  accept one.
+
 - GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
   request continues the agent's own work (after a tool result or the
   assistant's own output, and for a compaction summary or a tool's own
@@ -435,25 +590,6 @@ them.
   provisioned, and an inherited one kept, instead of failing the build or
   dropping the tool for the build's lifetime. The first search completes the
   exchange.
-
-- `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
-  decision kind it registers instead of the whole store, so two runtimes on
-  one store each execute their own kinds. A kind another executor holds is
-  not executed: the loop starts without it, each pass lists it as unclaimed
-  and asks for its claim again, and the loop takes the kind over once that
-  executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
-  whatever kinds it registers. See Breaking for the change to `start`.
-
-- `meerkat-anthropic`: on an Anthropic account created before 2026-08-31,
-  which Anthropic does not hold to thinking-block binding, a replayed
-  thinking block whose system prompt, tools or earlier messages changed is
-  now dropped by the API (and logged) instead of reaching the model, since
-  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
-  the `drop_block` control on every account (see Fixed). A request that
-  forces a tool call with thinking omitted keeps its previous shape, with no
-  thinking and no control: the client refuses a forced tool call beside
-  explicit thinking, and a forced call skips thinking on the models that
-  accept one.
 
 ### Deprecated
 
@@ -556,6 +692,85 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+- `meerkat-schedule`: a `meerkat_schedule_list` row for a schedule whose
+  trigger is too large to keep whole cuts the trigger's timezone to 200
+  characters like an id. A stored timezone is validated only when
+  occurrences are planned, so a paused schedule could hold a very long one,
+  and every listing carried it whole.
+
+- `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5
+  with no thinking configured) no longer fails after a mid-session tool
+  change on accounts that enforce thinking-block binding (Anthropic accounts
+  created on or after 2026-08-31). Claude Fable 5.1, Opus 5.5, Sonnet 5.5
+  and Haiku 5.5 check every replayed thinking block against the system
+  prompt, the tools and the earlier messages it was produced under, and
+  such an account answers 400 ("The block is bound to a different
+  conversation") once any of them changed. Meerkat changes the tools
+  mid-session as MCP servers connect, so every later turn of a thinking
+  session failed. Requests to those models now set
+  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` with the
+  `thinking-binding-controls-2026-08-01` beta header, and the API drops the
+  stale blocks instead: beside configured `adaptive` thinking, and, with
+  thinking omitted, beside `{"type": "adaptive"}`, the model's own default,
+  which turns nothing on since each of these models thinks by default. The
+  control is never sent beside `between_tools` or `disabled`, nor for a
+  model whose default is no thinking or an uncatalogued model id. A
+  non-empty `input_transformations` report (the blocks the API dropped or
+  let through) is logged as a warning that names each block and its reason:
+  the model answered without that reasoning, and the prompt cache restarts
+  at the first dropped block.
+
+- `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
+  claims forced tool choice support. Anthropic answers 400 to `tool_choice`
+  `any` or a named tool on Claude Fable 5.1, as on Opus 5.5 and Sonnet 5.5
+  ("Forced tool use not supported" in Anthropic's API errors reference). A
+  forced tool choice on Fable 5.1 is now refused locally with the typed
+  `ToolChoiceUnsupported` refusal (`ModelDoesNotSupportForcedToolChoice`)
+  before any request is sent, instead of being sent and answered with that
+  400, which mapped to the same typed refusal.
+
+- `meerkat-runtime`: a kept input's requeue age is measured from the
+  graceful stop that kept it, not from its admission, so a run admitted long
+  before a restart is no longer ended as `requeue_expired` after a short
+  restart. A graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, which `rkat-rpc`'s, the
+  REST server's and a mob's default graceful shutdowns use with a 15-minute
+  max age for sessions with per-round commits) marks each input it keeps
+  with the stop's time, and the next start now ends the input as
+  `RequeueExpired` only when more than `max_age` has passed since that time:
+  `max_age` bounds the outage after which kept work still runs. The start
+  measured the age from the input's admission instead, so every run
+  admitted more than 15 minutes before a graceful restart, however short the
+  restart, was settled as `RequeueExpired` instead of resumed (its session
+  stream ending it with a `RunFailed`), and a queued input admitted that
+  long before ended `RequeueExpired` without running. A later graceful stop
+  that keeps an input again, before a start runs it, still replaces its
+  mark with its own time and max age, so the age counts from the last stop
+  that kept it. Every mark written since 0.9.5 carries the stop's time, so
+  no migration is needed. Affects 0.9.5 through 0.9.10.
+
+- `meerkat-sandbox`: on Linux, a read-only literal file grant whose last
+  component is a symbolic link is confined, where it was refused
+  (`UnsupportedRequirement`), so a confined process with IP access resolves
+  host names on a host whose `/etc/resolv.conf` links to systemd-resolved's
+  file (grant `/etc/resolv.conf` as a literal read path). The link's
+  regular-file target is pinned when the requirement compiles and bound
+  read-only at the link's path; every launch checks that the link keeps its
+  text and still resolves to that file, and setup reopens it only while it is
+  the file the launch checked. A file replaced under its name (a new file
+  renamed into place, as systemd-resolved rewrites its stub file when its DNS
+  settings change) is checked again by the same rules at the next launch and
+  pinned in its place, so confined launches keep resolving names after the
+  change; a link replaced with other text, or a file replaced by anything
+  those rules refuse, refuses the launch. The link's own text alone must
+  name its target (a link to a link is refused), the target must not be in
+  `/proc`, `/sys` or `/dev`, and the link and every directory above it must
+  be owned by root or the effective user, as their filesystem reports, and
+  writable by neither group nor others unless sticky; any other link is
+  still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
+  through 0.9.10.
+
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response no
   longer fails the turn for good when Copilot gives its output items new
   ids. Copilot re-identifies an item on most events of its lifecycle while
@@ -595,7 +810,73 @@ them.
   incomplete-response error naming the item's `output_index`, nothing of it
   is committed, and the turn is tried again.
 
+- `meerkat-runtime`: a host store commit no longer sends its batch past its
+  fence token's lease. A commit whose outcome stayed unknown or unavailable
+  was retried for its whole retry budget (30 s by default), also after
+  renews failed and the self-fence window of the token its batch carries
+  closed. Once the store's lease for that token ended, another process could
+  acquire, and a store that only hides the old token's batches at load
+  (outside the contract, which refuses them at commit) acknowledged a retry
+  that no load shows. Core now sends a batch, the first time or again, only
+  while the realm holds its fence and before the token's self-fence
+  deadline (the start of its last successful acquire or renew plus the
+  self-fence window); a commit still unsettled there stops, typed, and
+  poisons its scopes like any batch whose outcome stays unknown. Affects
+  0.9.5 through 0.9.10.
+
+- `meerkat-session`: a round commit or a closing save whose batch the host
+  store left unsettled at its fence window is no longer waited on and
+  written again, or suspended as if nothing had been written: its outcome is
+  unknown, so the checkpoint answers the teardown class at once, the live
+  session is torn down, and it is reloaded from what the store holds (after
+  a reopen of the realm, what landed). A direct turn whose round commit
+  failed at a store fence gap no longer says that the round was not written:
+  its retryable store error says that the round commit failed.
+
+- `meerkat-runtime`: a stopped host store writer no longer poisons its realm
+  when the store grants an acquire the writer gave up on. Each acquire of a
+  re-acquire runs under `SpiRealmConfig::renew_timeout`; a store that still
+  granted a timed-out one left a token the writer never recorded, and the
+  writer's next re-acquire met it as another holder and poisoned the realm
+  until a reopen. While an acquire of its own timed out since its last
+  grant, the writer now waits out such a holder's recorded lease and
+  acquires again; it poisons the realm only when that holder renewed its
+  lease or the listing shows a batch it did not write. With no timed-out
+  acquire, a holder it does not know poisons the realm at once, as before.
+  Affects 0.9.5 through 0.9.10.
+
+- `meerkat-mob-mcp`: `mob_check_member` no longer tells the model to check
+  again later for a member whose session the store refuses until its realm
+  is reopened. Such a member's status carried `read_failed` on the wire, so
+  its note said a later check may bring the preview back; it now carries
+  `store_refused`, and its note says that no check brings the preview back
+  before that reopen. Affects 0.9.10.
+
+- `meerkat-mob-mcp`: `delegate` from a session on a model the catalog does
+  not list, a realm `[models.<id>]` entry or a self-hosted model, runs its
+  helper. The session's implicit delegation mob named the session's model
+  without its provider, so its definition did not validate and every such
+  call failed with `unknown_model`, on every surface. The mob's `delegate`
+  profile now names the provider, and the self-hosted server, that the
+  session's build resolved for the model, so the helper runs on the
+  session's own route. An implicit mob created before this fix is reused.
+  Affects 0.7.0 through 0.9.10.
+
 ### Security
+
+- `meerkat-sandbox`: on Linux, compiling a confinement requirement opened
+  each granted path by name and followed a symbolic link in any directory
+  on the way. Someone who could write a directory partway down a granted
+  path could exchange that directory with a link while the requirement
+  compiled, and get another file or directory of the host's user pinned and
+  bound in its place: read-only, or writable for a writable grant. This
+  held for every grant kind, file and subtree grants and the platform
+  baseline alike. Every granted path is now opened with no symbolic link in
+  any component, when the requirement compiles, when a final link's
+  replaced target is captured again, and at each launch's setup: openat2
+  with `RESOLVE_NO_SYMLINKS`, or, on a kernel without openat2, a walk that
+  opens each directory without following a link. A grant whose path holds a
+  link at that moment is refused. Affects 0.8.52 through 0.9.10.
 
 - `meerkat-gemini`: the Gemini client marks its credential header values
   sensitive, as the other provider clients do: the values a dynamic
@@ -604,36 +885,22 @@ them.
   and HTTP/2 never indexes them. A value that is not a valid header value
   fails the request as an authentication failure before it is sent.
 
-- `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5
-  with no thinking configured) no longer fails after a mid-session tool
-  change on accounts that enforce thinking-block binding (Anthropic accounts
-  created on or after 2026-08-31). Claude Fable 5.1, Opus 5.5, Sonnet 5.5
-  and Haiku 5.5 check every replayed thinking block against the system
-  prompt, the tools and the earlier messages it was produced under, and
-  such an account answers 400 ("The block is bound to a different
-  conversation") once any of them changed. Meerkat changes the tools
-  mid-session as MCP servers connect, so every later turn of a thinking
-  session failed. Requests to those models now set
-  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` with the
-  `thinking-binding-controls-2026-08-01` beta header, and the API drops the
-  stale blocks instead: beside configured `adaptive` thinking, and, with
-  thinking omitted, beside `{"type": "adaptive"}`, the model's own default,
-  which turns nothing on since each of these models thinks by default. The
-  control is never sent beside `between_tools` or `disabled`, nor for a
-  model whose default is no thinking or an uncatalogued model id. A
-  non-empty `input_transformations` report (the blocks the API dropped or
-  let through) is logged as a warning that names each block and its reason:
-  the model answered without that reasoning, and the prompt cache restarts
-  at the first dropped block.
-
-- `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
-  claims forced tool choice support. Anthropic answers 400 to `tool_choice`
-  `any` or a named tool on Claude Fable 5.1, as on Opus 5.5 and Sonnet 5.5
-  ("Forced tool use not supported" in Anthropic's API errors reference). A
-  forced tool choice on Fable 5.1 is now refused locally with the typed
-  `ToolChoiceUnsupported` refusal (`ModelDoesNotSupportForcedToolChoice`)
-  before any request is sent, instead of being sent and answered with that
-  400, which mapped to the same typed refusal.
+- `meerkat-auth-core`: the credential directories the persisted token
+  stores create are owner-only on Unix: mode 0700, set explicitly whatever
+  the process umask. They are each realm directory of the file token store
+  (the stock CLI's credential store, and the store the `auto` backend
+  keeps a key in when the keyring does not hold it) and the refresh lock
+  directory (`refresh-locks` under the credentials root), which the
+  keyring backend uses too. Both were created with the umask (0755 under
+  the common 022), so another local user could list them: a realm
+  directory names the secret slots of the realm that hold a value, and the
+  lock directory keeps a lock file named after every slot that took a
+  refresh or mutation lock. Only slot names were exposed, never a secret
+  value: the credential files were already 0600, and the lock files are
+  empty. A directory an earlier release created keeps its mode: run
+  `chmod 700` on the realm directories and on `refresh-locks` under the
+  credentials root (`<platform-config>/meerkat/credentials` by default) to
+  tighten them.
 
 ### Upgrade notes
 
@@ -657,6 +924,31 @@ them.
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
 
+- Consent rows and a rollback: a Core that predates
+  `consent.approver.authentication_scope_digest` still opens the approval
+  store and reads every row (it ignores the field, and the decision's actor
+  is still the approver's id, which it checks at load), but the rows it
+  writes lack the field, and `FileApprovalStore` rewrites every row on each
+  write, so its first write drops the login digests recorded until then.
+  Nothing else changes for it.
+
+- Durable decisions and a rollback: a Core that predates the decision login
+  digest (0.9.9 and 0.9.10) reads a decision decided in a login since as
+  torn. It decodes the evidence without the digest, a field it does not
+  know, so the evidence no longer hashes to the digest the decision's state
+  binds: it lists the decision as unreadable, never executes it and leaves
+  the row as stored. Back on this release the decision reads again, and
+  executes before its deadline. A decision decided with no login, and every
+  decision decided before the upgrade, read as before.
+
+- Host store hosts: Core now sends no commit attempt past the self-fence
+  deadline of the token it carries, so while renews fail a
+  `SpiRealmConfig::commit_retry_budget` longer than the self-fence window
+  (20 s at the default timing) is cut there. To tolerate a slower store, set
+  `SpiRealmConfig::renew_timeout` to the renew interval first, then lengthen
+  the timing as the host store SPI reference describes (Core's Timeouts And
+  The Safety Condition).
+
 ### Known limitations
 
 - Peers keep the original requester in process only. A delivery over a
@@ -679,6 +971,13 @@ them.
   Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
+
+- `meerkat-runtime`: a takeover acquire that a host store grants after the
+  writer gave up on it, and after the writer's next successful acquire,
+  supersedes the writer's live token: the writer meets `FencedOut` and the
+  realm is poisoned until it is reopened. A store that gives each acquire a
+  server-side deadline below Core's acquire timeout
+  (`SpiRealmConfig::renew_timeout`) avoids it.
 
 ## [0.9.10] - 2026-11-04
 

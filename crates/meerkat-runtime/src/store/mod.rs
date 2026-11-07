@@ -3009,6 +3009,20 @@ pub enum RuntimeStoreError {
         /// Why the realm was poisoned.
         cause: String,
     },
+    /// A host store write stopped settling its batch when the self-fence
+    /// window of the fence token the batch carries closed: the host store
+    /// sends no batch past that window, since that token's lease at the
+    /// store may have ended by then. The batch may or may not have landed.
+    /// The scopes it touched are poisoned: a later call that needs one of
+    /// them is refused ([`Self::ScopeRefused`]) until the realm is reopened,
+    /// and the reopened realm shows the batch if it landed. The realm keeps
+    /// its fence.
+    #[error("Store write left unsettled when its fence window closed: {cause}")]
+    UnsettledAtFenceWindow {
+        /// The batch's account: its token, the attempts sent and the last
+        /// answer.
+        cause: String,
+    },
 }
 
 impl RuntimeStoreError {

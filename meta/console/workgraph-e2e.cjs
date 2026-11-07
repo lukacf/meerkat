@@ -21,6 +21,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { setTimeout: sleep } = require("node:timers/promises");
 const { chromium } = require("playwright");
@@ -93,12 +94,34 @@ async function gotoConsole(page, url) {
 
 // ── Seed over the real console RPC wire contract ────────────────────────
 
+// The console owns a WorkGraph claim by its signed-in caller, so the seed
+// claims as a person: an HS256 token of the fixture's development issuer
+// (workgraph_console_reference.rs), volunteered to its open console.
+function seedPersonToken() {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const signed = `${encode({ alg: "HS256", typ: "JWT", kid: "kid-current" })}.${encode({
+    sub: "operator@fixture.test",
+    email: "operator@fixture.test",
+    provider: "google_oauth",
+    iss: "https://trusted.meta.localhost",
+    aud: "meerkat-console",
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const signature = crypto.createHmac("sha256", "phase7-trusted-current-secret").update(signed).digest("base64url");
+  return `${signed}.${signature}`;
+}
+
 let rpcSeq = 0;
-async function rpc(baseUrl, method, params) {
+async function rpc(baseUrl, method, params, bearer) {
   rpcSeq += 1;
   const response = await fetch(`${baseUrl}/console/rpc`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+    },
     body: JSON.stringify({ jsonrpc: "2.0", id: `wg-e2e-${rpcSeq}`, method, params }),
   });
   assert.ok(response.ok, `${method}: http ${response.status}`);
@@ -155,8 +178,7 @@ async function seedWorkGraph(baseUrl) {
   const claimed = await rpc(baseUrl, "meta/workgraph/claim", {
     id: children[0].id,
     expected_revision: children[0].revision,
-    owner: { key: { kind: "agent", id: "builder" } },
-  });
+  }, seedPersonToken());
   assert.equal(claimed.item.status, "in_progress");
   const closed = await rpc(baseUrl, "meta/workgraph/close", {
     id: children[1].id,

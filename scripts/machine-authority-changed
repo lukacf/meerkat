@@ -115,6 +115,11 @@ machine_authority_path() {
     crates/xtask/tests/machine_verify_all_tlc_test.sh|crates/xtask/tests/machines_contracts.rs|crates/xtask/tests/protocol_codegen_drift.rs|crates/xtask/tests/runtime_authority_bypass.rs)
       return 0
       ;;
+    # The one TLC install every TLC lane runs (the JDK and the mirrored TLC
+    # jar): a jar or JDK change reruns the audit shards.
+    .github/actions/setup-tlc-ci/*)
+      return 0
+      ;;
   esac
   return 1
 }

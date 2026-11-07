@@ -2179,10 +2179,17 @@ no method loads, registers or wakes the session or the member.
   that id, its window starting then, while the realm still lists the
   approver id for the operator; a request rejected, withdrawn or left
   undecided past its deadline issues nothing, and neither does an approval
-  of an identity's request executed after the identity ended (its member
-  retired, its entry ended, or its mob was reset or replaced), refused with
-  the reason `subject_ended`, or while the server cannot tell what the
-  identity is (`subject_unknown`, fail closed). A `current_run` request names
+  of an identity's request executed while no member holds the identity's
+  name (its member retired, its entry ended, or its mob was reset) or after
+  its mob was replaced, refused with the reason `subject_ended`, or while
+  the server cannot tell what the identity is (`subject_unknown`, fail
+  closed). A request names the identity by its name and mob incarnation
+  only: an approval executed after a new member took the name in the same
+  incarnation issues the grant to that member, so reject or withdraw an
+  identity's open requests before its name is taken again. An identity end
+  that lands while the approval is being executed, after the server read
+  the identity and before the grant's commit, can leave the grant live on
+  the ended identity: revoke it. A `current_run` request names
   the run its subject is running when it is asked, and is refused when the
   subject runs another run by its approval. When the request ends, its
   session receives a `tool_grant_request` external event, like any input:
@@ -2198,7 +2205,9 @@ no method loads, registers or wakes the session or the member.
   session's agent asks the same way through its `request_tool_grant` tool
   (see [scoped tool grants](/concepts/tools#scoped-tool-grants)); while the
   server runs the executor of the kind, its agents' requests name the
-  realm's agent `rkat-agent` as their requester.
+  realm's agent `rkat-agent` as their requester, and an agent's call for a
+  target its subject already has an open or approved window request for
+  answers that request instead of holding another.
 
 List and audit read the subject's grant rows without checking that the
 session or the member exists: an archived session's grants and a retired
@@ -2225,8 +2234,9 @@ issuer, audit event kind, expiry driver, refusal reason) decodes a value a
 later version adds as `unknown`, which this server never sends: a client
 older than run scopes reads `run_ended` as `unknown`.
 
-Every refusal of a request answers invalid params with typed data, the
-request refusal under `tool_grant_request_refusal`:
+Every refusal of a request's subject, target, scope, window or duration, grant
+id, decision reference or page limit answers invalid params with typed data,
+the request refusal under `tool_grant_request_refusal`:
 
 ```json
 {"kind": "tool_grant_request_refused", "tool_grant_request_refusal": {"kind": "subject_unknown"}}
@@ -2239,9 +2249,12 @@ past, empty, longer than the maximum, or given twice or not at all),
 `empty_target`, `not_found` (an unknown or malformed grant id, with
 `grant_id`), `invalid_decision_ref`, `invalid_page_limit` (an audit `limit`
 of 0) or `run_not_active` (a `current_run` grant or request whose subject
-runs no turn). `server_not_installed`, `no_live_grant` and `invalid_wait` are
+runs no turn). A request's `duration_ms` is refused as a grant's window is
+(`invalid_window`). `server_not_installed`, `no_live_grant` and `invalid_wait` are
 reserved for hosts that keep an installation list or attach a granted MCP
-server live; `rkat-rpc` never sends them. Other
+server live; `rkat-rpc` never sends them. A request too large for a decision
+to hold (its `reason` past the 256 KiB bound of a decision's rendering or
+body) answers plain invalid params, with no data. Other
 errors use the standard codes: `SESSION_BUSY` when concurrent writers changed
 the grant under a grant or revoke twice, which a retry resolves; capability
 unavailable for an `identity` subject on a server that runs no mobs, a store

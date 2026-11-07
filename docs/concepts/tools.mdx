@@ -294,7 +294,9 @@ confinement all still apply to every call it opens.
   `request_tool_grant`, itself ungated, through which the agent asks for one
   of its gated names or families: it names the target, `duration_ms` and a
   `reason`, never the session or the approver, and the call returns at once
-  with the pending request (a replayed call answers the same request). The
+  with the pending request (a replayed call answers the same request, and a
+  call for a target the session's subject already has an open or approved
+  window request for answers that request). The
   session's host holds it with what it takes requests with
   (`MeerkatMachine::set_tool_grant_request_host`: the decision owner, the
   approver policy and the requester its agents are named by; `rkat-rpc`
@@ -325,9 +327,13 @@ confinement all still apply to every call it opens.
 - **Lifecycle.** The canonical `ToolGrantLifecycleMachine` owns each grant:
   issued, then expired at its fixed deadline, revoked before it, or, for a
   run-scoped grant, ended with its run before it. The run's end ends the grant
-  when the run completes, fails or is cancelled, when durable-tail recovery
-  closes a run a stopped process left open, and otherwise at the first use of
-  a later run of the session. Ended grants stay ended across restarts and
+  when the run completes, fails or is cancelled (a run a hard interrupt
+  dropped included), when durable-tail recovery closes a run a stopped
+  process left open, and otherwise at the first use of a later run of the
+  session. Recovery ends the session's run-scoped grants of the run it
+  closes; a member identity's run-scoped grants of a recovered member run
+  end at the member's next run's first use, or at their deadline. Ended
+  grants stay ended across restarts and
   host clock rollbacks. The
   runtime's deadline timer expires a served session's grants on time, and a
   list or audit read settles the due grants of any session without loading

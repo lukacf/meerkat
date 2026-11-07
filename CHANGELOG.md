@@ -397,7 +397,8 @@ them.
   and the `decision/notice` entry of the RPC notification catalog.
 
 - `meerkat-core`, `meerkat-runtime`, `meerkat-machine-schema`,
-  `meerkat-machine-kernels`: run-scoped tool grants. A scoped tool grant can
+  `meerkat-machine-kernels`, `meerkat-session`, `meerkat`: run-scoped tool
+  grants. A scoped tool grant can
   also be scoped to one run of its session (`ToolGrantRequest::run_scope`):
   it opens its names only at the model-request boundaries of that run and
   admits only that run's calls. A call outside any run is refused
@@ -405,8 +406,15 @@ them.
   or call of a later run ends it. The grant ends with its run when the run
   completes, fails or is cancelled (the session tells its grant seam,
   `SessionToolGrants::end_run`, which `ToolGrantService::end_run` serves),
-  and when durable-tail recovery closes a run a stopped process left open;
-  at or after its deadline the run's end records the expiry instead. The
+  a run a hard interrupt dropped included (the session task ends its grants
+  right after the cancel: `Agent::end_dropped_run_tool_grants`, and the
+  provided `SessionAgent::end_dropped_run_tool_grants` that the facade's
+  agent forwards), and when durable-tail recovery closes a run a stopped
+  process left open. Recovery ends the session's run-scoped grants of that
+  run; a mob member identity's run-scoped grants of a recovered member run
+  end at the member's next run's first boundary or call, or at their
+  deadline. At or after its deadline the run's end records the expiry
+  instead. The
   status `run_ended` and a `run_ended` audit row (with the run and the driver
   that ended it) record the end, which stays across restarts and clock
   rollbacks. The `ToolGrantLifecycleMachine` owns the run scope (`EndRun`,
@@ -449,9 +457,10 @@ them.
   execution meets the grant it issued (`ToolGrantService::issued_for`) and
   settles executed. It refuses a decision no person decided
   (`not_a_human_decision`), a request whose subject ended (`subject_ended`:
-  a member identity whose mob is gone or was replaced, or whose member left
-  the roster, so a later member of the name never holds a grant asked for
-  an earlier one) or that the host cannot confirm now (`subject_unknown`),
+  a member identity whose mob is gone or was replaced, or whose name no
+  member holds when the approval is executed; see Known limitations for a
+  name a new member took) or that the host cannot confirm now
+  (`subject_unknown`),
   a run-scoped request whose run is over
   (`run_ended`) and a body this version cannot read (`unreadable_request`),
   and hands each ended request's notice (`ToolGrantRequestNotice`) to the
@@ -478,7 +487,10 @@ them.
   `ToolGrantAgentRequest`, `ToolGrantRequestReceipt`;
   `ToolGrantGate::requested_target` and `ToolGrantGate::request_grant`),
   keyed by the call's run and id, so a replayed call answers the request it
-  held. A runtime takes its agents' requests through `ToolGrantRequestHost`
+  held. A call for a target its subject already has an open or approved
+  window request for answers that request instead of holding another, so an
+  agent that asks again and again leaves one request per target with its
+  approver. A runtime takes its agents' requests through `ToolGrantRequestHost`
   (`MeerkatMachine::set_tool_grant_request_host`,
   `ToolGrantService::set_request_host` and `request_host`): the decision
   owner, the request policy and the requester its agents are named by.
@@ -493,7 +505,9 @@ them.
   `RequestToolGrantResult`): a host asks for a grant of a session's or a mob
   member identity's gated tool name or family that a person approves;
   `rkat-rpc` is the requester
-  and `operator` the approver id. `rkat-rpc` runs the executor of
+  and `operator` the approver id. Its subject, target, scope and duration
+  are refused as a grant's are, with the typed request refusal (a zero or
+  too long `duration_ms` is `invalid_window`). `rkat-rpc` runs the executor of
   `tool_grant.issue` decisions (`SessionRuntime::start_tool_grant_request_executor`,
   started with the router and stopped with the runtime): a decide or
   withdraw on the server asks it for a pass at once, and it passes every 30
@@ -710,6 +724,16 @@ them.
   `tool_grants/grant` that names a `scope` (invalid params), so a request is
   never read as a window grant.
 
+- Downgrade: a 0.9.10 binary reads the grant an approved request issued
+  (its id is a version 5 UUID) as a row it cannot read, a window grant
+  included, as it reads a run-scoped grant: it opens nothing there, lists
+  it under `unreadable`, and cannot revoke it (`tool_grants/revoke` answers
+  not found). Revoke such grants, or let them expire, before a rollback:
+  one still within its window comes back live on the next upgrade. 0.9.10
+  executes no `tool_grant.issue` decision (it has no executor of the kind):
+  open and approved requests, and the notices of ended ones, wait for the
+  next upgrade, where a request past its deadline by then expires.
+
 - An identity adopted before this release reads as declared with its role's
   named profile: its desired material records no profile source. One that
   was declared with an exact profile of its own (`profile_override`) then
@@ -752,6 +776,20 @@ them.
   receiver whose composition installs another ingress domain, such as a
   peer under another composition or realm in the same process, refuses the
   work at admission.
+
+- A grant request names a mob member identity by its name and mob
+  incarnation only. When the requested identity ends (its member retires,
+  its identity entry ends, or its mob is reset) and a new member takes the
+  name in the same mob incarnation before a person's approval is executed,
+  the approval issues the grant to the new member, and the request's notice
+  reaches it. Reject or withdraw an identity's open requests before its
+  name is taken again, or revoke such a grant (`tool_grants/revoke`).
+
+- A member identity's end that lands while an approval of one of its grant
+  requests is being executed, after the executor read the identity and
+  before it committed the grant, leaves that grant live: the end found no
+  grant to end. A later member of the name in the same mob incarnation then
+  holds it. Revoke such a grant (`tool_grants/revoke`).
 
 ## [0.9.10] - 2026-11-04
 

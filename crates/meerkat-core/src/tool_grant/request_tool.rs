@@ -6,14 +6,15 @@
 //! policy). The tool holds nothing itself. The session's grant seam asks its
 //! host to hold a durable decision ([`super::SessionToolGrants::request_grant`]),
 //! keyed by the call's run and id so a replayed call answers the request it
-//! held, and the call returns at once with the pending request. Nothing opens
-//! until a person approves it and the host issues the grant; the session is
-//! told when the request is decided.
+//! held (a host may answer a call with the subject's pending request for the
+//! same target), and the call returns at once with the pending request.
+//! Nothing opens until a person approves it and the host issues the grant;
+//! the session is told when the request is decided.
 //!
-//! The factory mounts it beside a gated build's tools when the session's host
-//! takes requests ([`super::ToolGrantGate::takes_requests`]). The tool itself
-//! is not gated: every other constraint (the static tool policy, governed
-//! authority, review) applies to it as to any tool.
+//! Every grant-gated build mounts it beside its tools (the factory does): a
+//! host that takes no requests answers the call with a tool error. The tool
+//! itself is not gated: every other constraint (the static tool policy,
+//! governed authority, review) applies to it as to any tool.
 
 use std::sync::Arc;
 use std::time::Duration;

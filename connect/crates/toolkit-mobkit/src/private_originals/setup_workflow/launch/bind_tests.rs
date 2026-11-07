@@ -268,3 +268,106 @@ async fn actual_bind_refusal_withdraws_pending_source_and_replays_failed_launch(
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+
+// A workflow launch whose bind meets the custody recovery's control held by
+// another actor (as a recovery round, a stop or an acceptance holds it) for a
+// short while, released within Core's owner-change bound, waits for it as the
+// shipped launch did and starts once: never NotAdmitted, never a Failed
+// launch effect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launch_whose_recovery_control_is_held_briefly_starts_once() {
+    let f = FirstFixture::for_continuation().await;
+    let result = AssertUnwindSafe(tokio::time::timeout(GUARD, async {
+        let c = prepare(&f).await;
+        assert_eq!(
+            f.inputs().await.unwrap(),
+            2,
+            "A and independent P are admitted"
+        );
+        let EffectClaimOutcome::Claimed(claimed) = f
+            .store
+            .claim_effect(
+                &c.snapshot.reference().launch_effect(),
+                c.snapshot.revision(),
+                "held-control-launch",
+                60_000,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("first launch effect claimed")
+        };
+        let prepared = Arc::new(PreparedWorkflowLaunch {
+            selection: c.planning.clone(),
+            reference: c.snapshot.reference().clone(),
+        });
+        let route = f
+            .source
+            .route(&c.planning.submission.original.route)
+            .unwrap();
+        // The launch bind meets the recovery control held for 300 ms just
+        // before its recovery enrollment.
+        {
+            let source = f.source.clone();
+            let enrollments = AtomicUsize::new(0);
+            crate::source_hold_probe::install(Arc::new(move |site, _key| match site {
+                crate::source_hold_probe::Site::OriginalEnroll
+                    if enrollments.fetch_add(1, Ordering::SeqCst) == 0 =>
+                {
+                    crate::source_hold_probe::retain(
+                        source
+                            .custody_recovery
+                            .hold_control_for_test(Duration::from_millis(300)),
+                    );
+                    None
+                }
+                _ => None,
+            }));
+        }
+        let binder = prepared.binder(&f.source, &route).await.unwrap();
+        let observed = prepared
+            .submit_with_binder(&f.source, binder, None)
+            .await
+            .unwrap();
+        tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &observed,
+                WorkflowLaunchObservation::Native {
+                    observation: PrivateOriginalSubmission::Admitted {
+                        deduplicated: false,
+                        ..
+                    }
+                }
+            ),
+            "the launch waited for the briefly held control and started once: {}",
+            serde_json::to_string(&observed).unwrap()
+        );
+        c.planning
+            .record_launch_observation(&f.source, claimed.lease.as_ref().unwrap(), &observed)
+            .await
+            .unwrap();
+        let effect = f.store.get_effect(&claimed.key).await.unwrap().unwrap();
+        assert_eq!(
+            effect.status,
+            EffectStatus::Succeeded,
+            "the launch effect is not Failed"
+        );
+        assert_eq!(effect.attempt, 1);
+        assert_eq!(
+            f.inputs().await.unwrap(),
+            3,
+            "the launch input was admitted once"
+        );
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = f.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    match result {
+        Ok(result) => result.expect("bounded held-control launch"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}

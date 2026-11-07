@@ -625,6 +625,32 @@ impl CustodyRecovery {
         self.control.wake.notify_one();
     }
 
+    /// Test seam: this source's recovery control held for `hold` on a thread
+    /// of its own, as a recovery round or another enrollment holds it.
+    /// Returns once it is held; the returned thread releases it.
+    #[cfg(test)]
+    pub(crate) fn hold_control_for_test(
+        &self,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let control = self.control.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let state = control
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            drop(state);
+        });
+        assert!(
+            holding.recv().is_ok(),
+            "the control's recovery control hold began"
+        );
+        thread
+    }
+
     pub(super) fn announce(&self) {
         // None is an actual absence of a delivery composition. Recovery can
         // still settle its owned work, but this path then emits no wake and

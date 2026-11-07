@@ -306,15 +306,20 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
                     }
                 ))
     );
-    assert!(
-        audit
-            .iter()
-            .all(|row| !operations.contains(&row.observation.operation_id)
-                || !matches!(
+    let refused = audit
+        .iter()
+        .filter(|row| {
+            operations.contains(&row.observation.operation_id)
+                && matches!(
                     row.observation.observation,
                     AuditObservation::Refused { .. }
                         | AuditObservation::AuthorizationUnavailable { .. }
-                ))
+                )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        refused.is_empty(),
+        "the tool's operation was refused or unavailable before it succeeded: {refused:?}"
     );
 }
 
@@ -1400,6 +1405,84 @@ async fn a_first_peer_delivery_held_at_the_admitted_check_waits_there_with_or_wi
     close_held(fixture).await;
     match checked {
         Ok(result) => result.expect("the first peer delivery control did not settle"),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+// A peer delivery whose bind meets the source's custody recovery control,
+// held by another actor for 300 ms (within Core's owner-change bound) just
+// before its recovery enrollment. The peer ingress binder waits for it inside
+// the bind, as shipped: the one offer is bound, never declined or refused;
+// the delivery is accepted, admitted once and its turn completes; the source
+// row retains the offered identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_delivery_meeting_a_briefly_held_recovery_control_is_admitted_once() {
+    let fixture = Box::pin(start()).await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT * 8, Box::pin(async {
+        let receiver = add(&fixture, ADDED).await;
+        let sender = add(&fixture, SENDER).await;
+        ready(&fixture, &receiver).await;
+        ready(&fixture, &sender).await;
+        wire_pair(&fixture).await;
+        let recipient = peer(&fixture, ADDED).await;
+        *fixture.factory.next_call.lock().unwrap() = Some("memory");
+        *fixture.factory.next_args.lock().unwrap() = serde_json::json!({"action":"remember",
+            "title":"Held recovery control", "body":"The delivery is admitted once"});
+        // The delivery's bind, just before its recovery enrollment: another
+        // actor holds the source's custody recovery control for 300 ms.
+        {
+            let source = fixture.source.clone();
+            let enrollments = AtomicUsize::new(0);
+            crate::source_hold_probe::install(Arc::new(move |site, _key| {
+                if site == crate::source_hold_probe::Site::OriginalEnroll
+                    && enrollments.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    crate::source_hold_probe::retain(
+                        source
+                            .custody_recovery
+                            .hold_control_for_test(std::time::Duration::from_millis(300)),
+                    );
+                }
+                None
+            }));
+        }
+        let sent = send(&fixture, &sender, &recipient).await;
+        let offers = fixture.peer_observer.offers.lock().unwrap().iter()
+            .filter(|(session, _, _)| session == &receiver)
+            .map(|(_, input, declined)| (input.clone(), *declined))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(&sent, Ok(meerkat_core::SendReceipt::PeerMessageSent { delivery:
+                meerkat_core::comms::PeerDeliveryOutcome::DurablyResolved { outcome:
+                    meerkat_core::interaction::PeerIngressTerminalOutcomeKind::Accepted }, .. })),
+            "the bind waited for the briefly held control and the delivery was accepted: {sent:?}"
+        );
+        assert_eq!(offers.len(), 1, "one offer, never offered again");
+        assert!(!offers[0].1, "the offer was never declined");
+        let admitted = completed(&fixture, &receiver, 1).await;
+        tool_succeeded(&admitted, "memory");
+        let (_, after, _) = source_row(&fixture, &admitted).await;
+        after.peer_ingress.as_ref().unwrap().check_input(&offers[0].0, false).unwrap();
+        assert_eq!(
+            &admitted.state.input_id,
+            offers[0].0.id(),
+            "the offered identity is retained"
+        );
+        let exact = cold_service_admission::decode_source_input(&after,
+            after.bound_service_input.as_ref().unwrap()).unwrap();
+        meerkat_runtime::input_state::verify_exact_replay(&admitted.state, &exact).unwrap();
+        assert_eq!(
+            native_input_states(&fixture, &receiver).await.len(),
+            1,
+            "exactly one native admission"
+        );
+    }))).catch_unwind().await;
+    tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+        .await
+        .unwrap();
+    fixture.close().await;
+    match checked {
+        Ok(result) => result.expect("the peer held-control control did not settle"),
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }

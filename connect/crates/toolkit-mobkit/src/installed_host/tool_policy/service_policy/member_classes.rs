@@ -2141,6 +2141,8 @@ impl ServicePolicyOwner {
 }
 
 mod callbacks;
+#[cfg(test)]
+pub(crate) use callbacks::issue_callback_leaf;
 mod standing;
 #[cfg(test)]
 mod tests;

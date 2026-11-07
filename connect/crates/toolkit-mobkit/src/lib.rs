@@ -951,6 +951,9 @@ pub mod source_hold_probe {
         /// the binder (`prepare` or `submit`). A control's hold answer here
         /// is ignored.
         HelperNotNow,
+        /// An Original submission's binder, inside Core's governed bind, just
+        /// before its recovery enrollment; not keyed.
+        OriginalEnroll,
         /// The shared original binder's recovery enrollment, its candidate
         /// just staged and its settlement not yet enrolled; not keyed. A
         /// control's hold answer here is ignored: its probe acts on a thread

@@ -1177,6 +1177,12 @@ impl OriginalBinder {
                 .check()
                 .map_err(|_| "The approved Console login is unavailable")?;
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) =
+            crate::source_hold_probe::observe(crate::source_hold_probe::Site::OriginalEnroll, "")
+        {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
         let (input, pending) = self
             .source
             .custody_recovery

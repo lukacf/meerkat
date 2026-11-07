@@ -1638,3 +1638,295 @@ async fn a_class_input_first_send_marks_its_callback_grant_and_keeps_its_shipped
         _ => panic!("class input first send timed out"),
     }
 }
+
+/// Save `submission`'s class input selection through the production
+/// selection (`class_input_basis`), outside any bind: the class route's
+/// callback grants and the selected targets, as a bind dropped right after
+/// that write leaves them.
+async fn save_class_input(
+    fixture: &Fixture,
+    session: &meerkat_core::SessionId,
+    submission: &PrivateOriginalSubmit,
+) {
+    let key = fixture.source.key(&submission.original).unwrap();
+    let stored = fixture.source.store.get(&key).await.unwrap().unwrap();
+    let record = fixture
+        .source
+        .decode_record(&stored, &submission.original)
+        .unwrap();
+    let basis = fixture
+        .source
+        .class_input_basis(&record, &submission.original, session)
+        .await
+        .unwrap();
+    assert!(basis.is_some(), "the class input selection is saved");
+}
+
+/// Native operation root grants: after a dropped bind left
+/// the class input selection saved and the native operation roots and
+/// children unissued, the roots' issuance is the attempt's first write, on
+/// the real send path. Marked, the send is admitted; with the roots' mark
+/// dropped, the write witness names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_root_issued_first_after_its_class_selection_was_saved_is_marked() {
+    let fixture = Box::pin(start()).await;
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 6,
+        Box::pin(async {
+            let session = add(&fixture, ADDED).await;
+            add(&fixture, "project-aborted").await;
+            ready(&fixture, &session).await;
+            let submission = original(&fixture, "stage-a-saved-class").await;
+            fixture
+                .source
+                .prepare_original_native_operations(
+                    submission.clone(),
+                    selection(&fixture, "stage-a-saved-class").await,
+                )
+                .await
+                .unwrap();
+            save_class_input(&fixture, &session, &submission).await;
+            run(
+                &fixture,
+                &session,
+                submission,
+                "peers",
+                serde_json::json!({}),
+                Some(true),
+            )
+            .await;
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match result {
+        Ok(Ok(())) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+        _ => panic!("the native root leg timed out"),
+    }
+}
+
+/// Native operation child grants: after a
+/// dropped bind left the parent (the native operation root, shared by its
+/// issuance id) issued, the class input selection saved and this original's
+/// child unissued, the child's issuance is the attempt's first write, on the
+/// real send path. The second original reuses the first one's exact
+/// request, so its bind finds the callback grants, its saved selection and
+/// the roots, and issues only its own children: marked, it is admitted;
+/// with the child's mark dropped, the write witness names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_native_child_issued_first_under_a_shared_root_is_marked() {
+    let fixture = Box::pin(start()).await;
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 8,
+        Box::pin(async {
+            let session = add(&fixture, ADDED).await;
+            add(&fixture, "project-aborted").await;
+            ready(&fixture, &session).await;
+            let request = selection(&fixture, "stage-a-shared-issuance").await;
+            let first = original(&fixture, "stage-a-shared-first").await;
+            fixture
+                .source
+                .prepare_original_native_operations(first.clone(), request.clone())
+                .await
+                .unwrap();
+            run(
+                &fixture,
+                &session,
+                first,
+                "peers",
+                serde_json::json!({}),
+                Some(true),
+            )
+            .await;
+            let second = original(&fixture, "stage-a-shared-second").await;
+            fixture
+                .source
+                .prepare_original_native_operations(second.clone(), request)
+                .await
+                .unwrap();
+            save_class_input(&fixture, &session, &second).await;
+            run(
+                &fixture,
+                &session,
+                second,
+                "peers",
+                serde_json::json!({}),
+                Some(true),
+            )
+            .await;
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match result {
+        Ok(Ok(())) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+        _ => panic!("the shared-root native child leg timed out"),
+    }
+}
+
+/// The callback leaf grant: after a dropped bind
+/// left the parent (a class callback root) issued and the leaf unissued, the
+/// leaf's issuance is the attempt's first write. The production leaf issuer
+/// runs on its issuing branch inside a governed bind attempt, under a root
+/// the same native grant authority issued: with the leaf's mark the write
+/// witness stays quiet and the attempt is marked; with the mark dropped it
+/// names the grant write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_callback_leaf_issued_first_in_a_bind_attempt_is_marked() {
+    use meerkat_core::protected_section::{self, ProtectedSection};
+    let fixture = Box::pin(start()).await;
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 4,
+        Box::pin(async {
+            let session = add(&fixture, ADDED).await;
+            add(&fixture, "project-aborted").await;
+            ready(&fixture, &session).await;
+            let context = fixture.source.callback_grant_context().unwrap();
+            let bounds =
+                meerkat_authorization_contracts::constraints::ExecutionRestrictions::unrestricted();
+            let root = context
+                .grants
+                .issue_root(
+                    &context.operator,
+                    EvidenceId::new("stage-a-callback-root").unwrap(),
+                    context.application.clone(),
+                    None,
+                    bounds.clone(),
+                )
+                .unwrap();
+            let executor = fixture
+                .source
+                .route(&fixture.route(ADDED).id)
+                .unwrap()
+                .logical_executor
+                .clone();
+            let (leaf, effect) =
+                protected_section::within_marked(ProtectedSection::GovernedBind, async {
+                    crate::installed_host::tool_policy::service_policy::issue_callback_leaf(
+                        &context.grants,
+                        &context.application,
+                        &root,
+                        EvidenceId::new("stage-a-callback-leaf").unwrap(),
+                        executor,
+                        bounds,
+                    )
+                })
+                .await;
+            assert!(
+                leaf.is_ok(),
+                "the leaf is issued under the issued root: {leaf:?}"
+            );
+            assert_eq!(
+                effect,
+                Some("original.callback_grant"),
+                "the leaf marks the attempt"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match result {
+        Ok(Ok(())) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+        _ => panic!("the callback leaf leg timed out"),
+    }
+}
+
+/// Setup target grants: after a dropped bind left
+/// the parent (the targets' selected parent) issued and the targets
+/// unissued, the targets' issuance is the attempt's first write. The
+/// production issuer (`issue_targets`) runs on its issuing branch for a
+/// governed bind attempt, on a blocking writer that enters the attempt and
+/// is handed its handle, as the configured setup and setup request writers
+/// run it, its parent issued by the same native grant authority: with the
+/// targets' mark the write witness stays quiet and the attempt is marked;
+/// with the mark dropped it names the grant write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn setup_targets_issued_first_in_a_bind_attempt_are_marked() {
+    use meerkat_authorization_contracts::constraints::{DelegationDepth, ExecutionRestrictions};
+    use meerkat_core::protected_section::{self, ProtectedSection};
+    let fixture = Box::pin(start()).await;
+    let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT * 4,
+        Box::pin(async {
+            let session = add(&fixture, ADDED).await;
+            add(&fixture, "project-aborted").await;
+            ready(&fixture, &session).await;
+            let context = fixture.source.callback_grant_context().unwrap();
+            let bounds = ExecutionRestrictions {
+                delegation_depth: DelegationDepth::remaining(1),
+                ..ExecutionRestrictions::unrestricted()
+            };
+            let parent = context
+                .grants
+                .issue_root(
+                    &context.operator,
+                    EvidenceId::new("stage-a-target-parent").unwrap(),
+                    context.application.clone(),
+                    None,
+                    bounds.clone(),
+                )
+                .unwrap();
+            let reference = original(&fixture, "stage-a-targets").await.original;
+            let origin = fixture.source.setup_origin_for(&reference).unwrap();
+            let executor = fixture
+                .source
+                .route(&reference.route)
+                .unwrap()
+                .logical_executor
+                .clone();
+            let selected = [
+                meerkat_toolkit::host_lifetime::policy::CompiledAgentSetupTarget {
+                    target: None,
+                    parent,
+                    restrictions: bounds,
+                },
+            ];
+            let owner = fixture.source.owner.clone();
+            let application = context.application.clone();
+            let find = EvidenceId::new("stage-a-find").unwrap();
+            let (issued, effect) =
+                protected_section::within_marked(ProtectedSection::GovernedBind, async move {
+                    let attempt = protected_section::effect_mark();
+                    tokio::task::spawn_blocking(move || {
+                        let _entered = attempt.as_ref().map(protected_section::EffectMark::enter);
+                        crate::private_originals::setup_targets::issue_targets(
+                            &owner,
+                            &application,
+                            &executor,
+                            None,
+                            &origin,
+                            &find,
+                            &selected,
+                            attempt.as_ref(),
+                        )
+                    })
+                    .await
+                    .unwrap()
+                })
+                .await;
+            assert!(
+                issued.is_ok(),
+                "the targets are issued under their parent: {issued:?}"
+            );
+            assert_eq!(
+                effect,
+                Some("original.setup_target_grant"),
+                "the targets mark the attempt"
+            );
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    fixture.close().await;
+    match result {
+        Ok(Ok(())) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+        _ => panic!("the setup targets leg timed out"),
+    }
+}

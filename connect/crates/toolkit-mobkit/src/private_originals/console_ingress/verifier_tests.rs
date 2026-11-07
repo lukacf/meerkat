@@ -21,6 +21,7 @@ enum Case {
     MismatchedScope,
     TamperedSignature,
     WrongIssuer,
+    HeldRecoveryControl,
 }
 
 struct RouteObservation {
@@ -355,6 +356,26 @@ async fn controlled_console(case: Case) {
                     .await
             }),
         ));
+        if matches!(case, Case::HeldRecoveryControl) {
+            // The first send's bind meets the source's custody recovery control
+            // held by another actor (as a recovery round, a stop or an
+            // acceptance holds it) just before its recovery enrollment.
+            let source = fixture.source.clone();
+            let enrollments = AtomicUsize::new(0);
+            crate::source_hold_probe::install(Arc::new(move |site, _key| match site {
+                crate::source_hold_probe::Site::OriginalEnroll
+                    if enrollments.fetch_add(1, Ordering::SeqCst) == 0 =>
+                {
+                    crate::source_hold_probe::retain(
+                        source
+                            .custody_recovery
+                            .hold_control_for_test(std::time::Duration::from_millis(300)),
+                    );
+                    None
+                }
+                _ => None,
+            }));
+        }
         if matches!(case, Case::Retired) {
             let retired = tokio::time::timeout(WAIT, logins.fixture_retire(1).unwrap())
                 .await
@@ -364,7 +385,7 @@ async fn controlled_console(case: Case) {
         }
         // Subscribe before the HTTP send so positive completion is an actual
         // native event, not a race on the provider's first request counter.
-        let mut completion = if matches!(case, Case::Valid) {
+        let mut completion = if matches!(case, Case::Valid | Case::HeldRecoveryControl) {
             Some(
                 fixture
                     .service
@@ -403,7 +424,7 @@ async fn controlled_console(case: Case) {
             reply
         } else {
             let reply = post(address, &bearer, &member).await;
-            if matches!(case, Case::Valid) {
+            if matches!(case, Case::Valid | Case::HeldRecoveryControl) {
                 require_queued_reply(&reply, &observation);
             }
             reply
@@ -420,14 +441,70 @@ async fn controlled_console(case: Case) {
                 assert_eq!(send.origin, "console");
             }
         }
-        if matches!(case, Case::Valid | Case::RetiredAfterSelection) {
+        if matches!(
+            case,
+            Case::Valid | Case::RetiredAfterSelection | Case::HeldRecoveryControl
+        ) {
             let permit = tokio::time::timeout(WAIT, observation.finished.acquire())
                 .await
                 .unwrap()
                 .unwrap();
             permit.forget();
         }
-        if matches!(case, Case::Valid) {
+        if matches!(case, Case::HeldRecoveryControl) {
+            // The send waited for the briefly held control, as the shipped
+            // Console send did, and was delivered once.
+            assert!(
+                (200..300).contains(&reply.0),
+                "the send is accepted as queued"
+            );
+            assert!(
+                observation.failure.lock().unwrap().is_none(),
+                "the bind waited for the briefly held control, never refused it: {:?}",
+                observation.failure.lock().unwrap()
+            );
+            assert!(observation.bound.lock().unwrap().is_some());
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    let event = completion
+                        .as_mut()
+                        .expect("the held-control Console subscription")
+                        .next()
+                        .await
+                        .expect("native Console completion stream");
+                    match event.payload {
+                        meerkat_core::AgentEvent::RunCompleted {
+                            session_id, result, ..
+                        } => {
+                            assert_eq!(session_id, fixture.session);
+                            assert_eq!(result, "The original request completed");
+                            break;
+                        }
+                        meerkat_core::AgentEvent::StreamTruncated { .. } => {
+                            panic!("native Console completion observation truncated");
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("the delivered send's turn completes");
+            assert_eq!(
+                fixture.inputs().await,
+                Ok(1),
+                "the send was delivered exactly once"
+            );
+            // Its login reservation settled: the retirement reports no
+            // uncertainty.
+            let retired = tokio::time::timeout(WAIT, logins.fixture_retire(1).unwrap())
+                .await
+                .expect("bounded Console login retirement")
+                .unwrap();
+            assert!(retired.fenced && retired.reservations_drained && !retired.uncertain);
+            tokio::task::spawn_blocking(crate::source_hold_probe::clear)
+                .await
+                .unwrap();
+        } else if matches!(case, Case::Valid) {
             assert!(
                 (200..300).contains(&reply.0),
                 "normal Console send must succeed"
@@ -749,4 +826,13 @@ async fn tampered_signature_never_selects_installed_console_ingress() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_issuer_never_selects_installed_console_ingress() {
     controlled_console(Case::WrongIssuer).await;
+}
+
+// A Console send whose bind meets the custody recovery's control held by
+// another actor for a short while, released within Core's owner-change bound,
+// waits for it as the shipped Console send did and is delivered once, its
+// login reservation settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_send_meeting_a_briefly_held_recovery_control_is_delivered_once() {
+    controlled_console(Case::HeldRecoveryControl).await;
 }

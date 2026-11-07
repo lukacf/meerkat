@@ -612,9 +612,10 @@ impl ApprovalGrants {
         outcomes
     }
 
-    /// Run Core's sweep now ([`Self::sweep`]), as the loop's pass does, and
-    /// answer how many decisions it cleaned up. A host may call it, for
-    /// example at start; the loop needs no host to call it.
+    /// Run Core's sweep now, the one the loop's pass runs through
+    /// [`DecisionExecutor::sweep`], and answer how many decisions it cleaned
+    /// up. A host may call it, for example at start; the loop needs no host
+    /// to call it.
     pub async fn sweep_branches(&self) -> usize {
         self.sweep()
             .await

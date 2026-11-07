@@ -141,6 +141,15 @@ impl DecisionStore for CountingStore {
         false
     }
 
+    fn claim_executor_kind(
+        &self,
+        kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        self.record("claim_executor_kind");
+        self.inner.claim_executor_kind(kind)
+    }
+
+    #[allow(deprecated)]
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
         self.record("claim_executor");
         self.inner.claim_executor()
@@ -238,8 +247,27 @@ fn hold_of(
     rendering: &DecisionRendering,
     deadline_at_ms: u64,
 ) -> DecisionHoldRequest {
+    hold_of_kind(
+        "release",
+        subject,
+        requester,
+        reviewer,
+        rendering,
+        deadline_at_ms,
+    )
+}
+
+/// The hold of `subject` of `kind` by `requester`, until `deadline_at_ms`.
+fn hold_of_kind(
+    kind: &str,
+    subject: &str,
+    requester: DecisionPrincipalKey,
+    reviewer: Option<DecisionPrincipalKey>,
+    rendering: &DecisionRendering,
+    deadline_at_ms: u64,
+) -> DecisionHoldRequest {
     let request = DecisionHoldRequest::new(
-        DecisionKind::new("release").expect("kind"),
+        DecisionKind::new(kind).expect("kind"),
         DecisionSubjectKey::new(subject).expect("subject key"),
         operation_id(),
         request_digest(),
@@ -361,9 +389,19 @@ fn approved_subject(
     rendering: &DecisionRendering,
     subject: &str,
 ) -> DecisionId {
+    approved_of_kind(service, rendering, "release", subject)
+}
+
+/// Hold, present and approve the routable decision of `subject` of `kind`.
+fn approved_of_kind(
+    service: &DurableDecisionService,
+    rendering: &DecisionRendering,
+    kind: &str,
+    subject: &str,
+) -> DecisionId {
     let decision_id = service
         .hold(
-            hold_of(subject, requester(), None, rendering, DEADLINE),
+            hold_of_kind(kind, subject, requester(), None, rendering, DEADLINE),
             true,
         )
         .expect("hold")
@@ -1108,8 +1146,14 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     );
     assert_eq!(
         candidate
-            .claim_executor()
-            .expect_err("claim the executor role"),
+            .claim_executor_kind(&DecisionKind::new("release").expect("kind"))
+            .expect_err("claim the executor role of a kind"),
+        DecisionError::CandidateLaunch
+    );
+    #[allow(deprecated)]
+    let whole_store = candidate.claim_executor().map(|_| ());
+    assert_eq!(
+        whole_store.expect_err("claim the executor role of the store"),
         DecisionError::CandidateLaunch
     );
     assert!(store.calls().is_empty(), "a refused write reads nothing");

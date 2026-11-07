@@ -482,12 +482,13 @@ impl MobActor {
     /// MobMachine step, and answer the Declared entries it marked (whose
     /// members the handle retires) and the ones the step ended at once. The
     /// seal ends no entry itself: on the step's own prepared authority, each
-    /// unseated Declared entry the roster does not list is unlisted first
-    /// (`UnlistIdentityEntry`, which ends it, naming the end, or defers it
-    /// while a member step of it is in flight), and only then is the roster
-    /// sealed; MobMachine refuses a seal while such an entry remains. The
-    /// identities the step ends have their scoped tool grants, and those of
-    /// their archived sessions, ended before the step commits; a failure
+    /// unseated entry the roster does not list is unlisted first
+    /// (`UnlistIdentityEntry`, which ends a Declared one, naming the end,
+    /// defers it while a member step of it is in flight, and leaves any
+    /// other entry as it is), and only then is the roster sealed; MobMachine
+    /// refuses a seal while an unseated Declared entry it would end remains.
+    /// The identities the step ends have their scoped tool grants, and those
+    /// of their archived sessions, ended before the step commits; a failure
     /// fails the whole step, which commits nothing. A mob that is not
     /// running answers an invalid transition.
     pub(super) async fn seal_declared_roster(
@@ -500,19 +501,19 @@ impl MobActor {
             .map(mob_dsl::AgentIdentity::from_domain)
             .collect();
         let mut authority = self.dsl_authority.prepare_authority();
-        // The unseated Declared entries the roster leaves out: MobMachine
-        // decides each one's unlist.
+        // The unseated entries the roster leaves out, whatever their
+        // custody: MobMachine decides each one's unlist (a store-owned
+        // entry's answers NotADeclaredEntry and changes nothing).
         let unlisted: Vec<mob_dsl::AgentIdentity> = {
             let state = authority.state();
             state
                 .identity_entry_origins
-                .iter()
-                .filter(|(dsl_identity, origin)| {
-                    **origin == mob_dsl::IdentityEntryOrigin::Declared
-                        && !desired.contains(*dsl_identity)
+                .keys()
+                .filter(|dsl_identity| {
+                    !desired.contains(*dsl_identity)
                         && !state.identity_to_runtime.contains_key(*dsl_identity)
                 })
-                .map(|(dsl_identity, _)| dsl_identity.clone())
+                .cloned()
                 .collect()
         };
         let rejected = |input: &mob_dsl::MobMachineInput, error: &dyn std::fmt::Display| {

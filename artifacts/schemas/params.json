@@ -22381,6 +22381,498 @@
     "title": "CreateScheduleRequest",
     "type": "object"
   },
+  "DecisionAudienceRequest": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who a presenter showed a rendering to. Closed.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "description": "Whoever acts for the decision's approver id.",
+        "properties": {
+          "approver_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "approver",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "approver_id"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "The decision's named reviewer (a principal key).",
+        "properties": {
+          "kind": {
+            "const": "reviewer",
+            "type": "string"
+          },
+          "reviewer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "DecisionAudienceRequest"
+  },
+  "DecisionDecideParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/decide` parameters. They name only the decision, the answer,\nthe digest of the rendering the human saw and a reason; who decided\ncomes from the authenticated event, never from the request.",
+    "properties": {
+      "approve": {
+        "type": "boolean"
+      },
+      "decision_id": {
+        "type": "string"
+      },
+      "presented_digest": {
+        "type": "string"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "decision_id",
+      "approve",
+      "presented_digest"
+    ],
+    "title": "DecisionDecideParams",
+    "type": "object"
+  },
+  "DecisionGetParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/get` parameters.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "include_request": {
+        "description": "Whether the result carries the held request.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionGetParams",
+    "type": "object"
+  },
+  "DecisionListParams": {
+    "$defs": {
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/list` parameters: every field set must match. The page holds\nat most `limit` decisions (100 when absent, at most 500), in decision id\norder after `after`.",
+    "properties": {
+      "after": {
+        "description": "The decision id to read the page after.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "approver_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "kind": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "limit": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "phase": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "DecisionListParams",
+    "type": "object"
+  },
+  "DecisionPresentParams": {
+    "$defs": {
+      "DecisionAudienceRequest": {
+        "description": "Who a presenter showed a rendering to. Closed.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "DecisionPresentationRequest": {
+        "additionalProperties": false,
+        "description": "What a host presenter showed. Closed.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/DecisionAudienceRequest"
+          },
+          "channel_ref": {
+            "description": "Where the rendering was shown.",
+            "type": "string"
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when it presented one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      },
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering to\nthe party that decides now.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "presentation": {
+        "$ref": "#/$defs/DecisionPresentationRequest"
+      }
+    },
+    "required": [
+      "decision_id",
+      "presentation"
+    ],
+    "title": "DecisionPresentParams",
+    "type": "object"
+  },
+  "DecisionPresentationRequest": {
+    "$defs": {
+      "DecisionAudienceRequest": {
+        "description": "Who a presenter showed a rendering to. Closed.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "What a host presenter showed. Closed.",
+    "properties": {
+      "at_ms": {
+        "description": "The host's clock reading of the presentation, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "audience": {
+        "$ref": "#/$defs/DecisionAudienceRequest"
+      },
+      "channel_ref": {
+        "description": "Where the rendering was shown.",
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "description": "The presenter's part size; absent when it presented one part.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "message_ref": {
+        "type": "string"
+      },
+      "parts_shown": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "subject_digest": {
+        "description": "The digest of the rendering that was presented.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "audience",
+      "subject_digest",
+      "parts_shown",
+      "channel_ref",
+      "message_ref",
+      "at_ms"
+    ],
+    "title": "DecisionPresentationRequest",
+    "type": "object"
+  },
+  "DecisionRenderingParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/rendering` parameters. `max_part_bytes` splits the rendering\ninto canonical parts of at most that many bytes; absent, it is one part.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionRenderingParams",
+    "type": "object"
+  },
+  "DecisionWithdrawParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "`decision/withdraw` parameters: the connection withdraws as the host.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id"
+    ],
+    "title": "DecisionWithdrawParams",
+    "type": "object"
+  },
   "DeviceCompleteParams": {
     "$defs": {
       "WireOAuthProvider": {

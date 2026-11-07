@@ -344,8 +344,8 @@ pub use exact_operation::{
 };
 pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use governance_config::{
-    GovernanceConfig, StockConsentAssurance, StockReviewConfig, StockReviewRule, StockReviewTarget,
-    StockReviewTier, StockReviewerSelection,
+    DecisionGovernanceConfig, GovernanceConfig, StockConsentAssurance, StockReviewConfig,
+    StockReviewRule, StockReviewTarget, StockReviewTier, StockReviewerSelection,
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
@@ -377,6 +377,7 @@ pub use image_content::{
     hydrate_messages_for_execution,
 };
 pub use image_generation::*;
+pub use interaction::GovernedSendOrigin;
 pub use interaction::{
     InboxInteraction, InteractionContent, InteractionId, ObjectiveId, PeerIngressAdmission,
     PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,

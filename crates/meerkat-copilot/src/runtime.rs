@@ -2453,6 +2453,17 @@ async fn fetch_copilot_models(
     api_base: &str,
     token: &str,
 ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
+    fetch_copilot_models_within(transport, config, api_base, token, COPILOT_HTTP_TIMEOUT).await
+}
+
+/// [`fetch_copilot_models`] with both attempts together inside `bound`.
+async fn fetch_copilot_models_within(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    api_base: &str,
+    token: &str,
+    bound: StdDuration,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
     let attempts = async {
         match list_copilot_models_once(transport, config, &url, token).await {
@@ -2462,7 +2473,7 @@ async fn fetch_copilot_models(
             answer => answer,
         }
     };
-    tokio::time::timeout(COPILOT_HTTP_TIMEOUT, attempts)
+    tokio::time::timeout(bound, attempts)
         .await
         .unwrap_or_else(|_| {
             Err(CopilotModelDiscoveryError::Transport(

@@ -16,7 +16,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `writer_fence_renew_answers` — host_store_writer_fence_machine.rs::renew_answers_never_resume_a_stopped_writer ignores a renew that answers once the writer stopped and a fenced-out answer naming the writer's own newer token, loses the realm to any other fenced-out answer, and refuses a renew answer where no renew can be in flight
 - `writer_fence_resume` — host_store_writer_fence_machine.rs::a_stopped_writer_resumes_only_through_a_proved_grant re-acquires from Stopped alone, takes its own recorded lease over, proves the grant with a clean listing, installs its token and resumes on its first renew, and refuses a re-acquire while live, in flight, unopened or lost
 - `writer_fence_failed_attempts` — host_store_writer_fence_machine.rs::a_failed_attempt_leaves_the_writer_stopped returns a failed, timed-out or held takeover acquire, a failed listing and a failed resume renew to Stopped, counts a timed-out acquire, and keeps a grant whose listing failed as the writer's own lease, which the next attempt takes over
-- `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, and loses the realm when the same holder still holds the fence
+- `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move
 - `writer_fence_loss` — host_store_writer_fence_machine.rs::the_realm_is_lost_once_and_for_good loses the realm to a foreign batch, a fenced-out resume renew, a grant at or below the installed token and a poison, keeps the first cause, and refuses every later input and every answer the writer did not ask for
 
 ### Transitions
@@ -159,6 +159,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_unknown_holders`
 - `AcquireHeldByRenewedHolder`
+  - anchors: `host_store_writer_fence`
+  - scenarios: `writer_fence_unknown_holders`
+- `AcquireHeldByUnrenewedHolder`
   - anchors: `host_store_writer_fence`
   - scenarios: `writer_fence_unknown_holders`
 - `AcquireHeldByPossibleLateGrant`

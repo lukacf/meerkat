@@ -3012,7 +3012,8 @@ pub enum RuntimeStoreError {
     /// A host store write stopped settling its batch when the self-fence
     /// window of the fence token the batch carries closed: the host store
     /// sends no batch past that window, since that token's lease at the
-    /// store may have ended by then. The batch may or may not have landed.
+    /// store may have ended by then. A batch that was sent may or may not
+    /// have landed; one never sent did not.
     /// The scopes it touched are poisoned: a later call that needs one of
     /// them is refused ([`Self::ScopeRefused`]) until the realm is reopened,
     /// and the reopened realm shows the batch if it landed. The realm keeps

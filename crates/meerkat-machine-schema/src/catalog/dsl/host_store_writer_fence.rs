@@ -20,7 +20,8 @@
 //! - **Time.** It reads no clock. The realm keeps the self-fence window's
 //!   anchor, its timers and the recorded end of a waited-out lease, and
 //!   reports their facts as inputs: the window closed, a renew started
-//!   inside or after the window, the waited-out lease ended.
+//!   inside or after the window, the waited-out lease ended, the lease of
+//!   a holder met again moved later than the end the writer waited out.
 //! - **Store I/O.** The realm sends the acquire, listing and renew the
 //!   machine asks for, and reports each answer as an input. Every request is
 //!   answered: an acquire or renew the store does not answer in time is
@@ -350,8 +351,12 @@ machine! {
             // A caller of the stopped writer asks for a re-acquire.
             BeginReacquire,
             // The acquire in flight answered. `token` is the granted token,
-            // or the holder of a `Held` answer.
-            AcquireAnswered { outcome: Enum<WriterFenceAcquireOutcome>, token: u64 },
+            // or the holder of a `Held` answer. `lease_moved` is a clock fact
+            // the realm reads for a `Held` answer naming the holder it waited
+            // out: whether that holder's lease now ends more than one renew
+            // interval later than the end the writer waited out (the holder
+            // renewed it). False for every other answer.
+            AcquireAnswered { outcome: Enum<WriterFenceAcquireOutcome>, token: u64, lease_moved: bool },
             // The recorded lease of the waited-out holder ended.
             LeaseEnded,
             // The listing that proves the grant `token` answered.
@@ -776,7 +781,7 @@ machine! {
         // A grant above the installed token is this writer's own until a
         // listing proves it: no other writer committed since the stop.
         transition AcquireGranted {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "granted" { outcome == WriterFenceAcquireOutcome::Granted }
             guard "above_the_installed_token" { token > self.token }
@@ -793,7 +798,7 @@ machine! {
         // A grant at or below the installed token breaks the store's token
         // order: fail closed.
         transition AcquireGrantedOutOfOrder {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "granted" { outcome == WriterFenceAcquireOutcome::Granted }
             guard "at_or_below_the_installed_token" { token <= self.token }
@@ -807,7 +812,7 @@ machine! {
         // The exclusive acquire met the writer's own recorded lease (its
         // installed token, or a grant whose listing failed): take it over.
         transition AcquireHeldByOwnLease {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "held" { outcome == WriterFenceAcquireOutcome::Held }
             guard "exclusive" { self.step == WriterFenceAcquireStep::Exclusive }
@@ -822,7 +827,7 @@ machine! {
         // With no acquire of its own timed out since its last grant, a holder
         // the writer does not know is another writer.
         transition AcquireHeldByAnother {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "held" { outcome == WriterFenceAcquireOutcome::Held }
             guard "exclusive" { self.step == WriterFenceAcquireStep::Exclusive }
@@ -836,15 +841,16 @@ machine! {
         }
 
         // The holder met again after the writer waited out its recorded lease
-        // renewed it: another live writer.
+        // renewed it (its lease moved later): another live writer.
         transition AcquireHeldByRenewedHolder {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "held" { outcome == WriterFenceAcquireOutcome::Held }
             guard "exclusive" { self.step == WriterFenceAcquireStep::Exclusive }
             guard "unknown_holder" { token != self.token && self.own_grant != Some(token) }
             guard "an_acquire_timed_out" { self.timed_out > 0 }
             guard "the_waited_holder" { self.waited_holder == Some(token) }
+            guard "its_lease_moved" { lease_moved }
             update {
                 self.lost_cause = WriterFenceLostCause::HolderRenewed;
             }
@@ -852,10 +858,28 @@ machine! {
             emit RealmLost { cause: self.lost_cause }
         }
 
+        // The holder met again after the writer waited out the end it
+        // recorded, its lease not moved: nobody renewed it, and the writer's
+        // recorded end came early (a store that answers the remaining lease
+        // rounded down, or on a slower clock). Wait out its new end.
+        transition AcquireHeldByUnrenewedHolder {
+            on input AcquireAnswered { outcome, token, lease_moved }
+            guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
+            guard "held" { outcome == WriterFenceAcquireOutcome::Held }
+            guard "exclusive" { self.step == WriterFenceAcquireStep::Exclusive }
+            guard "unknown_holder" { token != self.token && self.own_grant != Some(token) }
+            guard "an_acquire_timed_out" { self.timed_out > 0 }
+            guard "the_waited_holder" { self.waited_holder == Some(token) }
+            guard "its_lease_did_not_move" { !lease_moved }
+            update {}
+            to WaitingOut
+            emit HolderWaitedOut { holder: token }
+        }
+
         // While an acquire of its own timed out, an unknown holder may be its
         // own late grant: wait out its recorded lease.
         transition AcquireHeldByPossibleLateGrant {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "held" { outcome == WriterFenceAcquireOutcome::Held }
             guard "exclusive" { self.step == WriterFenceAcquireStep::Exclusive }
@@ -872,7 +896,7 @@ machine! {
         // A takeover of the writer's own lease supersedes any holder; one
         // that answers held failed.
         transition AcquireHeldAtTakeover {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "held" { outcome == WriterFenceAcquireOutcome::Held }
             guard "takeover" { self.step == WriterFenceAcquireStep::TakeoverOwn }
@@ -884,7 +908,7 @@ machine! {
         }
 
         transition AcquireFailed {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "failed" { outcome == WriterFenceAcquireOutcome::Failed }
             update {
@@ -896,7 +920,7 @@ machine! {
 
         // The store may still grant an acquire the realm gave up on.
         transition AcquireTimedOut {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "acquiring" { self.lifecycle_phase == Phase::Acquiring }
             guard "timed_out" { outcome == WriterFenceAcquireOutcome::TimedOut }
             update {
@@ -909,14 +933,14 @@ machine! {
 
         transition AcquireAnsweredNotAcquiring {
             per_phase [Unopened, Live, Stopped, Proving, Resuming, WaitingOut]
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             update {}
             to Unopened
             emit RequestRefused { reason: WriterFenceRefusal::NotAcquiring }
         }
 
         transition AcquireAnsweredLost {
-            on input AcquireAnswered { outcome, token }
+            on input AcquireAnswered { outcome, token, lease_moved }
             guard "lost" { self.lifecycle_phase == Phase::Lost }
             update {}
             to Lost

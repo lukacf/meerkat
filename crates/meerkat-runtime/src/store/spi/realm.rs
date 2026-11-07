@@ -59,10 +59,13 @@
 //!   So while an acquire of this writer timed out since its last grant, a
 //!   holder it does not know may be its own: it waits out that holder's
 //!   recorded lease, making no acquire before it ends, and acquires again.
-//!   The same holder still holding after that end renewed its lease, and
-//!   only a live writer renews: that poisons the realm, as a foreign batch in
-//!   the listing does. With no timed-out acquire, an unknown holder poisons
-//!   at once.
+//!   The same holder still holding after that end, its lease moved later by
+//!   more than one renew interval, renewed it, and only a live writer
+//!   renews: that poisons the realm, as a foreign batch in the listing does.
+//!   One whose lease did not move was renewed by nobody (a store that answers
+//!   the remaining lease rounded down makes the recorded end early): it is
+//!   waited out again. A remaining lease is capped at the declared lease.
+//!   With no timed-out acquire, an unknown holder poisons at once.
 //! - **Token order:** a re-acquire's grant must answer a token above the one
 //!   the writer holds, as every grant must answer a token above every earlier
 //!   one. A grant at or below it breaks the store's token order: the realm is
@@ -630,7 +633,10 @@ struct WriterFence {
     lost: Option<String>,
     /// The waited-out holder and the instant its recorded lease ends unless
     /// it is renewed: when the answer arrived plus what the store said
-    /// remained of it, so never before the store's own end.
+    /// remained of it, capped at the declared lease. For an exact answer
+    /// that is the store's own end; a store that rounds the remaining lease
+    /// down makes it early, and the holder met again after it, its lease not
+    /// moved later by more than one renew interval, is waited out again.
     waited_until: Option<(FenceToken, Instant)>,
 }
 
@@ -1544,7 +1550,10 @@ impl SpiRealm {
             Ok(Err(HostStoreError::Held { holder, remaining })) => (
                 WriterFenceAcquireOutcome::Held,
                 holder,
-                remaining,
+                // A compliant holder's lease is never longer than the
+                // declared one; a longer answer is outside the contract
+                // and would put the recorded end past any clock.
+                remaining.min(self.timing.lease()),
                 Some(HostStoreError::Held { holder, remaining }),
                 None,
             ),
@@ -1563,10 +1572,24 @@ impl SpiRealm {
                 None,
             ),
         };
+        // The holder met again after the writer waited out the end it
+        // recorded renewed its lease only when that lease now ends more than
+        // one renew interval later: a holder that renews on schedule moves
+        // its end by at least the lease minus one interval, while a store
+        // that rounds the remaining lease down, or reads it on a slower
+        // clock, only makes the recorded end early.
+        let lease_moved = outcome == WriterFenceAcquireOutcome::Held
+            && lock(&self.writer_fence)
+                .waited_until
+                .is_some_and(|(waited, until)| {
+                    waited == token
+                        && Instant::now() + remaining > until + self.timing.renew_interval()
+                });
         let effects = self.apply_fence(
             FenceInput::AcquireAnswered {
                 outcome,
                 token: token.get(),
+                lease_moved,
             },
             |cause| match cause {
                 WriterFenceLostCause::HeldByAnother => {

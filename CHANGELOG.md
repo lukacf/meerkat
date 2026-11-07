@@ -294,8 +294,12 @@ them.
   until a reopen. While an acquire of its own timed out since its last
   grant, the writer now waits out such a holder's recorded lease and
   acquires again; it poisons the realm only when that holder renewed its
-  lease or the listing shows a batch it did not write. With no timed-out
-  acquire, a holder it does not know poisons the realm at once, as before.
+  lease (its lease moved later by more than one renew interval; one whose
+  lease did not move, met early because the store rounded the remaining
+  lease down, is waited out again) or the listing shows a batch it did not
+  write. A remaining lease is capped at the declared lease. With no
+  timed-out acquire, a holder it does not know poisons the realm at once,
+  as before.
   Affects 0.9.5 through 0.9.10.
 
 - `meerkat-runtime`: a stopped host store writer no longer poisons its realm

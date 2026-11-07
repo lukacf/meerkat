@@ -295,7 +295,7 @@ async fn a_grant_clears_the_count_of_timed_out_acquires() {
         "granted after the timed-out acquire"
     );
     host.faults.lock().unwrap().renew_unavailable = 1;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!realm.lease_is_live(), "stopped again");
     host.expire_lease();
     let (other_realm, _other_store) = open_fast(&host, AcquireMode::Exclusive).await;

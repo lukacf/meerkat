@@ -490,8 +490,8 @@ fence:
   the stopped holder waits and suspends the run the same way (the commit
   is written again, once, when the acquire succeeds within the wait); the
   round it was writing is done again on resume, as after a crash. A commit
-  whose batch was already sent and is still unsettled when the holder's
-  window closes stops there instead: it fails typed, its scopes are
+  whose batch is not settled, or not yet sent, when the holder's window
+  closes stops there instead: it fails typed, its scopes are
   poisoned, and writing them again is refused until the realm is opened
   again (see Failures below). A
   closing save (the write after the run's final answer) waits and is

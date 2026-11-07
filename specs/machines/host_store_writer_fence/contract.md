@@ -22,7 +22,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WindowClosed`
 - `RenewAnswered`(outcome: WriterFenceRenewOutcome, renewed: u64, current: u64, in_window: Bool)
 - `BeginReacquire`
-- `AcquireAnswered`(outcome: WriterFenceAcquireOutcome, token: u64)
+- `AcquireAnswered`(outcome: WriterFenceAcquireOutcome, token: u64, lease_moved: Bool)
 - `LeaseEnded`
 - `ListingChecked`(outcome: WriterFenceListingOutcome, token: u64)
 - `Poison`(cause: WriterFenceLostCause)
@@ -334,7 +334,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireGranted`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `granted`
   - `above_the_installed_token`
@@ -343,7 +343,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireGrantedOutOfOrder`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `granted`
   - `at_or_below_the_installed_token`
@@ -352,7 +352,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireHeldByOwnLease`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `held`
   - `exclusive`
@@ -362,7 +362,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireHeldByAnother`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `held`
   - `exclusive`
@@ -373,19 +373,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireHeldByRenewedHolder`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `held`
   - `exclusive`
   - `unknown_holder`
   - `an_acquire_timed_out`
   - `the_waited_holder`
+  - `its_lease_moved`
 - Emits: `RealmLost`
 - To: `Lost`
 
+### `AcquireHeldByUnrenewedHolder`
+- From: `Acquiring`
+- On: `AcquireAnswered`(outcome, token, lease_moved)
+- Guards:
+  - `held`
+  - `exclusive`
+  - `unknown_holder`
+  - `an_acquire_timed_out`
+  - `the_waited_holder`
+  - `its_lease_did_not_move`
+- Emits: `HolderWaitedOut`
+- To: `WaitingOut`
+
 ### `AcquireHeldByPossibleLateGrant`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `held`
   - `exclusive`
@@ -397,7 +411,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireHeldAtTakeover`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `held`
   - `takeover`
@@ -406,7 +420,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireFailed`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `failed`
 - Emits: `WriterStopped`
@@ -414,7 +428,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireTimedOut`
 - From: `Acquiring`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Guards:
   - `timed_out`
 - Emits: `WriterStopped`
@@ -422,43 +436,43 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcquireAnsweredNotAcquiringUnopened`
 - From: `Unopened`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Unopened`
 
 ### `AcquireAnsweredNotAcquiringLive`
 - From: `Live`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Live`
 
 ### `AcquireAnsweredNotAcquiringStopped`
 - From: `Stopped`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Stopped`
 
 ### `AcquireAnsweredNotAcquiringProving`
 - From: `Proving`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Proving`
 
 ### `AcquireAnsweredNotAcquiringResuming`
 - From: `Resuming`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Resuming`
 
 ### `AcquireAnsweredNotAcquiringWaitingOut`
 - From: `WaitingOut`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `WaitingOut`
 
 ### `AcquireAnsweredLost`
 - From: `Lost`
-- On: `AcquireAnswered`(outcome, token)
+- On: `AcquireAnswered`(outcome, token, lease_moved)
 - Emits: `RequestRefused`
 - To: `Lost`
 
@@ -614,5 +628,5 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `writer_fence_renew_answers` — host_store_writer_fence_machine.rs::renew_answers_never_resume_a_stopped_writer ignores a renew that answers once the writer stopped and a fenced-out answer naming the writer's own newer token, loses the realm to any other fenced-out answer, and refuses a renew answer where no renew can be in flight
 - `writer_fence_resume` — host_store_writer_fence_machine.rs::a_stopped_writer_resumes_only_through_a_proved_grant re-acquires from Stopped alone, takes its own recorded lease over, proves the grant with a clean listing, installs its token and resumes on its first renew, and refuses a re-acquire while live, in flight, unopened or lost
 - `writer_fence_failed_attempts` — host_store_writer_fence_machine.rs::a_failed_attempt_leaves_the_writer_stopped returns a failed, timed-out or held takeover acquire, a failed listing and a failed resume renew to Stopped, counts a timed-out acquire, and keeps a grant whose listing failed as the writer's own lease, which the next attempt takes over
-- `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, and loses the realm when the same holder still holds the fence
+- `writer_fence_unknown_holders` — host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move
 - `writer_fence_loss` — host_store_writer_fence_machine.rs::the_realm_is_lost_once_and_for_good loses the realm to a foreign batch, a fenced-out resume renew, a grant at or below the installed token and a poison, keeps the first cause, and refuses every later input and every answer the writer did not ask for

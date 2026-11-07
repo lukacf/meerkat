@@ -64,7 +64,22 @@ fn renewed_in_window(token: u64) -> Input {
 }
 
 fn acquire(outcome: WriterFenceAcquireOutcome, token: u64) -> Input {
-    Input::AcquireAnswered { outcome, token }
+    Input::AcquireAnswered {
+        outcome,
+        token,
+        lease_moved: false,
+    }
+}
+
+/// The `Held` answer of `holder`, met again after the writer waited out
+/// the end it recorded, its lease moved later by more than one renew
+/// interval (`lease_moved`) or not.
+fn held_again(holder: u64, lease_moved: bool) -> Input {
+    Input::AcquireAnswered {
+        outcome: WriterFenceAcquireOutcome::Held,
+        token: holder,
+        lease_moved,
+    }
 }
 
 fn listing(outcome: WriterFenceListingOutcome, token: u64) -> Input {
@@ -550,15 +565,25 @@ fn an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire() {
         authority
     }
 
-    // The same holder still holds the fence: it renewed its lease.
+    // The same holder still holds the fence, its lease moved later: it
+    // renewed its lease.
     let mut renewed = acquiring_after_the_wait();
     assert_lost_to(
-        &apply(
-            &mut renewed,
-            acquire(WriterFenceAcquireOutcome::Held, STRANGER),
-        ),
+        &apply(&mut renewed, held_again(STRANGER, true)),
         WriterFenceLostCause::HolderRenewed,
     );
+
+    // The same holder, its lease not moved: nobody renewed it (the end the
+    // writer recorded came early), so it is waited out again.
+    let mut unrenewed = acquiring_after_the_wait();
+    let waited_again = apply(&mut unrenewed, held_again(STRANGER, false));
+    assert!(matches!(
+        only_effect(&waited_again),
+        Effect::HolderWaitedOut { holder } if holder == STRANGER
+    ));
+    assert_eq!(unrenewed.state().lifecycle_phase, Phase::WaitingOut);
+    assert_eq!(unrenewed.state().waited_holder, Some(STRANGER));
+    assert_eq!(unrenewed.state().timed_out, 1);
 
     // Another unknown holder is waited out in turn.
     let mut other = acquiring_after_the_wait();

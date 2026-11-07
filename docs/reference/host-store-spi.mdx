@@ -133,7 +133,7 @@ truncates a value and never commits part of a change.
 | `Indeterminate(detail)` | The outcome is unknown: the batch may or may not have landed | Unknown |
 | `Invalid(detail)` | The request breaks a limit or is malformed | Nothing |
 | `Unavailable(detail)` | The store cannot be reached or cannot serve now | Nothing |
-| `Held { holder, remaining }` | An exclusive acquire found a live holder, whose recorded lease lasts `remaining` longer | Nothing acquired |
+| `Held { holder, remaining }` | An exclusive acquire found a live holder, whose recorded lease lasts `remaining` longer. Answer it exactly, never rounded down and never beyond the lease you declared: Core waits a holder out for it | Nothing acquired |
 
 Answer `Unavailable` only when nothing was applied. When you cannot tell
 whether a commit landed, answer `Indeterminate`: Core then settles it by
@@ -394,8 +394,8 @@ To tolerate a slower store:
 An acquire Core gave up on at its timeout should not take effect later:
 where your store can, give it a server-side deadline below Core's
 timeout. Core copes with one that does (see
-[Core's Writer Rules](#cores-writer-rules)), but only by waiting out its
-lease, and a late takeover stops the realm.
+[Core's Writer Rules](#cores-writer-rules)) by waiting out its lease, but a
+takeover it grants after Core's next successful acquire stops the realm.
 
 ### Core's Writer Rules
 
@@ -420,11 +420,15 @@ The store relies on Core keeping these rules:
   Core meets it as the holder at its next re-acquire. While an acquire of
   its own timed out since its last grant, Core cannot tell that token from
   another writer's: it waits out the holder's recorded lease (the
-  `remaining` of `Held`), makes no acquire before it ends, and then acquires
-  exclusively again and checks the listing as at any re-acquire. The realm
-  stops until it is opened again only when the same holder still holds the
-  fence after that lease ended (only a live writer renews it), or when the
-  listing shows a batch this writer did not write. With no acquire of its
+  `remaining` of `Held`, capped at the lease you declared), makes no
+  acquire before it ends, and then acquires exclusively again and checks
+  the listing as at any re-acquire. The realm stops until it is opened
+  again only when the same holder still holds the fence after that lease
+  ended with its lease moved later by more than one renew interval (only a
+  live writer renews it), or when the listing shows a batch this writer did
+  not write. A holder whose lease did not move is waited out again: a
+  store that rounds `remaining` down only makes Core's recorded end early.
+  With no acquire of its
   own timed out, a holder Core does not know stops the realm at once. A
   takeover your store grants after Core's next successful acquire
   supersedes Core's live token; Core then meets `FencedOut` and the realm
@@ -444,8 +448,8 @@ The store relies on Core keeping these rules:
   per renew interval while it fails, and goes on once it resumed the
   holder. A round commit refused while the holder is stopped waits the same
   way and is written again, once, when the acquire succeeds. A commit whose
-  batch was already sent and is still unsettled at its token's self-fence
-  deadline is not refused but stopped: its scopes are poisoned (see
+  batch is not settled, or not yet sent, at its token's self-fence deadline
+  is not refused but stopped: its scopes are poisoned (see
   [How Core Settles A Commit](#how-core-settles-a-commit)), so writing them
   again is refused until the realm is opened again. When no
   acquire succeeds in that time and no other process shows up (a fence

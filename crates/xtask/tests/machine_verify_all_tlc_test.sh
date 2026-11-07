@@ -650,6 +650,29 @@ if run_part audits-u; then
   TLC_WORKERS="${tlc_workers}" "${tool_grant_expiry_audit}" "${TOOL_GRANT_EXPIRY_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
+# A host store realm's writer fence (the HostStoreWriterFenceMachine) is
+# driven by a store and by other writers, which the machine's own ci sweep
+# cannot see. A hand-written audit over the same generated model adds a store
+# that grants tokens in order and records one holder's lease, acquires the
+# writer gave up on that the store still decides later, a second writer that
+# takes the fence over once, renews, commits and stops, and a waited-out end
+# that comes before the store's own (a store that answers the remaining lease
+# rounded down). Under every generated invariant it checks five invariants
+# (the realm is lost only to another writer or to the documented residual; a
+# live writer resumed through a clean listing; no grant installed over an
+# unseen foreign batch; no holder that renews is waited out again; the token
+# never above the store's), requires its seven witnesses reached and refuses
+# five seeded defects (--mutants). 15 machine steps reach every witness.
+writer_fence_audit="${workspace_root}/specs/machines/host_store_writer_fence/writer_fence_audit.sh"
+if [[ ! -x "${writer_fence_audit}" ]]; then
+  echo "error: writer fence audit runner is missing from workspace runfiles: ${writer_fence_audit}" >&2
+  exit 1
+fi
+if run_part audits-u; then
+  echo "running bounded host store writer fence TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${writer_fence_audit}" "${WRITER_FENCE_AUDIT_MAX_STEPS:-15}" --mutants
+fi
+
 # The MobMachine member lifecycle (roster recovery and reset, session
 # binding, progress observations, the local Retire arms, RetireMember, the
 # session ingress detach, the runtime retirement, destroy and archive

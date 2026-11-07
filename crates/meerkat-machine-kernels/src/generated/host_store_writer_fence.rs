@@ -526,6 +526,7 @@ pub mod inputs {
     pub struct AcquireAnswered {
         pub outcome: WriterFenceAcquireOutcome,
         pub token: u64,
+        pub lease_moved: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LeaseEnded {}
@@ -703,6 +704,7 @@ pub enum TransitionId {
     AcquireHeldByOwnLease,
     AcquireHeldByAnother,
     AcquireHeldByRenewedHolder,
+    AcquireHeldByUnrenewedHolder,
     AcquireHeldByPossibleLateGrant,
     AcquireHeldAtTakeover,
     AcquireFailed,

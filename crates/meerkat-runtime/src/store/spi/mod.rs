@@ -133,7 +133,8 @@ pub enum SpiError {
     /// fence token the batch carries closed: Core sends no batch past that
     /// window, since the token's lease at the store may have ended by then.
     /// The batch was sent `attempts` times, `last` answering the last of them
-    /// (`None`: it was never sent), so it may or may not have landed. The
+    /// (`None`: it was never sent, and did not land); a batch that was sent
+    /// may or may not have landed. The
     /// scopes it touched are poisoned like those of any batch whose outcome
     /// stays unknown; the realm keeps its fence.
     #[error(

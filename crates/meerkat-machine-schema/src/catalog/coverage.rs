@@ -4039,6 +4039,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                         "AcquireHeldByOwnLease",
                         "AcquireHeldByAnother",
                         "AcquireHeldByRenewedHolder",
+                        "AcquireHeldByUnrenewedHolder",
                         "AcquireHeldByPossibleLateGrant",
                         "AcquireHeldAtTakeover",
                         "AcquireFailed",
@@ -4204,12 +4205,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
                 scenario(
                     "writer_fence_unknown_holders",
-                    "host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, and loses the realm when the same holder still holds the fence",
+                    "host_store_writer_fence_machine.rs::an_unknown_holder_is_waited_out_only_after_a_timed_out_acquire loses the realm to an unknown holder with no acquire timed out, waits out one while an acquire had timed out, refuses a re-acquire until its lease ended, loses the realm when the same holder still holds the fence with its lease moved later, and waits out again one whose lease did not move",
                     CoverageClaims::none()
                         .transitions(&[
                             "AcquireHeldByAnother",
                             "AcquireHeldByPossibleLateGrant",
                             "AcquireHeldByRenewedHolder",
+                            "AcquireHeldByUnrenewedHolder",
                             "BeginReacquireWaitingOut",
                             "LeaseEnded",
                             "LeaseEndedNotWaitingOutUnopened",

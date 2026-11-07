@@ -393,7 +393,7 @@ BeginReacquireLost ==
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireGranted(outcome, arg_token) ==
+AcquireGranted(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Granted")
     /\ (arg_token > token)
@@ -406,7 +406,7 @@ AcquireGranted(outcome, arg_token) ==
     /\ UnchangedFrame_e3f1e6fb26f3c3c2
 
 
-AcquireGrantedOutOfOrder(outcome, arg_token) ==
+AcquireGrantedOutOfOrder(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Granted")
     /\ (arg_token <= token)
@@ -416,7 +416,7 @@ AcquireGrantedOutOfOrder(outcome, arg_token) ==
     /\ UnchangedFrame_321073f37d2d1075
 
 
-AcquireHeldByOwnLease(outcome, arg_token) ==
+AcquireHeldByOwnLease(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Held")
     /\ (step = "Exclusive")
@@ -427,7 +427,7 @@ AcquireHeldByOwnLease(outcome, arg_token) ==
     /\ UnchangedFrame_f34d36f620f6c1b5
 
 
-AcquireHeldByAnother(outcome, arg_token) ==
+AcquireHeldByAnother(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Held")
     /\ (step = "Exclusive")
@@ -439,20 +439,34 @@ AcquireHeldByAnother(outcome, arg_token) ==
     /\ UnchangedFrame_321073f37d2d1075
 
 
-AcquireHeldByRenewedHolder(outcome, arg_token) ==
+AcquireHeldByRenewedHolder(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Held")
     /\ (step = "Exclusive")
     /\ ((arg_token # token) /\ (own_grant # Some(arg_token)))
     /\ (timed_out > 0)
     /\ (waited_holder = Some(arg_token))
+    /\ lease_moved
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
     /\ lost_cause' = "HolderRenewed"
     /\ UnchangedFrame_321073f37d2d1075
 
 
-AcquireHeldByPossibleLateGrant(outcome, arg_token) ==
+AcquireHeldByUnrenewedHolder(outcome, arg_token, lease_moved) ==
+    /\ phase = "Acquiring"
+    /\ (outcome = "Held")
+    /\ (step = "Exclusive")
+    /\ ((arg_token # token) /\ (own_grant # Some(arg_token)))
+    /\ (timed_out > 0)
+    /\ (waited_holder = Some(arg_token))
+    /\ ~(lease_moved)
+    /\ phase' = "WaitingOut"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_27ae1a2ba7929ceb
+
+
+AcquireHeldByPossibleLateGrant(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Held")
     /\ (step = "Exclusive")
@@ -465,7 +479,7 @@ AcquireHeldByPossibleLateGrant(outcome, arg_token) ==
     /\ UnchangedFrame_fe6e3a1e56d7caf8
 
 
-AcquireHeldAtTakeover(outcome, arg_token) ==
+AcquireHeldAtTakeover(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Held")
     /\ (step = "TakeoverOwn")
@@ -475,7 +489,7 @@ AcquireHeldAtTakeover(outcome, arg_token) ==
     /\ UnchangedFrame_bf8265ad4b2a1ee3
 
 
-AcquireFailed(outcome, arg_token) ==
+AcquireFailed(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "Failed")
     /\ phase' = "Stopped"
@@ -484,7 +498,7 @@ AcquireFailed(outcome, arg_token) ==
     /\ UnchangedFrame_bf8265ad4b2a1ee3
 
 
-AcquireTimedOut(outcome, arg_token) ==
+AcquireTimedOut(outcome, arg_token, lease_moved) ==
     /\ phase = "Acquiring"
     /\ (outcome = "TimedOut")
     /\ phase' = "Stopped"
@@ -494,49 +508,49 @@ AcquireTimedOut(outcome, arg_token) ==
     /\ UnchangedFrame_5a6cc2b62c1a3af9
 
 
-AcquireAnsweredNotAcquiringUnopened(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringUnopened(outcome, arg_token, lease_moved) ==
     /\ phase = "Unopened"
     /\ phase' = "Unopened"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredNotAcquiringLive(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringLive(outcome, arg_token, lease_moved) ==
     /\ phase = "Live"
     /\ phase' = "Live"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredNotAcquiringStopped(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringStopped(outcome, arg_token, lease_moved) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredNotAcquiringProving(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringProving(outcome, arg_token, lease_moved) ==
     /\ phase = "Proving"
     /\ phase' = "Proving"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredNotAcquiringResuming(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringResuming(outcome, arg_token, lease_moved) ==
     /\ phase = "Resuming"
     /\ phase' = "Resuming"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredNotAcquiringWaitingOut(outcome, arg_token) ==
+AcquireAnsweredNotAcquiringWaitingOut(outcome, arg_token, lease_moved) ==
     /\ phase = "WaitingOut"
     /\ phase' = "WaitingOut"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_27ae1a2ba7929ceb
 
 
-AcquireAnsweredLost(outcome, arg_token) ==
+AcquireAnsweredLost(outcome, arg_token, lease_moved) ==
     /\ phase = "Lost"
     /\ phase' = "Lost"
     /\ model_step_count' = model_step_count + 1
@@ -755,22 +769,23 @@ Next ==
     \/ BeginReacquireWaitingOut
     \/ BeginReacquireUnopened
     \/ BeginReacquireLost
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireGranted(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireGrantedOutOfOrder(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByOwnLease(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByAnother(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByRenewedHolder(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByPossibleLateGrant(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldAtTakeover(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireFailed(outcome, arg_token)
-    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireTimedOut(outcome, arg_token)
-    \/ (phase = "Unopened") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringUnopened(outcome, arg_token)
-    \/ (phase = "Live") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringLive(outcome, arg_token)
-    \/ (phase = "Stopped") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringStopped(outcome, arg_token)
-    \/ (phase = "Proving") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringProving(outcome, arg_token)
-    \/ (phase = "Resuming") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringResuming(outcome, arg_token)
-    \/ (phase = "WaitingOut") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredNotAcquiringWaitingOut(outcome, arg_token)
-    \/ (phase = "Lost") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireAnsweredLost(outcome, arg_token)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireGranted(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireGrantedOutOfOrder(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireHeldByOwnLease(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireHeldByAnother(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByRenewedHolder(outcome, arg_token, TRUE)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : AcquireHeldByUnrenewedHolder(outcome, arg_token, FALSE)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireHeldByPossibleLateGrant(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireHeldAtTakeover(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireFailed(outcome, arg_token, lease_moved)
+    \/ (phase = "Acquiring") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireTimedOut(outcome, arg_token, lease_moved)
+    \/ (phase = "Unopened") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringUnopened(outcome, arg_token, lease_moved)
+    \/ (phase = "Live") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringLive(outcome, arg_token, lease_moved)
+    \/ (phase = "Stopped") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringStopped(outcome, arg_token, lease_moved)
+    \/ (phase = "Proving") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringProving(outcome, arg_token, lease_moved)
+    \/ (phase = "Resuming") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringResuming(outcome, arg_token, lease_moved)
+    \/ (phase = "WaitingOut") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredNotAcquiringWaitingOut(outcome, arg_token, lease_moved)
+    \/ (phase = "Lost") /\ \E outcome \in WriterFenceAcquireOutcomeValues : \E arg_token \in 0..2 : \E lease_moved \in BOOLEAN : AcquireAnsweredLost(outcome, arg_token, lease_moved)
     \/ LeaseEnded
     \/ LeaseEndedNotWaitingOutUnopened
     \/ LeaseEndedNotWaitingOutLive

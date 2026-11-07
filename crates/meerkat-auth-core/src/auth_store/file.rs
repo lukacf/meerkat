@@ -4,7 +4,9 @@
 //! `<root>/<realm_id>/<binding_id>.json`; profile override credentials live at
 //! `<root>/<realm_id>/<binding_id>@<profile_id>.json`; shared account
 //! credentials live at `<root>/<realm_id>/account~<account_id>.json`.
-//! Permissions: 0o600 on Unix; atomic rename (`.tmp` → target) on save.
+//! Permissions on Unix: a realm directory the store creates is 0o700, set
+//! explicitly whatever the process umask, and credential files are 0o600. A
+//! save writes `<stem>.json.tmp` and renames it onto the target.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
 
@@ -71,7 +73,7 @@ impl TokenStore for FileTokenStore {
 
     async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
         let dir = self.realm_dir(key.realm().as_str());
-        tokio::fs::create_dir_all(&dir).await?;
+        create_owner_only_dir(&dir).await?;
         let final_path = self.path_for(key);
         let tmp_path = final_path.with_extension("json.tmp");
 
@@ -187,6 +189,42 @@ impl TokenStore for FileTokenStore {
     fn backend_name(&self) -> &'static str {
         "file"
     }
+}
+
+/// Create the credential directory `dir`, and the directories above it that
+/// are missing. A credential directory's listing names secret slots (a realm
+/// directory lists which slots of the realm hold a value), so on Unix `dir`
+/// is owner-only when this call creates it: 0o700, set explicitly after the
+/// creation so the process umask does not decide it. A `dir` that already
+/// exists keeps its mode, and the directories above it get the mode the
+/// umask gives them, as before.
+#[cfg(unix)]
+async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = dir.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // Created no wider than 0o700, so no other user can list it at any time.
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(dir).await {
+        Ok(()) => tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await,
+        // An earlier call, or a concurrent one, created it: it stays as it
+        // is. Anything else at the path is an error, as before.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match tokio::fs::metadata(dir).await {
+                Ok(metadata) if metadata.is_dir() => Ok(()),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dir).await
 }
 
 #[cfg(unix)]

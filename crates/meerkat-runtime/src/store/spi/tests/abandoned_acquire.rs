@@ -271,8 +271,7 @@ async fn a_grant_whose_listing_failed_is_taken_over_as_the_writers_own() {
 // that timed out: once the writer stops again and another writer opens with
 // token 3, the next re-acquire meets token 3 as the holder and loses the
 // realm at once, as a writer with no timed-out acquire does. Had the grant
-// kept the count, the writer would wait out another writer's lease instead
-// (review mutant M9).
+// kept the count, the writer would wait out another writer's lease instead.
 #[tokio::test(start_paused = true)]
 async fn a_grant_clears_the_count_of_timed_out_acquires() {
     let host = fast_host();

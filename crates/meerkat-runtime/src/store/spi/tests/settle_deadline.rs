@@ -282,8 +282,7 @@ async fn the_reopen_loads_a_batch_stopped_at_its_fence_window_that_landed() {
 // until half a second past the deadline: the main batch's first send would
 // come past the deadline, so it is never sent. The settle stops typed, with
 // no attempt and no answer, and the realm keeps its fence. Without the
-// deadline check before a batch's first send, the main batch went out late
-// (review mutant M15).
+// deadline check before a batch's first send, the main batch went out late.
 #[tokio::test(start_paused = true)]
 async fn a_batch_whose_first_send_would_come_past_its_tokens_deadline_is_never_sent() {
     use meerkat_core::host_store::SelfFence;
@@ -345,7 +344,7 @@ async fn a_batch_whose_first_send_would_come_past_its_tokens_deadline_is_never_s
 // answers `Unavailable`. A settle that starts 100 ms before the deadline
 // sends nothing at or past it and stops typed. With the deadline counted
 // from the settle's start instead of the token's last acquire or renew, it
-// went on past the deadline (review mutant M4).
+// went on past the deadline.
 #[tokio::test(start_paused = true)]
 async fn a_settle_that_starts_late_in_its_window_stops_at_its_tokens_deadline() {
     use meerkat_core::host_store::SelfFence;

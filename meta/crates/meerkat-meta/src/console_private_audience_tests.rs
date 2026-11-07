@@ -1756,19 +1756,31 @@ async fn the_audit_read_leaves_out_rows_naming_a_hidden_member() -> TestResult {
 /// end, a retire or reset boundary, a compaction harvest;
 /// `distiller_skips_private_side_chats`), so nothing said in it reaches any
 /// identity's memory, the agent's it was forked from included. The agent's own
-/// session is distilled as before.
+/// session is distilled as before. The row reads the store the runtime
+/// persists its sessions through, the one a runtime with agent memory hands
+/// its distiller, which holds the side chat's transcript.
 #[tokio::test]
 async fn a_private_side_chats_stored_session_keeps_the_distiller_out() -> TestResult {
+    use super::console_side_chat_tests::persistent_gateway_runtime_and_store_in;
     use crate::memory::distiller::TranscriptSource as _;
 
-    let (temp_dir, runtime) = runtime("private-side-chat-distiller").await?;
+    let state = tempfile::tempdir()?;
+    let (runtime, store) = persistent_gateway_runtime_and_store_in(
+        state.path(),
+        "private-side-chat-distiller",
+        "",
+        "",
+    )
+    .await?;
     seeded_member(&runtime, "worker", "alpha", &[]).await?;
     let app = console_json_router_with_state(enforced_console(&runtime, None));
     let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
     assert!(forked["error"].is_null(), "{forked:#}");
+    let side_chat = AgentIdentity::from("alpha-side");
+    runtime.handle().ensure_member_live(&side_chat).await?;
     runtime
         .handle()
-        .member(&AgentIdentity::from("alpha-side"))
+        .member(&side_chat)
         .await?
         .start_turn(
             meerkat_core::types::ContentInput::Text("My salary is private.".to_string()),
@@ -1789,14 +1801,17 @@ async fn a_private_side_chats_stored_session_keeps_the_distiller_out() -> TestRe
             .ok_or_else(|| format!("{member} has a session"))?;
         sessions.push(session.to_string());
     }
-    let layout = crate::storage_layout::MetaStorageLayout::with_injected_roots(
-        temp_dir.path().join("state"),
-        None,
-    );
-    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat_store::SqliteSessionStore::open(
-        layout.session_db()?.path,
-    )?);
     let transcripts = crate::memory::distiller::SessionStoreTranscriptSource::new(store);
+    let said = transcripts
+        .read(&sessions[1], 0)
+        .await?
+        .ok_or("the store holds the side chat's session")?;
+    assert!(
+        said.messages
+            .iter()
+            .any(|message| message.text.contains("My salary is private.")),
+        "the store holds what was said in the side chat: {said:?}"
+    );
     assert!(
         !transcripts.private_to_a_person(&sessions[0]).await?,
         "the agent's own session is distilled as before"

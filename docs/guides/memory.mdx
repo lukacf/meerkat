@@ -89,7 +89,7 @@ Controls when and how compaction runs.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auto_compact_threshold` | `u64` | model-aware; raw struct default `100_000` | Token high-water mark. If config leaves it implicit, `AgentFactory` uses four-fifths of the selected catalog model's context window. An explicit config or per-build override wins. |
+| `auto_compact_threshold` | `u64` | model-aware; raw struct default `100_000` | Token high-water mark. If config leaves it implicit, `AgentFactory` uses four-fifths of the selected catalog model's context window, or of the selected account's prompt limit when the account states a smaller one (a GitHub Copilot account model's `max_prompt_tokens`). An explicit config or per-build override wins. |
 | `max_request_bytes` | `Option<u64>` | `None` | Optional host request-body cap. Byte compaction triggers at four-fifths of the stricter available cap: this value or an exact provider-reported cap. |
 | `recent_turn_budget` | `usize` | `4` | Maximum number of recent complete conversational turns to retain. A turn starts only at a conversational User message; typed injected context stays attached to that turn. Capacity recovery may retain fewer turns. |
 | `max_summary_tokens` | `u32` | `4096` | Maximum tokens the LLM may produce for the compaction summary. |

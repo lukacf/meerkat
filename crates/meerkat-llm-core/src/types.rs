@@ -142,6 +142,15 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// The most input (prompt) tokens one request may carry on this
+    /// client's selected account and model, when the provider states one
+    /// (for example a Copilot account's per-model prompt limit). `None`
+    /// states none. A session's default compaction threshold stays below
+    /// it. Wrappers delegate to the client they wrap.
+    fn prompt_token_limit(&self) -> Option<u32> {
+        None
+    }
+
     /// Return an exact witness for the largest serialized JSON body this
     /// invocation may send. The default is unavailable for custom providers.
     fn request_pressure(

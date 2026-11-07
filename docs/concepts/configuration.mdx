@@ -250,6 +250,9 @@ cataloged models scale the token trigger to 80 percent of the smaller of their
 context window and separate input ceiling, when one is declared. For
 `gpt-6-astra`, the 922,000-token input ceiling gives a 737,600-token default
 trigger; its shared input-plus-output context window remains 1,050,000 tokens.
+When the selected account states a smaller prompt limit for the model (a
+GitHub Copilot account model's `max_prompt_tokens`), the trigger is 80 percent
+of that limit instead.
 Built-in provider clients also attach the current provider's approximate
 request-byte cap to each lowered request; the byte trigger fires at 80 percent
 of that cap. `max_request_bytes` is an optional operator override, especially

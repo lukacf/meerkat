@@ -616,7 +616,8 @@ Choosing a model:
   has looked the account up. The endpoints Copilot lists for the model choose
   the protocol, never its vendor: a model on `/v1/messages` runs on the
   Anthropic Messages wire, otherwise a model on `/responses` or
-  `/chat/completions` runs on the OpenAI wire, Responses first. The session
+  `/chat/completions` runs on the OpenAI wire, Responses first; a model whose
+  entry lists no endpoint at all runs on `/chat/completions`. The session
   moves to the account's route of that protocol, whichever route of the
   account it named. The model's limits come from the same list: its context
   window, prompt limit and output limit, and whether it takes images. Tool
@@ -638,10 +639,16 @@ made, and no other route or credential is tried in its place:
 
 | What happened | Refusal |
 |---|---|
-| The account's model list does not name the model, or the account's policy disables it | `account model refused`: the credential does not offer the model, followed by the ids it offers |
+| The account's model list does not name the model | `account model refused`: the credential does not offer the model, followed by the ids it offers |
+| The account's policy for the model is not `enabled` (`disabled`, `unconfigured` or another state) | `account model refused`: the credential lists the model with that policy state, not `enabled` |
 | The account offers the model on no endpoint Meerkat speaks | `account model refused`: offered on no endpoint Meerkat speaks |
 | The account's model discovery failed | `account model refused`: the model list is not available; retry once it loads |
 | The account has no route for the model's protocol (explicit tables without it) | the credential account has no route for that provider |
+
+A model the registry defines follows the account's list on a Copilot route
+too: a model whose entry lists no endpoint is served on `/chat/completions` by
+the OpenAI and Gemini routes, and one the account lists under a policy other
+than `enabled` is refused with an error that names the state.
 
 A `[models.<id>]` entry keeps owning its model: the account is never asked
 about it, and its `provider` still decides the route. To move from the
@@ -797,15 +804,16 @@ descriptors (`CredentialSourceSpec::FileDescriptor`) let host
 applications inject tokens without going through OAuth.
 
 Credential header values are marked sensitive on every OpenAI Responses,
-OpenAI-compatible Chat Completions and Anthropic Messages request, so the
-request's `Debug` output does not print them and HTTP/2 never indexes them:
-the values a dynamic authorizer supplies (an `external_authorizer` route's, a
-Copilot route's bearer) and a static API key's (the OpenAI `Authorization`
-bearer, Azure OpenAI's `api-key`, the compatible client's bearer, Anthropic's
-`x-api-key`). The Gemini client's credential headers are not marked. A value
-that is not a valid HTTP header value fails the request as an authentication
-failure ("a credential header value is not a valid HTTP header value") before
-it is sent. Those clients also pass what they read from a text generation
+OpenAI-compatible Chat Completions, Anthropic Messages and Gemini request, so
+the request's `Debug` output does not print them and HTTP/2 never indexes
+them: the values a dynamic authorizer supplies (an `external_authorizer`
+route's, a Copilot route's bearer, a Vertex or Code Assist bearer) and a
+static API key's (the OpenAI `Authorization` bearer, Azure OpenAI's `api-key`,
+the compatible client's bearer, Anthropic's `x-api-key`, Gemini's
+`x-goog-api-key`). A value that is not a valid HTTP header value fails the
+request as an authentication failure ("a credential header value is not a
+valid HTTP header value") before it is sent. The OpenAI and Anthropic clients
+also pass what they read from a text generation
 response (a rejection body, a stream error event, a data line that does not
 parse, the provider error fields they log) through the authorizer's
 `HttpAuthorizer::redact_response_diagnostic` before it reaches a caller or a

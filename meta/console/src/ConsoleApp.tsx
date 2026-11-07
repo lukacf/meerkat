@@ -106,12 +106,9 @@ import {
 } from "./lib/headless";
 import {
   WORKGRAPH_CONFLICT_CODE,
-  resolveWorkGraphBindingRevision,
-  resolveWorkGraphGoalItemRevision,
-  resolveWorkGraphItemRevision,
-  workGraphClaimOwnerId,
+  WORKGRAPH_UNOBSERVED_REVISION_MESSAGE,
+  workGraphMayRelease,
   workGraphConflictRefreshRequest,
-  type WorkGraphCommandRunner,
 } from "./lib/workgraph-actions";
 import { createConsoleId } from "./lib/id";
 import {
@@ -534,8 +531,6 @@ function agentWorkItems(
       priority: item.priority ?? null,
     }));
 }
-
-const DEFAULT_APPROVER_ID = "console-ops-lead";
 
 /// Live signals that should freshen a docked WorkGraph panel: dedicated
 /// workgraph.* timeline frames or workgraph_* tool completions in any turn.
@@ -960,6 +955,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules!()) : undefined,
         capabilities: () => call(() => source.capabilities()),
+        whoami: source.whoami ? () => call(() => source.whoami!()) : undefined,
         queryTimeline: input => call(() => source.queryTimeline(input)),
         send: input => call(() => source.send(input)),
         executeCommand: source.executeCommand ? input => call(() => source.executeCommand!(input)) : undefined,
@@ -2852,20 +2848,69 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
+  // The gateway decides approvals only as the signed-in person the
+  // connection names (anyone else is refused as approver_unauthenticated),
+  // so the inbox offers decisions only when whoami reports a person, and
+  // tells any other caller whoami names to sign in as themselves. A
+  // transport without whoami, an older gateway or a failed read leaves the
+  // approvals read-only.
+  // The same read names the principal the caller's WorkGraph claims are
+  // owned by: an identified caller claims as itself, and an open console's
+  // caller without a token claims nothing. The claim's owner releases it,
+  // and so does an access admin, whose release the gateway records.
+  const [approvalDecider, setApprovalDecider] = React.useState<{
+    scope: string;
+    person: boolean;
+    answered?: boolean;
+    claimant?: string;
+    canAdminister?: boolean;
+  }>();
+  React.useEffect(() => {
+    let active = true;
+    const scope = sendScope;
+    void Promise.resolve()
+      .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
+      .then((whoami) => {
+        if (!active) return;
+        const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
+        setApprovalDecider({
+          scope,
+          person: whoami?.actorKind === "person",
+          answered: Boolean(whoami),
+          ...(claimant ? { claimant } : {}),
+          canAdminister: whoami?.canAdminister === true,
+        });
+      })
+      .catch(() => {
+        if (active) setApprovalDecider({ scope, person: false });
+      });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
+  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : undefined;
+  const approvalsDecidable = currentDecider?.person;
+  // whoami named a caller who is no signed-in person: only signing in as
+  // themselves lets them decide.
+  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
+  const workGraphClaimant = currentDecider?.claimant;
+  const workGraphAdmin = currentDecider?.canAdminister === true;
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === undefined) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
+      ...(!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" as const } : {}),
       load: async signal => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.listGatingPending, target, signal,
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.decideGating, target, signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: `console_${decision}` },
+        params: { pending_id: pendingId, decision, reason: `console_${decision}` },
       })).result,
     });
     approvalResourceRef.current = resource;
@@ -2876,7 +2921,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe(); resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
@@ -5064,29 +5109,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         // action CASes against the live revision. Best-effort — the banner
         // and failure note above already surfaced the conflict.
         if (cardIdentity && jsonRpcErrorCode(err) === WORKGRAPH_CONFLICT_CODE) {
-          const refresh = workGraphConflictRefreshRequest(params);
-          if (refresh) {
-            try {
-              const fresh = await executeHeadlessCommand(
-                refresh.command,
-                controlWorkbenchTarget("workgraph"),
-                refresh.params,
-              );
-              appendFrame(
-                cardIdentity,
-                buildWorkGraphOperatorResultFrame({
-                  method: consoleCommandMethod(refresh.command),
-                  params: refresh.params,
-                  result: fresh,
-                  identity: cardIdentity,
-                  refresh: true,
-                }),
-              );
-              forceRender();
-            } catch {
-              // The stale card stays; the conflict is already visible.
-            }
-          }
+          await rereadWorkGraphCard(params, cardIdentity);
         }
       }
       if (workGraphPanelDockedRef.current) {
@@ -5097,66 +5120,96 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     [baseUrl, refreshWorkGraphData],
   );
 
-  const runWorkGraphQuery = React.useCallback<WorkGraphCommandRunner>(
-    (command, params) =>
-      executeHeadlessCommand(command, controlWorkbenchTarget("workgraph"), params),
+  // Re-read the entity a WorkGraph action addressed (`id` or `binding_id`)
+  // and fold its live state into the inline card through the operator echo
+  // path, marked `refresh` so it sets no action outcome. Best-effort: the
+  // caller has already said why the card is read again.
+  async function rereadWorkGraphCard(params: Record<string, unknown>, cardIdentity: string) {
+    const refresh = workGraphConflictRefreshRequest(params);
+    if (!refresh) return;
+    try {
+      const fresh = await executeHeadlessCommand(
+        refresh.command,
+        controlWorkbenchTarget("workgraph"),
+        refresh.params,
+      );
+      appendFrame(
+        cardIdentity,
+        buildWorkGraphOperatorResultFrame({
+          method: consoleCommandMethod(refresh.command),
+          params: refresh.params,
+          result: fresh,
+          identity: cardIdentity,
+          refresh: true,
+        }),
+      );
+      forceRender();
+    } catch {
+      // The card stays as it was; the reason is already visible.
+    }
+  }
+
+  // A WorkGraph action whose card or panel row showed no revision sends
+  // nothing: acting on the revision current at the click would apply it to
+  // a state the viewer never saw. The console says so and reads the entity
+  // again (the inline card, and the docked panel), so the next action names
+  // a revision the viewer saw.
+  const holdUnobservedWorkGraphAction = React.useCallback(
+    async (entity: Record<string, unknown>, cardIdentity?: string) => {
+      setActionError(WORKGRAPH_UNOBSERVED_REVISION_MESSAGE);
+      if (cardIdentity) await rereadWorkGraphCard(entity, cardIdentity);
+      if (workGraphPanelDockedRef.current) {
+        await refreshWorkGraphData().catch(() => {});
+      }
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseUrl],
+    [baseUrl, refreshWorkGraphData],
   );
 
   // Operator handlers shared by the inline card and the docked panel.
   // `cardIdentity` scopes the synthetic result echo to that identity's chat
-  // log; the panel passes none (it re-reads the snapshot instead). A payload
-  // without a revision means the UI never observed the CAS token — resolve
-  // the live one first and, if that fails, surface the banner without
-  // sending (a guessed 0 is a guaranteed conflict).
+  // log; the panel passes none (it re-reads the snapshot instead). Each
+  // action names the revision its card or row showed (`entity` names what
+  // it addresses, for the re-read when it showed none).
   const makeWorkGraphOperatorHandlers = React.useCallback(
     (cardIdentity?: string) => {
       const dispatch = (
-        resolveRevision: () => Promise<number>,
+        revision: number | undefined,
+        entity: Record<string, unknown>,
         send: (expectedRevision: number) => Promise<void>,
       ) => {
-        void (async () => {
-          let expectedRevision: number;
-          try {
-            expectedRevision = await resolveRevision();
-          } catch (err) {
-            setActionError(errorMessage(err));
-            return;
-          }
-          await send(expectedRevision);
-        })();
+        void (revision === undefined
+          ? holdUnobservedWorkGraphAction(entity, cardIdentity)
+          : send(revision));
       };
-      const revisionOr = (
-        revision: number | undefined,
-        resolve: () => Promise<number>,
-      ) => (revision !== undefined ? () => Promise.resolve(revision) : resolve);
       return {
-        onClaim: ({ itemId, revision }: { itemId: string; revision?: number }) =>
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === undefined ? undefined : ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId)),
+            revision,
+            { id: itemId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClaim, {
                 id: itemId,
                 expected_revision: expectedRevision,
-                owner: {
-                  kind: "principal",
-                  id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID),
-                },
               }, cardIdentity),
           ),
         onClose: ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphItemRevision(runWorkGraphQuery, itemId)),
+            revision,
+            { id: itemId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClose, {
                 id: itemId,
                 expected_revision: expectedRevision,
               }, cardIdentity),
           ),
-        onGoalConfirm: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
+        onGoalConfirm: approvalsDecidable !== true ? undefined : ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphGoalConfirm, {
                 binding_id: bindingId,
@@ -5165,7 +5218,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onGoalRequestClose: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphGoalItemRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphGoalRequestClose, {
                 binding_id: bindingId,
@@ -5174,7 +5228,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionPause: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionPause, {
                 binding_id: bindingId,
@@ -5183,7 +5238,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionResume: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionResume, {
                 binding_id: bindingId,
@@ -5192,7 +5248,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           ),
         onAttentionReassign: ({ bindingId, revision, identity }: { bindingId: string; revision?: number; identity: string }) =>
           dispatch(
-            revisionOr(revision, () => resolveWorkGraphBindingRevision(runWorkGraphQuery, bindingId)),
+            revision,
+            { binding_id: bindingId },
             (expectedRevision) =>
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphAttentionReassign, {
                 binding_id: bindingId,
@@ -5203,7 +5260,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, runWorkGraphQuery, experience?.access?.subject],
+    [runWorkGraphCommand, holdUnobservedWorkGraphAction, workGraphClaimant, approvalsDecidable],
   );
 
   // Inline-card affordances: undefined when the caller lacks the manage
@@ -6232,6 +6289,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onLoadEvidence={loadMemoryEvidence}
           onDecideQuarantine={
             memoryData.canDecideQuarantine &&
+            approvalsDecidable === true &&
             !frontendReadOnly &&
             experience?.console_policy?.read_only !== true
               ? decideMemoryQuarantine
@@ -6257,24 +6315,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
+          canRelease={(item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin })}
           onRelease={({ itemId, revision }) => {
-            // Same CAS rule as the other item actions: an unobserved
-            // revision is resolved live, never guessed.
-            void (async () => {
-              let expectedRevision = revision;
-              if (expectedRevision === undefined) {
-                try {
-                  expectedRevision = await resolveWorkGraphItemRevision(runWorkGraphQuery, itemId);
-                } catch (err) {
-                  setActionError(errorMessage(err));
-                  return;
-                }
-              }
-              await runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
-                id: itemId,
-                expected_revision: expectedRevision,
-              });
-            })();
+            // The same rule as the other item actions: the revision the row
+            // showed, never one read at the click.
+            if (revision === undefined) {
+              void holdUnobservedWorkGraphAction({ id: itemId });
+              return;
+            }
+            void runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphRelease, {
+              id: itemId,
+              expected_revision: revision,
+            });
           }}
           onGoalConfirm={workGraphPanelHandlers.onGoalConfirm}
           onGoalRequestClose={workGraphPanelHandlers.onGoalRequestClose}

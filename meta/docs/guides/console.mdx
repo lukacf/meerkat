@@ -410,9 +410,24 @@ confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/concepts/gating) for
 current tier, timeout, and decision behavior.
 
-The stock console submits decisions with `approver_id: "console-ops-lead"`. There
-is no approver selector in this inbox. A request pinned to a different approver
-needs a host-provided approval surface that authenticates and maps the approver.
+The stock console decides as the signed-in person: its decisions name no
+approver, and the console takes the approver from the connection (see
+[Gating](/concepts/gating)). When `meta/console/whoami` reports a caller that is
+not a person (no token on an open console, a service token, a token that names
+no human, or a shared-account token), the inbox shows requests read-only and
+says to sign in as yourself to decide: such a caller can read them but not
+decide them. A request pinned to an approver id is decided by a person who
+holds that id through the access configuration's `approvers` bindings.
+
+The same holds for memory quarantine reviews and WorkGraph goal confirmations:
+the console offers them only to a signed-in person. A WorkGraph claim is owned
+by the caller who makes it, so the WorkGraph panel offers Claim only to a
+caller with a token, and Release on the caller's own claims and, to an access
+admin, on anyone's: the work graph records an admin's release with the admin
+and the claim released. Claims the stock console makes carry no lease, so
+someone else's claim ends when an access admin releases it, when the host
+releases it on its stdio RPC gateway (`rpc_gateway`; `meta_gateway` serves
+none), or when its item is closed.
 
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
@@ -524,16 +539,27 @@ which asks you to confirm. An edit keeps the timing unless you change it.
   policy at that time, a writable console, and an agent that takes console
   messages. A refused send fails that time only; the schedule keeps its
   later times.
-- Creating, editing or resuming a schedule makes you its sender. On a
-  console without sign-in the sender is the console's shared account, as it
-  is for a message you send there; once the console requires sign-in, such
-  schedules stop sending until someone signed in edits them.
-- A change that races another change of the same schedule is refused and
-  the list is read again: check the schedule and repeat the change.
+- Creating a schedule makes you its sender, and so does editing or resuming
+  one you send. Editing or resuming a schedule someone else sends takes it
+  over: the Console first says who it sends as and asks you to confirm, and
+  only then makes you its sender; keeping its sender changes nothing. The
+  schedule keeps the senders it was taken over from, and its details name
+  them. On a console without sign-in the sender is the console's shared
+  account, as it is for a message you send there; once the console requires
+  sign-in, such schedules stop sending until someone signed in edits them.
+- An edit or a resume names the version of the schedule the pane showed: one
+  made after someone else changed the same schedule is refused and the list
+  is read again: check the schedule and repeat the change. A pause and a
+  delete name no version: they act on the schedule as it is.
+- A deployment can let people message an agent without changing its
+  schedules: schedule changes also need `schedule.manage`, which an access
+  configuration that names no schedule action grants wherever it grants
+  `agent.send`.
 - A schedule repeats at most once a minute.
-- Viewers who may see the agent but not message it see its schedules
-  read-only, and so does everyone on a read-only console or on a gateway
-  that does not offer schedule changes; the pane says why.
+- Viewers who may see the agent but not message it, or message it but not
+  manage its schedules, see its schedules read-only, and so does everyone on
+  a read-only console or on a gateway that does not offer schedule changes;
+  the pane says why.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
@@ -958,6 +984,7 @@ interface ConsoleAgent {
   addressable?: boolean;
   affordances?: {
     can_send_message?: boolean;
+    can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
     runtime_mode?: string;
@@ -1118,8 +1145,8 @@ Primary RPC methods on `/console/rpc`:
 - `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
   `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
   an agent's console schedules (see [Schedules](#schedules)); the list is
-  gated by `agent.view` and the writes by `agent.send` for the agent, and
-  each send is a Console send by the schedule's sender
+  gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
+  for the agent, and each send is a Console send by the schedule's sender
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit

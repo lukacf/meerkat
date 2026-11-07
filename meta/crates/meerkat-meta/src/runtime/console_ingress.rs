@@ -687,16 +687,25 @@ fn apply_access_to_experience(body: &mut Value, view: &AccessView) {
                     view.allows_agent(crate::access::ACTION_AGENT_RETIRE, identity.as_str());
                 let can_respawn =
                     view.allows_agent(crate::access::ACTION_AGENT_RESPAWN, identity.as_str());
+                let can_manage_schedules =
+                    view.allows_agent(crate::access::ACTION_SCHEDULE_MANAGE, identity.as_str());
                 if let Some(affordances) =
                     agent.get_mut("affordances").and_then(Value::as_object_mut)
                 {
                     intersect_bool(affordances, "can_send_message", can_send);
                     intersect_bool(affordances, "can_retire", can_retire);
                     intersect_bool(affordances, "can_respawn", can_respawn);
-                    any_can_send |= affordances
+                    // A console schedule change takes `agent.send` and
+                    // `schedule.manage` on the agent.
+                    let can_send_message = affordances
                         .get("can_send_message")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    affordances.insert(
+                        "can_manage_schedules".to_string(),
+                        Value::Bool(can_send_message && can_manage_schedules),
+                    );
+                    any_can_send |= can_send_message;
                     any_can_retire |= affordances
                         .get("can_retire")
                         .and_then(Value::as_bool)
@@ -1880,6 +1889,21 @@ impl AuthenticatedConsoleHuman {
     /// without one can still be a valid authenticated human.
     pub fn login_scope(&self) -> Option<&str> {
         self.login_scope.as_deref()
+    }
+
+    /// What a record keeps of the login this human authenticated in:
+    /// `sha256:` and the lowercase hex SHA-256 of the signed login
+    /// association ([`Self::login_scope`]), or, for a token that carries
+    /// none, of its unpadded base64url digest (one login per token). It
+    /// names neither the login nor the token.
+    pub(crate) fn login_scope_digest(&self) -> String {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        let scope = match &self.login_scope {
+            Some(scope) => scope.clone(),
+            None => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.token_digest),
+        };
+        format!("sha256:{:x}", Sha256::digest(scope.as_bytes()))
     }
 
     /// The human's qualified principal: a `Human` whose id is the verified

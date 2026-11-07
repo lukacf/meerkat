@@ -1074,6 +1074,15 @@ pub struct GatingDecider {
     pub held_approver_ids: BTreeSet<String>,
 }
 
+/// What the caller established about a decider's authentication, recorded
+/// with the decision: the assurance and a digest of the login the decision
+/// was made in. Never the token or the login itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GatingDecisionEvidence {
+    pub(crate) assurance: meerkat_core::ApprovalAssurance,
+    pub(crate) login_scope_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatingDecideRequest {
     pub pending_id: String,

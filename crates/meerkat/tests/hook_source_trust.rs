@@ -171,13 +171,19 @@ fn project_file(project: &Path) -> PathBuf {
 
 /// Writes the project `config.toml` stating `entries` as its hooks.
 fn write_project_hooks(project: &Path, entries: Vec<HookEntryConfig>) {
+    write_hooks(&project_file(project), entries);
+}
+
+/// Writes the convention `config.toml` at `file` stating `entries` as its
+/// hooks.
+fn write_hooks(file: &Path, entries: Vec<HookEntryConfig>) {
     #[derive(serde::Serialize)]
     struct ProjectConfig {
         hooks: meerkat_core::HooksConfig,
     }
-    std::fs::create_dir_all(project.join(".rkat")).unwrap();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
-        project_file(project),
+        file,
         toml::to_string(&ProjectConfig {
             hooks: meerkat_core::HooksConfig {
                 entries,
@@ -225,6 +231,22 @@ struct Run {
 /// Builds an agent over `project` (with `trust` installed, if any) and runs
 /// one turn that calls the guarded tool.
 async fn build_and_run(base: &Path, project: &Path, trust: Option<Arc<RecordedTrust>>) -> Run {
+    build_and_run_with(
+        base,
+        project,
+        None,
+        trust.map(|trust| trust as Arc<dyn HookSourceTrust>),
+    )
+    .await
+}
+
+/// [`build_and_run`] with a user config root (if any) and any trust.
+async fn build_and_run_with(
+    base: &Path,
+    project: &Path,
+    user_root: Option<&Path>,
+    trust: Option<Arc<dyn HookSourceTrust>>,
+) -> Run {
     let client = Arc::new(ScriptedClient::default());
     let tool = Arc::new(GuardedTool::default());
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
@@ -238,6 +260,9 @@ async fn build_and_run(base: &Path, project: &Path, trust: Option<Arc<RecordedTr
         .project_root(project)
         .builtins(false)
         .shell(false);
+    if let Some(user_root) = user_root {
+        factory = factory.user_config_root(user_root);
+    }
     if let Some(trust) = trust {
         factory = factory.with_hook_source_trust(trust);
     }
@@ -379,4 +404,87 @@ async fn without_a_trust_the_project_hooks_run_as_before() {
     assert!(marker.exists(), "the project hook ran");
     assert_eq!(run.tool.0.load(Ordering::SeqCst), 1);
     assert!(refused_hooks(&run.events).is_empty());
+}
+
+/// Counts the factory's questions per file; the project file is untrusted
+/// and the user file trusted.
+struct CountingTrust {
+    project_file: PathBuf,
+    asked: Mutex<HashMap<PathBuf, usize>>,
+}
+
+impl HookSourceTrust for CountingTrust {
+    fn decide(&self, source: HookSource<'_>) -> HookSourceDecision {
+        *self
+            .asked
+            .lock()
+            .unwrap()
+            .entry(source.path.to_path_buf())
+            .or_default() += 1;
+        if source.path == self.project_file {
+            HookSourceDecision::Untrusted
+        } else {
+            HookSourceDecision::Trusted
+        }
+    }
+}
+
+/// Each convention file is decided once per build, however many hooks it
+/// states, and no hook of the untrusted project file runs.
+#[tokio::test]
+async fn each_hook_source_is_decided_once_per_build() {
+    let (_temp, base, project) = fixture();
+    let user_root = base.join("user");
+    let user_file = user_root.join(".rkat").join("config.toml");
+    let project_markers: Vec<_> = (0..3)
+        .map(|n| base.join(format!("project-hook-{n}-entered")))
+        .collect();
+    write_project_hooks(
+        &project,
+        project_markers
+            .iter()
+            .enumerate()
+            .map(|(n, marker)| marker_guardrail(&format!("project-{n}"), marker))
+            .collect(),
+    );
+    write_hooks(
+        &user_file,
+        (0..2)
+            .map(|n| {
+                marker_guardrail(
+                    &format!("user-{n}"),
+                    &base.join(format!("user-hook-{n}-entered")),
+                )
+            })
+            .collect(),
+    );
+    let trust = Arc::new(CountingTrust {
+        project_file: project_file(&project),
+        asked: Mutex::new(HashMap::new()),
+    });
+
+    let run = build_and_run_with(
+        &base,
+        &project,
+        Some(&user_root),
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+    )
+    .await;
+
+    assert_eq!(
+        *trust.asked.lock().unwrap(),
+        HashMap::from([(project_file(&project), 1), (user_file, 1)]),
+        "each file is decided exactly once"
+    );
+    assert!(project_markers.iter().all(|marker| !marker.exists()));
+    assert_eq!(run.tool.0.load(Ordering::SeqCst), 0, "its tool is blocked");
+    // The first refused guardrail ends the dispatch, so only it reports;
+    // the sdk unit test `untrusted_entries_decides_each_file_once` pins
+    // that all three are in the refused set.
+    let refused = refused_hooks(&run.events);
+    assert!(!refused.is_empty());
+    assert!(
+        refused.iter().all(|(id, _)| id.0.starts_with("project-")),
+        "only project hooks are refused: {refused:?}"
+    );
 }

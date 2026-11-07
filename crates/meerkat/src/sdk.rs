@@ -144,16 +144,24 @@ pub async fn resolve_layered_hooks_config(
 /// Layered hooks with the convention file each file entry comes from.
 pub(crate) struct LayeredHooks {
     pub(crate) config: HooksConfig,
-    /// Each layered entry a convention file states: its id, the file as
-    /// read, and whether the user file states the same definition.
-    file_entries: Vec<(meerkat_core::HookId, ReadHookSource, bool)>,
+    /// Each layered entry a convention file states: its id, which file
+    /// states it, and whether the user file states the same definition.
+    file_entries: Vec<(meerkat_core::HookId, HookFile, bool)>,
+    /// The project file as read, when it was.
+    project_file: Option<ReadHookSource>,
     /// The user file as read, when it was.
     user_file: Option<ReadHookSource>,
 }
 
+/// Which convention file a layered entry comes from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookFile {
+    Project,
+    User,
+}
+
 /// A convention file the layering read: its path and the digest of the
 /// bytes its hooks were parsed from.
-#[derive(Clone)]
 struct ReadHookSource {
     path: std::path::PathBuf,
     sha256: crate::HookSourceDigest,
@@ -172,18 +180,36 @@ impl LayeredHooks {
     /// The layered entries whose definition comes from a file `untrusted`
     /// refuses (judged over the bytes the layering read), unless a trusted
     /// user file states the same definition (it is then that file's entry).
+    ///
+    /// `untrusted` is asked once per file: once about the user file when it
+    /// was read, and once about the project file when it contributes an
+    /// entry, however many entries each states.
     pub(crate) fn untrusted_entries(
         &self,
         untrusted: impl Fn(crate::HookSource<'_>) -> bool,
     ) -> Vec<meerkat_core::HookId> {
-        let user_trusted = self
+        let user_untrusted = self
             .user_file
             .as_ref()
-            .is_some_and(|user| !untrusted(user.as_source()));
+            .map(|user| untrusted(user.as_source()));
+        let project_untrusted = self
+            .project_file
+            .as_ref()
+            .filter(|_| {
+                self.file_entries
+                    .iter()
+                    .any(|(_, file, _)| *file == HookFile::Project)
+            })
+            .map(|project| untrusted(project.as_source()));
+        let user_trusted = user_untrusted == Some(false);
         self.file_entries
             .iter()
-            .filter(|(_, source, user_duplicate)| {
-                untrusted(source.as_source()) && !(*user_duplicate && user_trusted)
+            .filter(|(_, file, user_duplicate)| {
+                let file_untrusted = match file {
+                    HookFile::Project => project_untrusted,
+                    HookFile::User => user_untrusted,
+                };
+                file_untrusted == Some(true) && !(*user_duplicate && user_trusted)
             })
             .map(|(id, _, _)| id.clone())
             .collect()
@@ -228,23 +254,23 @@ pub(crate) async fn resolve_layered_hooks(
             layered.entries.push(entry.clone());
         }
     }
-    if let Some((cfg, source)) = &context {
+    if let Some((cfg, _)) = &context {
         for entry in &cfg.entries {
             if seen_ids.insert(entry.id.clone()) {
                 layered.entries.push(entry.clone());
                 file_entries.push((
                     entry.id.clone(),
-                    source.clone(),
+                    HookFile::Project,
                     user_entries.contains(entry),
                 ));
             }
         }
     }
-    if let Some((cfg, source)) = &user {
+    if let Some((cfg, _)) = &user {
         for entry in &cfg.entries {
             if seen_ids.insert(entry.id.clone()) {
                 layered.entries.push(entry.clone());
-                file_entries.push((entry.id.clone(), source.clone(), false));
+                file_entries.push((entry.id.clone(), HookFile::User, false));
             }
         }
     }
@@ -252,6 +278,7 @@ pub(crate) async fn resolve_layered_hooks(
     LayeredHooks {
         config: layered,
         file_entries,
+        project_file: context.map(|(_, source)| source),
         user_file: user.map(|(_, source)| source),
     }
 }
@@ -1269,6 +1296,49 @@ mod tests {
             }
             other => panic!("expected command adapter, got {other:?}"),
         }
+    }
+
+    /// Each convention file is decided once however many entries it
+    /// states; every entry of the untrusted project file is refused, and
+    /// the trusted user file's entries are not.
+    #[tokio::test]
+    async fn untrusted_entries_decides_each_file_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let user_root = temp.path().join("user");
+        let context_root = temp.path().join("context");
+        write_config_with_hooks(
+            &context_root,
+            vec![
+                mk_hook("p0", "echo p0"),
+                mk_hook("p1", "echo p1"),
+                mk_hook("p2", "echo p2"),
+            ],
+        )
+        .await;
+        write_config_with_hooks(
+            &user_root,
+            vec![mk_hook("u0", "echo u0"), mk_hook("u1", "echo u1")],
+        )
+        .await;
+        let project_file = context_root.join(".rkat").join("config.toml");
+
+        let layered =
+            resolve_layered_hooks(Some(&context_root), Some(&user_root), &Config::default()).await;
+        let asked = std::sync::Mutex::new(Vec::new());
+        let refused = layered.untrusted_entries(|source| {
+            asked.lock().unwrap().push(source.path.to_path_buf());
+            source.path == project_file
+        });
+
+        let mut asked = asked.into_inner().unwrap();
+        asked.sort();
+        let mut expected = vec![project_file, user_root.join(".rkat").join("config.toml")];
+        expected.sort();
+        assert_eq!(asked, expected);
+        assert_eq!(
+            refused,
+            vec![HookId::new("p0"), HookId::new("p1"), HookId::new("p2")]
+        );
     }
 
     #[tokio::test]

@@ -58,6 +58,22 @@ them.
   release does not mint, so a retry is refused the same way. Plain System
   context appends were already refused on a governed runtime.
 
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`: the
+  mob machine prepares a placed member's operator-instruction delivery as
+  it prepares a local member's (see Added). The arm that blocked every
+  placed member is gone, so the kernel `generated::mob::TransitionId` loses
+  `PrepareMemberInstructionDeliveryPlacedRunning` and
+  `PrepareMemberInstructionDeliveryPlacedStopped`, and the discriminant of
+  every variant after them moves. `TransitionId` has no repr and
+  (de)serializes by variant name, so only an integer cast, or a match or a
+  serialized value that names one of the two variants, observes it.
+
+- `meerkat-runtime`: `SupervisorBridgeCommandKind` gains
+  `RecordMemberInstructionTarget` and `ReleaseMemberInstructionTarget`,
+  appended last, so no existing variant's implicit discriminant moves. The
+  enum is exhaustive, so a downstream exhaustive match needs the new arms,
+  or a wildcard arm.
+
 ### Added
 
 - `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`, `meerkat-mob`:
@@ -108,6 +124,26 @@ them.
   status read is the authority. The Python, TypeScript and Web SDKs know the
   event type and keep its payload whole.
 
+- `meerkat-contracts`, `meerkat-mob`: a placed member (one on another host)
+  receives its mob's operator instructions. The mob records the member's
+  snapshot in the member's session on its member host, and releases its
+  target there when the member retires and the host keeps the session,
+  over two new host-addressed supervisor bridge commands of protocol 7:
+  `RecordMemberInstructionTarget` (`BridgeRecordInstructionTargetPayload`,
+  fenced by the member's exact incarnation) and
+  `ReleaseMemberInstructionTarget` (`BridgeReleaseInstructionTargetPayload`,
+  served once no member holds the session), with the replies
+  `MemberInstructionTargetRecorded` and `MemberInstructionTargetReleased`
+  and the rejection cause `InstructionTargetRefused { code }`, which
+  carries the closed refusal code. The member host serves them through its
+  own session service, without waking the member and without holding up
+  its other bridge commands. A member host that does not serve them refuses
+  them before any effect (`unsupported_protocol_version` before protocol 7,
+  `unsupported` for a protocol 7 host from before them), and the mob blocks
+  the member `member_host_unsupported`: no `HostFeatures` probe is asked
+  first. `InstructionRecordDisposition` and `InstructionReleaseDisposition`
+  (meerkat-core) derive a JSON schema under the `schema` feature.
+
 ### Changed
 
 - Docs: instruction activations (`session/activate_instruction`) are
@@ -127,8 +163,15 @@ them.
   before its runtime was composed governed are still delivered to its
   members.
 
-- `meerkat-mob`: a placed member (one on another host) is reported blocked
-  (`member_host_unsupported`); operator instructions do not reach it.
+- `meerkat-mob`: in a mob whose member hosts run different releases, a
+  placed member whose member host runs a release before 0.9.11 answers
+  `member_host_unsupported` (status `blocked`) until its host runs 0.9.11:
+  the host refuses the record before any effect and nothing is recorded,
+  and the member stays blocked until a write selects it again or it is
+  seated again after the upgrade. The status read does not read a placed
+  member's session on its member host: its delivery facts are the mob's,
+  and its `effective_read` is `unreadable`, with the member host named in
+  the reason.
 
 ## [0.9.10] - 2026-11-04
 

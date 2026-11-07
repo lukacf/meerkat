@@ -1439,12 +1439,14 @@ replace_in_arm("AdoptLegacyIdentityEntryAdopted",
                "FALSE")
 PY
 
-  # A Created entry answers the adoption as already an entry (its call of
-  # the adoption's verdict rule takes any entry as a declared one).
+  # A Created entry answers the adoption as already an entry (its
+  # declared_entry guard and its call of the adoption's verdict rule take
+  # any entry as a declared one: the guard, which the arm checks first, is
+  # the rule's own declared argument, so both copies go).
   mutate names already_entry_over_created "Invariant AuditNamesAdoptionExactlyOne" <<'PY'
 replace_in_arm("AdoptLegacyIdentityEntryAlreadyAnEntry",
                '((IF (agent_identity \\in DOMAIN identity_entry_origins) THEN Some((IF agent_identity \\in DOMAIN identity_entry_origins THEN identity_entry_origins[agent_identity] ELSE "None")) ELSE None) = Some("Declared"))',
-               "TRUE")
+               "TRUE", count=2)
 PY
 
   # The agent lane admits an unreadable name (its name_readable guard

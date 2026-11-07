@@ -17611,8 +17611,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `legacy_adoption_verdict`
   - `listed`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17621,8 +17623,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `legacy_adoption_verdict`
   - `unlisted`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17631,6 +17635,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
+  - `member_seated`
+  - `observed_incarnation_current`
   - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
@@ -17640,6 +17646,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
+  - `member_seated`
+  - `observed_incarnation_current`
   - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
@@ -17649,8 +17657,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `legacy_adoption_verdict`
   - `entry_free_name`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
@@ -17659,6 +17669,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
+  - `member_seated`
   - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
@@ -17668,6 +17679,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
+  - `member_not_seated`
   - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
@@ -17677,6 +17689,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
+  - `declared_entry`
   - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
@@ -17686,8 +17699,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
-  - `legacy_adoption_verdict`
   - `other_custody_or_reserved_name`
+  - `legacy_adoption_verdict`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 

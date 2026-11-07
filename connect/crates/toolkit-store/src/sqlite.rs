@@ -11,13 +11,14 @@ use std::time::Duration;
 /// copying the database does not extend its executor fence to another copy.
 #[derive(Clone)]
 pub struct SqliteStore {
-    connection: Arc<Mutex<OwnedConnection>>,
+    connection: Arc<Mutex<Option<OwnedConnection>>>,
     store_id: String,
     record_publication: Option<Arc<dyn RecordChangePublication>>,
 }
 
 // Entered blocking work retains this same Arc, including physical custody,
 // after its awaiting caller or last public store handle has been dropped.
+// The slot is emptied only by the store's release, which waits for that work.
 struct OwnedConnection {
     connection: Connection,
     _physical_owner: File,
@@ -79,8 +80,9 @@ impl SqliteStore {
 
     /// Open this installed application's existing database with exclusive
     /// physical custody and its actual owner's publication. The guard spans all
-    /// clones and entered blocking work. A competing supported handle refuses
-    /// to open while this owner exists. Raw SQL is outside this host contract.
+    /// clones and entered blocking work, until [`Self::release_custody`] ends
+    /// it. A competing supported handle refuses to open while this owner
+    /// exists. Raw SQL is outside this host contract.
     pub fn open_existing_published(
         path: impl AsRef<Path>,
         publication: Arc<dyn RecordChangePublication>,
@@ -102,6 +104,35 @@ impl SqliteStore {
         self.record_publication
             .as_ref()
             .is_some_and(|bound| Arc::ptr_eq(bound, publication))
+    }
+
+    /// End this opened store's physical custody, for every clone of it: once
+    /// any blocking work already entered on the connection ends, close the
+    /// connection and the physical owner file, which releases the owner's
+    /// lock. From then on every operation through any clone answers
+    /// [`StoreError::OwnerUnavailable`] without touching the database, so a
+    /// task that still holds a clone can no longer read or change it, and the
+    /// same database opens again at once. Nothing committed changes. A second
+    /// call changes nothing.
+    ///
+    /// The host's close calls it after the host's last legitimate change.
+    ///
+    /// # Errors
+    /// [`StoreError::Worker`] when the blocking release could not run; the
+    /// custody then ends when the last clone and the entered work drop.
+    pub async fn release_custody(&self) -> StoreResult<()> {
+        let connection = self.connection.clone();
+        tokio::task::spawn_blocking(move || {
+            // Poisoned by a panicked operation, the connection is still
+            // closed: SQLite rolls back an unfinished transaction.
+            let released = match connection.lock() {
+                Ok(mut slot) => slot.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            drop(released);
+        })
+        .await
+        .map_err(|_| StoreError::Worker)
     }
 
     fn open_mode(
@@ -189,10 +220,10 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(OwnedConnection {
+            connection: Arc::new(Mutex::new(Some(OwnedConnection {
                 connection,
                 _physical_owner: physical_owner,
-            })),
+            }))),
             store_id,
             record_publication: publication,
         })
@@ -201,6 +232,8 @@ impl SqliteStore {
     /// Blocking SQLite work never holds an async runtime thread. Cancellation of
     /// an awaiting caller does not roll back a transaction that already committed;
     /// callers reconcile by admission key, revision and effect ID after loss.
+    /// After [`Self::release_custody`] nothing runs: the store's owner is
+    /// unavailable.
     async fn with<T: Send + 'static>(
         &self,
         action: impl FnOnce(&mut Connection, &str) -> StoreResult<T> + Send + 'static,
@@ -208,8 +241,9 @@ impl SqliteStore {
         let connection = self.connection.clone();
         let store_id = self.store_id.clone();
         tokio::task::spawn_blocking(move || {
-            let mut connection = connection.lock().map_err(|_| StoreError::Synchronization)?;
-            action(&mut connection.connection, &store_id)
+            let mut slot = connection.lock().map_err(|_| StoreError::Synchronization)?;
+            let owned = slot.as_mut().ok_or(StoreError::OwnerUnavailable)?;
+            action(&mut owned.connection, &store_id)
         })
         .await
         .map_err(|_| StoreError::Worker)?

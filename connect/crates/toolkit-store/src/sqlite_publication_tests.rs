@@ -248,17 +248,6 @@ async fn conflicting_cas_does_not_publish_but_failed_actual_update_invalidates_o
     assert_eq!(owner.get(&prior.key).await.unwrap(), Some(prior));
 }
 
-/// RED stand-in for the custody release this change adds: before it, the
-/// host's close leaves the store's custody as it is.
-trait ReleaseCustodyAtBase {
-    async fn release_custody(&self) -> StoreResult<()>;
-}
-impl ReleaseCustodyAtBase for SqliteStore {
-    async fn release_custody(&self) -> StoreResult<()> {
-        Ok(())
-    }
-}
-
 /// An installed store whose host closed while a task of that host still
 /// holds a clone of it: the release hands the physical owner back at once,
 /// so the same database opens again; the clone's next read or write is

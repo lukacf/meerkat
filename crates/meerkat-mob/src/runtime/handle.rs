@@ -1540,12 +1540,7 @@ pub enum MemberPreviewUnavailable {
     /// reopened (a host store whose scope of the session, or whose realm,
     /// is poisoned). The refusal is recorded: later status reads answer from
     /// it without reading the session again, and a wait on the member ends
-    /// with it ([`MobHandle::wait_one`]).
-    ///
-    /// Its wire value is `read_failed`, the value a client that predates it
-    /// knows: it serializes as `read_failed`, and nothing deserializes into
-    /// it.
-    #[serde(rename(serialize = "read_failed"), skip_deserializing)]
+    /// with it ([`MobHandle::wait_one`]). Its wire value is `store_refused`.
     StoreRefused,
 }
 
@@ -1813,7 +1808,7 @@ fn wire_registration_hook_call(
     }
 }
 
-/// Project a domain [`MemberPreviewUnavailable`] into its closed wire twin.
+/// Project a domain [`MemberPreviewUnavailable`] into its wire twin.
 fn wire_preview_unavailable(
     marker: MemberPreviewUnavailable,
 ) -> meerkat_contracts::WireMemberPreviewUnavailable {
@@ -1821,10 +1816,11 @@ fn wire_preview_unavailable(
         MemberPreviewUnavailable::ObservationDeadline => {
             meerkat_contracts::WireMemberPreviewUnavailable::ObservationDeadline
         }
-        // A store refusal until the realm reopens is a failed read on the
-        // wire, whose closed vocabulary has no value of its own for it.
-        MemberPreviewUnavailable::ReadFailed | MemberPreviewUnavailable::StoreRefused => {
+        MemberPreviewUnavailable::ReadFailed => {
             meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+        }
+        MemberPreviewUnavailable::StoreRefused => {
+            meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused
         }
         MemberPreviewUnavailable::SessionAbsent => {
             meerkat_contracts::WireMemberPreviewUnavailable::SessionAbsent
@@ -22266,30 +22262,37 @@ mod tests {
     use super::*;
     use crate::ids::Generation;
 
-    /// A store refusal of a member's session read is a typed marker for Rust
-    /// callers and the existing `read_failed` on every wire: the closed wire
-    /// enum maps it there, the domain marker serializes as it in snapshot
-    /// JSON, and `read_failed` reads back as `ReadFailed`, never as the new
-    /// marker. The refusal itself never leaves the process in a snapshot.
+    /// A store refusal of a member's session read has its own wire value,
+    /// `store_refused`: the wire enum maps it there, the domain marker
+    /// serializes as it in snapshot JSON and reads back as it, and
+    /// `read_failed` still reads as `ReadFailed`. The refusal itself never
+    /// leaves the process in a snapshot.
     #[test]
-    fn a_store_refused_preview_is_read_failed_on_the_wire() {
+    fn a_store_refused_preview_is_store_refused_on_the_wire() {
         assert_eq!(
             wire_preview_unavailable(MemberPreviewUnavailable::StoreRefused),
-            meerkat_contracts::WireMemberPreviewUnavailable::ReadFailed
+            meerkat_contracts::WireMemberPreviewUnavailable::StoreRefused
+        );
+        assert_eq!(
+            serde_json::to_value(wire_preview_unavailable(
+                MemberPreviewUnavailable::StoreRefused
+            ))
+            .expect("serialize"),
+            serde_json::json!("store_refused")
         );
         assert_eq!(
             serde_json::to_value(MemberPreviewUnavailable::StoreRefused).expect("serialize"),
-            serde_json::json!("read_failed")
+            serde_json::json!("store_refused")
+        );
+        assert_eq!(
+            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("store_refused"))
+                .expect("deserialize"),
+            MemberPreviewUnavailable::StoreRefused
         );
         assert_eq!(
             serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("read_failed"))
                 .expect("deserialize"),
             MemberPreviewUnavailable::ReadFailed
-        );
-        assert!(
-            serde_json::from_value::<MemberPreviewUnavailable>(serde_json::json!("store_refused"))
-                .is_err(),
-            "no wire value reads as the store refusal"
         );
     }
 

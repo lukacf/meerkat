@@ -879,13 +879,14 @@ impl MetaRuntimeHandle {
         self.gating_escalation_routes = routes;
     }
 
-    /// Decide as `request.approver_id`. For trusted embedding hosts and
-    /// unauthenticated local consoles, where the caller vouches for that id.
+    /// Decide as `request.approver_id`. For trusted embedding hosts and the
+    /// host's stdio RPC gateway, where the caller vouches for that id; the
+    /// decision records device trust.
     pub fn decide_gating_action(
         &mut self,
         request: GatingDecideRequest,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, None);
+        let result = self.decide_gating_action_as(request, None, None);
         self.flush_gating_notices();
         result
     }
@@ -894,13 +895,14 @@ impl MetaRuntimeHandle {
     /// ignored. A requested approver must be the principal or an approver id
     /// the principal holds, and the decision records both. The generic gate
     /// keeps its self-approval prohibition, checked against the principal and
-    /// every held id.
+    /// every held id. The host vouches for the principal, so the decision
+    /// records device trust.
     pub fn decide_gating_action_for(
         &mut self,
         request: GatingDecideRequest,
         decider: &GatingDecider,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
-        let result = self.decide_gating_action_as(request, Some(decider));
+        let result = self.decide_gating_action_as(request, Some(decider), None);
         self.flush_gating_notices();
         result
     }
@@ -913,7 +915,8 @@ impl MetaRuntimeHandle {
     /// Hold the fence that `authorize` reads
     /// across this whole call so revocation cannot land between the check
     /// and the mutation. Resolution notices are returned undelivered:
-    /// deliver them after releasing the fence and the owner.
+    /// deliver them after releasing the fence and the owner. Without the
+    /// console's attestation the decision records device trust.
     pub fn decide_gating_action_authorized<E>(
         &mut self,
         request: GatingDecideRequest,
@@ -922,10 +925,37 @@ impl MetaRuntimeHandle {
         Result<Result<GatingDecisionResult, GatingDecideError>, E>,
         GatingNoticeBatch,
     ) {
+        self.decide_gating_action_fenced(request, None, authorize)
+    }
+
+    /// [`Self::decide_gating_action_authorized`] for a decider whose
+    /// authentication the caller attests: the decision's audit entry records
+    /// `evidence` beside the deciding principal.
+    pub(crate) fn decide_gating_action_attested<E>(
+        &mut self,
+        request: GatingDecideRequest,
+        evidence: &GatingDecisionEvidence,
+        authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
+    ) -> (
+        Result<Result<GatingDecisionResult, GatingDecideError>, E>,
+        GatingNoticeBatch,
+    ) {
+        self.decide_gating_action_fenced(request, Some(evidence), authorize)
+    }
+
+    fn decide_gating_action_fenced<E>(
+        &mut self,
+        request: GatingDecideRequest,
+        evidence: Option<&GatingDecisionEvidence>,
+        authorize: impl FnOnce(Option<&GatingPendingEntry>) -> Result<GatingDecider, E>,
+    ) -> (
+        Result<Result<GatingDecisionResult, GatingDecideError>, E>,
+        GatingNoticeBatch,
+    ) {
         self.refresh_gating_timeouts();
         let pending = self.gating_pending.get(request.pending_id.trim()).cloned();
         let result = authorize(pending.as_ref())
-            .map(|decider| self.decide_gating_action_as(request, Some(&decider)));
+            .map(|decider| self.decide_gating_action_as(request, Some(&decider), evidence));
         (result, self.take_gating_notices())
     }
 
@@ -945,6 +975,7 @@ impl MetaRuntimeHandle {
         &mut self,
         request: GatingDecideRequest,
         decider: Option<&GatingDecider>,
+        evidence: Option<&GatingDecisionEvidence>,
     ) -> Result<GatingDecisionResult, GatingDecideError> {
         let now_ms = current_time_ms();
         self.refresh_gating_timeouts_at(now_ms);
@@ -1071,6 +1102,29 @@ impl MetaRuntimeHandle {
             }
         };
         let decided_at_ms = now_ms;
+        let mut detail = serde_json::json!({
+            "approver_id": approver_id,
+            "deciding_principal": decider.map(|decider| decider.principal.clone()),
+            "approver_binding": approver_binding,
+            "decision": decision,
+            "reason": reason,
+            "approval_route_id": pending_entry.approval_route_id,
+            "approval_delivery_id": pending_entry.approval_delivery_id,
+            "next_pending_id": next_pending_id,
+            "origin": pending_entry.origin,
+        });
+        match evidence {
+            Some(evidence) => {
+                detail["deciding_assurance"] = serde_json::json!(evidence.assurance);
+                detail["login_scope_digest"] = serde_json::json!(evidence.login_scope_digest);
+            }
+            // A decision no console attested is the host's own (its stdio
+            // RPC gateway, an embedding host): device trust, never a person.
+            None => {
+                detail["deciding_assurance"] =
+                    serde_json::json!(meerkat_core::ApprovalAssurance::DeviceTrusted);
+            }
+        }
         self.append_gating_audit(GatingAuditEntry {
             audit_id: String::new(),
             timestamp_ms: 0,
@@ -1080,17 +1134,7 @@ impl MetaRuntimeHandle {
             actor_id: pending_entry.actor_id.clone(),
             risk_tier: pending_entry.risk_tier.clone(),
             outcome: outcome.clone(),
-            detail: serde_json::json!({
-                "approver_id": approver_id,
-                "deciding_principal": decider.map(|decider| decider.principal.clone()),
-                "approver_binding": approver_binding,
-                "decision": decision,
-                "reason": reason,
-                "approval_route_id": pending_entry.approval_route_id,
-                "approval_delivery_id": pending_entry.approval_delivery_id,
-                "next_pending_id": next_pending_id,
-                "origin": pending_entry.origin,
-            }),
+            detail,
         })
         .map_err(GatingDecideError::IdsUnavailable)?;
         self.gating_notice_queue.push(GatingResolutionNotice {
@@ -1297,6 +1341,66 @@ mod gating_identity_tests {
             })
         );
         assert_eq!(owner.list_gating_pending(), before);
+    }
+
+    /// A decision made on the host's own pipe (the stdio gateway's
+    /// `meta/gating/decide`, or an embedding host deciding as a principal it
+    /// authenticated) records device trust, never a person, and no login.
+    #[test]
+    fn host_decisions_record_device_trust() {
+        let mut owner = owner();
+        let stdio = owner
+            .evaluate_gating_action(r3())
+            .pending_id
+            .expect("pends");
+        let answer: Value = serde_json::from_str(&crate::handle_meta_rpc_json(
+            &mut owner,
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "meta/gating/decide",
+                "params": { "pending_id": stdio, "approver_id": "operator", "decision": "approve" },
+            })
+            .to_string(),
+            Duration::from_secs(1),
+        ))
+        .expect("response");
+        assert!(answer["error"].is_null(), "{answer}");
+        let host = owner
+            .evaluate_gating_action(r3())
+            .pending_id
+            .expect("pends");
+        owner
+            .decide_gating_action_for(
+                GatingDecideRequest {
+                    pending_id: host.clone(),
+                    approver_id: String::new(),
+                    decision: GatingDecision::Approve,
+                    reason: None,
+                },
+                &GatingDecider {
+                    principal: "host-operator".to_string(),
+                    ..GatingDecider::default()
+                },
+            )
+            .expect("the host decides");
+        let audit = owner.gating_state_snapshot().audit;
+        for pending_id in [stdio, host] {
+            let entry = audit
+                .iter()
+                .find(|entry| {
+                    entry.event_type == "approval_decided"
+                        && entry.pending_id.as_deref() == Some(pending_id.as_str())
+                })
+                .unwrap_or_else(|| panic!("the decision of {pending_id}"));
+            assert_eq!(
+                entry.detail["deciding_assurance"],
+                serde_json::json!("device_trusted"),
+                "{entry:?}"
+            );
+            assert!(
+                entry.detail.get("login_scope_digest").is_none(),
+                "{entry:?}"
+            );
+        }
     }
 
     #[test]

@@ -193,6 +193,19 @@ pub enum HttpAuthorizationResponseAction {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HttpAuthorizationContent {
     pub has_images: bool,
+    /// Who the request continues: the user, or the agent's own work.
+    pub initiator: HttpRequestInitiator,
+}
+
+/// Who a provider request continues.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HttpRequestInitiator {
+    /// A new step of the conversation: the request's last input is a user
+    /// message, or it has no input yet.
+    #[default]
+    User,
+    /// The agent continuing its own work.
+    Agent,
 }
 
 /// Dynamic authorizer trait. Used when auth artifacts need to be computed

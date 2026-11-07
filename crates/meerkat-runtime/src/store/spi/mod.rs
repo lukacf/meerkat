@@ -128,6 +128,23 @@ pub enum SpiError {
     /// call changed nothing.
     #[error("host store lease is not live: {0}")]
     LeaseLapsed(String),
+    /// A commit stopped settling its batch when the self-fence window of the
+    /// fence token the batch carries closed: Core sends no batch past that
+    /// window, since the token's lease at the store may have ended by then.
+    /// The batch was sent `attempts` times, `last` answering the last of them
+    /// (`None`: it was never sent), so it may or may not have landed. The
+    /// scopes it touched are poisoned like those of any batch whose outcome
+    /// stays unknown; the realm keeps its fence.
+    #[error(
+        "host store batch is unsettled: the self-fence window of fence token {token} closed \
+         (attempts sent: {attempts}{})",
+        LastAnswer(.last.as_ref())
+    )]
+    UnsettledAtFenceWindow {
+        token: FenceToken,
+        attempts: u32,
+        last: Option<HostStoreError>,
+    },
     /// The host store failed.
     #[error("host store: {0}")]
     Host(#[from] HostStoreError),
@@ -153,11 +170,13 @@ pub enum SpiError {
 impl SpiError {
     /// The error a mutating store call answers. A poisoned realm or scope
     /// answers its typed refusal ([`RuntimeStoreError::RealmRefused`] or
-    /// [`RuntimeStoreError::ScopeRefused`]).
+    /// [`RuntimeStoreError::ScopeRefused`]), and a batch left unsettled when
+    /// its fence window closed answers
+    /// [`RuntimeStoreError::UnsettledAtFenceWindow`].
     #[must_use]
     pub fn into_write(self) -> RuntimeStoreError {
-        match self.into_refusal() {
-            Ok(refusal) => refusal,
+        match self.into_typed() {
+            Ok(typed) => typed,
             Err(other) => RuntimeStoreError::WriteFailed(other.to_string()),
         }
     }
@@ -169,11 +188,13 @@ impl SpiError {
     /// data that does not decode or fails the host's own integrity check as
     /// [`RuntimeStoreError::Corrupt`], so a reader can tell a refusal that
     /// lasts until the realm reopens and an outage a later read may get past
-    /// from state that needs a repair.
+    /// from state that needs a repair. A read that changed memory commits
+    /// like a write, and a batch it left unsettled when its fence window
+    /// closed answers [`RuntimeStoreError::UnsettledAtFenceWindow`].
     #[must_use]
     pub fn into_read(self) -> RuntimeStoreError {
-        match self.into_refusal() {
-            Ok(refusal) => refusal,
+        match self.into_typed() {
+            Ok(typed) => typed,
             Err(error @ Self::Host(HostStoreError::Unavailable(_))) => {
                 RuntimeStoreError::Unavailable(error.to_string())
             }
@@ -181,6 +202,21 @@ impl SpiError {
                 RuntimeStoreError::Corrupt(error.to_string())
             }
             Err(other) => RuntimeStoreError::ReadFailed(other.to_string()),
+        }
+    }
+
+    /// The typed error a read and a write both answer: a refusal until the
+    /// realm is reopened ([`Self::into_refusal`]), or a batch left unsettled
+    /// when its fence window closed. Any other error comes back unchanged.
+    fn into_typed(self) -> Result<RuntimeStoreError, Self> {
+        match self.into_refusal() {
+            Ok(refusal) => Ok(refusal),
+            Err(error @ Self::UnsettledAtFenceWindow { .. }) => {
+                Ok(RuntimeStoreError::UnsettledAtFenceWindow {
+                    cause: error.to_string(),
+                })
+            }
+            Err(other) => Err(other),
         }
     }
 
@@ -201,6 +237,19 @@ impl SpiError {
                     .collect(),
             }),
             other => Err(other),
+        }
+    }
+}
+
+/// The last answer of a [`SpiError::UnsettledAtFenceWindow`] batch, when it
+/// was sent.
+struct LastAnswer<'a>(Option<&'a HostStoreError>);
+
+impl std::fmt::Display for LastAnswer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(last) => write!(f, "; last answer: {last}"),
+            None => Ok(()),
         }
     }
 }

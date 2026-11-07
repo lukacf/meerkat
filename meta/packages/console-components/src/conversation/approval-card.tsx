@@ -42,6 +42,9 @@ export interface ApprovalCardProps {
   resourceStatus: PendingApprovalSnapshot["status"];
   decision?: ApprovalDecisionState;
   readOnly?: boolean;
+  /** Why the card is read-only, when known: `sign_in` names what lets the
+   *  caller decide (only a signed-in person decides). */
+  readOnlyReason?: PendingApprovalSnapshot["readOnlyReason"];
   /** Host pages where a read-only session's decision is made instead. */
   decideLinks?: readonly HostDecideLink[];
   onDecide(pendingId: string, action: ApprovalAction): void | Promise<void>;
@@ -187,7 +190,7 @@ function AskedLine({ request, waiting, testId }: { request: PendingApproval; wai
 }
 
 /** The same request and decision owner can feed an inbox and several panes. */
-export function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }: ApprovalCardProps) {
+export function ApprovalCard({ request, resourceStatus, decision, readOnly = false, readOnlyReason, decideLinks, onDecide }: ApprovalCardProps) {
   const now = useApprovalClock([request.deadlineAtMs]);
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
@@ -278,7 +281,9 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
           Escalated to a new request <TechnicalId value={decision.result.next_pending_id} label="Request ID" />
         </Notice>
       ) : null}
-      {readOnly && !hostDecide ? <Notice tone="locked">Read-only access</Notice> : null}
+      {readOnly && !hostDecide ? (
+        <Notice tone="locked">{readOnlyReason === "sign_in" ? "Sign in as yourself to decide" : "Read-only access"}</Notice>
+      ) : null}
       {resourceStatus === "forbidden" ? <Notice tone="locked">Approval access denied</Notice> : null}
       <footer className="cc-approval__footer">
         <span className="cc-approval__status" role="status">

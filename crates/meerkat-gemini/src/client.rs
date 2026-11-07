@@ -915,33 +915,64 @@ impl GeminiClient {
         }
     }
 
+    /// `request` signed for `url`: the authorizer's headers when the client
+    /// has one, else the API key (`x-goog-api-key`), every value marked
+    /// sensitive ([`http::sensitive_header_value`]).
+    async fn sign_request(
+        &self,
+        request: reqwest::RequestBuilder,
+        method: &str,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        match &self.authorizer {
+            Some(authorizer) => {
+                Self::authorizer_signed(authorizer.as_ref(), request, method, url).await
+            }
+            None => Ok(request.header(
+                "x-goog-api-key",
+                http::sensitive_header_value(&self.api_key)?,
+            )),
+        }
+    }
+
+    /// `request` with the headers `authorizer` supplies for `url`.
+    async fn authorizer_signed(
+        authorizer: &dyn meerkat_core::HttpAuthorizer,
+        mut request: reqwest::RequestBuilder,
+        method: &str,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        let mut extra: Vec<(String, String)> = Vec::new();
+        authorizer
+            .authorize(&mut meerkat_core::HttpAuthorizationRequest {
+                method,
+                url,
+                headers: &mut extra,
+            })
+            .await
+            .map_err(|e| LlmError::AuthenticationFailed {
+                message: format!("gemini authorizer failed: {e}"),
+            })?;
+        for (name, value) in extra {
+            request = request.header(name, http::sensitive_header_value(&value)?);
+        }
+        Ok(request)
+    }
+
     async fn post_gemini_json(
         &self,
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, LlmError> {
-        let mut req = self
-            .http()?
-            .post(endpoint)
-            .header("Content-Type", "application/json");
-        if let Some(authorizer) = &self.authorizer {
-            let mut extra: Vec<(String, String)> = Vec::new();
-            let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-                method: "POST",
-                url: endpoint,
-                headers: &mut extra,
-            };
-            authorizer.authorize(&mut auth_req).await.map_err(|e| {
-                LlmError::AuthenticationFailed {
-                    message: format!("gemini authorizer failed: {e}"),
-                }
-            })?;
-            for (name, value) in extra {
-                req = req.header(name, value);
-            }
-        } else {
-            req = req.header("x-goog-api-key", &self.api_key);
-        }
+        let req = self
+            .sign_request(
+                self.http()?
+                    .post(endpoint)
+                    .header("Content-Type", "application/json"),
+                "POST",
+                endpoint,
+            )
+            .await?;
         req.json(body)
             .send()
             .await
@@ -969,25 +1000,15 @@ impl GeminiClient {
                 message: "Gemini API gs:// video references require Google bearer auth for Files API registration; use the vertex_ai backend for direct gs:// references or pass a pre-registered file URI".to_string(),
             });
         };
-        let mut req = self
-            .http()?
-            .post(endpoint)
-            .header("Content-Type", "application/json");
-        let mut extra: Vec<(String, String)> = Vec::new();
-        let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-            method: "POST",
-            url: endpoint,
-            headers: &mut extra,
-        };
-        authorizer
-            .authorize(&mut auth_req)
-            .await
-            .map_err(|e| LlmError::AuthenticationFailed {
-                message: format!("gemini authorizer failed: {e}"),
-            })?;
-        for (name, value) in extra {
-            req = req.header(name, value);
-        }
+        let req = Self::authorizer_signed(
+            authorizer.as_ref(),
+            self.http()?
+                .post(endpoint)
+                .header("Content-Type", "application/json"),
+            "POST",
+            endpoint,
+        )
+        .await?;
         req.json(body)
             .send()
             .await
@@ -1003,22 +1024,13 @@ impl GeminiClient {
                 message: "Gemini API gs:// video references require Google bearer auth for Files API registration; use the vertex_ai backend for direct gs:// references or pass a pre-registered file URI".to_string(),
             });
         };
-        let mut req = self.http()?.get(endpoint);
-        let mut extra: Vec<(String, String)> = Vec::new();
-        let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-            method: "GET",
-            url: endpoint,
-            headers: &mut extra,
-        };
-        authorizer
-            .authorize(&mut auth_req)
-            .await
-            .map_err(|e| LlmError::AuthenticationFailed {
-                message: format!("gemini authorizer failed: {e}"),
-            })?;
-        for (name, value) in extra {
-            req = req.header(name, value);
-        }
+        let req = Self::authorizer_signed(
+            authorizer.as_ref(),
+            self.http()?.get(endpoint),
+            "GET",
+            endpoint,
+        )
+        .await?;
         req.send()
             .await
             .map_err(|_| LlmError::NetworkTimeout { duration_ms: 30000 })
@@ -2237,30 +2249,14 @@ impl GeminiClient {
             let http = self.http()?;
 
             // Auth path: if an authorizer is attached (Code Assist /
-            // Vertex ADC Bearer flow), collect its headers via the
-            // HttpAuthorizer trait; otherwise fall back to x-goog-api-key.
-            let mut req = http
-                .post(&url)
-                .header("Content-Type", "application/json");
-            if let Some(authorizer) = &self.authorizer {
-                let mut extra: Vec<(String, String)> = Vec::new();
-                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-                    method: "POST",
-                    url: &url,
-                    headers: &mut extra,
-                };
-                authorizer
-                    .authorize(&mut auth_req)
-                    .await
-                    .map_err(|e| LlmError::AuthenticationFailed {
-                        message: format!("gemini authorizer failed: {e}"),
-                    })?;
-                for (name, value) in extra {
-                    req = req.header(name, value);
-                }
-            } else {
-                req = req.header("x-goog-api-key", &self.api_key);
-            }
+            // Vertex ADC Bearer flow), its headers; otherwise x-goog-api-key.
+            let req = self
+                .sign_request(
+                    http.post(&url).header("Content-Type", "application/json"),
+                    "POST",
+                    &url,
+                )
+                .await?;
             let req = req.json(&body).build().map_err(|_| LlmError::InvalidRequest {
                 message: "could not construct model request".to_owned(),
             })?;
@@ -3127,6 +3123,57 @@ mod tests {
         fn label(&self) -> &'static str {
             "test-bearer"
         }
+    }
+
+    /// The credential header values a Gemini request carries are marked
+    /// sensitive, as on the other provider clients: an authorizer's
+    /// (`Authorization: Bearer ...`) and the static API key's
+    /// `x-goog-api-key`. The request's `Debug` output, and HTTP/2 header
+    /// compression, never keep the credential.
+    #[tokio::test]
+    async fn credential_header_values_are_sensitive() {
+        const KEY_CANARY: &str = "c4n4ryGeminiApiKey";
+        let url = "http://127.0.0.1:9/v1beta/models/gemini-test:streamGenerateContent";
+
+        let authorized =
+            GeminiClient::new(String::new()).with_authorizer(Arc::new(TestBearerAuthorizer));
+        let request = authorized
+            .sign_request(reqwest::Client::new().post(url), "POST", url)
+            .await
+            .expect("the authorizer signs the request")
+            .build()
+            .expect("the request builds");
+        let authorization = request
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("an Authorization header");
+        assert_eq!(authorization.to_str().ok(), Some("Bearer test-token"));
+        assert!(
+            authorization.is_sensitive(),
+            "the authorizer's Authorization value must be marked sensitive"
+        );
+        assert!(
+            !format!("{request:?}").contains("test-token"),
+            "{request:?}"
+        );
+
+        let keyed = GeminiClient::new(KEY_CANARY.to_string());
+        let request = keyed
+            .sign_request(reqwest::Client::new().post(url), "POST", url)
+            .await
+            .expect("the key signs the request")
+            .build()
+            .expect("the request builds");
+        let key = request
+            .headers()
+            .get("x-goog-api-key")
+            .expect("an x-goog-api-key header");
+        assert_eq!(key.to_str().ok(), Some(KEY_CANARY));
+        assert!(
+            key.is_sensitive(),
+            "the API key's x-goog-api-key value must be marked sensitive"
+        );
+        assert!(!format!("{request:?}").contains(KEY_CANARY), "{request:?}");
     }
 
     async fn gemini_image_stub(

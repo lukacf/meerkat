@@ -421,11 +421,11 @@ them.
   explicit thinking, and a forced call skips thinking on the models that
   accept one.
 
+### Deprecated
+
 - Docs: instruction activations (`session/activate_instruction`) are
   deprecated in favour of operator instructions (`session/set_instruction`).
   The method keeps working.
-
-### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
   `DurableDecisionService::claim_executor`, the whole-store executor claim of

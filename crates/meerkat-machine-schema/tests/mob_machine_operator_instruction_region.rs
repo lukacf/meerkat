@@ -14,7 +14,7 @@
 
 use meerkat_machine_schema::catalog::dsl::dsl_mob_machine;
 use meerkat_machine_schema::catalog::dsl::mob_machine::{
-    AgentIdentity, AgentRuntimeId, FenceToken, Generation, InstructionEffect,
+    AgentIdentity, AgentRuntimeId, FenceToken, Generation, HostId, InstructionEffect,
     InstructionTargetKind, MemberInstructionBlock, MemberInstructionDeferReason,
     MemberSessionDisposal, MobId, MobMachineAuthority, MobMachineEffect, MobMachineInput,
     MobMachineMutator, MobMachineSignal, MobMachineState, MobMachineTransition,
@@ -606,8 +606,7 @@ fn a_seat_after_a_write_owes_the_current_generation() {
 }
 
 /// A dormant member's delivery is prepared for its session at the current
-/// generation, and preparing it wakes nothing; a placed member is blocked
-/// until its host takes deliveries.
+/// generation, and preparing it wakes nothing.
 #[test]
 fn a_delivery_is_prepared_for_the_bound_session_and_wakes_nothing() {
     let mut authority = Authority::new();
@@ -643,6 +642,65 @@ fn a_delivery_is_prepared_for_the_bound_session_and_wakes_nothing() {
     );
     signal(&mut authority, record("dormant", 2));
     assert_eq!(recorded(&authority, "dormant"), Some(2));
+}
+
+/// A placed member's delivery is prepared exactly like a local member's: for
+/// the session bound to it (its session on its member host) at the current
+/// generation; the mob carries it to the host over the supervisor bridge.
+/// A member host that does not serve the record refuses it, and that
+/// feedback blocks the member `member_host_unsupported` until a write
+/// selects it again.
+#[test]
+fn a_placed_member_is_prepared_like_a_local_member() {
+    let mut authority = Authority::new();
+    seat(&mut authority, "placed", "alpha");
+    let mut state = authority.state().clone();
+    state
+        .member_placement
+        .insert(identity("placed"), HostId("host-1".to_string()));
+    let mut authority = Authority::recover_from_state(state)
+        .unwrap_or_else(|error| panic!("a placed member's state: {error}"));
+    signal(&mut authority, set(SLOT, 1, DIGEST_A, 10, Target::Mob));
+    let transition = signal(&mut authority, prepare("placed"));
+    assert_eq!(
+        transition.effects(),
+        [Effect::MemberInstructionDeliveryPrepared {
+            agent_identity: identity("placed"),
+            session_id: session_of("placed"),
+            generation: 1,
+        }]
+        .as_slice(),
+        "a placed member is prepared, not blocked"
+    );
+    assert_wakes_nothing(&transition);
+    assert_eq!(
+        owed(&authority, "placed"),
+        Some(1),
+        "preparing closes nothing"
+    );
+
+    let transition = signal(
+        &mut authority,
+        refuse("placed", 1, MemberInstructionBlock::MemberHostUnsupported),
+    );
+    assert_eq!(
+        transition.effects(),
+        [Effect::MemberInstructionTargetBlocked {
+            agent_identity: identity("placed"),
+            generation: 1,
+            block: MemberInstructionBlock::MemberHostUnsupported,
+        }]
+        .as_slice()
+    );
+    assert_eq!(owed(&authority, "placed"), None);
+    assert_eq!(recorded(&authority, "placed"), None);
+    signal(&mut authority, set(SLOT, 2, DIGEST_B, 10, Target::Mob));
+    assert_eq!(blocked(&authority, "placed"), None);
+    assert_eq!(owed(&authority, "placed"), Some(2));
+    signal(&mut authority, prepare("placed"));
+    signal(&mut authority, record("placed", 2));
+    assert_eq!(recorded(&authority, "placed"), Some(2));
+    assert_eq!(owed(&authority, "placed"), None);
 }
 
 /// An unborn seat is owed but not delivered until its session is born.

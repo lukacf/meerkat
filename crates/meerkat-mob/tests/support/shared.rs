@@ -2749,6 +2749,9 @@ pub struct ScriptedV7State {
     refuse_next_v7_materialize: bool,
     /// The `command` name of every request received, in order.
     command_kinds: Vec<String>,
+    /// The `command` name and the cause of every request this host refused,
+    /// in order.
+    rejections: Vec<(String, BridgeRejectionCause)>,
 }
 
 /// How a scripted host answers commands stamped above protocol V6.
@@ -3011,6 +3014,16 @@ impl ScriptedHostPeer {
     /// The `command` name of every request this host received, in order.
     pub fn received_command_kinds(&self) -> Vec<String> {
         self.v7_state().command_kinds.clone()
+    }
+
+    /// The causes this host refused requests of `command` with, in order.
+    pub fn rejection_causes(&self, command: &str) -> Vec<BridgeRejectionCause> {
+        self.v7_state()
+            .rejections
+            .iter()
+            .filter(|(kind, _)| kind == command)
+            .map(|(_, cause)| cause.clone())
+            .collect()
     }
 
     fn v7_state(&self) -> std::sync::MutexGuard<'_, ScriptedV7State> {
@@ -3553,16 +3566,16 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
 
                 // A command stamped above V6 gets the scripted V7
                 // answer before its payload is read.
+                let kind = params
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let mut v7_answer = {
                     let stamped = params
                         .get("protocol_version")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or_default();
-                    let kind = params
-                        .get("command")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
                     let mut v7 = responder_v7
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3942,6 +3955,15 @@ pub async fn spawn_scripted_host_peer(name: &str) -> ScriptedHostPeer {
                 let Some(reply_value) = reply_value else {
                     continue;
                 };
+                if let Ok(BridgeReply::Rejected { cause, .. }) =
+                    serde_json::from_value::<BridgeReply>(reply_value.clone())
+                {
+                    responder_v7
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .rejections
+                        .push((kind.clone(), cause));
+                }
 
                 let reply_route = candidate.ingress.route.clone().or_else(|| {
                     candidate

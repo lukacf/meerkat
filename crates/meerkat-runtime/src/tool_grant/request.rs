@@ -292,11 +292,11 @@ fn render_duration(duration_ms: u64) -> String {
     const SECOND: u64 = 1_000;
     const MINUTE: u64 = 60 * SECOND;
     const HOUR: u64 = 60 * MINUTE;
-    if duration_ms % HOUR == 0 {
+    if duration_ms.is_multiple_of(HOUR) {
         format!("{} h", duration_ms / HOUR)
-    } else if duration_ms % MINUTE == 0 {
+    } else if duration_ms.is_multiple_of(MINUTE) {
         format!("{} min", duration_ms / MINUTE)
-    } else if duration_ms % SECOND == 0 {
+    } else if duration_ms.is_multiple_of(SECOND) {
         format!("{} s", duration_ms / SECOND)
     } else {
         format!("{duration_ms} ms")

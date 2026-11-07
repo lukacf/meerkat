@@ -296,7 +296,7 @@ impl SessionRuntime {
                         decisions: self.decision_service(),
                         policy: ToolGrantRequestPolicy::default(),
                         requester,
-                    }))
+                    }));
             }
             Err(error) => {
                 tracing::warn!(%error, "the runtime's agents cannot be named; they take no grant requests");

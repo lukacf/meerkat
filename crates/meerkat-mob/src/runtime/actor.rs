@@ -61330,6 +61330,7 @@ impl MobActor {
             mut ack_mode,
             content_attribution,
             requester,
+            sender_label,
             governed_input,
         } = *payload;
         let dsl_expected_session_id = expected_session_id
@@ -61474,6 +61475,7 @@ impl MobActor {
                             ack_mode,
                             content_attribution,
                             requester,
+                            sender_label,
                             governed_input,
                         }),
                     });
@@ -68411,6 +68413,7 @@ mod routed_effect_containment_tests {
                 ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                 content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                 requester: None,
+                sender_label: None,
                 governed_input: None,
                 expected_session_id: None,
             })

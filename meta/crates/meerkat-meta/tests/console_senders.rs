@@ -13,6 +13,7 @@ use std::time::Duration;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use meerkat_client::TestClient;
+use meerkat_core::types::TranscriptUserRole;
 use meerkat_core::{Message, PrincipalKind, PrincipalRef, TrustDomainId, TurnRequester};
 use meerkat_meta::{
     AccessControlConfig, AccessController, AccessRule, AuthPolicy, BigQueryNaming, ConsolePolicy,
@@ -319,6 +320,115 @@ async fn requester_rows(runtime: &UnifiedRuntime, content: &str) -> Vec<Option<T
     .unwrap_or_else(|_| panic!("the member committed {content:?}"))
 }
 
+/// The text of the injected-context row right before the member's committed
+/// user row `content` (the sender label its turn carries), once the member
+/// committed that row; `None` when the row right before it is no
+/// injected-context row.
+async fn label_before_row(runtime: &UnifiedRuntime, content: &str) -> Option<String> {
+    let member = runtime
+        .mob_handle()
+        .get_member(&meerkat_mob::ids::AgentIdentity::from(MEMBER))
+        .await
+        .expect("roster read")
+        .expect("the member is listed");
+    let session = member
+        .bridge_session_id()
+        .expect("the member has a session")
+        .to_string();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let messages = runtime
+                .mob_runtime()
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("history read")
+                .messages;
+            let position = messages.iter().position(|message| {
+                matches!(message, Message::User(user)
+                    if user.transcript_role == TranscriptUserRole::Conversational
+                        && user.text_content() == content)
+            });
+            if let Some(index) = position {
+                return index
+                    .checked_sub(1)
+                    .and_then(|previous| match &messages[previous] {
+                        Message::User(user)
+                            if user.transcript_role == TranscriptUserRole::InjectedContext =>
+                        {
+                            Some(user.text_content())
+                        }
+                        _ => None,
+                    });
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the member committed {content:?}"))
+}
+
+/// `POST /console/send` with no `Authorization` header.
+async fn send_without_token(app: &axum::Router, content: &str, key: &str) -> (StatusCode, Value) {
+    json_of(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/console/send")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "identity": MEMBER,
+                            "content": content,
+                            "origin": "console",
+                            "idempotency_key": key,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("send request"),
+            )
+            .await
+            .expect("send response"),
+    )
+    .await
+}
+
+/// A person's token signed with a key the console does not trust.
+fn unverifiable_bearer(email: &str) -> String {
+    let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jwt_header.kid = Some("kid-current".to_string());
+    let token = jsonwebtoken::encode(
+        &jwt_header,
+        &json!({
+            "iss": ISSUER,
+            "aud": "meerkat-console",
+            "exp": chrono::Utc::now().timestamp() + 300,
+            "sub": subject_of(email),
+            "email": email,
+            "provider": "google_oauth",
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"a-key-the-console-does-not-trust"),
+    )
+    .expect("signed fixture token");
+    format!("Bearer {token}")
+}
+
+/// A console that admits everyone to view and send, as an open console
+/// needs to verify a volunteered token at all.
+fn everyone_views_and_sends() -> AccessController {
+    AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ADMIN.to_string()],
+        rules: vec![AccessRule {
+            id: "everyone-views-and-sends".to_string(),
+            actions: vec!["agent.view".to_string(), "agent.send".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("access controller")
+}
+
 /// Two people sending to one member of an Enforced console are two senders:
 /// each `user_input` frame names its own (kind, assurance, display name and
 /// caller scope, never the requester key), each turn's transcript rows name
@@ -509,6 +619,11 @@ async fn service_send_names_no_requester() {
         vec![None],
         "a service's run has no requester"
     );
+    assert_eq!(
+        label_before_row(&runtime, "from the robot").await,
+        None,
+        "a service's message carries no human sender label"
+    );
     let _ = runtime.shutdown().await;
 }
 
@@ -521,19 +636,7 @@ async fn open_console_person_send_names_no_requester() {
     let mut runtime = boot_with_member(state.path(), &mob_id("open")).await;
     // An open console verifies a volunteered token only with an access
     // controller; this one admits everyone to view and send.
-    runtime.set_access_controller(
-        AccessController::new(AccessControlConfig {
-            enabled: true,
-            admins: vec![ADMIN.to_string()],
-            rules: vec![AccessRule {
-                id: "everyone-views-and-sends".to_string(),
-                actions: vec!["agent.view".to_string(), "agent.send".to_string()],
-                ..AccessRule::default()
-            }],
-            ..AccessControlConfig::default()
-        })
-        .expect("access controller"),
-    );
+    runtime.set_access_controller(everyone_views_and_sends());
     let app = runtime.build_reference_app_router(decisions(false));
     let alice = person_bearer(ALICE);
     let alice_scope = caller_scope(&app, &alice).await;
@@ -557,6 +660,64 @@ async fn open_console_person_send_names_no_requester() {
         requester_rows(&runtime, "from alice on an open console").await,
         vec![None],
         "a run started from an open console has no requester"
+    );
+    assert_eq!(
+        label_before_row(&runtime, "from alice on an open console").await,
+        None,
+        "an open console labels no sender for the model"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// On an open console a send without a token, and one whose token does not
+/// verify, are an anonymous caller's: neither names a requester. (A verified
+/// person's governed send there is the host's binding to make.)
+#[tokio::test(flavor = "multi_thread")]
+async fn open_console_unverified_send_names_no_requester() {
+    let state = state_dir();
+    let mut runtime = boot_with_member(state.path(), &mob_id("open-unverified")).await;
+    runtime.set_access_controller(everyone_views_and_sends());
+    let app = runtime.build_reference_app_router(decisions(false));
+
+    let (status, sent) = send_without_token(&app, "from no token", "open-anonymous").await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let (status, sent) = send(
+        &app,
+        &unverifiable_bearer(ALICE),
+        "from an unverifiable token",
+        "open-unverifiable",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(
+        requester_rows(&runtime, "from no token").await,
+        vec![None],
+        "a send without a token names no requester"
+    );
+    assert_eq!(
+        requester_rows(&runtime, "from an unverifiable token").await,
+        vec![None],
+        "a send whose token does not verify names no requester"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// On a console that requires sign-in, a person's send reaches the member's
+/// model with its sender label: an injected-context row of its own right
+/// before the person's message, naming the sender as every viewer sees it.
+#[tokio::test(flavor = "multi_thread")]
+async fn person_send_carries_its_sender_label() {
+    let state = state_dir();
+    let runtime = boot_with_member(state.path(), &mob_id("label")).await;
+    let app = runtime.build_reference_app_router(decisions(true));
+
+    let (status, sent) = send(&app, &person_bearer(ALICE), "alice asks", "label-1", None).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(
+        label_before_row(&runtime, "alice asks").await.as_deref(),
+        Some(format!("Message from {ALICE}").as_str()),
+        "the person's message carries their sender label"
     );
     let _ = runtime.shutdown().await;
 }

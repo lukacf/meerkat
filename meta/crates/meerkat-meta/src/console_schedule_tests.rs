@@ -1559,6 +1559,47 @@ async fn turn_requester(
     .expect("the agent committed the scheduled send")
 }
 
+/// Whether the row right before the agent's committed user row `content` of
+/// `identity` is an injected-context row (a sender label), once the agent
+/// committed that row.
+async fn labelled_before(fixture: &Fixture, identity: &str, content: &str) -> bool {
+    let member = fixture
+        .runtime
+        .handle()
+        .get_member(&meerkat_mob::ids::AgentIdentity::from(identity))
+        .await
+        .expect("roster read")
+        .expect("the agent is listed");
+    let session = member
+        .bridge_session_id()
+        .expect("the agent has a session")
+        .to_string();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let messages = fixture
+                .runtime
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("history read")
+                .messages;
+            if let Some(index) = messages.iter().position(|message| {
+                matches!(message, meerkat_core::Message::User(user)
+                    if user.transcript_role == meerkat_core::types::TranscriptUserRole::Conversational
+                        && user.text_content() == content)
+            }) {
+                return index.checked_sub(1).is_some_and(|previous| {
+                    matches!(&messages[previous], meerkat_core::Message::User(user)
+                        if user.transcript_role
+                            == meerkat_core::types::TranscriptUserRole::InjectedContext)
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent committed the scheduled send")
+}
+
 /// A fire's input carries the schedule's sender as its requester on a
 /// console that requires sign-in: the person who last defined the schedule
 /// is the direct requester of the agent's turn, as of a live send of
@@ -1611,6 +1652,12 @@ async fn scheduled_fire_requester_is_schedule_sender() -> TestResult {
         turn_requester(&fixture, "alpha", "Post the morning summary.").await,
         Some(meerkat_core::TurnRequester::direct(erin)),
         "the fired turn's requester is the schedule's sender"
+    );
+    // A schedule's fire is no human message: its turn carries no sender
+    // label, although the console labels a person's own sends.
+    assert!(
+        !labelled_before(&fixture, "alpha", "Post the morning summary.").await,
+        "a schedule's fire carries no human sender label"
     );
     fixture.stop().await;
     Ok(())

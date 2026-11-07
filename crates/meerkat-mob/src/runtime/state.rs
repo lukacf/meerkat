@@ -429,6 +429,10 @@ pub(super) struct SubmitWorkPayload {
     /// (`WorkSpec::with_requester`). Shell dispatch carrier only: only host
     /// human input carries it, onto the member runtime's admitted input.
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The label naming the person who sent this work, for the member's
+    /// model (`WorkSpec::with_sender_label`). Shell dispatch carrier only:
+    /// only host human input carries it.
+    pub sender_label: Option<crate::ids::SenderLabel>,
     /// A caller-bound governed input realized for this work exactly as
     /// bound, in place of a turn built from `content`. Shell dispatch
     /// carrier only: the MobMachine admits the same identity facts as for

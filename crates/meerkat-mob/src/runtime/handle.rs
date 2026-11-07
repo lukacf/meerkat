@@ -4024,6 +4024,7 @@ fn submit_work_payload(
         ack_mode,
         content_attribution,
         requester: spec.requester,
+        sender_label: spec.sender_label,
         governed_input: None,
     }))
 }
@@ -13160,6 +13161,7 @@ impl MobHandle {
             // A governed input's requester is its own association's; the
             // member's native admission alone reads it.
             requester: None,
+            sender_label: None,
             // Governed input is bound to the session read above: the
             // admission refuses it if the member's binding moved since.
             expected_session_id: Some(session_id.clone()),

@@ -107,6 +107,15 @@ them.
   enum is exhaustive, so a downstream exhaustive match needs the new arm, or
   a wildcard arm.
 
+- Behaviour-only (not measured by the gate): `meerkat-runtime`,
+  `meerkat-mob`: the max age of a graceful stop that keeps queued work
+  (`UnregisterQueuedInputs::Requeue { max_age }`, `RequeueMaxAge`) is
+  measured from the stop that kept an input, not from the input's admission
+  (see Fixed). A kept input now runs at a start that comes within `max_age`
+  of that stop, however long before the stop it was admitted, so a host
+  that used `max_age` to bound how old an input may be when it runs must
+  bound that itself; see the upgrading guide.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the

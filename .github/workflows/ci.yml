@@ -3186,6 +3186,7 @@ jobs:
           python3 -m unittest -v
           scripts.test_package_connect_resources
           scripts.test_assemble_connect_product
+          scripts.test_release_payload_privacy_scan
 
       - name: Check documentation
         run: python3 scripts/check-docs.py

@@ -97,6 +97,8 @@ python3 scripts/connect-candidate.py assemble-cli \
   --candidate-work /absolute/retained/connect-candidate \
   --shutdown-review /absolute/review/native-shutdown-review.json \
   --shutdown-review-sha256 <exact-reviewed-record-sha256> \
+  --rules /absolute/private/release-privacy-rules.json \
+  --exemptions /absolute/private/release-privacy-exemptions.json \
   --output /absolute/new-cli-assembly
 ```
 
@@ -128,7 +130,10 @@ build record. It creates a separate final build record with the two evidence
 references, then invokes the existing assembler. The result is the existing
 `conversation_catalog_local_preparation_and_help_preview`, with
 `cli_tty_qualified: false`. It is neither a Forge gateway selection nor a public
-release, and it retains the assembler's existing exclusions.
+release, and it retains the assembler's existing exclusions. It then scans the
+assembled product and its `.sha256` file for private text (see "Scan the release
+payload for private text" below) and refuses a product that the scan refuses:
+that product is moved to `assembled.refused`, so nothing remains at `assembled`.
 
 These CI wrapper commands require the same retained producer directory through
 independent review and assembly. The existing records name absolute executable
@@ -152,6 +157,56 @@ Retain its actual CLI/rkat/test/resource identities, answers and cleanup beside
 the component preview. Neither these package tests nor an older successful
 journey qualifies different RC binaries. Autonomous live-model acceptance is a
 separate observation, not inferred from the controlled journey.
+
+## Scan the release payload for private text
+
+Every release file is scanned for private text before it is attested or
+uploaded. One engine does the matching and the container checks:
+`scripts/release-evidence-privacy-scan.py`, kept unchanged and pinned by its
+sha256 in `scripts/release-payload-privacy-scan.py`. The engine decodes nested
+containers four levels deep and does not unpack zstd. The wrapper walks each
+payload file with the engine's own traversal, and every container the engine
+does not enter (nested deeper than four levels, or zstd) becomes an extra
+artifact of the same engine run. The scan therefore reaches every level: a
+product archive, the integration library inside it, the wheels, crates and
+source archives inside the library, and what they hold.
+
+```sh
+python3 scripts/connect-candidate.py privacy-scan \
+  --rules /absolute/private/release-privacy-rules.json \
+  --exemptions /absolute/private/release-privacy-exemptions.json \
+  --accepted-findings /absolute/private/accepted-findings.json \
+  --output /absolute/new-privacy-scan \
+  /absolute/staged/<every file to attest or upload>
+```
+
+- The rules and exemptions are private and are never committed. Release mode
+  takes both on the command line and refuses without them; there is no default.
+- Scan every file that will be attested or uploaded: both product archives with
+  their `.sha256` files, the evidence and every other release asset. The
+  embedded integration library is reached through the product archives.
+- The scan fails closed. Any hit refuses, and so does any error the engine
+  reports (a container it cannot decode, a damaged or unsupported archive, a
+  member over its size bound, an unreadable input), unless an accepted finding
+  below covers it exactly. A member over the size bound and an unreadable input
+  are never accepted.
+- `--accepted-findings` is optional. Its entries (schema
+  `release-payload-privacy-scan/accepted/1`) are findings the release owner
+  accepts in exact bytes, such as a third-party file whose text happens to match
+  a rule. Each entry names a category, a rule id, the sha256 of the file that
+  holds the finding (or of a container that encloses it) and a one-line reason.
+  A structural error is accepted with the category `structure`, the engine's
+  error kind as the rule, and the sha256 of the container it was reported in.
+  The same finding in any other bytes refuses, and without the file nothing is
+  accepted. The file stays private, beside the rules.
+- `report.json` holds counts only: hits and errors, accepted and refused, by
+  category and kind, and each payload file's name, size and sha256.
+  `detail.json` holds the matched strings. It is private (mode 0600) and is
+  never uploaded.
+- CI runs only the tests (`scripts/test_release_payload_privacy_scan.py`), with
+  synthetic rules: a made-up marker in
+  `scripts/fixtures/release-payload-privacy-scan/`. CI does not scan release
+  bytes.
 
 ## Required inputs still unbound
 

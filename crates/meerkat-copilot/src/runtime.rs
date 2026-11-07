@@ -198,6 +198,19 @@ impl CopilotModelDiscoveryError {
         )
     }
 
+    /// Whether the listing could not answer now and a later one may, with no
+    /// change to the token or the account: GitHub rate limited it, or the
+    /// failure is worth an immediate retry ([`Self::worth_an_immediate_retry`]).
+    fn clears_on_its_own(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                rate_limited: true,
+                ..
+            }
+        ) || self.worth_an_immediate_retry()
+    }
+
     fn retry_delay(&self) -> StdDuration {
         match self {
             Self::Http {
@@ -310,6 +323,16 @@ struct CopilotExchangeUnavailable {
     /// the outage answers in place of the exchange, when the exchange sent
     /// `Retry-After` ([`exchange_not_before`]).
     not_before: Option<DateTime<Utc>>,
+}
+
+impl CopilotExchangeUnavailable {
+    /// The outage as a resolution sees it: a credential source that cannot
+    /// answer now, which clears on its own.
+    fn source_unavailable(&self) -> ProviderAuthError {
+        ProviderAuthError::Auth(AuthError::SourceUnavailable {
+            reason: self.message.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -1170,10 +1193,14 @@ impl CopilotRoutedClient {
     /// A Copilot authorization failure as a turn sees it: while the account's
     /// token exchange is temporarily unavailable and no token is left to
     /// serve, the exchange failure's retryable class; otherwise the
-    /// authorizer's own error.
+    /// authorizer's own error. The authorizer reports that outage as
+    /// `SourceUnavailable`, and any other failure it cannot type as
+    /// `RefreshFailed`.
     fn authorization_error(&self, error: AuthError) -> meerkat_llm_core::LlmError {
-        if matches!(error, AuthError::RefreshFailed(_))
-            && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
+        if matches!(
+            error,
+            AuthError::RefreshFailed(_) | AuthError::SourceUnavailable { .. }
+        ) && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
         {
             return retryable;
         }
@@ -1776,6 +1803,8 @@ struct CopilotRefreshOutcome {
 enum CopilotTokenError {
     /// The token exchange failed transiently and no valid token is left. The
     /// account recorded the outage; the next use tries the exchange again.
+    /// Carries the outage as `AuthError::SourceUnavailable`, a kind that
+    /// clears on its own.
     ExchangeUnavailable(ProviderAuthError),
     /// Every other failure, an account action included.
     Failed(ProviderAuthError),
@@ -2098,7 +2127,7 @@ impl CopilotAuthorizer {
         unavailable.not_before = unavailable
             .retry_after
             .map(|retry_after| exchange_not_before(now, retry_after));
-        let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
+        let error = unavailable.source_unavailable();
         let mut cache = self.state.cache.write();
         let Some(cached) = cache.as_mut() else {
             // No token was minted for this account yet. The outage is kept on
@@ -2251,11 +2280,7 @@ impl CopilotAuthorizer {
             && unavailable
                 .not_before
                 .is_some_and(|not_before| now < not_before))
-        .then(|| {
-            CopilotTokenError::ExchangeUnavailable(ProviderAuthError::SourceResolutionFailed(
-                unavailable.message.clone(),
-            ))
-        })
+        .then(|| CopilotTokenError::ExchangeUnavailable(unavailable.source_unavailable()))
     }
 
     fn fresh_cached(&self, source_generation: u64, now: DateTime<Utc>) -> Option<CachedTokenView> {
@@ -2843,9 +2868,7 @@ impl CopilotAuthorizer {
                 *self.state.pacing.identity_retry_at.lock() =
                     Some(operator_models_retry_at(error, discovery_now));
             }
-            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                "GitHub Copilot model listing failed: {error}"
-            ))));
+            return Err(operator_listing_failure(error));
         }
         let (models, model_discovery_refresh_at) = match models_result {
             Ok(snapshot) => (
@@ -3069,7 +3092,7 @@ impl CopilotAuthorizer {
             OperatorRefusal::RateLimited { until } => {
                 *self.state.pacing.identity_retry_at.lock() = Some(*until);
             }
-            OperatorRefusal::Refused(_) => {}
+            OperatorRefusal::Refused(_) | OperatorRefusal::Unavailable(_) => {}
         }
         refusal.into_provider_error()
     }
@@ -3278,6 +3301,14 @@ fn auth_error_from_refresh(error: RefreshError) -> AuthError {
             disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
             ..
         } => AuthError::UserReauthRequired,
+        // AuthMachine judged the failure transient: GitHub's token endpoint
+        // cannot answer now, and a later refresh can succeed.
+        classified @ RefreshError::Classified {
+            disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+            ..
+        } => AuthError::SourceUnavailable {
+            reason: classified.to_string(),
+        },
         other => AuthError::RefreshFailed(other.to_string()),
     }
 }
@@ -3423,6 +3454,10 @@ enum OperatorRefusal {
     Refused(String),
     /// GitHub rate limited the identity lookup until `until`.
     RateLimited { until: DateTime<Utc> },
+    /// GitHub could not answer the identity lookup now: a 5xx, a network
+    /// failure or a timeout. Not a credential fact, and nothing is paused:
+    /// the next request asks again.
+    Unavailable(String),
 }
 
 impl OperatorRefusal {
@@ -3431,7 +3466,7 @@ impl OperatorRefusal {
             Self::TokenRejected { status, message } => {
                 format!("GitHub refused this token ({status}): {message}")
             }
-            Self::Refused(detail) => detail.clone(),
+            Self::Refused(detail) | Self::Unavailable(detail) => detail.clone(),
             Self::RateLimited { until } => format!(
                 "GitHub rate limited the Copilot identity lookup until {}",
                 until.to_rfc3339()
@@ -3439,12 +3474,17 @@ impl OperatorRefusal {
         }
     }
 
+    /// A rate limit and an unavailable lookup clear on their own
+    /// (`source_unavailable`); a refusal of the identity needs the account
+    /// fixed (`refresh_failed`), and a refusal of the token a new token.
     fn into_provider_error(self) -> ProviderAuthError {
         match self {
             Self::TokenRejected { .. } => ProviderAuthError::Auth(AuthError::UserReauthRequired),
             Self::Refused(detail) => ProviderAuthError::Auth(AuthError::RefreshFailed(detail)),
-            refusal @ Self::RateLimited { .. } => {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(refusal.detail()))
+            refusal @ (Self::RateLimited { .. } | Self::Unavailable(_)) => {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable {
+                    reason: refusal.detail(),
+                })
             }
         }
     }
@@ -3478,7 +3518,15 @@ async fn lookup_operator_identity(
         .get(url.as_str(), headers)
         .await
         .map_err(|error| {
-            OperatorRefusal::Refused(format!("GitHub Copilot identity lookup failed: {error}"))
+            let detail = format!("GitHub Copilot identity lookup failed: {error}");
+            // A network failure or a timeout may pass; a refused redirect,
+            // an oversized answer or a missing HTTP client will not.
+            match error {
+                CopilotHttpTransportError::Request(_) | CopilotHttpTransportError::Timeout => {
+                    OperatorRefusal::Unavailable(detail)
+                }
+                _ => OperatorRefusal::Refused(detail),
+            }
         })?;
     if response.rate_limited {
         return Err(OperatorRefusal::RateLimited {
@@ -3519,6 +3567,13 @@ async fn lookup_operator_identity(
         status @ 400..=499 => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot refused this token ({status}): {}",
+                github_error_message(&response.body, token)
+            )));
+        }
+        // GitHub unavailable: the next request asks again.
+        status @ 500..=599 => {
+            return Err(OperatorRefusal::Unavailable(format!(
+                "GitHub Copilot identity lookup failed ({status}): {}",
                 github_error_message(&response.body, token)
             )));
         }
@@ -3879,14 +3934,24 @@ async fn verify_operator_token_with(
     match fetch_copilot_models(transport, config, &identity.api_base, token).await {
         Ok(_) => Ok(identity),
         Err(error) => Err(models_refusal(&error, identity.installation).map_or_else(
-            || {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                    "GitHub Copilot model listing failed: {error}"
-                )))
-            },
+            || operator_listing_failure(&error),
             OperatorRefusal::into_provider_error,
         )),
     }
+}
+
+/// A required model listing of an operator token that failed without
+/// refusing the token: one that may answer later (a rate limit, a 408, 502,
+/// 503 or 504, a network failure or a timeout) is a credential source that
+/// cannot answer now, which clears on its own; any other failure is
+/// `refresh_failed`.
+fn operator_listing_failure(error: &CopilotModelDiscoveryError) -> ProviderAuthError {
+    let reason = format!("GitHub Copilot model listing failed: {error}");
+    ProviderAuthError::Auth(if error.clears_on_its_own() {
+        AuthError::SourceUnavailable { reason }
+    } else {
+        AuthError::RefreshFailed(reason)
+    })
 }
 
 /// A Copilot API base: an `https` URL without user information.

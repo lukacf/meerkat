@@ -259,7 +259,10 @@ token Copilot rejects with a 401 is replaced on its next use, and the
 account's routes stay resolvable. Restoring or waking a session, or building
 one whose output budget is set explicitly or in the configuration, succeeds
 during such an outage on the account's last known model list; the first
-request then performs the exchange. An exchange 401, or a 403 that asks for an
+request then performs the exchange. Any other build fails during the outage
+as `source_unavailable`, a kind that clears on its own: a mob member whose
+session its first wake creates stays dormant through it, and a later
+delivery wakes it again. An exchange 401, or a 403 that asks for an
 account action, still needs a new sign-in.
 
 <Warning>
@@ -308,7 +311,9 @@ GitHub's identity lookup may not answer a fine-grained personal access token
 that the Copilot API accepts (it can answer 403 or 404). The route then uses
 the default Copilot API host, `https://api.githubcopilot.com`, with no login
 or plan, and only once the account's model list loads there: a token that
-cannot list the models is never used. A 401 or 403 from that list is Copilot
+cannot list the models is never used. A listing GitHub cannot answer now (a
+rate limit, a 408, 502, 503 or 504, a network failure or a timeout) fails the
+request as `source_unavailable`. A 401 or 403 from that list is Copilot
 refusing the token (a missing Copilot Requests permission or seat, a policy),
 not a revoked token: the request fails as `refresh_failed`, the same token is
 asked about again after a minute, and it works once that is fixed. Only the
@@ -460,9 +465,18 @@ What each refusal looks like:
 | GitHub refused the account's current token: revoked, expired or invalid (a 401 from the identity lookup, which a later model listing's 401 runs again; for a GitHub App installation token, a 401 from the model listing) | `user_reauth_required` | the `github_copilot` account is `reauth_required` until a different token value appears or the process restarts: an environment variable is read again on every request and a command or resolver at most once a minute, and a new token heals the account as soon as it is read; replace the token rather than signing in again |
 | GitHub refused an earlier token after the account published a newer one (a request still in flight with the earlier token, for example when two credential stores or provider registries share the account) | `stale_credential` | that request, and requests waiting on the same lookup, fail; the newer token stays valid and the next request uses it; nothing is paused |
 | Copilot refused the token: no seat, no Copilot Requests permission, an organization policy, chat disabled (for a user token, a 401 or 403 from the model listing, or a refusal from the identity lookup other than a 401) | `refresh_failed`, with GitHub's message | none: the same token works once that is fixed; when the identity lookup did not answer the token, the same token is asked about again after a minute, and another token at once |
-| Rate limited: a 429, or a 403 with `Retry-After`, with `x-ratelimit-remaining: 0` or whose message says a secondary rate limit was exceeded | `refresh_failed` | the identity lookup waits for the time GitHub states (`Retry-After`, else the limit's reset; a minute when GitHub states none, and never less than a minute or more than an hour), for every session of the account, and a command or resolver source is not run meanwhile; a rate-limited model listing fails nothing and is asked again after that time, except for a token the lookup does not answer, whose request fails and whose lookup waits the same way |
-| GitHub unavailable: the identity lookup answers a 5xx, times out or cannot connect | `refresh_failed` | none: the next request looks the account up again |
+| Rate limited: a 429, or a 403 with `Retry-After`, with `x-ratelimit-remaining: 0` or whose message says a secondary rate limit was exceeded | `source_unavailable` | the identity lookup waits for the time GitHub states (`Retry-After`, else the limit's reset; a minute when GitHub states none, and never less than a minute or more than an hour), for every session of the account, and a command or resolver source is not run meanwhile; a rate-limited model listing fails nothing and is asked again after that time, except for a token the lookup does not answer, whose request fails and whose lookup waits the same way |
+| GitHub unavailable: the identity lookup answers a 5xx, times out or cannot connect, or, for a token the lookup does not answer, the model listing meets a 408, 502, 503 or 504, a network failure or a timeout | `source_unavailable` | none: the next request looks the account up again |
 | Logged out (`rkat auth logout global:copilot_openai`) | `lease_absent` | until a different token value appears or the process restarts; meanwhile a command or resolver is read again at most once a minute, as after a refusal |
+
+`source_unavailable` says GitHub could not answer now; nothing was refused,
+and the same token works once GitHub answers again. Like
+`credential_store_unavailable` and `credential_access_pending`, it is a kind
+that clears on its own (`AuthErrorKind::clears_on_its_own`): a mob member
+whose session its first wake creates stays dormant through it, its waking
+caller gets the retryable `resume_gate_unavailable`, and a later delivery
+wakes it again. A provider authentication failure of any other kind breaks
+such a member.
 
 Which token value was refused or logged out is remembered only in the
 process's memory, by the account's AuthMachine lease. A restart, or any other
@@ -1111,6 +1125,11 @@ On resolve, the runtime:
    `expires_at`. On failure, `RefreshFailedTransient` (retry)
    or `RefreshFailedPermanent` (routes to `ReauthRequired` +
    emits an `[AUTH_REAUTH_REQUIRED]` system notice on the session).
+   The resolve that ran the refresh fails with the machine's verdict:
+   `source_unavailable` after a transient failure (a kind that clears on
+   its own: the next resolve refreshes again) and `user_reauth_required`
+   after a permanent one. A failure the machine did not classify stays
+   `refresh_failed`.
 
 The lifecycle is TLC-verified in `specs/machines/auth/`.
 

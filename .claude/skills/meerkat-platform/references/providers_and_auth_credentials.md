@@ -158,8 +158,10 @@ default_model = "my-deployment"     # the Azure deployment name
   valid token is left a turn fails with a retryable error the agent loop
   retries. A token Copilot rejects with a 401 is replaced on its next use. A
   session restore, a wake, or a build with a set output budget succeeds
-  during such an outage. An exchange 401, or a 403 that asks for an account
-  action, still needs a new sign-in.
+  during such an outage; any other build fails as `source_unavailable`, a
+  kind that clears on its own (a mob member whose first wake meets it stays
+  dormant and the next delivery wakes it). An exchange 401, or a 403 that
+  asks for an account action, still needs a new sign-in.
 - `bedrock_aws_sigv4`, `vertex_google_auth` and `foundry_azure_ad` are
   compiled only with the `meerkat-anthropic` features `bedrock`, `vertex` and
   `foundry`, and `adc` / `compute_adc` only with `meerkat-gemini/adc`; the
@@ -202,6 +204,13 @@ default_model = "my-deployment"     # the Azure deployment name
 - OAuth tokens refresh automatically, starting 60 seconds before expiry
   (lock files in `credentials/refresh-locks` serialize refresh across
   processes). A permanent failure leaves `reauth_required`: log in again.
+  The resolve that ran a failed refresh answers AuthMachine's verdict:
+  `source_unavailable` for a transient failure and `user_reauth_required`
+  for a permanent one. `source_unavailable`, `credential_store_unavailable`
+  and `credential_access_pending` clear on their own
+  (`AuthErrorKind::clears_on_its_own`): a mob member whose first wake meets
+  one stays dormant (`resume_gate_unavailable`, retryable) and a later
+  delivery wakes it.
 
 ## rkat auth commands
 
@@ -280,7 +289,9 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   the newer token valid. When the lookup answers a token 403 or 404 (it may
   not answer a fine-grained token), the route uses it unnamed (no login or
   plan) on `https://api.githubcopilot.com` once the account's model list
-  loads there; a failed listing fails the request (`refresh_failed`). For a
+  loads there; a failed listing fails the request (`source_unavailable` for
+  a rate limit, a 408, 502, 503 or 504, a network failure or a timeout,
+  else `refresh_failed`). For a
   user token, a 401 or 403 from the model listing is Copilot refusing the
   token (`refresh_failed`, the lease untouched; after an unanswered lookup
   the same token is asked about again after a minute); only the identity
@@ -294,7 +305,8 @@ the token store. It sets `[realm.global] default_binding` if none is set.
   GitHub rate limit (a 429, or a 403 with `Retry-After`, a spent primary
   limit or a message naming the secondary rate limit) pauses the account's
   lookup for GitHub's stated time, at least a minute; a 5xx or network
-  failure pauses nothing. A command source with `refresh_interval_ms`
+  failure pauses nothing. Both fail the request as `source_unavailable`,
+  which clears on its own. A command source with `refresh_interval_ms`
   reports that lifetime as the token's expiry, so a session built within it
   reuses the token without running the command again. A token a provider,
   proxy or gateway echoes back verbatim is redacted from errors and logs (the

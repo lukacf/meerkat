@@ -88,7 +88,8 @@ pub use store::{
     InMemoryConsoleLogStore, SqliteConsoleLogStore,
 };
 pub(crate) use thread::{
-    ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference, PrivateReplyAppend,
+    ConsoleSendThread, ConsoleThreadAudience, ConsoleThreadReference, KeptReplyServing,
+    PrivateReplyAppend, RecordedThread,
 };
 pub use types::{
     AppendDisposition, AppendOutcome, ConsoleActorKind, ConsoleCursor, ConsoleDeltaCompaction,

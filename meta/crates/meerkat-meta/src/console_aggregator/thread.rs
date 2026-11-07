@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
-    AppendDisposition, ConsoleFrame, ConsoleFrameMemberProvenance, ConsoleFrameSource,
-    ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleSender,
-    ConsoleTimelineEvent, MetaConsoleAggregator, NewConsoleFrame,
+    AppendDisposition, ConsoleCursor, ConsoleFrame, ConsoleFrameMemberProvenance,
+    ConsoleFrameSource, ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleIdentityRecord,
+    ConsoleLogResult, ConsoleSender, ConsoleTimelineEvent, FrameVisibilityRead,
+    MetaConsoleAggregator, NewConsoleFrame,
 };
 
 /// The kind of the frame a private reply is appended to its thread as.
@@ -40,6 +41,9 @@ struct ReplyAddressee<'a> {
     /// The person's console principal (the access subject: the verified
     /// email, else the `sub`): the sender's display name.
     access_principal: Option<&'a str>,
+    /// The person's qualified principal: the requester the send carried to
+    /// the agent's run.
+    requester: &'a meerkat_core::PrincipalRef,
 }
 
 /// The person the replies to a send by `sender` are for: the sender, when it
@@ -49,10 +53,11 @@ struct ReplyAddressee<'a> {
 /// open console name none, and their requests have no one to reply to
 /// privately.
 fn reply_addressee(sender: &ConsoleSender) -> Option<ReplyAddressee<'_>> {
-    sender.requester.as_ref()?;
+    let requester = sender.requester.as_ref()?;
     Some(ReplyAddressee {
         private_owner_key: &sender.caller_scope,
         access_principal: sender.display_name.as_deref(),
+        requester,
     })
 }
 
@@ -131,6 +136,14 @@ pub(crate) struct ConsoleThreadReference {
     pub(crate) requester: Option<meerkat_core::PrincipalRef>,
 }
 
+/// A console request's send record (its `user_input` frame) and the thread
+/// it recorded: read once for a delivery, which passes it on.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedThread {
+    record: ConsoleFrame,
+    pub(crate) reference: ConsoleThreadReference,
+}
+
 /// How a private reply's frame went into its thread.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PrivateReplyAppend {
@@ -155,15 +168,16 @@ pub(crate) fn private_reply_dedupe_key(interaction_id: &str, reply_id: &str) -> 
 }
 
 impl MetaConsoleAggregator {
-    /// The thread the console send whose interaction id is `interaction_id`
-    /// recorded; `None` when no send record with that interaction id holds a
-    /// thread (an unknown interaction, a send made before threads were
-    /// recorded, or a send of the public send API, which has no console
+    /// The send record of the console send whose interaction id is
+    /// `interaction_id`, with the thread it recorded: one read of the console
+    /// log, newest first. `None` when no send record with that interaction id
+    /// holds a thread (an unknown interaction, a send made before threads
+    /// were recorded, or a send of the public send API, which has no console
     /// caller).
-    pub(crate) async fn thread_reference(
+    pub(crate) async fn recorded_thread(
         &self,
         interaction_id: &str,
-    ) -> ConsoleLogResult<Option<ConsoleThreadReference>> {
+    ) -> ConsoleLogResult<Option<RecordedThread>> {
         let Some(record) = self
             .inner
             .store
@@ -172,7 +186,19 @@ impl MetaConsoleAggregator {
         else {
             return Ok(None);
         };
-        Ok(thread_reference_of(&record))
+        Ok(thread_reference_of(&record).map(|reference| RecordedThread { record, reference }))
+    }
+
+    /// The thread the console send whose interaction id is `interaction_id`
+    /// recorded ([`Self::recorded_thread`]).
+    pub(crate) async fn thread_reference(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleThreadReference>> {
+        Ok(self
+            .recorded_thread(interaction_id)
+            .await?
+            .map(|thread| thread.reference))
     }
 
     /// The frame of the reply `reply_id` to the request `interaction_id`, if
@@ -189,7 +215,7 @@ impl MetaConsoleAggregator {
     }
 
     /// Append `text` as the reply `reply_id` to its request's person thread
-    /// (`reference`, a [`ConsoleThreadAudience::Person`] thread): a
+    /// (`thread`, a [`ConsoleThreadAudience::Person`] thread): a
     /// `private_reply` frame of that member's conversation, caused by the
     /// request's send record and carrying its captured member provenance, so
     /// every surface decides it as that member's own frames, which only the
@@ -198,27 +224,21 @@ impl MetaConsoleAggregator {
     /// ([`PrivateReplyAppend::ThreadGone`]).
     pub(crate) async fn append_private_reply(
         &self,
-        reference: &ConsoleThreadReference,
+        thread: &RecordedThread,
         reply_id: &str,
         text: &str,
     ) -> ConsoleLogResult<PrivateReplyAppend> {
-        let dedupe_key = private_reply_dedupe_key(&reference.interaction_id, reply_id);
+        let dedupe_key = private_reply_dedupe_key(&thread.reference.interaction_id, reply_id);
         if let Some(existing) = self.inner.store.frame_by_dedupe_key(&dedupe_key).await? {
             return Ok(PrivateReplyAppend::Existing(existing));
         }
-        let (Some(addressee), Some(record)) = (
-            reference.addressee.as_deref(),
-            self.inner
-                .store
-                .send_frame_by_interaction(&reference.interaction_id)
-                .await?,
-        ) else {
+        let Some(addressee) = thread.reference.addressee.as_deref() else {
             return Ok(PrivateReplyAppend::ThreadGone);
         };
-        if !Box::pin(self.member_still_private_to(&record.identity, addressee)).await {
+        if !Box::pin(self.member_still_private_to(&thread.record.identity, addressee)).await {
             return Ok(PrivateReplyAppend::ThreadGone);
         }
-        let frame = self.kept_private_reply_frame(&record, dedupe_key, text)?;
+        let frame = self.kept_private_reply_frame(&thread.record, dedupe_key, text)?;
         let outcome = super::append_frame(&self.inner, frame).await?;
         if outcome.disposition == AppendDisposition::Existing {
             return Ok(PrivateReplyAppend::Existing(outcome.frame));
@@ -232,36 +252,24 @@ impl MetaConsoleAggregator {
         Ok(PrivateReplyAppend::Appended(outcome.frame))
     }
 
-    /// The reply `reply_id` to the request with interaction id
-    /// `interaction_id` as it is kept wherever it is delivered: the payload
-    /// of the frame it is appended to its thread as, as a host's payload
-    /// policy leaves it, and whether the policy rewrote it. A reply delivered
-    /// as an attention item is kept in this form too, so no one reads more of
-    /// it there than in a thread. `None` when no send record holds the
-    /// request.
-    pub(crate) async fn kept_private_reply(
+    /// The reply `reply_id` to the request `thread` as it is kept wherever
+    /// it is delivered: the frame it is appended to its thread as, as a
+    /// host's payload policy leaves it before it is stored. A reply
+    /// delivered as an attention item keeps this frame too (on the server
+    /// only), and each read shows it as the reading console shows the frame
+    /// in a thread ([`KeptReplyServing`]), so no one reads more of it there
+    /// than in a thread.
+    pub(crate) fn kept_private_reply(
         &self,
-        interaction_id: &str,
+        thread: &RecordedThread,
         reply_id: &str,
         text: &str,
-    ) -> ConsoleLogResult<Option<(Value, bool)>> {
-        let Some(record) = self
-            .inner
-            .store
-            .send_frame_by_interaction(interaction_id)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let frame = self.kept_private_reply_frame(
-            &record,
-            private_reply_dedupe_key(interaction_id, reply_id),
+    ) -> ConsoleLogResult<NewConsoleFrame> {
+        self.kept_private_reply_frame(
+            &thread.record,
+            private_reply_dedupe_key(&thread.reference.interaction_id, reply_id),
             text,
-        )?;
-        Ok(Some((
-            frame.payload,
-            frame.status == ConsoleFrameStatus::Redacted,
-        )))
+        )
     }
 
     /// The frame `text` is appended to the thread of the request `record`
@@ -328,6 +336,84 @@ impl MetaConsoleAggregator {
             Box::pin(super::capture_member_provenance(owner, &resolved, &record)).await;
         private_to(&provenance, addressee)
     }
+
+    /// One read's serving of kept replies through this console (a router's
+    /// view of the owner) to a reader whose agent audience is `audience`.
+    pub(crate) async fn kept_reply_serving<'a>(
+        &'a self,
+        audience: &'a crate::access::AccessView,
+    ) -> KeptReplyServing<'a> {
+        KeptReplyServing {
+            view: self,
+            audience,
+            identity_records: self.inner.identity_read_model.current().await,
+            read: FrameVisibilityRead::default(),
+        }
+    }
+}
+
+/// One read's serving of kept replies through a console
+/// ([`MetaConsoleAggregator::kept_reply_serving`]): every reply is decided
+/// against the members and identities as the read first found them, as one
+/// timeline read decides its frames.
+pub(crate) struct KeptReplyServing<'a> {
+    view: &'a MetaConsoleAggregator,
+    audience: &'a crate::access::AccessView,
+    identity_records: Vec<ConsoleIdentityRecord>,
+    read: FrameVisibilityRead,
+}
+
+impl KeptReplyServing<'_> {
+    /// The reply `kept` ([`MetaConsoleAggregator::kept_private_reply`]) as
+    /// this console shows it under `id`, the way a read of the request
+    /// member's own timeline shows the reply's frame: decided by the
+    /// reader's access to that member, through the request's captured
+    /// lineage, and by this console's visibility (a member that left the
+    /// roster since still shows its frames there), then projected under this
+    /// console's payload policy over the host's. `None` when either hides
+    /// it.
+    pub(crate) async fn serve(&mut self, id: &str, kept: NewConsoleFrame) -> Option<ConsoleFrame> {
+        let frame = kept_frame(id, kept);
+        if !super::timeline_frame_visible_to(self.audience, &frame) {
+            return None;
+        }
+        let visible = Box::pin(super::frame_is_visible_cached(
+            &self.view.inner,
+            &frame,
+            true,
+            &mut self.read,
+            &self.identity_records,
+        ))
+        .await
+        .unwrap_or(false);
+        visible.then(|| self.view.project_frame_for_view(frame))
+    }
+}
+
+/// The frame a kept reply stands for, under `id`: as it would be stored.
+fn kept_frame(id: &str, kept: NewConsoleFrame) -> ConsoleFrame {
+    ConsoleFrame {
+        id: id.to_string(),
+        cursor: ConsoleCursor::from_seq(0),
+        dedupe_key: kept.dedupe_key,
+        timestamp_ms: kept.timestamp_ms,
+        runtime_key: kept.runtime_key,
+        identity: kept.identity,
+        conversation_id: kept.conversation_id,
+        session_id: kept.session_id,
+        kind: kept.kind,
+        status: kept.status,
+        frame_version: 1,
+        updated_at_ms: None,
+        payload: kept.payload,
+        source: kept.source,
+        source_event_id: kept.source_event_id,
+        interaction_id: kept.interaction_id,
+        turn_id: kept.turn_id,
+        run_id: kept.run_id,
+        parent_frame_id: kept.parent_frame_id,
+        caused_by_frame_id: kept.caused_by_frame_id,
+    }
 }
 
 /// The thread reference a send record holds, read from its frame: its thread,
@@ -345,8 +431,9 @@ fn thread_reference_of(record: &ConsoleFrame) -> Option<ConsoleThreadReference> 
             .as_ref()
             .map(|addressee| addressee.private_owner_key.to_string()),
         access_principal: addressee
+            .as_ref()
             .and_then(|addressee| addressee.access_principal)
             .map(str::to_string),
-        requester: None,
+        requester: addressee.map(|addressee| addressee.requester.clone()),
     })
 }

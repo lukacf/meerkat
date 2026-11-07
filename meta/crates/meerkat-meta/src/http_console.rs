@@ -1374,10 +1374,13 @@ fn console_whoami_rpc(
 /// ([`crate::console_replies`]), newest first, and the dismissal of one of
 /// them. Only a verified person holds items, read by the person's
 /// private-owner key; every other caller reads none and dismisses none, and
-/// no param names whose items are read. A console that keeps no attention
-/// list answers that the methods are not found. Dismissing is a console
-/// change: a read-only console refuses it, and the caller is checked again
-/// right before the dismissal is made.
+/// no param names whose items are read. Each item is shown as this console
+/// shows the reply's frame in a thread: under its own payload policy and
+/// visibility, and only while the caller may view the agent the request
+/// went to. A console that keeps no attention list answers that the methods
+/// are not found. Dismissing is a console change: a read-only console
+/// refuses it, and the caller is checked again right before the dismissal
+/// is made.
 async fn console_attention_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,
@@ -1385,7 +1388,10 @@ async fn console_attention_rpc(
     request: &JsonRpcRequest,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
-    let Some(attention) = state.console_attention.as_ref() else {
+    let (Some(attention), Some(view)) = (
+        state.console_attention.as_ref(),
+        state.console_aggregator.as_ref(),
+    ) else {
         return response_value(
             response_id,
             None,
@@ -1395,7 +1401,7 @@ async fn console_attention_rpc(
     let addressee = auth.human.as_ref().map(console_person_private_owner_key);
     if request.method == crate::rpc::CONSOLE_ATTENTION_METHOD {
         let items = match &addressee {
-            Some(addressee) => match attention.list(addressee).await {
+            Some(addressee) => match attention.list(addressee, view, &auth.audience).await {
                 Ok(items) => items,
                 Err(error) => {
                     return response_value(
@@ -1550,7 +1556,10 @@ fn advertise_console_attention(
     method: &str,
     state: &ConsoleJsonState,
 ) -> Value {
-    if method != "meta/capabilities" || state.console_attention.is_none() {
+    if method != "meta/capabilities"
+        || state.console_attention.is_none()
+        || state.console_aggregator.is_none()
+    {
         return response;
     }
     if let Some(methods) = response

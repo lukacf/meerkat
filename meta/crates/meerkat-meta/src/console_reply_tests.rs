@@ -1023,6 +1023,12 @@ async fn a_private_reply_is_delivered_once_per_reply_id() -> TestResult {
         Ok(None),
         "a reply never delivered is not"
     );
+    assert_eq!(
+        replies.attention_retention(),
+        Some(crate::runtime::RecordRetention::Durable),
+        "a composition over a state directory keeps its attention list, and the receipts in \
+         it, across restarts"
+    );
     let items = attention(&fixture.app, &alice).await;
     assert_eq!(
         items.as_ref().map(Vec::len),
@@ -1455,6 +1461,11 @@ async fn the_attention_list_reads_no_dismissed_item() -> TestResult {
     let alice = alice();
     let sent = send(&fixture.app, Some(&alice), "alpha", "dismissed-reads").await;
     let replies = fixture.replies();
+    assert_eq!(
+        replies.attention_retention(),
+        Some(crate::runtime::RecordRetention::Process),
+        "a metadata store kept in memory keeps the attention list for the process"
+    );
     for reply in ["reply-1", "reply-2", "reply-3"] {
         let delivered = replies
             .deliver(

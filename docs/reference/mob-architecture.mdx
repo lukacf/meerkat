@@ -685,19 +685,24 @@ composition without the built-in identity and member store commits no change
   its edges, written in the change's transaction, and MobMachine keeps the
   one custody map of the mob's edges (`identity_edge_owners`): a peer that is
   no identity is refused `PeerUnknown`, and a second declaration of an owned
-  edge gives no custody. An edge is wired once both its ends are seated, by
-  the change's own step or by the seat of the end that was not (a create's
-  seat, an unarchive, a re-listing, a start), and it enables nothing: a
-  member reaches its peers only with the tools its profile grants. An
-  archive or an unlisting of an end leaves the edge declared and unwired,
-  and the end's next seat wires it again; no record of the unlisting is
-  kept, since the owner's row holds the edge. An owned edge ends only by its
+  edge gives no custody. An edge is in force while both its ends are
+  identity entries, as MobMachine decides it; an edge in force is wired once
+  both its ends are seated, by the change's own step or by the seat of the
+  end that was not (a create's seat, an unarchive, a re-listing, a start),
+  and it enables nothing: a member reaches its peers only with the tools its
+  profile grants. An archive of an end leaves the edge declared and unwired,
+  and the end's next seat wires it again. An unlisting of an end leaves the
+  edge declared and out of force: a worker that takes the end's free name is
+  no end of it (the edge wires nothing for it, and the worker's own wiring
+  takes a plain unwire), and the end's re-listing brings the edge back in
+  force; no record of the unlisting is kept, since the owner's row holds the
+  edge. An owned edge ends only by its
   owner's change (another identity's change ending it is refused
   `InvalidRequest`), by the host's policy reload that denies it
   (`MobHandle::end_denied_identity_edge`, naming its owner:
   `OwnedEdgeEndOutcome`), by the removal of either end (in the removal's own
   transaction, with its tombstone, which owns no edge) and by the mob's reset
-  or destroy. A plain unwire of an owned edge is refused
+  or destroy. A plain unwire of an owned edge in force is refused
   `MobError::OwnedIdentityEdge`. A start recovers each edge from its owner's
   row and wires those a crash left unwired.
 - **Adoption into store custody (0.9.11).** `MobHandle::adopt_identity`

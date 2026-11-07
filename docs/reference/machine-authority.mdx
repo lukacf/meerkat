@@ -388,12 +388,19 @@ reload that denies it (`OwnedEdgeEndCause`), naming its owner
 (`OwnedEdgeEndVerdict`: another identity's end is `NotOwner`); a removal ends
 its identity's edges, whichever end owns them, in its own step
 (`RemoveIdentityEntry`), and the reset and the destroy end them all;
-`AdmitMemberUnwire` refuses a plain unwire of an owned edge
+`AdmitMemberUnwire` refuses a plain unwire of an owned edge in force
 (`MemberUnwireAdmission`); and the boot recovers each edge from its owner's
-row (`RecoverOwnedIdentityEdge`). The map is the edge's desired record: the
-shell realizes an edge (`wiring_edges`) once both its ends are seated, and an
-archive or an unlisting of an end leaves it owned and unrealized. The
-invariants `owned_edge_owner_is_a_store_owned_end` and
+row (`RecoverOwnedIdentityEdge`). The map is the edge's desired record. An
+edge is in force while both its ends are identity entries (the helper
+`owned_edge_in_force`): only then does the shell realize it
+(`wiring_edges`) once both its ends are seated, each realization (a seat's,
+a spawn's or a pass's) reading MobMachine's verdict before its wire
+(`AdmitOwnedEdgeRealization`, `OwnedEdgeRealization`), and only then is it
+refused a plain unwire. An archive of an end leaves the edge owned and
+unrealized; an unlisting of an end leaves it owned and out of force, so a
+worker that takes the end's free name is no end of it, and the end's
+re-listing brings it back in force. The invariants
+`owned_edge_owner_is_a_store_owned_end` and
 `owned_edge_joins_no_tombstone` hold these facts.
 
 `MobMachine` decides an adoption into store custody too (since 0.9.11):

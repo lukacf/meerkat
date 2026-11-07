@@ -4171,7 +4171,7 @@ macro_rules! mob_catalog_machine_dsl {
             a_is_an_entry: bool,
             b_is_an_entry: bool
         ) -> bool {
-            owned == true || (owned == true && a_is_an_entry == true && b_is_an_entry == true)
+            owned == true && a_is_an_entry == true && b_is_an_entry == true
         }
 
         // The cause a new store-owned entry is unseated for at its create's

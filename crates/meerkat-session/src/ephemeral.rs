@@ -4884,6 +4884,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         self.builder.session_comms_identity_root()
     }
 
+    /// Finalize the durable compaction stages of `projections` for a session
+    /// no live actor of this service hosts, through this service's builder
+    /// ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`]).
+    /// The persistent service's cold settle is its only caller.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        self.builder
+            .finalize_absent_session_compaction_stages(session_id, projections)
+            .await
+    }
+
     /// The host's MCP attempt guards this service's builder carries, if any.
     pub fn mcp_attempt_guards(&self) -> Option<&B::Guards>
     where

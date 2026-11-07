@@ -21915,8 +21915,153 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         session_id: &SessionId,
     ) -> Result<crate::OwedCompactionSettlement, SessionError> {
-        let _ = session_id;
-        Ok(crate::OwedCompactionSettlement::NothingOwed)
+        // #1813: the settle writes the session's durable rows (the batch's
+        // publication, the outbox acknowledgement and the session's intent),
+        // so it holds this owner's hosting claim for its duration, inside its
+        // blocking store writes too.
+        let hosting = self.grant_session_hosting(session_id)?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.settle_owed_compaction_projections_hosted(session_id),
+        )
+        .await
+    }
+
+    /// [`Self::settle_owed_compaction_projections`] under the hosting claim.
+    async fn settle_owed_compaction_projections_hosted(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::OwedCompactionSettlement, SessionError> {
+        if self.session_hosted_in_process(id).await? {
+            return Ok(crate::OwedCompactionSettlement::Live);
+        }
+        // The session's mutation boundary, which every non-turn writer takes
+        // before the recovery gate: a runtime loop lap that outlived its
+        // actor holds it, and the settle waits for it, bounded.
+        let turn_finalization_gate = self.turn_finalization_gate_for_session(id).await;
+        let Ok(_turn_finalization_guard) = tokio::time::timeout(
+            TAIL_SETTLE_BOUNDARY_BOUND,
+            turn_finalization_gate.lock_owned(),
+        )
+        .await
+        else {
+            return Err(SessionError::Busy { id: id.clone() });
+        };
+        // A materialization waits here; one that went live first owns the
+        // finalization.
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock_owned().await;
+        if self.session_hosted_in_process(id).await? {
+            return Ok(crate::OwedCompactionSettlement::Live);
+        }
+        if !self.runtime_store.supports_compaction_projection_outbox() {
+            return Ok(crate::OwedCompactionSettlement::NothingOwed);
+        }
+        let runtime_id = Self::runtime_id_for_session(id);
+        let intents = self
+            .runtime_store
+            .load_pending_compaction_projections(&runtime_id)
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to read the compaction outbox of session {id}: {error}"
+                )))
+            })?;
+        if intents.is_empty() {
+            return Ok(crate::OwedCompactionSettlement::NothingOwed);
+        }
+        // A run's provisional tail stands ahead of the committed boundary the
+        // rows were committed at: that run owns the boundary, and an
+        // acknowledgement now would move the base its round commits chain
+        // from. Its settlement (a resume, or the recovery at the session's
+        // next materialization) finalizes the projections.
+        if self.provisional_tail_stands(id).await? {
+            tracing::warn!(
+                session_id = %id,
+                owed = intents.len(),
+                "a provisional tail stands over the session's owed compaction projections; the cold settle refuses busy"
+            );
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        if let Some(foreign) = intents
+            .iter()
+            .find(|intent| intent.projection.session_id() != id)
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the compaction outbox of session {id} holds a projection of session {}",
+                foreign.projection.session_id()
+            ))));
+        }
+        let projections = intents
+            .iter()
+            .map(|intent| intent.projection.clone())
+            .collect::<Vec<_>>();
+        // Each pending row is the commit authority of its projection: only a
+        // runtime commit inserts it. A cold settle has no executor to fence,
+        // so the hosting claim, the gates and the unregistered state are the
+        // fence.
+        let published = self
+            .inner
+            .finalize_absent_session_compaction_stages(id, &projections)
+            .await?;
+        if published.len() != projections.len() {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the builder finalized {} compaction batches of session {id} for {} owed projections",
+                published.len(),
+                projections.len()
+            ))));
+        }
+        for projection in &projections {
+            self.runtime_store
+                .mark_compaction_projection_finalized(&runtime_id, projection)
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to acknowledge the finalized compaction projection {} of session {id}: {error}",
+                        projection.revision()
+                    )))
+                })?;
+        }
+        // The acknowledgement rewrote the committed session without the
+        // intents: a body this service verified before it is not current.
+        self.forget_whole_blob_body(id);
+        tracing::info!(
+            session_id = %id,
+            projections = projections.len(),
+            "settled the session's owed compaction projections cold"
+        );
+        Ok(crate::OwedCompactionSettlement::Settled {
+            projections: intents
+                .into_iter()
+                .zip(published)
+                .map(|(intent, entries)| {
+                    crate::SettledCompactionProjection::new(
+                        intent.projection,
+                        intent.summary_tokens,
+                        intent.messages_before,
+                        intent.messages_after,
+                        entries,
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Whether this service hosts `id` in this process: a live actor, or a
+    /// registration on its runtime machine. Never creates a machine.
+    async fn session_hosted_in_process(&self, id: &SessionId) -> Result<bool, SessionError> {
+        if self.inner.has_live_session(id).await? {
+            return Ok(true);
+        }
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(match adapter {
+            Some(adapter) => adapter.contains_session(id).await,
+            None => false,
+        })
     }
 
     /// Observe the exact committed RuntimeStore body without reconciling the

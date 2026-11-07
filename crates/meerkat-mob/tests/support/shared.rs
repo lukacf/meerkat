@@ -4266,6 +4266,20 @@ impl meerkat_session::SessionAgentBuilder for RecordingAgentBuilder {
         )
         .await
     }
+
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, meerkat_core::service::SessionError>
+    {
+        <meerkat::FactoryAgentBuilder as meerkat_session::SessionAgentBuilder>::finalize_absent_session_compaction_stages(
+            &self.inner,
+            session_id,
+            projections,
+        )
+        .await
+    }
 }
 
 /// [`persistent_service_with_client_in_realm`] over the controlling host's

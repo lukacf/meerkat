@@ -134,6 +134,37 @@ them.
   already. The member stays as it is, its own retirement ends it, and the
   next complete apply decides it again if it is still there.
 
+- `meerkat-session`: `PersistentSessionService::settle_owed_compaction_projections`
+  settles a session's owed compaction projections cold: for each memory
+  batch the runtime's compaction outbox still owes, the batch is finalized
+  and its row acknowledged (which removes the intent from the committed
+  session), with no actor built and no model called. It answers the new
+  `OwedCompactionSettlement` (also re-exported from `meerkat`):
+  `NothingOwed`, `Settled { projections }` (each a
+  `SettledCompactionProjection` with the intent's summary facts and the
+  records the finalization published, in outbox order), or `Live` for a
+  session hosted in the process, whose agent owns the finalization. A
+  session another runtime owner hosts is refused `ServedElsewhere`, and one
+  under a standing provisional tail `Busy`. The builder seam
+  `SessionAgentBuilder::finalize_absent_session_compaction_stages`
+  (provided, fails closed) finalizes the stages; `FactoryAgentBuilder`
+  implements it over its canonical memory store, and a wrapping builder
+  forwards it.
+
+- `meerkat-core`: `MemoryStore::finalize_compaction_batch_reporting`
+  (provided, unsupported by default) finalizes a staged batch as
+  `finalize_compaction_batch` does and answers the records it published, as
+  `enumerate_scoped` then reads them. `meerkat-memory`'s `HnswMemoryStore`
+  implements it.
+
+- `meerkat-mob`: `MobHandle::settle_member_owed_compaction_projections`
+  settles a seated member's current session the same way, under the
+  `Retire` control scope and without an actor command, so a host can read a
+  compaction's discards before it ends the member's session.
+  `MobSessionService::settle_owed_compaction_projections` (provided) is its
+  seam: a service without durable sessions owes nothing, and one with them
+  that does not forward refuses typed.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -221,6 +252,16 @@ them.
   reconfigure had applied, and the switch stayed pending. The switch now
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
+
+- `meerkat-mob`: a rotation of a member onto a fresh session (a
+  `rotate_member`: a reset, or a deleted identity created anew) settles the
+  session it leaves before its terminal step. A member that compacted inside
+  a run its stop committed as interrupted owed that compaction's memory
+  projection until its next wake, and a lazy start does not wake it for
+  that: rotated while dormant, its batch stayed staged and invisible and its
+  outbox row pending, for good. Now the batch is finalized into the old
+  session's memory and the row acknowledged. A settle that fails leaves
+  them owed, as before, and never fails the rotation.
 
 ## [0.9.10] - 2026-11-04
 

@@ -610,3 +610,138 @@ async fn confinement_refusing_a_file_does_not_skip_the_trust() {
         )]
     );
 }
+
+fn untrusted_source() -> HookFailureReason {
+    HookFailureReason::ConfinementRefused {
+        refusal: ConfinementRefusal::UntrustedConfigurationSource,
+    }
+}
+
+/// A run override is the caller's own input, which the source trust does
+/// not judge: it may disable an untrusted project entry and supply its own
+/// entry under the same id, and that entry runs. The untrusted entry never
+/// does.
+#[tokio::test]
+async fn a_run_override_replacing_an_untrusted_entry_runs() {
+    let (_temp, base, project) = fixture();
+    let planted = base.join("planted-hook-entered");
+    let replacement = base.join("replacement-hook-entered");
+    write_project_hooks(&project, vec![marker_guardrail("shared", &planted)]);
+    let trust = RecordedTrust::new([]);
+    let factory = factory_for(
+        &base,
+        &project,
+        None,
+        Some(Arc::clone(&trust) as Arc<dyn HookSourceTrust>),
+        None,
+    );
+
+    let run = run_on(
+        &factory,
+        HookRunOverrides {
+            entries: vec![marker_guardrail("shared", &replacement)],
+            disable: vec![HookId::new("shared")],
+        },
+    )
+    .await;
+
+    assert_eq!(run.outcome.as_deref(), Ok("continued"));
+    assert_eq!(trust.asked().len(), 1, "the project file is decided");
+    assert!(
+        refused_hooks(&run.events).is_empty(),
+        "the replacement is not refused: {:?}",
+        refused_hooks(&run.events)
+    );
+    assert!(replacement.exists(), "the caller's replacement ran");
+    assert!(!planted.exists(), "the untrusted entry never ran");
+    assert_eq!(
+        run.tool.0.load(Ordering::SeqCst),
+        1,
+        "the replacement let the tool run"
+    );
+}
+
+/// The untrusted entry never runs, whatever the run overrides do: with none
+/// it is refused; beside an unrelated override entry it is still refused;
+/// disabled, it does not run; an override entry of its id that does not
+/// disable it is the typed duplicate-id configuration error. A trusted user
+/// file's entry runs wherever the run proceeds.
+#[tokio::test]
+async fn an_untrusted_entry_never_runs_whatever_the_run_overrides() {
+    for case in ["none", "unrelated", "disabled", "duplicate"] {
+        let (_temp, base, project) = fixture();
+        let user_root = base.join("user");
+        let user_file = user_root.join(".rkat").join("config.toml");
+        let planted = base.join("planted-hook-entered");
+        let user_marker = base.join("user-hook-entered");
+        let other = base.join("other-hook-entered");
+        write_project_hooks(&project, vec![marker_guardrail("shared", &planted)]);
+        write_hooks(
+            &user_file,
+            vec![HookEntryConfig {
+                priority: -1,
+                ..marker_guardrail("user-own", &user_marker)
+            }],
+        );
+        let trust = RecordedTrust::new([(
+            user_file.clone(),
+            HookSourceDigest::of(&std::fs::read(&user_file).unwrap()),
+        )]);
+        let factory = factory_for(
+            &base,
+            &project,
+            Some(&user_root),
+            Some(trust as Arc<dyn HookSourceTrust>),
+            None,
+        );
+        let overrides = match case {
+            "none" => HookRunOverrides::default(),
+            "unrelated" => HookRunOverrides {
+                entries: vec![marker_guardrail("other", &other)],
+                disable: Vec::new(),
+            },
+            "disabled" => HookRunOverrides {
+                entries: Vec::new(),
+                disable: vec![HookId::new("shared")],
+            },
+            _ => HookRunOverrides {
+                entries: vec![marker_guardrail("shared", &other)],
+                disable: Vec::new(),
+            },
+        };
+
+        let run = run_on(&factory, overrides).await;
+
+        assert!(!planted.exists(), "{case}: the untrusted entry never ran");
+        match case {
+            "none" | "unrelated" => {
+                assert_eq!(run.outcome.as_deref(), Ok("continued"), "{case}");
+                assert_eq!(
+                    refused_hooks(&run.events),
+                    vec![(HookId::new("shared"), untrusted_source())],
+                    "{case}"
+                );
+                assert_eq!(
+                    run.tool.0.load(Ordering::SeqCst),
+                    0,
+                    "{case}: its tool stays blocked"
+                );
+                assert!(user_marker.exists(), "{case}: the trusted entry ran");
+            }
+            "disabled" => {
+                assert_eq!(run.outcome.as_deref(), Ok("continued"), "{case}");
+                assert!(refused_hooks(&run.events).is_empty(), "{case}");
+                assert_eq!(run.tool.0.load(Ordering::SeqCst), 1, "{case}");
+                assert!(user_marker.exists(), "{case}: the trusted entry ran");
+            }
+            _ => {
+                let error = run
+                    .outcome
+                    .expect_err("an override of the untrusted entry's id that keeps it is refused");
+                assert!(error.contains("duplicate hook id"), "{case}: {error}");
+                assert!(!other.exists(), "{case}");
+                assert_eq!(run.tool.0.load(Ordering::SeqCst), 0, "{case}");
+            }
+        }
+    }
+}

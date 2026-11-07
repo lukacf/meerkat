@@ -873,3 +873,276 @@ async fn observe_infrastructure_launch_error_still_stops_before_later_hooks()
     assert_eq!(later_calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
+
+/// The id of the base entry the host refuses in the rows below.
+const REFUSED: &str = "untrusted";
+
+/// Which in-process handlers entered, in order.
+type Entered = Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+/// A `PreToolExecution` entry run by the in-process handler `handler`: a
+/// guardrail in the foreground, or an observer in the background.
+fn pre_tool_entry(background: bool, id: &str, handler: &str) -> HookEntryConfig {
+    HookEntryConfig {
+        id: HookId::new(id),
+        point: HookPoint::PreToolExecution,
+        capability: if background {
+            HookCapability::Observe
+        } else {
+            HookCapability::Guardrail
+        },
+        mode: if background {
+            HookExecutionMode::Background
+        } else {
+            HookExecutionMode::Foreground
+        },
+        runtime: HookAdapterConfig::in_process(handler),
+        ..Default::default()
+    }
+}
+
+/// What one invocation over a base of a trusted entry and an entry the host
+/// refuses ([`REFUSED`], run by the handler `refused-source`) did.
+struct RefusedBaseRun {
+    result: Result<HookExecutionReport, HookEngineError>,
+    entered: Vec<&'static str>,
+    /// The background completions, by hook id.
+    background: Vec<(HookId, meerkat_core::hooks::HookBackgroundResult)>,
+}
+
+impl RefusedBaseRun {
+    async fn invoke(
+        background: bool,
+        overrides: Option<HookRunOverrides>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let engine = DefaultHookEngine::new(HooksConfig {
+            entries: vec![
+                pre_tool_entry(background, "trusted", "trusted"),
+                pre_tool_entry(background, REFUSED, "refused-source"),
+            ],
+            ..Default::default()
+        })
+        .with_refused_entries([(
+            HookId::new(REFUSED),
+            ConfinementRefusal::UntrustedConfigurationSource,
+        )]);
+        let entered: Entered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for handler in ["trusted", "refused-source", "replacement", "other"] {
+            let entered = Arc::clone(&entered);
+            engine
+                .register_in_process_handler(
+                    handler,
+                    Arc::new(move |_| {
+                        let entered = Arc::clone(&entered);
+                        Box::pin(async move {
+                            entered
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(handler);
+                            Ok(RuntimeHookResponse {
+                                decision: Some(HookDecision::Allow),
+                            })
+                        })
+                    }),
+                )
+                .await?;
+        }
+        let result = engine
+            .execute(
+                HookInvocation::new(HookPoint::PreToolExecution, SessionId::new()),
+                overrides.as_ref(),
+            )
+            .await;
+        finish_background_tasks(&engine).await;
+        let background = engine
+            .background_dispatch_ledger()
+            .drain()
+            .await
+            .into_iter()
+            .filter_map(|signal| match signal {
+                BackgroundDispatchSignal::Completed { completion } => {
+                    Some((completion.attribution.hook_id, completion.result))
+                }
+                _ => None,
+            })
+            .collect();
+        let entered = entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(Self {
+            result,
+            entered,
+            background,
+        })
+    }
+
+    /// The refused base entry did not enter.
+    fn refused_source_never_entered(&self) -> bool {
+        !self.entered.contains(&"refused-source")
+    }
+}
+
+fn untrusted_source() -> HookFailureReason {
+    HookFailureReason::ConfinementRefused {
+        refusal: ConfinementRefusal::UntrustedConfigurationSource,
+    }
+}
+
+/// A host refusal stays with the base entry it was set for. A run override
+/// that disables that entry and supplies the caller's own entry under the same
+/// id runs the caller's entry, in the foreground and in the background; the
+/// refused entry itself never enters.
+#[tokio::test]
+async fn a_run_override_replacing_a_refused_entry_runs_the_replacement()
+-> Result<(), Box<dyn std::error::Error>> {
+    for background in [false, true] {
+        let run = RefusedBaseRun::invoke(
+            background,
+            Some(HookRunOverrides {
+                entries: vec![pre_tool_entry(background, REFUSED, "replacement")],
+                disable: vec![HookId::new(REFUSED)],
+            }),
+        )
+        .await?;
+        let report = match &run.result {
+            Ok(report) => report,
+            Err(error) => {
+                return Err(format!(
+                    "background {background}: the replacement is refused: {error:?}"
+                )
+                .into());
+            }
+        };
+        assert!(
+            run.entered.contains(&"replacement"),
+            "background {background}: the replacement ran: {:?}",
+            run.entered
+        );
+        assert!(run.entered.contains(&"trusted"), "background {background}");
+        assert!(
+            run.refused_source_never_entered(),
+            "background {background}"
+        );
+        assert!(report.launch_refusals.is_empty(), "{report:?}");
+        if background {
+            assert!(
+                matches!(
+                    run.background.as_slice(),
+                    [
+                        (_, meerkat_core::hooks::HookBackgroundResult::Completed(_)),
+                        (_, meerkat_core::hooks::HookBackgroundResult::Completed(_))
+                    ]
+                ),
+                "{:?}",
+                run.background
+            );
+        } else {
+            assert_eq!(report.decision, Some(HookDecision::Allow));
+        }
+    }
+    Ok(())
+}
+
+/// The refused base entry never enters, whatever the run's overrides do:
+/// with no override it is refused; beside an unrelated override entry it is
+/// still refused; disabled, it does not run; an override entry of its id that
+/// does not disable it is the typed duplicate-id configuration error. The
+/// trusted entry runs wherever the invocation proceeds.
+#[tokio::test]
+async fn a_refused_entry_never_runs_whatever_the_run_overrides()
+-> Result<(), Box<dyn std::error::Error>> {
+    use meerkat_core::hooks::HookBackgroundResult;
+    for background in [false, true] {
+        let refused_was_reported = |run: &RefusedBaseRun| {
+            if background {
+                run.result.is_ok()
+                    && run.background.iter().any(|(id, result)| {
+                        id.0 == REFUSED
+                            && *result == HookBackgroundResult::LaunchRefused(untrusted_source())
+                    })
+            } else {
+                matches!(
+                    &run.result,
+                    Err(HookEngineError::LaunchRefused { hook_id, reason })
+                        if hook_id.0 == REFUSED && *reason == untrusted_source()
+                )
+            }
+        };
+
+        let none = RefusedBaseRun::invoke(background, None).await?;
+        assert!(
+            refused_was_reported(&none),
+            "background {background}: {none:?}"
+        );
+        assert!(none.refused_source_never_entered(), "{none:?}");
+        assert!(none.entered.contains(&"trusted"), "{none:?}");
+
+        let unrelated = RefusedBaseRun::invoke(
+            background,
+            Some(HookRunOverrides {
+                entries: vec![pre_tool_entry(background, "other", "other")],
+                disable: Vec::new(),
+            }),
+        )
+        .await?;
+        assert!(
+            refused_was_reported(&unrelated),
+            "background {background}: an unrelated override does not lift the refusal: \
+             {unrelated:?}"
+        );
+        assert!(unrelated.refused_source_never_entered(), "{unrelated:?}");
+        assert!(unrelated.entered.contains(&"trusted"), "{unrelated:?}");
+
+        let disabled = RefusedBaseRun::invoke(
+            background,
+            Some(HookRunOverrides {
+                entries: Vec::new(),
+                disable: vec![HookId::new(REFUSED)],
+            }),
+        )
+        .await?;
+        assert!(disabled.result.is_ok(), "{disabled:?}");
+        assert!(disabled.refused_source_never_entered(), "{disabled:?}");
+        assert!(disabled.entered.contains(&"trusted"), "{disabled:?}");
+        assert!(
+            disabled.background.iter().all(|(id, _)| id.0 != REFUSED),
+            "{disabled:?}"
+        );
+
+        let duplicate = RefusedBaseRun::invoke(
+            background,
+            Some(HookRunOverrides {
+                entries: vec![pre_tool_entry(background, REFUSED, "replacement")],
+                disable: Vec::new(),
+            }),
+        )
+        .await?;
+        assert!(
+            matches!(
+                &duplicate.result,
+                Err(HookEngineError::InvalidConfiguration(message))
+                    if message.contains("duplicate hook id")
+            ),
+            "{duplicate:?}"
+        );
+        assert!(duplicate.entered.is_empty(), "{duplicate:?}");
+    }
+    Ok(())
+}
+
+impl std::fmt::Debug for RefusedBaseRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefusedBaseRun")
+            .field(
+                "result",
+                &self
+                    .result
+                    .as_ref()
+                    .map(|report| (&report.decision, &report.launch_refusals)),
+            )
+            .field("entered", &self.entered)
+            .field("background", &self.background)
+            .finish()
+    }
+}

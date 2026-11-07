@@ -133,6 +133,21 @@ pub trait ConsoleLogStore: Send + Sync {
         status: ConsoleFrameStatus,
     ) -> ConsoleLogResult<Option<ConsoleFrame>>;
 
+    /// Record (`Some`) or clear (`None`) a send frame's `delivery_hold`
+    /// payload field, keeping its status: a governed dispatch held past its
+    /// budget records why it submitted nothing; a dispatch again clears it.
+    /// A store that cannot change a frame's payload answers an error.
+    async fn update_send_frame_hold(
+        &self,
+        frame_id: &str,
+        hold: Option<serde_json::Value>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _ = (frame_id, hold);
+        Err(boxed_error(
+            "this console log store does not record a send's delivery hold",
+        ))
+    }
+
     async fn query_frames(
         &self,
         query: ConsoleTimelineQuery,
@@ -381,6 +396,27 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             return Ok(None);
         };
         frame.status = status;
+        frame.frame_version = frame.frame_version.saturating_add(1);
+        frame.updated_at_ms = Some(current_time_ms());
+        Ok(Some(frame.clone()))
+    }
+
+    async fn update_send_frame_hold(
+        &self,
+        frame_id: &str,
+        hold: Option<serde_json::Value>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some(seq) = state.id_to_seq.get(frame_id).copied() else {
+            return Ok(None);
+        };
+        let Some(frame) = state.frames.get_mut(&seq) else {
+            return Ok(None);
+        };
+        set_delivery_hold(&mut frame.payload, hold)?;
         frame.frame_version = frame.frame_version.saturating_add(1);
         frame.updated_at_ms = Some(current_time_ms());
         Ok(Some(frame.clone()))
@@ -1142,6 +1178,39 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         select_frame_by_id(&conn, frame_id)
     }
 
+    async fn update_send_frame_hold(
+        &self,
+        frame_id: &str,
+        hold: Option<serde_json::Value>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some(payload_json) = conn
+            .query_row(
+                "SELECT payload_json FROM console_frames WHERE id = ?1",
+                params![frame_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(into_boxed)?
+        else {
+            return Ok(None);
+        };
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&payload_json).map_err(into_boxed)?;
+        set_delivery_hold(&mut payload, hold)?;
+        let payload_json = serde_json::to_string(&payload).map_err(into_boxed)?;
+        conn.execute(
+            "UPDATE console_frames SET payload_json = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3",
+            params![payload_json, current_time_ms() as i64, frame_id],
+        )
+        .map_err(into_boxed)?;
+        select_frame_by_id(&conn, frame_id)
+    }
+
     async fn query_frames(
         &self,
         query: ConsoleTimelineQuery,
@@ -1709,6 +1778,25 @@ fn to_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Record (`Some`) or clear (`None`) a send frame's `delivery_hold`.
+fn set_delivery_hold(
+    payload: &mut serde_json::Value,
+    hold: Option<serde_json::Value>,
+) -> ConsoleLogResult<()> {
+    let Some(fields) = payload.as_object_mut() else {
+        return Err(boxed_error("a send frame's payload is not an object"));
+    };
+    match hold {
+        Some(hold) => {
+            fields.insert("delivery_hold".to_string(), hold);
+        }
+        None => {
+            fields.remove("delivery_hold");
+        }
+    }
+    Ok(())
 }
 
 fn boxed_error(message: impl Into<String>) -> ConsoleLogError {

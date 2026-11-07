@@ -350,12 +350,16 @@ API errors return standard HTTP status codes with a JSON body:
 | `409` | Console timeline replay unavailable or console-send conflict/refusal |
 | `429` | Console-send admission backlog full (`admission_backlog_full`) |
 | `500` | Internal server error |
-| `503` | Console-send actor probe unhealthy or reload refused |
+| `503` | Console-send actor probe unhealthy, reload refused, or a governed send held |
 | `504` | Console-send admission or reload timed out |
 
 Structured `/console/send` admission failures carry `{error, message, data}`:
-`429` uses `admission_backlog_full`, `503` uses `actor_probe_unhealthy` or
-`reload_refused`, and `504` uses `admission_timeout` or `reload_timed_out`.
+`429` uses `admission_backlog_full`, `503` uses `actor_probe_unhealthy`,
+`reload_refused` or `governed_input_held` (every bind of the host's binder
+answered "not now" until the door's wait budget ended: nothing was
+submitted, so send it again), and `504` uses `admission_timeout` or
+`reload_timed_out`. A governed send the host refused is `409`
+`governed_input_refused`.
 Preserve `data` when reporting these failures; a timeout does not by itself
 establish execution fate or retryability. These REST status mappings are
 distinct from the JSON-RPC policy codes documented in the

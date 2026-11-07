@@ -3625,6 +3625,41 @@ impl MetaConsoleAggregator {
         Ok(())
     }
 
+    /// A governed dispatch held past its door's budget: nothing was
+    /// submitted. The send returns to accepted (`MarkHeld`) and its frame
+    /// records the hold in its `delivery_hold` (the condition, the wait, the
+    /// binds, retryable); a replay of the send's key dispatches it again.
+    pub async fn mark_interaction_delivery_held(
+        &self,
+        input_frame_id: &str,
+        hold: &crate::identity_first::GovernedHold,
+    ) -> Result<(), ConsoleSendError> {
+        let _ = SendState::Dispatching
+            .apply(SendTransition::MarkHeld)
+            .map_err(ConsoleSendError::State)?;
+        let delivery_hold = json!({
+            "condition": hold.condition.as_str(),
+            "waited_ms": u64::try_from(hold.waited.as_millis()).unwrap_or(u64::MAX),
+            "binds": hold.binds,
+            "retryable": true,
+        });
+        update_send_frame_hold_and_emit(&self.inner, input_frame_id, Some(delivery_hold))
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(())
+    }
+
+    /// A held send dispatched again: its hold no longer stands.
+    pub(crate) async fn clear_interaction_delivery_hold(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        update_send_frame_hold_and_emit(&self.inner, input_frame_id, None)
+            .await
+            .map_err(ConsoleSendError::Log)?;
+        Ok(())
+    }
+
     /// Whether a live dispatch owns the send frame `frame_id`.
     #[cfg(test)]
     pub(crate) fn send_dispatch_claimed(&self, frame_id: &str) -> bool {
@@ -8279,6 +8314,25 @@ async fn update_frame_status_and_emit(
     let Some(updated) = inner.store.update_frame_status(frame_id, status).await? else {
         return Ok(None);
     };
+    emit_frame_updated(inner, updated).await
+}
+
+async fn update_send_frame_hold_and_emit(
+    inner: &AggregatorInner,
+    frame_id: &str,
+    hold: Option<Value>,
+) -> ConsoleLogResult<Option<ConsoleFrame>> {
+    let Some(updated) = inner.store.update_send_frame_hold(frame_id, hold).await? else {
+        return Ok(None);
+    };
+    emit_frame_updated(inner, updated).await
+}
+
+/// Emit `updated` as a `frame_updated` marker (once per frame version).
+async fn emit_frame_updated(
+    inner: &AggregatorInner,
+    updated: ConsoleFrame,
+) -> ConsoleLogResult<Option<ConsoleFrame>> {
     let update_marker = NewConsoleFrame {
         id: None,
         dedupe_key: format!("frame-update:{}:{}", updated.id, updated.frame_version),

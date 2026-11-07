@@ -3054,6 +3054,18 @@ async fn console_send_identity_first_governed(
                     aggregator.begin_send_redispatch(&frame, &claim)?;
                     (accepted, Some(claim))
                 }
+                // A governed send held past its budget submitted nothing: a
+                // replay of its key dispatches the same input again, keyed
+                // and identified by its frame.
+                NativeSendObservation::Absent
+                    if governed.is_some() && frame.payload.get("delivery_hold").is_some() =>
+                {
+                    aggregator.begin_send_redispatch(&frame, &claim)?;
+                    aggregator
+                        .clear_interaction_delivery_hold(&frame.id)
+                        .await?;
+                    (accepted, Some(claim))
+                }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
                     return Ok(accepted);
                 }
@@ -3112,6 +3124,19 @@ async fn console_send_identity_first_governed(
                 }
             }
             Err(err) => {
+                if let crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(hold),
+                ) = &err
+                {
+                    // Held, not failed: nothing was submitted.
+                    let _ = aggregator
+                        .mark_interaction_delivery_held(&accepted.input_frame_id, hold)
+                        .await;
+                    return Err(identity_runtime_error_to_console_send_error(
+                        identity.as_str(),
+                        err,
+                    ));
+                }
                 let _ = aggregator
                     .mark_interaction_delivery_failed(&accepted.input_frame_id)
                     .await;
@@ -3191,6 +3216,24 @@ async fn console_send_identity_first_governed(
                 }
             }
             Err(err) => {
+                if let crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(hold),
+                ) = &err
+                {
+                    // Held, not failed: nothing was submitted, and a replay
+                    // of the send's key dispatches it again.
+                    if let Err(mark) = dispatch_aggregator
+                        .mark_interaction_delivery_held(&dispatch_accepted.input_frame_id, hold)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %dispatch_identity,
+                            error = %mark,
+                            "console identity-first send was held but its hold was not recorded"
+                        );
+                    }
+                    return;
+                }
                 let _ = dispatch_aggregator
                     .mark_interaction_delivery_failed(&dispatch_accepted.input_frame_id)
                     .await;
@@ -3291,7 +3334,10 @@ fn identity_runtime_error_to_console_send_error(
         error @ (crate::identity_first::IdentityRuntimeError::AdmissionBacklogFull { .. }
         | crate::identity_first::IdentityRuntimeError::HostHumanInput(_)
         | crate::identity_first::IdentityRuntimeError::ReloadRefused { .. }
-        | crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. }) => {
+        | crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. }
+        // A governed send's typed answer (refused, held, unresolved) keeps
+        // its kind on the Console's answer.
+        | crate::identity_first::IdentityRuntimeError::GovernedInput(_)) => {
             ConsoleSendError::RuntimeOperation(Box::new(error))
         }
         other => ConsoleSendError::Dispatch(other.to_string()),
@@ -3940,6 +3986,9 @@ fn console_send_error_response(err: ConsoleSendError) -> axum::response::Respons
                 crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. } => {
                     (StatusCode::GATEWAY_TIMEOUT, "reload_timed_out")
                 }
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_),
+                ) => (StatusCode::SERVICE_UNAVAILABLE, "governed_input_held"),
                 crate::identity_first::IdentityRuntimeError::GovernedInput(_) => {
                     (StatusCode::CONFLICT, "governed_input_refused")
                 }
@@ -3998,6 +4047,17 @@ fn console_send_rpc_code(err: &ConsoleSendError) -> i64 {
         ConsoleSendError::IdempotencyConflict(_) => -32009,
         ConsoleSendError::Retired(_) => -32004,
         ConsoleSendError::UnqualifiedPrincipal(_) | ConsoleSendError::GovernedRefused(_) => -32003,
+        // Held, not failed: retryable, as on the identity RPC.
+        ConsoleSendError::RuntimeOperation(error)
+            if matches!(
+                error.as_ref(),
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_)
+                )
+            ) =>
+        {
+            crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE
+        }
         ConsoleSendError::State(_)
         | ConsoleSendError::Dispatch(_)
         | ConsoleSendError::Log(_)
@@ -4045,6 +4105,9 @@ fn console_send_public_message(err: &ConsoleSendError) -> String {
                 crate::identity_first::IdentityRuntimeError::ReloadTimedOut { .. } => {
                     "member reload timed out; inspect member health before retrying"
                 }
+                crate::identity_first::IdentityRuntimeError::GovernedInput(
+                    crate::identity_first::GovernedInputError::Held(_),
+                ) => "governed input held; nothing was submitted, send it again",
                 crate::identity_first::IdentityRuntimeError::GovernedInput(_) => {
                     "governed input refused; inspect the typed reason before retrying"
                 }

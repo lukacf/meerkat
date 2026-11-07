@@ -15,6 +15,10 @@ pub enum SendTransition {
     StartDispatch,
     MarkDelivered,
     MarkDeliveryFailed,
+    /// A governed dispatch held past its door's budget submitted nothing:
+    /// the send returns to accepted, its hold recorded, and a replay of its
+    /// key dispatches it again.
+    MarkHeld,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +49,10 @@ impl SendState {
             )),
             (Self::Dispatching, SendTransition::MarkDeliveryFailed) => Ok((
                 Self::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Dispatching, SendTransition::MarkHeld) => Ok((
+                Self::AcceptedPersisted,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
             _ => Err("illegal send state transition"),

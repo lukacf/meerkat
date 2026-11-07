@@ -11733,10 +11733,17 @@ impl IdentityRuntime {
                 },
             ),
         );
-        prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(format!(
+        let key = format!(
             "console:{}:{}",
             accepted.interaction_id, accepted.input_frame_id
-        )));
+        );
+        // The send's own input id, derived from its frame and interaction:
+        // a held send dispatched again submits the same input.
+        prompt.header.id = meerkat_core::lifecycle::InputId::from_uuid(uuid::Uuid::new_v5(
+            &CONSOLE_GOVERNED_INPUT_NAMESPACE,
+            key.as_bytes(),
+        ));
+        prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(key));
         let outcome = self
             .send_governed_with_turn_ticket(
                 identity,
@@ -22972,3 +22979,9 @@ mod candidate_deferral_tests {
         );
     }
 }
+
+/// The namespace of the governed Console input ids, derived from each send's
+/// `console:{interaction}:{frame}` key.
+const CONSOLE_GOVERNED_INPUT_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x6d, 0x6f, 0x62, 0x6b, 0x69, 0x74, 0x2d, 0x67, 0x6f, 0x76, 0x2d, 0x69, 0x6e, 0x70, 0x75, 0x74,
+]);

@@ -3145,8 +3145,20 @@ function renderHistoryUserEntry(
   };
 }
 
+/// A governed send held at its host's door records `delivery_hold` on its
+/// still-accepted input frame: nothing was delivered, and sending it again
+/// dispatches it again.
+function hasDeliveryHold(frame: ConsoleFrame): boolean {
+  const data = frame.data;
+  if (!data || typeof data !== "object") return false;
+  const hold = (data as Record<string, unknown>).delivery_hold;
+  return Boolean(hold) && typeof hold === "object";
+}
+
 function renderUserDeliveryFailureEntry(frame: ConsoleFrame, entryId: string): ConversationTimelineEntry | null {
-  if (frame.event !== "user_input" || frame.status !== "delivery_failed") return null;
+  if (frame.event !== "user_input") return null;
+  const failed = frame.status === "delivery_failed";
+  if (!failed && !(frame.status === "accepted" && hasDeliveryHold(frame))) return null;
   return {
     kind: "message",
     id: `${entryId}:delivery-status`,
@@ -3154,7 +3166,7 @@ function renderUserDeliveryFailureEntry(frame: ConsoleFrame, entryId: string): C
     variant: "meta",
     createdAt: isoFromTimestampMs(frame.timestampMs),
     ...(frame.interactionId ? { interactionId: frame.interactionId } : {}),
-    text: "Message delivery failed.",
+    text: failed ? "Message delivery failed." : "Message held: nothing was delivered yet. Send it again.",
     runtimeEvent: runtimeEventFromFrame(frame.event, {
       status: frame.status,
       input_frame_id: frame.id,

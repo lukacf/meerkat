@@ -1,9 +1,50 @@
 //! Native Linux lowering of the existing immutable confinement requirement.
 //!
 //! Restricted paths use an empty private mount view, not content-only Landlock
-//! grants. No host procfs is exposed. This module owns no permission policy or
-//! child supervisor; it adapts the retained requirement and transfers the one
-//! spawned child into NativeChild.
+//! grants. This module owns no permission policy or child supervisor; it
+//! adapts the retained requirement and transfers the one spawned child into
+//! NativeChild.
+//!
+//! # Processes of a launch
+//!
+//! Every launch is a pid namespace of its own, with new user, mount and IPC
+//! namespaces, and a new network namespace when the requirement grants no IP
+//! access. The host creates its first process directly in them
+//! (`clone(2)`): that process is pid 1 of the namespace and the one direct
+//! child NativeChild owns, the leader of the launch's process group. It runs
+//! the setup below, starts the command as pid 2, and replaces its own image
+//! with the backend's init (`init_image_bounds`), a small static program
+//! executed from a sealed memory file. So no process of the launch is a copy
+//! of the host once the command runs: the init holds no host memory, and the
+//! command waits for the init before it executes its program.
+//!
+//! The init runs under the command's seccomp filter, chroot and dropped
+//! capabilities. It makes itself non-dumpable, so the command can open none
+//! of its memory, descriptors, environment or executable through `/proc`;
+//! reaps every process the namespace orphans; and when the command ends,
+//! reports the command's wait status to the host and exits, which ends every
+//! other process of the namespace. NativeChild reports that status: the
+//! command's exit code, or the signal that ended it. A SIGKILL of the
+//! launch's PID from the host ends the namespace at once. A signal to the
+//! launch's process group reaches the command and everything it started
+//! (none of them can leave the group). The init installs no signal handler,
+//! and pid 1 of a pid namespace ignores every signal it has no handler for
+//! that comes from inside its namespace, and every one from the host but
+//! SIGKILL and SIGSTOP, so the init never ends early by one.
+//!
+//! # The launch's procfs
+//!
+//! No host procfs is exposed. The launch gets a procfs of its own pid
+//! namespace at `/proc`, read-only and with task entries only
+//! (`subset=pid`): `/proc/self/exe` resolves, which a Rust toolchain needs,
+//! while host-wide state such as `/proc/sys` and `/proc/net` is absent, and
+//! only the launch's own processes are listed. `/proc/self/net` shows the
+//! launch's network namespace: its own loopback interface when IP is denied,
+//! the host's shared namespace when IP is granted. The mount is best effort:
+//! a host that refuses it (a masked or overmounted `/proc`, or a kernel
+//! without `subset=pid`) still launches, without `/proc`.
+//!
+//! # Granted paths
 //!
 //! Every granted path is canonical, with one exception: a read-only literal
 //! file grant may name a symbolic link as its final component
@@ -28,15 +69,14 @@
 //! another object pinned or bound.
 #![allow(unsafe_code)]
 
+use std::convert::Infallible;
 use std::ffi::{CStr, CString, OsStr};
 use std::fs::File;
-use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -50,7 +90,8 @@ use crate::{ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunch
 
 // These are compatibility resources, not a bind of the host root. Missing
 // optional distribution paths are omitted; /bin/sh and the target still have
-// to resolve inside this view at actual exec. No /proc, /sys, home or scratch.
+// to resolve inside this view at actual exec. No host /proc, /sys, home or
+// scratch; the launch's own procfs is mounted by setup (`PROCFS_FLAGS`).
 const BASELINE_DIRECTORIES: &[&str] = &[
     "/bin",
     "/sbin",
@@ -72,16 +113,42 @@ const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
 // supported 64-bit architectures. These are syscall command numbers only.
 const F_SETOWN_EX: libc::c_int = 15;
 const F_SETSIG: libc::c_int = 10;
+// Linux UAPI linux/memfd.h (6.3): an executable memory file, on a host whose
+// vm.memfd_noexec would otherwise create it without exec permission.
+const MFD_EXEC: libc::c_uint = 0x10;
 // A probe child whose setup step fails exits with this base plus the step's
 // number, so the refused step can be read from its exit status (for example
 // in `strace -f`). The refusal itself stays BackendUnavailable.
 const PROBE_STEP_STATUS_BASE: i32 = 64;
+// The launch's procfs: read-only, nosuid, nodev, noexec, task entries only.
+const PROCFS_FLAGS: libc::c_ulong =
+    libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+// The namespaces every launch's first process is created in; a launch
+// without IP access also gets a network namespace of its own.
+const LAUNCH_NAMESPACES: libc::c_int =
+    libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWPID;
+// The stack each of a launch's two processes runs its setup on, until it
+// executes its program: far more than their allocation-free code needs.
+const LAUNCH_STACK_BYTES: usize = 256 * 1024;
+// Every descriptor a launch's processes keep for themselves (the report,
+// status and release pipes, the init image) is placed at or above this, so
+// the command's stdio and custody gate (0 to 3) and init's own pipes (3 and
+// 4) can be installed without overwriting one of them.
+const LAUNCH_DESCRIPTOR_FLOOR: libc::c_int = 10;
+// The descriptors the backend's init is executed with: the write end of the
+// status pipe, and the write end of the pipe that releases the command.
+const INIT_STATUS_DESCRIPTOR: libc::c_int = 3;
+const INIT_RELEASE_DESCRIPTOR: libc::c_int = 4;
+// The command's pid in its launch's pid namespace: the first process pid 1
+// starts there. The init waits for this pid (`init_image_bounds`).
+const COMMAND_PID: libc::pid_t = 2;
 
-/// The steps of `LinuxPolicy::apply`, numbered for the probe's exit status.
+/// The steps of a launch's setup (`LinuxPolicy::apply` and the processes
+/// around it), numbered for the probe's exit status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetupStep {
     NoNewPrivileges = 1,
-    Unshare = 2,
+    ProcessGroup = 2,
     Setgroups = 3,
     UidMap = 4,
     GidMap = 5,
@@ -101,6 +168,13 @@ enum SetupStep {
     Capabilities = 19,
     CloseRange = 20,
     Seccomp = 21,
+    ProcTarget = 22,
+    Command = 23,
+    Init = 24,
+    Directory = 25,
+    Stdio = 26,
+    Gate = 27,
+    Exec = 28,
 }
 
 impl SetupStep {
@@ -184,6 +258,10 @@ pub(super) struct LinuxPolicy {
     filter: Vec<libc::sock_filter>,
     uid_map: Vec<u8>,
     gid_map: Vec<u8>,
+    // The namespaces each launch's first process is created in.
+    namespaces: libc::c_int,
+    // The sealed init image every launch's pid 1 executes (`sealed_init`).
+    init: OwnedFd,
 }
 
 impl LinuxPolicy {
@@ -236,15 +314,21 @@ impl LinuxPolicy {
             // Mixed dimensions also need an exact metadata/write lowering.
             _ => return Err(ConfinementRefusal::UnsupportedRequirement),
         }
+        let ip = matches!(spec.network, IpNetworkAccess::Unrestricted);
         let policy = Arc::new(Self {
             mounts,
-            filter: filter(
-                architecture,
-                matches!(spec.network, IpNetworkAccess::Unrestricted),
-            ),
+            filter: filter(architecture, ip),
             // Only fixed decimal mapping data is read after fork.
             uid_map: format!("0 {} 1\n", unsafe { libc::geteuid() }).into_bytes(),
             gid_map: format!("0 {} 1\n", unsafe { libc::getegid() }).into_bytes(),
+            // Without IP the launch's /proc/self/net shows a namespace of its
+            // own, with only a loopback interface, never the host's sockets.
+            namespaces: if ip {
+                LAUNCH_NAMESPACES
+            } else {
+                LAUNCH_NAMESPACES | libc::CLONE_NEWNET
+            },
+            init: sealed_init()?,
         });
         let bound = policy.bind_mounts()?;
         policy.probe(&bound)?;
@@ -298,32 +382,28 @@ impl LinuxPolicy {
     }
 
     // Capability setup runs once per compiled host profile. It never executes
-    // the requested target. Only the exact probe PID is waited/killed here.
-    // `bound` is what the probe binds of each mount, validated before fork;
-    // the caller holds it until the probe returns, its child gone.
+    // the requested target: the probe is a launch whose command exits at
+    // once instead, so it runs every setup step, starts a command and runs
+    // the init. Only the exact probe PID is waited/killed here. `bound` is
+    // what the probe binds of each mount, validated before the clone; the
+    // caller holds it until the probe returns, its processes gone.
     fn probe(&self, bound: &[Bound]) -> Result<(), ConfinementRefusal> {
-        // One slot per mount for setup's reopened sources, allocated before
-        // fork: the child only writes its own copy.
-        let mut sources = vec![-1; self.mounts.len()];
-        // A launch site of the confinement backend: the capability probe.
-        #[allow(clippy::disallowed_methods)]
-        let pid = unsafe { libc::fork() };
-        if pid == -1 {
-            return Err(ConfinementRefusal::BackendUnavailable);
-        }
-        if pid == 0 {
-            let status = match self.apply(bound, &mut sources) {
-                Ok(()) => 0,
-                Err(failure) => failure.step.probe_status(),
-            };
-            unsafe { libc::_exit(status) };
-        }
+        let unavailable = |_| ConfinementRefusal::BackendUnavailable;
+        let started = self.start(bound, None).map_err(unavailable)?;
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut status = 0;
         loop {
-            let result = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
-            if result == pid {
-                return if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+            let result = unsafe { libc::waitpid(started.pid, &raw mut status, libc::WNOHANG) };
+            if result == started.pid {
+                // Every process that held a write end of either pipe is gone,
+                // so neither read below waits.
+                let report = read_report(started.report).map_err(unavailable)?;
+                let command = reported_status(&started.status);
+                return if libc::WIFEXITED(status)
+                    && libc::WEXITSTATUS(status) == 0
+                    && report.is_none()
+                    && command == Some(0)
+                {
                     Ok(())
                 } else {
                     Err(ConfinementRefusal::BackendUnavailable)
@@ -345,19 +425,70 @@ impl LinuxPolicy {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        loop {
-            if unsafe { libc::waitpid(pid, &raw mut status, 0) } != -1
-                || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
-            {
-                break;
-            }
-        }
+        reap(started.pid, true);
         Err(ConfinementRefusal::BackendUnavailable)
     }
 
-    // Called only between fork and exec, or in the disposable capability probe.
-    // This path performs raw syscalls and reads preallocated data only. No
+    /// Creates a launch's first process: pid 1 of new user, mount, IPC and
+    /// pid namespaces (and a network namespace without IP), and the leader
+    /// of a new process group. It runs the setup, starts the command (which
+    /// executes `target`, or for the probe, exits at once) and becomes the
+    /// launch's init (`LaunchPlan`). Returns its PID and the host's ends of
+    /// the report and status pipes; the caller owns that PID from here, and
+    /// keeps `bound` and `target` until the launch's setup is done.
+    fn start(&self, bound: &[Bound], target: Option<&Target>) -> io::Result<Started> {
+        let (report, report_write) = launch_pipe(0)?;
+        let (status, status_write) = launch_pipe(libc::O_NONBLOCK)?;
+        // One slot per mount for setup's reopened sources, and the two
+        // processes' stacks, allocated here: each process only writes its
+        // own copy.
+        let mut sources = vec![-1; self.mounts.len()];
+        let mut stacks = vec![0_u8; 2 * LAUNCH_STACK_BYTES];
+        let (launch_stack, command_stack) = stacks.split_at_mut(LAUNCH_STACK_BYTES);
+        let (launch_stack, command_stack) = (stack_top(launch_stack), stack_top(command_stack));
+        let mut plan = LaunchPlan {
+            policy: self,
+            bound,
+            sources: &mut sources,
+            target,
+            report: report_write.as_raw_fd(),
+            status: status_write.as_raw_fd(),
+            release: [-1, -1],
+            command_stack,
+        };
+        // The new process starts with every signal blocked, so no handler
+        // of the host's runs in it. The command unblocks them right before
+        // its exec, and the init right after its own, when no handler is
+        // left.
+        let mut every = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        let mut previous = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        unsafe {
+            libc::sigfillset(every.as_mut_ptr());
+            libc::pthread_sigmask(libc::SIG_SETMASK, every.as_ptr(), previous.as_mut_ptr());
+        }
+        let pid = clone_process(
+            enter_launch,
+            launch_stack,
+            self.namespaces | libc::SIGCHLD,
+            (&raw mut plan).cast(),
+        );
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, previous.as_ptr(), std::ptr::null_mut());
+        }
+        if pid == -1 {
+            return Err(error);
+        }
+        Ok(Started {
+            pid,
+            report,
+            status,
+        })
+    }
+
+    // Called only in a launch's first process (pid 1 of its namespaces,
+    // created by `start`) between its clone and the init's exec. This path
+    // performs raw syscalls and reads preallocated data only. No
     // allocation, host lock, callback, Rust destructor or async operation.
     // `sources` is preallocated with one slot per mount, and `bound` holds
     // what the launch validated of each mount.
@@ -365,10 +496,6 @@ impl LinuxPolicy {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
         {
-            raw(unsafe {
-                libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC)
-            })
-            .map_err(SetupStep::Unshare.failed())?;
             write_file(c"/proc/self/setgroups", b"deny").map_err(SetupStep::Setgroups.failed())?;
             write_file(c"/proc/self/uid_map", &self.uid_map).map_err(SetupStep::UidMap.failed())?;
             write_file(c"/proc/self/gid_map", &self.gid_map).map_err(SetupStep::GidMap.failed())?;
@@ -419,6 +546,26 @@ impl LinuxPolicy {
                 mount.install(root, source, bound.noexec)?;
             }
             raw(unsafe { libc::close(root) }).map_err(SetupStep::StageOpen.failed())?;
+            // The launch's own procfs, of its own pid namespace: read-only,
+            // task entries only. No grant lands under /proc
+            // (`reserved_read_root`), so the directory is new. Best effort:
+            // a host that refuses the mount (a masked or overmounted host
+            // /proc, a kernel without subset=pid) launches without /proc,
+            // the view a launch had before the backend mounted one.
+            raw(unsafe { libc::mkdir(c"/tmp/proc".as_ptr(), 0o555) })
+                .map_err(SetupStep::ProcTarget.failed())?;
+            if unsafe {
+                libc::mount(
+                    c"proc".as_ptr(),
+                    c"/tmp/proc".as_ptr(),
+                    c"proc".as_ptr(),
+                    PROCFS_FLAGS,
+                    c"subset=pid".as_ptr().cast(),
+                )
+            } == -1
+            {
+                unsafe { libc::rmdir(c"/tmp/proc".as_ptr()) };
+            }
             // The synthetic ancestors are not writable scratch. Child mounts
             // keep their separately assigned read/write flags.
             raw(unsafe {
@@ -473,9 +620,11 @@ impl LinuxPolicy {
             libc::syscall(libc::SYS_capset, std::ptr::addr_of!(header), data.as_ptr())
         })
         .map_err(SetupStep::Capabilities.failed())?;
-        // Mark, rather than close, std::process's private exec-error pipe.
-        // It must survive failed setup and disappear with all ambient handles
-        // at the first exec. A declared custody fd3 is installed afterward.
+        // Mark, rather than close, every descriptor above stdio: the
+        // launch's pipes, the init image and the command's stdio sources
+        // must survive until the exec of each process, and every handle
+        // inherited from the host disappears at it. The command's stdio and
+        // custody gate, and the init's pipes, are installed afterward.
         raw_long(unsafe {
             libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC)
         })
@@ -494,6 +643,675 @@ impl LinuxPolicy {
         .map_err(SetupStep::Seccomp.failed())?;
         Ok(())
     }
+}
+
+/// A launch's first process, just created by [`LinuxPolicy::start`], and the
+/// host's ends of its pipes.
+struct Started {
+    pid: libc::pid_t,
+    // Read end of the pipe a failed setup step or exec reports its errno
+    // through. It reaches EOF without data once both processes executed
+    // their programs.
+    report: OwnedFd,
+    // Read end (nonblocking) of the pipe the init writes the command's raw
+    // wait status to before it exits.
+    status: OwnedFd,
+}
+
+/// A launch's program, prepared before the launch's first process is
+/// created: its exec arguments, environment and working directory as C
+/// strings, with their pointer arrays, and its stdio and custody gate.
+struct Target {
+    program: CString,
+    _arguments: Vec<CString>,
+    argv: Vec<*const libc::c_char>,
+    _environment: Vec<CString>,
+    envp: Vec<*const libc::c_char>,
+    directory: CString,
+    // The descriptors the command gets as stdin, stdout and stderr; each is
+    // above stdio (`native_stdio`), so installing one cannot overwrite
+    // another's source.
+    stdio: [libc::c_int; 3],
+    // The custody gate's read end, installed as descriptor 3.
+    gate: Option<libc::c_int>,
+}
+
+impl Target {
+    fn new(
+        launch: &ProcessLaunchSpec,
+        gate: Option<(&OsStr, libc::c_int)>,
+        stdio: [libc::c_int; 3],
+    ) -> io::Result<Self> {
+        // ProcessLaunchSpec and the gate's caller refuse NUL bytes already.
+        let c_string = |value: &OsStr| {
+            CString::new(value.as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid confined launch"))
+        };
+        let mut arguments = Vec::new();
+        let program = if let Some((token, _)) = gate {
+            const PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 || exit 125; case $meerkat_custody_gate in \"$1\") ;; *) exit 125 ;; esac; exec 3<&-; shift; exec \"$@\"";
+            for value in [
+                OsStr::new("/bin/sh"),
+                OsStr::new("-c"),
+                OsStr::new(PROLOGUE),
+                OsStr::new("meerkat-custody-gate"),
+                token,
+                launch.program.as_os_str(),
+            ] {
+                arguments.push(c_string(value)?);
+            }
+            c"/bin/sh".to_owned()
+        } else {
+            arguments.push(c_string(launch.program.as_os_str())?);
+            c_string(launch.program.as_os_str())?
+        };
+        for argument in &launch.arguments {
+            arguments.push(c_string(argument)?);
+        }
+        let environment = launch
+            .environment
+            .iter()
+            .map(|(key, value)| {
+                let mut entry = key.clone();
+                entry.push("=");
+                entry.push(value);
+                c_string(&entry)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let pointers = |values: &[CString]| {
+            values
+                .iter()
+                .map(|value| value.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect::<Vec<_>>()
+        };
+        Ok(Self {
+            program,
+            argv: pointers(&arguments),
+            _arguments: arguments,
+            envp: pointers(&environment),
+            _environment: environment,
+            directory: c_string(launch.directory.as_os_str())?,
+            stdio,
+            gate: gate.map(|(_, descriptor)| descriptor),
+        })
+    }
+
+    // In the command, between its clone and exec: enters the working
+    // directory inside the view, installs stdio and the custody gate,
+    // unblocks every signal as std's spawn leaves it, and executes the
+    // program. Returns only the failure. Allocation-free raw syscalls only.
+    fn exec(&self) -> SetupFailure {
+        match self.enter() {
+            Err(failure) => failure,
+            Ok(never) => match never {},
+        }
+    }
+
+    fn enter(&self) -> Result<Infallible, SetupFailure> {
+        raw(unsafe { libc::chdir(self.directory.as_ptr()) })
+            .map_err(SetupStep::Directory.failed())?;
+        for (target, &source) in (0..).zip(&self.stdio) {
+            raw(unsafe { libc::dup2(source, target) }).map_err(SetupStep::Stdio.failed())?;
+        }
+        if let Some(gate) = self.gate {
+            raw(unsafe { libc::dup2(gate, 3) }).map_err(SetupStep::Gate.failed())?;
+            raw(unsafe { libc::fcntl(3, libc::F_SETFD, 0) }).map_err(SetupStep::Gate.failed())?;
+        }
+        let mut unblocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        unsafe {
+            libc::sigemptyset(unblocked.as_mut_ptr());
+        }
+        raw(unsafe {
+            libc::sigprocmask(libc::SIG_SETMASK, unblocked.as_ptr(), std::ptr::null_mut())
+        })
+        .map_err(SetupStep::Exec.failed())?;
+        // A launch site of the confinement backend: the command's program.
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            libc::execve(
+                self.program.as_ptr(),
+                self.argv.as_ptr(),
+                self.envp.as_ptr(),
+            )
+        };
+        Err(SetupStep::Exec.failed()(errno()))
+    }
+}
+
+/// What a launch's two processes read between their clone and exec,
+/// prepared by [`LinuxPolicy::start`] before the first clone. Each process
+/// works on its own copy: nothing here is allocated, locked or dropped
+/// after the clone.
+struct LaunchPlan<'a> {
+    policy: &'a LinuxPolicy,
+    bound: &'a [Bound],
+    sources: &'a mut [i32],
+    // `None` for the capability probe, whose command executes nothing.
+    target: Option<&'a Target>,
+    // Write ends of the report and status pipes (`Started`).
+    report: libc::c_int,
+    status: libc::c_int,
+    // The pipe through which the init releases the command: made by pid 1
+    // after setup, read by the command, written by the init.
+    release: [libc::c_int; 2],
+    command_stack: *mut libc::c_void,
+}
+
+impl LaunchPlan<'_> {
+    // Pid 1 of the launch's namespaces: setup, then the command (pid 2),
+    // then the init image. Returns only the failure.
+    fn run(&mut self) -> SetupFailure {
+        match self.become_init() {
+            Err(failure) => failure,
+            Ok(never) => match never {},
+        }
+    }
+
+    fn become_init(&mut self) -> Result<Infallible, SetupFailure> {
+        // The leader of the launch's process group, which every process of
+        // the launch stays in (the filter refuses setpgid and setsid).
+        raw(unsafe { libc::setpgid(0, 0) }).map_err(SetupStep::ProcessGroup.failed())?;
+        // std's spawn leaves the command SIGPIPE at its default action.
+        if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(SetupStep::ProcessGroup.failed()(errno()));
+        }
+        self.policy.apply(self.bound, self.sources)?;
+        let mut release = [-1; 2];
+        raw(unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) })
+            .map_err(SetupStep::Command.failed())?;
+        for (slot, descriptor) in self.release.iter_mut().zip(release) {
+            *slot = above_floor(descriptor).map_err(SetupStep::Command.failed())?;
+        }
+        let command = clone_process(
+            enter_command,
+            self.command_stack,
+            libc::SIGCHLD,
+            std::ptr::from_mut(self).cast(),
+        );
+        if command == -1 {
+            return Err(SetupStep::Command.failed()(errno()));
+        }
+        if command != COMMAND_PID {
+            // Not the pid the init waits for. This process's exit ends the
+            // command with the namespace.
+            return Err(SetupStep::Command.failed()(libc::ESRCH));
+        }
+        // The init keeps exactly two descriptors: the status pipe as 3 and
+        // the release pipe's write end as 4. Both sources sit above the
+        // floor, so neither install overwrites the other or the report pipe
+        // and the init image this process still needs.
+        let failed = SetupStep::Init.failed();
+        raw(unsafe { libc::dup2(self.status, INIT_STATUS_DESCRIPTOR) }).map_err(&failed)?;
+        raw(unsafe { libc::dup2(self.release[1], INIT_RELEASE_DESCRIPTOR) }).map_err(&failed)?;
+        // The host's own stdio, inherited at the clone.
+        for descriptor in 0..3 {
+            unsafe { libc::close(descriptor) };
+        }
+        // A SIGCHLD the host left ignored would reap the command before the
+        // init waits for it. The command keeps the host's disposition.
+        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
+            return Err(failed(errno()));
+        }
+        let argv = [c"meerkat-init".as_ptr(), std::ptr::null()];
+        let envp = [std::ptr::null()];
+        // A launch site of the confinement backend: the launch's init.
+        #[allow(clippy::disallowed_methods)]
+        unsafe {
+            libc::fexecve(self.policy.init.as_raw_fd(), argv.as_ptr(), envp.as_ptr())
+        };
+        Err(failed(errno()))
+    }
+}
+
+// The launch's first process, from `clone_process` in the host.
+extern "C" fn enter_launch(plan: *mut libc::c_void) -> libc::c_int {
+    // SAFETY: `plan` is the LaunchPlan `LinuxPolicy::start` prepared for
+    // this clone. This process has its own copy of it and of everything it
+    // borrows, and is its only user.
+    let plan = unsafe { &mut *plan.cast::<LaunchPlan<'_>>() };
+    let failure = plan.run();
+    report(plan.report, failure.errno);
+    failure.step.probe_status()
+}
+
+// The command, pid 2, from `clone_process` in the launch's first process.
+extern "C" fn enter_command(plan: *mut libc::c_void) -> libc::c_int {
+    // SAFETY: as in `enter_launch`: this process's own copy of the plan.
+    let plan = unsafe { &*plan.cast::<LaunchPlan<'_>>() };
+    // This process's copy of the release pipe's write end goes first, so a
+    // launch whose init never runs ends the wait below at EOF.
+    unsafe { libc::close(plan.release[1]) };
+    let mut byte = 0_u8;
+    loop {
+        let read = unsafe { libc::read(plan.release[0], (&raw mut byte).cast(), 1) };
+        if read == 1 {
+            break;
+        }
+        if read == -1 && errno() == libc::EINTR {
+            continue;
+        }
+        // Pid 1 failed before the init ran, and reports why. The target
+        // never runs.
+        return 127;
+    }
+    match plan.target {
+        // The capability probe's command executes nothing.
+        None => 0,
+        Some(target) => {
+            let failure = target.exec();
+            report(plan.report, failure.errno);
+            127
+        }
+    }
+}
+
+// The one process creation of the confinement backend: each launch's first
+// process (pid 1 of its namespaces, for the capability probe too) and the
+// command it starts. `entry` runs on `stack` in the new process, with `plan`.
+fn clone_process(
+    entry: extern "C" fn(*mut libc::c_void) -> libc::c_int,
+    stack: *mut libc::c_void,
+    flags: libc::c_int,
+    plan: *mut libc::c_void,
+) -> libc::pid_t {
+    // A launch site of the confinement backend: every launch's processes.
+    #[allow(clippy::disallowed_methods)]
+    unsafe {
+        libc::clone(entry, stack, flags, plan)
+    }
+}
+
+// Writes a failed step's errno to the report pipe, where the host reads it
+// as spawn's error. Allocation-free.
+fn report(report: libc::c_int, errno_value: i32) {
+    let bytes = errno_value.to_ne_bytes();
+    loop {
+        let written = unsafe { libc::write(report, bytes.as_ptr().cast(), bytes.len()) };
+        if written != -1 || errno() != libc::EINTR {
+            break;
+        }
+    }
+}
+
+// `descriptor` moved to the lowest free number at or above the launch's
+// floor, close-on-exec. Allocation-free.
+fn above_floor(descriptor: libc::c_int) -> Result<libc::c_int, i32> {
+    let moved =
+        raw(unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, LAUNCH_DESCRIPTOR_FLOOR) });
+    unsafe { libc::close(descriptor) };
+    moved
+}
+
+/// A close-on-exec pipe whose two ends sit above the launch's descriptor
+/// floor, the read end with `read_flags` (such as `O_NONBLOCK`) added.
+fn launch_pipe(read_flags: libc::c_int) -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [-1; 2];
+    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let [read, write] = ends.map(|end| {
+        above_floor(end)
+            .map(|moved| unsafe { OwnedFd::from_raw_fd(moved) })
+            .map_err(io::Error::from_raw_os_error)
+    });
+    let (read, write) = (read?, write?);
+    if read_flags != 0 {
+        let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFL) };
+        if flags == -1
+            || unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, flags | read_flags) } == -1
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((read, write))
+}
+
+/// What a launch's report pipe holds once every process holding a write end
+/// executed its program or exited: `None` when both executed (the command
+/// and the init), else the errno of the step that failed.
+fn read_report(report: OwnedFd) -> io::Result<Option<i32>> {
+    let mut report = File::from(report);
+    let mut bytes = [0_u8; 4];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match report.read(&mut bytes[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match filled {
+        0 => Ok(None),
+        4 => Ok(Some(i32::from_ne_bytes(bytes))),
+        _ => Err(io::ErrorKind::UnexpectedEof.into()),
+    }
+}
+
+/// The command's raw wait status, as the launch's init wrote it to its
+/// status pipe before exiting; `None` when it wrote none (it was killed
+/// first, or never ran). Read once the init is reaped, when no writer is
+/// left: the read end is nonblocking either way.
+pub(crate) fn reported_status(status: &OwnedFd) -> Option<i32> {
+    let mut bytes = [0_u8; 4];
+    let read = loop {
+        let read =
+            unsafe { libc::read(status.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+        if read != -1 || errno() != libc::EINTR {
+            break read;
+        }
+    };
+    (read == 4).then(|| i32::from_ne_bytes(bytes))
+}
+
+/// Reaps `pid`, a launch's first process the host still owns, killing it
+/// first when `kill`. Retries an interrupted wait only.
+fn reap(pid: libc::pid_t, kill: bool) {
+    if kill {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    loop {
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } != -1
+            || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            break;
+        }
+    }
+}
+
+/// The top of a stack in `region`, 16-byte aligned: stacks grow down.
+fn stack_top(region: &mut [u8]) -> *mut libc::c_void {
+    region
+        .as_mut_ptr_range()
+        .end
+        .map_addr(|address| address & !15)
+        .cast()
+}
+
+/// The backend's init image (see `init_image_bounds`) in an anonymous
+/// memory file, sealed against any change, as a read-only descriptor above
+/// the launch's floor that each launch's pid 1 executes. Read-only, since
+/// some kernels refuse to execute a file that is open for writing.
+fn sealed_init() -> Result<OwnedFd, ConfinementRefusal> {
+    fn unavailable<E>(_: E) -> ConfinementRefusal {
+        ConfinementRefusal::BackendUnavailable
+    }
+    let image = init_image();
+    if image.is_empty() {
+        return Err(ConfinementRefusal::BackendUnavailable);
+    }
+    let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    let mut descriptor = unsafe { libc::memfd_create(c"meerkat-init".as_ptr(), flags | MFD_EXEC) };
+    if descriptor == -1 && errno() == libc::EINVAL {
+        // A kernel before 6.3, which has neither MFD_EXEC nor memory files
+        // without exec permission.
+        descriptor = unsafe { libc::memfd_create(c"meerkat-init".as_ptr(), flags) };
+    }
+    if descriptor == -1 {
+        return Err(ConfinementRefusal::BackendUnavailable);
+    }
+    let mut writable = unsafe { File::from_raw_fd(descriptor) };
+    writable.write_all(image).map_err(unavailable)?;
+    raw(unsafe {
+        libc::fcntl(
+            writable.as_raw_fd(),
+            libc::F_ADD_SEALS,
+            libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL,
+        )
+    })
+    .map_err(unavailable)?;
+    let readable =
+        File::open(format!("/proc/self/fd/{}", writable.as_raw_fd())).map_err(unavailable)?;
+    above_floor(readable.into_raw_fd())
+        .map(|moved| unsafe { OwnedFd::from_raw_fd(moved) })
+        .map_err(unavailable)
+}
+
+/// The init image's bytes, in this binary's own code.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+fn init_image() -> &'static [u8] {
+    let bounds = init_image_bounds();
+    // SAFETY: both bounds point into one immutable span of this binary's
+    // code, `start` first; see `init_image_bounds`.
+    unsafe {
+        std::slice::from_raw_parts(
+            bounds.start,
+            usize::try_from(bounds.end.offset_from(bounds.start)).unwrap_or(0),
+        )
+    }
+}
+
+/// No init on another architecture: the backend refuses every requirement
+/// there (`native_audit_arch`) before it would need one.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn init_image() -> &'static [u8] {
+    &[]
+}
+
+/// Where the init image sits in this binary's code.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[repr(C)]
+struct ImageBounds {
+    start: *const u8,
+    end: *const u8,
+}
+
+// The backend's init, pid 1 of every launch's pid namespace: a static ELF
+// executable of one read-and-execute segment holding the whole file, loaded
+// at 0x400000, plus a non-executable stack. The assembler builds it, header
+// included, from the source below for the target architecture; the code is
+// position independent. It is executed (`sealed_init`, `LaunchPlan`) under
+// the launch's seccomp filter, chroot and dropped capabilities, with
+// exactly two descriptors: 3, the write end of the status pipe, and 4, the
+// write end of the pipe the command waits on. It:
+//
+// 1. unblocks every signal: its process blocked them all before the exec,
+//    so that no handler of the host's could run there, and a blocked signal
+//    would stay queued where an unblocked one is discarded;
+// 2. prctl(PR_SET_DUMPABLE, 0): the command can open none of its memory,
+//    descriptors, environment or executable through /proc;
+// 3. prctl(PR_SET_NAME, "meerkat-init");
+// 4. writes one byte to descriptor 4 and closes it, which lets the command
+//    (pid 2) execute its program;
+// 5. reaps every process of the namespace, wait4(-1, __WALL), until pid 2;
+// 6. writes pid 2's raw wait status to descriptor 3, and exits with pid 2's
+//    exit code, or 128 plus the signal that ended it (a pid namespace's
+//    init cannot end by a signal it sends itself), or 127 if it has no child
+//    left without having reaped pid 2. Its exit ends every other process of
+//    the namespace.
+//
+// It installs no signal handler: as pid 1 of its namespace it ignores every
+// signal from inside it, and from the host every one but SIGKILL and
+// SIGSTOP.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+extern "C" fn init_image_bounds() -> ImageBounds {
+    core::arch::naked_asm!(
+        "lea rax, [rip + 2f]",
+        "lea rdx, [rip + 3f]",
+        "ret",
+        ".balign 8",
+        "2:",
+        // ELF header: 64-bit, little-endian, version 1, System V ABI.
+        ".byte 0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0",
+        // ET_EXEC, EM_X86_64, EV_CURRENT, entry, program and section header
+        // offsets, flags, header sizes and counts.
+        ".short 2, 62",
+        ".long 1",
+        ".quad 0x400000 + (4f - 2b), 64, 0",
+        ".long 0",
+        ".short 64, 56, 2, 64, 0, 0",
+        // PT_LOAD: the whole file, read and execute, at 0x400000.
+        ".long 1, 5",
+        ".quad 0, 0x400000, 0x400000, 3f - 2b, 3f - 2b, 0x1000",
+        // PT_GNU_STACK: read and write, no execute.
+        ".long 0x6474e551, 6",
+        ".quad 0, 0, 0, 0, 0, 16",
+        "4:",
+        // rt_sigprocmask(SIG_SETMASK, &empty, NULL, 8)
+        "sub rsp, 16",
+        "mov qword ptr [rsp], 0",
+        "mov eax, 14",
+        "mov edi, 2",
+        "mov rsi, rsp",
+        "xor edx, edx",
+        "mov r10d, 8",
+        "syscall",
+        // prctl(PR_SET_DUMPABLE, 0)
+        "mov eax, 157",
+        "mov edi, 4",
+        "xor esi, esi",
+        "syscall",
+        // prctl(PR_SET_NAME, name)
+        "mov eax, 157",
+        "mov edi, 15",
+        "lea rsi, [rip + 5f]",
+        "syscall",
+        // write(4, &1, 1); close(4)
+        "mov byte ptr [rsp], 1",
+        "mov eax, 1",
+        "mov edi, 4",
+        "mov rsi, rsp",
+        "mov edx, 1",
+        "syscall",
+        "mov eax, 3",
+        "mov edi, 4",
+        "syscall",
+        // wait4(-1, &status, __WALL, NULL) until it returns 2
+        "6:",
+        "mov eax, 61",
+        "mov edi, -1",
+        "mov rsi, rsp",
+        "mov edx, 0x40000000",
+        "xor r10d, r10d",
+        "syscall",
+        "cmp eax, 2",
+        "je 7f",
+        "cmp eax, -4",
+        "je 6b",
+        "test eax, eax",
+        "jg 6b",
+        "mov edi, 127",
+        "jmp 8f",
+        // write(3, &status, 4); the exit code, or 128 plus the signal
+        "7:",
+        "mov eax, 1",
+        "mov edi, 3",
+        "mov rsi, rsp",
+        "mov edx, 4",
+        "syscall",
+        "mov eax, dword ptr [rsp]",
+        "mov edi, eax",
+        "and edi, 0x7f",
+        "jz 9f",
+        "add edi, 128",
+        "jmp 8f",
+        "9:",
+        "shr eax, 8",
+        "movzx edi, al",
+        // exit_group(code)
+        "8:",
+        "mov eax, 231",
+        "syscall",
+        "5:",
+        ".asciz \"meerkat-init\"",
+        "3:",
+    )
+}
+
+// The same init for 64-bit ARM (see the x86_64 one): the asm-generic system
+// call numbers, and a 64 KiB segment alignment for kernels with 64 KiB
+// pages.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+extern "C" fn init_image_bounds() -> ImageBounds {
+    core::arch::naked_asm!(
+        "adr x0, 2f",
+        "adr x1, 3f",
+        "ret",
+        ".balign 8",
+        "2:",
+        ".byte 0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0",
+        // ET_EXEC, EM_AARCH64
+        ".short 2, 183",
+        ".long 1",
+        ".quad 0x400000 + (4f - 2b), 64, 0",
+        ".long 0",
+        ".short 64, 56, 2, 64, 0, 0",
+        ".long 1, 5",
+        ".quad 0, 0x400000, 0x400000, 3f - 2b, 3f - 2b, 0x10000",
+        ".long 0x6474e551, 6",
+        ".quad 0, 0, 0, 0, 0, 16",
+        "4:",
+        // rt_sigprocmask(SIG_SETMASK, &empty, NULL, 8)
+        "sub sp, sp, 16",
+        "str xzr, [sp]",
+        "mov x8, 135",
+        "mov x0, 2",
+        "mov x1, sp",
+        "mov x2, 0",
+        "mov x3, 8",
+        "svc 0",
+        // prctl(PR_SET_DUMPABLE, 0)
+        "mov x8, 167",
+        "mov x0, 4",
+        "mov x1, 0",
+        "svc 0",
+        // prctl(PR_SET_NAME, name)
+        "mov x8, 167",
+        "mov x0, 15",
+        "adr x1, 5f",
+        "svc 0",
+        // write(4, &1, 1); close(4)
+        "mov w9, 1",
+        "strb w9, [sp]",
+        "mov x8, 64",
+        "mov x0, 4",
+        "mov x1, sp",
+        "mov x2, 1",
+        "svc 0",
+        "mov x8, 57",
+        "mov x0, 4",
+        "svc 0",
+        // wait4(-1, &status, __WALL, NULL) until it returns 2
+        "6:",
+        "mov x8, 260",
+        "mov x0, -1",
+        "mov x1, sp",
+        "mov x2, 0x40000000",
+        "mov x3, 0",
+        "svc 0",
+        "cmp w0, 2",
+        "b.eq 7f",
+        "cmn w0, 4",
+        "b.eq 6b",
+        "cmp w0, 0",
+        "b.gt 6b",
+        "mov x0, 127",
+        "b 8f",
+        // write(3, &status, 4); the exit code, or 128 plus the signal
+        "7:",
+        "mov x8, 64",
+        "mov x0, 3",
+        "mov x1, sp",
+        "mov x2, 4",
+        "svc 0",
+        "ldr w9, [sp]",
+        "and w0, w9, 0x7f",
+        "cbz w0, 9f",
+        "add w0, w0, 128",
+        "b 8f",
+        "9:",
+        "ubfx w0, w9, 8, 8",
+        // exit_group(code)
+        "8:",
+        "mov x8, 94",
+        "svc 0",
+        "5:",
+        ".asciz \"meerkat-init\"",
+        "3:",
+    )
 }
 
 fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), ConfinementRefusal> {
@@ -1271,9 +2089,7 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         statement(ret, allow),
     ]);
     // Only IP sockets from this process can exist. No AF_UNIX, netlink, packet
-    // or alternate-family connection can bypass IP/Unix separation. A Unix
-    // datagram pair can be retargeted, so pairs are supported only when every
-    // address-bearing operation below is denied. No pair is allowed with IP.
+    // or alternate-family connection can bypass IP/Unix separation.
     code.extend([
         jump(equal, libc::SYS_socket as u32, 0, 6),
         statement(load, 16),
@@ -1283,13 +2099,42 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         statement(ret, if ip { allow } else { refuse }),
         statement(ret, refuse),
     ]);
+    // A Unix pair is connected at creation and has no address, so it reaches
+    // nothing outside itself, except that a datagram pair's sendto and
+    // sendmsg take an address. Without IP every address-bearing call below
+    // is refused and every Unix pair is allowed. With IP those calls are
+    // allowed, and so only stream and seqpacket pairs are, whose address
+    // argument the kernel refuses or ignores: std's fork-and-exec spawn, the
+    // path cargo and rustc's linker call take, opens its error channel with
+    // a seqpacket pair. The type is the low four bits of the second
+    // argument (SOCK_NONBLOCK and SOCK_CLOEXEC sit above them): stream (1)
+    // and seqpacket (5) have bit 0 set and bits 1 and 3 clear, and every
+    // other type fails one of those three tests.
     code.extend([
-        jump(equal, libc::SYS_socketpair as u32, 0, 4),
+        jump(
+            equal,
+            libc::SYS_socketpair as u32,
+            0,
+            if ip { 11 } else { 4 },
+        ),
         statement(load, 16),
         jump(equal, libc::AF_UNIX as u32, 1, 0),
         statement(ret, refuse),
-        statement(ret, if ip { refuse } else { allow }),
     ]);
+    if ip {
+        code.extend([
+            statement(load, 24),
+            jump(bits, 0x2, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x8, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x1, 1, 0),
+            statement(ret, refuse),
+            statement(ret, allow),
+        ]);
+    } else {
+        code.push(statement(ret, allow));
+    }
     if !ip {
         for syscall in [
             libc::SYS_connect,
@@ -1350,10 +2195,10 @@ pub(super) fn spawn(
     streams: SpawnIo,
     gate: Option<(BorrowedFd<'_>, &OsStr)>,
 ) -> io::Result<NativeChild> {
-    // What this launch binds of each mount, validated here, before fork. The
-    // pre-exec closure owns it, and `command` the closure, until
-    // `command.spawn()` returns, which std does only after the child's exec
-    // or failure: each validated object stays alive through setup.
+    // What this launch binds of each mount, validated here, before the
+    // launch's first process is created. It stays alive until that
+    // process's setup is done and the command executed its program (the
+    // report pipe's EOF), so each validated object stays alive through setup.
     let bound = policy.launch_bindings(&launch).map_err(io::Error::other)?;
     let inherited_stdin = inherit(streams.stdin, libc::STDIN_FILENO)?;
     let inherited_stdout = inherit(streams.stdout, libc::STDOUT_FILENO)?;
@@ -1382,68 +2227,45 @@ pub(super) fn spawn(
     let stderr = stderr
         .map(|fd| ChildStderr::from_std(fd.into()))
         .transpose()?;
-    let mut command = if let Some((_, token)) = gate {
-        const PROLOGUE: &str = "IFS= read -r meerkat_custody_gate <&3 || exit 125; case $meerkat_custody_gate in \"$1\") ;; *) exit 125 ;; esac; exec 3<&-; shift; exec \"$@\"";
-        // A launch site of the confinement backend: the gated launch.
-        #[allow(clippy::disallowed_methods)]
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            OsStr::new("-c"),
-            OsStr::new(PROLOGUE),
-            OsStr::new("meerkat-custody-gate"),
-            token,
-            launch.program.as_os_str(),
-        ]);
-        command.args(&launch.arguments);
-        command
-    } else {
-        // A launch site of the confinement backend: the confined launch.
-        #[allow(clippy::disallowed_methods)]
-        let mut command = Command::new(&launch.program);
-        command.args(&launch.arguments);
-        command
-    };
-    command
-        .env_clear()
-        .envs(&launch.environment)
-        .process_group(0)
-        .stdin(Stdio::from(stdin_source))
-        .stdout(Stdio::from(stdout_source))
-        .stderr(Stdio::from(stderr_source));
-    // Command's own pre-exec cwd would retain an outside directory through
-    // chroot. Set cwd only after the complete private view is installed.
-    let directory = CString::new(launch.directory.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid confinement cwd"))?;
-    let gate = gate
+    let gate_source = gate
         .map(|(descriptor, _)| duplicate(descriptor.as_raw_fd()))
         .transpose()?;
-    // One slot per mount for setup's reopened sources, allocated here: the
-    // pre-exec child only writes its own copy.
-    let mut sources = vec![-1; policy.mounts.len()];
-    // SAFETY: The closure invokes only syscall helpers using preallocated
-    // strings, buffers, policy, bindings and FDs. Returning an error uses
-    // Command's existing owned error pipe; spawn does not report success after
-    // a setup failure.
-    unsafe {
-        command.pre_exec(move || {
-            policy
-                .apply(&bound, &mut sources)
-                .map_err(|failure| io::Error::from_raw_os_error(failure.errno))?;
-            raw(libc::chdir(directory.as_ptr())).map_err(io::Error::from_raw_os_error)?;
-            if let Some(gate) = &gate {
-                raw(libc::dup2(gate.as_raw_fd(), 3)).map_err(io::Error::from_raw_os_error)?;
-                raw(libc::fcntl(3, libc::F_SETFD, 0)).map_err(io::Error::from_raw_os_error)?;
-            }
-            Ok(())
-        });
+    let target = Target::new(
+        &launch,
+        gate.zip(gate_source.as_ref())
+            .map(|((_, token), source)| (token, source.as_raw_fd())),
+        [
+            stdin_source.as_raw_fd(),
+            stdout_source.as_raw_fd(),
+            stderr_source.as_raw_fd(),
+        ],
+    )?;
+    let started = policy.start(&bound, Some(&target))?;
+    // The launch's processes hold their own copies of every descriptor they
+    // need; the host's ends close here, as the pipes' write ends did in
+    // `start`. Only the command and the init now hold the report pipe's
+    // write end, until each executes its program.
+    drop((stdin_source, stdout_source, stderr_source, gate_source));
+    match read_report(started.report) {
+        Ok(None) => {}
+        Ok(Some(error)) => {
+            // A setup step or the command's exec failed: the launch ends on
+            // its own, with no target code run.
+            reap(started.pid, false);
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        Err(error) => {
+            reap(started.pid, true);
+            return Err(error);
+        }
     }
-    let child = command.spawn()?;
-    // std::process::Child has no drop reaper. Its configured streams were
-    // prepared above, so no fallible conversion or await separates successful
-    // spawn from this single native PID owner.
-    let owned = NativeChild::from_spawned_pid(child.id() as i32, sigchld, stdin, stdout, stderr);
-    drop(child);
-    Ok(owned)
+    // `bound` and `target` lived until the command executed its program,
+    // past every use of each validated object. No fallible conversion or
+    // await separates the started launch from its single native PID owner.
+    Ok(
+        NativeChild::from_spawned_pid(started.pid, sigchld, stdin, stdout, stderr)
+            .with_reported_status(started.status),
+    )
 }
 
 #[cfg(test)]
@@ -1464,6 +2286,8 @@ mod tests {
             filter: Vec::new(),
             uid_map: Vec::new(),
             gid_map: Vec::new(),
+            namespaces: LAUNCH_NAMESPACES,
+            init: sealed_init().unwrap(),
         });
         let launch = ProcessLaunchSpec::new(
             work.join("target"),
@@ -1907,6 +2731,8 @@ mod tests {
                 filter: Vec::new(),
                 uid_map: Vec::new(),
                 gid_map: Vec::new(),
+                namespaces: LAUNCH_NAMESPACES,
+                init: sealed_init().unwrap(),
             };
             let launch =
                 ProcessLaunchSpec::new(work.join("target"), Vec::new(), work, Default::default())
@@ -2439,5 +3265,134 @@ mod tests {
                 refuse
             );
         }
+    }
+
+    /// With IP, a Unix stream or seqpacket pair is admitted (std's
+    /// fork-and-exec spawn opens its error channel with one) and every other
+    /// pair type is refused: a datagram pair's sendto could name a host
+    /// socket. Without IP every Unix pair is admitted, as no address-bearing
+    /// call is. No other family ever gets a pair.
+    #[test]
+    fn seccomp_admits_unix_stream_and_seqpacket_pairs_with_ip() {
+        let Some(architecture) = native_audit_arch() else {
+            return;
+        };
+        let refuse = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let allow = libc::SECCOMP_RET_ALLOW;
+        // The kernel takes the type's flags above its low four bits.
+        let flags = u64::from((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32);
+        for ip in [false, true] {
+            let program = filter(architecture, ip);
+            let pair = |domain: libc::c_int, kind: libc::c_int| {
+                run_filter(
+                    &program,
+                    architecture,
+                    libc::SYS_socketpair as u32,
+                    [
+                        u64::from(domain as u32),
+                        u64::from(kind as u32) | flags,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                )
+            };
+            for kind in [libc::SOCK_STREAM, libc::SOCK_SEQPACKET] {
+                assert_eq!(pair(libc::AF_UNIX, kind), allow, "ip {ip}, type {kind}");
+            }
+            // 10 is the obsolete SOCK_PACKET.
+            for kind in [
+                libc::SOCK_DGRAM,
+                libc::SOCK_RAW,
+                libc::SOCK_RDM,
+                libc::SOCK_DCCP,
+                10,
+            ] {
+                let expected = if ip { refuse } else { allow };
+                assert_eq!(pair(libc::AF_UNIX, kind), expected, "ip {ip}, type {kind}");
+            }
+            for domain in [libc::AF_INET, libc::AF_INET6, libc::AF_NETLINK] {
+                assert_eq!(pair(domain, libc::SOCK_STREAM), refuse, "domain {domain}");
+            }
+            // The rules after the pair rule are still reached.
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_connect as u32, [0; 6]),
+                if ip { allow } else { refuse }
+            );
+            assert_eq!(
+                run_filter(&program, architecture, libc::SYS_getpid as u32, [0; 6]),
+                allow
+            );
+        }
+    }
+
+    /// The init image is a static ELF executable of this architecture: one
+    /// read-and-execute segment holding the whole file at 0x400000, a
+    /// non-executable stack, its entry in the code after the headers, and
+    /// its name at the end.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_init_image_is_a_static_executable_of_this_architecture() {
+        let image = init_image();
+        let u16_at = |at: usize| u16::from_le_bytes(image[at..at + 2].try_into().unwrap());
+        let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_le_bytes(image[at..at + 8].try_into().unwrap());
+        let length = image.len() as u64;
+        assert_eq!(
+            &image[..8],
+            b"\x7fELF\x02\x01\x01\x00",
+            "64-bit, little-endian"
+        );
+        let machine = if cfg!(target_arch = "x86_64") {
+            62
+        } else {
+            183
+        };
+        assert_eq!(
+            (u16_at(16), u16_at(18)),
+            (2, machine),
+            "ET_EXEC, this machine"
+        );
+        assert_eq!(
+            (u64_at(32), u16_at(54), u16_at(56)),
+            (64, 56, 2),
+            "two headers"
+        );
+        // PT_LOAD: read and execute, the whole file at 0x400000.
+        assert_eq!((u32_at(64), u32_at(68)), (1, 5));
+        assert_eq!((u64_at(72), u64_at(80)), (0, 0x40_0000));
+        assert_eq!((u64_at(96), u64_at(104)), (length, length));
+        // PT_GNU_STACK: read and write only.
+        assert_eq!((u32_at(120), u32_at(124)), (0x6474_e551, 6));
+        assert!(
+            (0x40_0000 + 176..0x40_0000 + length).contains(&u64_at(24)),
+            "the entry is in the code"
+        );
+        assert!(image.ends_with(b"meerkat-init\0"));
+    }
+
+    /// The init is executed from a memory file that holds exactly the
+    /// image and is sealed against any change, through a read-only
+    /// descriptor above the launch's floor.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn the_init_image_is_executed_from_a_sealed_read_only_memory_file() {
+        let init = sealed_init().unwrap();
+        let descriptor = init.as_raw_fd();
+        assert!(descriptor >= LAUNCH_DESCRIPTOR_FLOOR);
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_RDONLY);
+        assert_ne!(
+            unsafe { libc::fcntl(descriptor, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let seals = unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) };
+        let required =
+            libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+        assert_eq!(seals & required, required);
+        let mut contents = Vec::new();
+        File::from(init).read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, init_image());
     }
 }

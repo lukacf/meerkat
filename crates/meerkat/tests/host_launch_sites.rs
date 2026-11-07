@@ -52,9 +52,11 @@ const LAUNCH_PATTERNS: &[&str] = &[
     "webbrowser::open",
     "libc::fork(",
     "libc::vfork(",
+    "libc::clone(",
     "libc::posix_spawn(",
     "libc::posix_spawnp(",
     "libc::execv",
+    "libc::fexecve(",
     "libc::system(",
     "nix::unistd::fork(",
     "nix::unistd::execv",
@@ -131,15 +133,24 @@ const SITES: &[(&str, &str, usize, Launch)] = &[
         1,
         Launch::TrustedHostBranch(ConfinementLaunchKind::Shell),
     ),
+    // The Linux backend creates each launch's first process (pid 1 of the
+    // launch's namespaces) and its command with one clone call, and
+    // executes the command's program and the launch's init.
     (
         "crates/meerkat-sandbox/src/linux.rs",
-        "Command::new(",
-        2,
+        "libc::clone(",
+        1,
         Launch::ConfinementBackend,
     ),
     (
         "crates/meerkat-sandbox/src/linux.rs",
-        "libc::fork(",
+        "libc::execv",
+        1,
+        Launch::ConfinementBackend,
+    ),
+    (
+        "crates/meerkat-sandbox/src/linux.rs",
+        "libc::fexecve(",
         1,
         Launch::ConfinementBackend,
     ),

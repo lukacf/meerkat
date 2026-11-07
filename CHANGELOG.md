@@ -226,6 +226,14 @@ them.
   Fixed). Code that builds it literally, or destructures it without `..`,
   must name them; a factory that only reads its fields is unaffected.
 
+- Behaviour-only (not measured by the gate): `meerkat-sandbox`: on Linux,
+  the process a confined launch's `NativeChild` owns (its `id()`, the
+  launch's process group leader, the PID custody records) is the launch's
+  init, pid 1 of the launch's own pid namespace, no longer the command: the
+  command runs as pid 2 there, and its `$$` and `getpid()` are 2. Every
+  process the command leaves running ends when the command ends, where it
+  ran on until its caller ended the process group. See Changed.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -570,6 +578,33 @@ them.
   provisioned, and an inherited one kept, instead of failing the build or
   dropping the tool for the build's lifetime. The first search completes the
   exchange.
+
+- `meerkat-sandbox`: on Linux, every confined launch runs in a pid namespace
+  of its own and sees a read-only `/proc` of it, so a Rust toolchain runs
+  confined: `rustup`'s proxies, `rustc` (which loads its libraries relative
+  to `/proc/self/exe`), `cargo-clippy`, `cargo-fmt` and the linker failed
+  without `/proc`. That procfs holds process entries only (`subset=pid`), no
+  host-wide state such as `/proc/sys` or `/proc/net`, and lists only the
+  launch's own processes. A launch without IP access also gets a network
+  namespace of its own, so `/proc/self/net` shows only its loopback
+  interface; with IP access it shows the host's network namespace. A host
+  that refuses the mount (a masked or overmounted `/proc`, a kernel before
+  5.8) still launches, without `/proc`, as before. The launch's first
+  process is pid 1 of the namespace and the process `NativeChild` owns: it
+  runs the setup, starts the command as pid 2, then executes a small init
+  that the backend carries in a sealed memory file. The init holds none of
+  the host's memory, the command cannot inspect it, it reaps every orphan,
+  and it reports the command's exit status, which `NativeChild` returns
+  (the exit code, or the signal that ended the command). When the command
+  ends, every process it left running ends with it; killing the launch's
+  PID ends them all at once. With IP access, Unix stream and seqpacket
+  socket pairs are allowed, so a confined Rust program can start processes
+  (`cargo`, and `rustc`'s linker call, failed with `EPERM`); datagram pairs
+  stay refused. A confined launch is now two processes, and the backend
+  needs pid namespaces, network namespaces for a launch without IP access,
+  and memory files it may execute (`vm.memfd_noexec` below 2); a host
+  without them refuses confined launches (`BackendUnavailable`). See
+  Breaking.
 
 ### Deprecated
 

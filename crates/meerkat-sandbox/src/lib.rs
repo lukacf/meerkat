@@ -185,8 +185,11 @@ impl PreparedConfinement {
 
     /// Spawn behind a host-owned custody release pipe. The fixed gate reads
     /// one release token, closes descriptor 3, then enters the bound executor
-    /// without changing PID or process group. EOF or a different token exits
-    /// with code 125 before any target code runs.
+    /// without changing PID or process group: the target keeps the gate's.
+    /// EOF or a different token exits with code 125 before any target code
+    /// runs. On Linux the gate runs as the command of the launch's own pid
+    /// namespace (pid 2 there), under the launch's init, which is the direct
+    /// child the returned [`NativeChild`] owns.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn spawn_behind_gate(
         self,

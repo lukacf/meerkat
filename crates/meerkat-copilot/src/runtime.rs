@@ -5669,6 +5669,63 @@ mod tests {
         assert!(gated(64_000).request_pressure(&request).is_ok());
     }
 
+    /// The gate and the compaction threshold read one prompt limit: the
+    /// tighter of the stated prompt limit and the context window less the
+    /// request's output budget. The gate takes the request's own budget; the
+    /// limit stated to the factory takes the most output the account lets a
+    /// request ask, so it never exceeds what the gate admits. (Fails-old: with
+    /// only the window stated the factory read the whole window, above the
+    /// gate's limit; with both stated the gate read the prompt limit alone,
+    /// above the window.)
+    #[test]
+    fn the_gate_and_the_compaction_threshold_read_one_prompt_limit() {
+        let gated = |input_tokens, limits| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits,
+                    supports: Default::default(),
+                }),
+            )
+        };
+        let window_only = crate::CopilotModelLimits {
+            max_context_window_tokens: Some(128_000),
+            max_output_tokens: Some(32_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            gated(0, window_only.clone()).prompt_token_limit(),
+            Some(96_000),
+            "the window less the most output a request may ask"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        assert!(matches!(
+            gated(96_001, window_only).request_pressure(&request),
+            Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+        ));
+
+        let prompt_above_window = crate::CopilotModelLimits {
+            max_prompt_tokens: Some(200_000),
+            max_context_window_tokens: Some(128_000),
+            ..Default::default()
+        };
+        request.max_tokens = 8_000;
+        let refused = gated(125_000, prompt_above_window.clone()).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 120_000, .. })
+            ),
+            "the window less the request's output budget binds: {refused:?}"
+        );
+        assert!(
+            gated(120_000, prompt_above_window)
+                .request_pressure(&request)
+                .is_ok()
+        );
+    }
+
     /// A model the account lists with a policy state other than `enabled`
     /// is unavailable on the account's routes, and the refusal names the
     /// state the account states, with the models the account does offer.

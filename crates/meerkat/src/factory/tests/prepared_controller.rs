@@ -1342,3 +1342,99 @@ impl ProviderRuntime for ManagedLeaseRuntime {
         }))
     }
 }
+
+/// Whether the second turn of a `gpt-5.5` session built through a prepared
+/// controller, on a client whose account allows prompts of at most 128_000
+/// tokens, starts by compacting after a first turn whose prompt measured
+/// `input_tokens`.
+#[cfg(feature = "session-compaction")]
+async fn prepared_second_turn_compacts(input_tokens: u64) -> bool {
+    const LIMITED_REALM: &str = "prepared_controller_prompt_limit";
+    let temp = tempfile::tempdir().unwrap();
+    let mut factory = AgentFactory::new(temp.path().join("sessions"))
+        .without_provider_auth_persistence()
+        .builtins(false);
+    factory.provider_registry = Arc::new(ProviderRuntimeRegistry::empty().with_runtime(Arc::new(
+        CountingRuntime {
+            provider: Provider::OpenAI,
+            client: Arc::new(AccountPromptLimitedClient {
+                prompt_limit: 128_000,
+                input_tokens,
+            }),
+            record: Arc::new(RouteRecord::default()),
+        },
+    )));
+    let mut config = Config::default();
+    config.realm.insert(
+        LIMITED_REALM.to_string(),
+        inline_realm_section(&[("openai", "test-openai-key")]),
+    );
+    let request = || {
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.max_tokens = Some(1024);
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some(RealmId::parse(LIMITED_REALM).unwrap());
+        build.auth_binding = Some(configured_auth_binding(LIMITED_REALM, "default_openai"));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_image_generation = ToolCategoryOverride::Disable;
+        build
+    };
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let graph = factory
+        .prepare_controller_graph(
+            request(),
+            &config,
+            runtime.generated_auth_lease_handle(),
+            &session_id,
+        )
+        .await
+        .expect("the controller is prepared under the session's auth owner");
+    let ticket =
+        PreparedControllerTicket::new(PreparedControllerCell::new(session_id.clone(), graph));
+    let bindings = runtime
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("session runtime bindings");
+    let mut build = request();
+    build.resume_session = Some(Session::with_id(session_id));
+    build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+    build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+    build.prepared_controller = Some(encode_prepared_controller_for_service(ticket));
+    let mut agent = factory
+        .build_agent(build, &config)
+        .await
+        .expect("the session's build takes the prepared controller");
+    agent.set_runtime_execution_kind(Some(
+        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+    ));
+    agent
+        .run(meerkat_core::ContentInput::Text("first".into()))
+        .await
+        .expect("first turn");
+    agent.set_runtime_execution_kind(Some(
+        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+    ));
+    let (tx, mut rx) = mpsc::channel(256);
+    agent
+        .run_with_events(meerkat_core::ContentInput::Text("second".into()), tx)
+        .await
+        .expect("second turn");
+    let mut compacted = false;
+    while let Ok(event) = rx.try_recv() {
+        compacted |= matches!(event, AgentEvent::CompactionStarted { .. });
+    }
+    compacted
+}
+
+/// The prompt limit the selected account states reaches the session's
+/// compactor through a prepared controller too: the graph keeps the limit
+/// its client stated, and the consuming build's session compacts from
+/// 102_400, four-fifths of a 128_000 limit, on `gpt-5.5`, whose own default
+/// threshold is 840_000.
+#[cfg(feature = "session-compaction")]
+#[tokio::test]
+async fn a_prepared_controller_carries_the_account_prompt_limit_to_the_compactor() {
+    assert!(prepared_second_turn_compacts(110_000).await);
+    assert!(!prepared_second_turn_compacts(100_000).await);
+}

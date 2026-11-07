@@ -704,7 +704,9 @@ composition without the built-in identity and member store commits no change
   transaction, with its tombstone, which owns no edge) and by the mob's reset
   or destroy. A plain unwire of an owned edge in force is refused
   `MobError::OwnedIdentityEdge`. A start recovers each edge from its owner's
-  row and wires those a crash left unwired.
+  row and wires those a crash left unwired; an import restores the edges of
+  the rows it restores the same way, so they are the edges the next start
+  recovers.
 - **Adoption into store custody (0.9.11).** `MobHandle::adopt_identity`
   moves an existing member into store custody as one change (receipt kind
   `adopt`): a roster-owned identity (`AdoptionSource::roster`, with its

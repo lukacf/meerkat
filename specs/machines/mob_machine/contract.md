@@ -20513,7 +20513,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RestoreOwnedIdentityEdge`(edge, owner)
 - Guards:
-  - `peer_is_an_identity`
   - `owner_is_a_store_owned_end`
   - `edge_not_owned`
   - `ends_not_removed`

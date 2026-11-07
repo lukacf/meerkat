@@ -36001,7 +36001,6 @@ macro_rules! mob_catalog_machine_dsl {
         transition RestoreOwnedIdentityEdgeRestored {
             on input RestoreOwnedIdentityEdge { edge, owner }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "peer_is_an_identity" { self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == true }
             guard "owner_is_a_store_owned_end" {
                 mob_machine_wiring_edge_contains_identity(edge, owner)
                 && mob_machine_wiring_edge_a(edge) != mob_machine_wiring_edge_b(edge)
@@ -36037,7 +36036,6 @@ macro_rules! mob_catalog_machine_dsl {
                 || self.identity_entry_tombstones.contains(mob_machine_wiring_edge_b(edge)) == true
                 || self.identity_entry_removing.contains(mob_machine_wiring_edge_a(edge)) == true
                 || self.identity_entry_removing.contains(mob_machine_wiring_edge_b(edge)) == true
-                || self.identity_entry_origins.contains_key(mob_machine_wiring_edge_other(edge, owner)) == false
             }
             update {}
             to Running

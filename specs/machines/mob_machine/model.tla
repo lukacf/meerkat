@@ -27158,7 +27158,6 @@ AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed(edge) ==
 
 RestoreOwnedIdentityEdgeRestored(edge, owner) ==
     /\ phase = "Running"
-    /\ ((mob_machine_wiring_edge_other(edge, owner) \in DOMAIN identity_entry_origins) = TRUE)
     /\ (mob_machine_wiring_edge_contains_identity(edge, owner) /\ (mob_machine_wiring_edge_a(edge) # mob_machine_wiring_edge_b(edge)) /\ ((IF (owner \in DOMAIN identity_entry_origins) THEN Some((IF owner \in DOMAIN identity_entry_origins THEN identity_entry_origins[owner] ELSE "None")) ELSE None) = Some("Created")))
     /\ ((edge \in DOMAIN identity_edge_owners) = FALSE)
     /\ (((mob_machine_wiring_edge_a(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_tombstones) = FALSE) /\ ((mob_machine_wiring_edge_a(edge) \in identity_entry_removing) = FALSE) /\ ((mob_machine_wiring_edge_b(edge) \in identity_entry_removing) = FALSE))
@@ -27170,7 +27169,7 @@ RestoreOwnedIdentityEdgeRestored(edge, owner) ==
 
 RestoreOwnedIdentityEdgeSkipped(edge, owner) ==
     /\ phase = "Running"
-    /\ (IF (mob_machine_wiring_edge_contains_identity(edge, owner) = FALSE) THEN TRUE ELSE (IF (mob_machine_wiring_edge_a(edge) = mob_machine_wiring_edge_b(edge)) THEN TRUE ELSE (IF ((IF (owner \in DOMAIN identity_entry_origins) THEN Some((IF owner \in DOMAIN identity_entry_origins THEN identity_entry_origins[owner] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (IF ((edge \in DOMAIN identity_edge_owners) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_a(edge) \in identity_entry_tombstones) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_b(edge) \in identity_entry_tombstones) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_a(edge) \in identity_entry_removing) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_b(edge) \in identity_entry_removing) = TRUE) THEN TRUE ELSE ((mob_machine_wiring_edge_other(edge, owner) \in DOMAIN identity_entry_origins) = FALSE)))))))))
+    /\ (IF (mob_machine_wiring_edge_contains_identity(edge, owner) = FALSE) THEN TRUE ELSE (IF (mob_machine_wiring_edge_a(edge) = mob_machine_wiring_edge_b(edge)) THEN TRUE ELSE (IF ((IF (owner \in DOMAIN identity_entry_origins) THEN Some((IF owner \in DOMAIN identity_entry_origins THEN identity_entry_origins[owner] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (IF ((edge \in DOMAIN identity_edge_owners) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_a(edge) \in identity_entry_tombstones) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_b(edge) \in identity_entry_tombstones) = TRUE) THEN TRUE ELSE (IF ((mob_machine_wiring_edge_a(edge) \in identity_entry_removing) = TRUE) THEN TRUE ELSE ((mob_machine_wiring_edge_b(edge) \in identity_entry_removing) = TRUE))))))))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_009e4151ed1cf326

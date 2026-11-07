@@ -24967,8 +24967,13 @@ mob = true
         assert_host_tool_call_routed_to_the_helpers_build(&delegation);
     }
 
-    /// The scripted model of a requester's run: a turn offered the host tool
-    /// calls it once, and every other turn answers.
+    /// The person's input of the requester row.
+    const HOST_TOOL_PROMPT: &str = "use the host tool";
+
+    /// The scripted model of a requester's run: the first turn that holds the
+    /// person's input and is offered the host tool calls it once, and every
+    /// other turn answers. A turn the member runs before that input (a run of
+    /// its own, with no requester) never calls it.
     #[derive(Clone)]
     struct HostToolModel;
 
@@ -24991,7 +24996,11 @@ mob = true
                     .any(|result| result.tool_use_id == HOST_TOOL_CALL_ID),
                 _ => false,
             });
-            let call = !called && request.tools.iter().any(|tool| tool.name == HOST_TOOL);
+            let asked = request.messages.iter().any(|message| {
+                matches!(message, meerkat_core::Message::User(user)
+                    if user.text_content() == HOST_TOOL_PROMPT)
+            });
+            let call = asked && !called && request.tools.iter().any(|tool| tool.name == HOST_TOOL);
             let [usage, done] = crate::mob_handle_runtime::test_llm_usage::usage_then_done(
                 request,
                 meerkat_core::Provider::OpenAI,
@@ -25081,7 +25090,7 @@ comms = true
                 entry.agent_runtime_id.clone(),
                 entry.fence_token,
                 meerkat_mob::WorkSpec::new(
-                    meerkat_core::types::ContentInput::Text("use the host tool".to_string()),
+                    meerkat_core::types::ContentInput::Text(HOST_TOOL_PROMPT.to_string()),
                     meerkat_mob::WorkOrigin::External,
                 )
                 .with_interaction_id(meerkat_core::interaction::InteractionId(interaction))

@@ -245,9 +245,9 @@ of the run that submitted the job (see below), recorded with the job, or
 A tool handler's optional second argument is the original requester of the
 run the call serves (`ToolCallRequester`): its `principal` (`kind`, `id`, and
 `trustDomainId` when it is qualified) and `carried`, true when the run's work
-reached the agent through another actor, such as a peer hop. A console send
-from a person on a console that requires sign-in names that person, with
-`trustDomainId` `oidc-issuer:` and the issuer; a run without a requester
+reached the agent through another actor, such as a peer hop. A person the
+Meta console authenticated appears with `trustDomainId` `oidc-issuer:`
+followed by the token's issuer; a run without a requester
 passes `undefined`. The runtime sets it, never the arguments, so a tool that
 acts in one person's name can refuse everyone else:
 

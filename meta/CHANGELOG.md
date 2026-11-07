@@ -94,8 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `callback/call_tool` names it as `requester` (the principal, and
   `carried` when the run's work reached its agent through another actor),
   and a detached callback job's `callback/job/start` names the requester of
-  the run that submitted it, recorded with the job. A console send from a
-  person on a console that requires sign-in is such a run. A run without a
+  the run that submitted it, recorded with the job. A run without a
   requester names none. Only the runtime sets it; a `requester` inside a
   call's arguments is just an argument. The Python and TypeScript SDKs pass
   it to a tool handler (`ToolCallRequester`, with `RequesterPrincipal`): in

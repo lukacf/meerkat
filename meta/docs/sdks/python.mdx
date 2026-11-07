@@ -146,8 +146,8 @@ A tool handler that declares a `requester` parameter receives the original
 requester of the run the call serves (`ToolCallRequester`): its `principal`
 (`kind`, `id`, and `trust_domain_id` when it is qualified) and `carried`,
 true when the run's work reached the agent through another actor, such as a
-peer hop. A console send from a person on a console that requires sign-in
-names that person, with `trust_domain_id` `oidc-issuer:` and the issuer; a
+peer hop. A person the Meta console authenticated appears with
+`trust_domain_id` `oidc-issuer:` followed by the token's issuer; a
 run without a requester passes `None`. The runtime sets it, never the
 arguments, so a tool that acts in one person's name can refuse everyone else:
 

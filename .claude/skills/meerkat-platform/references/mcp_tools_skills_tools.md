@@ -214,7 +214,8 @@ and confinement still applies to a call it opens.
   `tool_grants/grant` (Python `scope="current_run"`, TypeScript
   `{ scope: "current_run" }`), which takes the run the subject is running
   now (a mob member identity's: the run of the session its member holds on
-  the server) and is refused with `data.kind = "run_not_active"` when it
+  the server) and is refused with the request refusal `run_not_active`
+  (`data.kind = "tool_grant_request_refused"`) when it
   runs none.
   Such a grant opens its names only in that run and refuses a call outside
   any run (`tool_grant_required`); it ends (`run_ended`) when the run

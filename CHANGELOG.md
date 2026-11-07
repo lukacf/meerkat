@@ -425,9 +425,9 @@ them.
   default, or `{"kind": "current_run"}`, which scopes the grant to the run
   its subject is running now (a mob member identity's: the run of the
   session its member holds on the server, whose end ends the grant); a
-  subject that runs no turn refuses it with
-  invalid params whose data is `{"kind": "run_not_active"}`
-  (`WireToolGrantErrorData`), and nothing is issued. Every grant carries its
+  subject that runs no turn refuses it with the typed request refusal
+  `run_not_active` (`ToolGrantRequestRefusal::RunNotActive`, under
+  `tool_grant_request_refused`), and nothing is issued. Every grant carries its
   `scope` (`WireToolGrantScope`: `window`, or `current_run` with the
   `run_id`), as does its `granted` audit row. Python `grant_tool` takes
   `scope="current_run"` and TypeScript `grantTool` takes
@@ -451,13 +451,15 @@ them.
   (`not_a_human_decision`), a request whose subject ended (`subject_ended`:
   a member identity whose mob is gone or was replaced, or whose member left
   the roster, so a later member of the name never holds a grant asked for
-  an earlier one), a run-scoped request whose run is over
+  an earlier one) or that the host cannot confirm now (`subject_unknown`),
+  a run-scoped request whose run is over
   (`run_ended`) and a body this version cannot read (`unreadable_request`),
   and hands each ended request's notice (`ToolGrantRequestNotice`) to the
   host's `ToolGrantRequestNotices`; the host's `ToolGrantSubjectObserver`
   answers what the subject is now (`ToolGrantSubjectPresence`: held, with
   its current run, a session's own or the run of the session a member
-  identity's member holds; ended; or unknown, asked again at a later pass).
+  identity's member holds; ended; or unknown, which refuses the approval
+  `subject_unknown`, fail closed).
   `tool_grant_requests_of` reads a
   subject's requests (the ended ones from a deadline bound on), and
   `MeerkatMachine::list_tool_grant_requests` lists them with the ended ones
@@ -545,8 +547,9 @@ them.
 - Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
   `target_not_gated`, `server_not_installed`, `no_live_grant`,
   `invalid_wait`, `invalid_window`, `empty_target`, `not_found`,
-  `invalid_decision_ref`, `invalid_page_limit`; the three server and attach
-  kinds are for host surfaces, and `rkat-rpc` never sends them) and
+  `invalid_decision_ref`, `invalid_page_limit`, `run_not_active`; the three
+  server and attach kinds are for host surfaces, and `rkat-rpc` never sends
+  them) and
   `TOOL_GRANT_REQUEST_REFUSED_KIND`; `ToolGrantSubject::member`;
   `ToolGrantIssuer::operator`; `GrantGatedTools::FIELD_NAMES`, `extend` and
   `without`; the defaulted `SessionToolGrants::for_member`;

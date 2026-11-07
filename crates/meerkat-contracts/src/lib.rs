@@ -691,7 +691,6 @@ pub use wire::{
     WireToolGrant,
     WireToolGrantAuditEvent,
     WireToolGrantAuditRow,
-    WireToolGrantErrorData,
     WireToolGrantExpiryDriver,
     WireToolGrantIssuer,
     WireToolGrantRefusalKind,

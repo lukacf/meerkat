@@ -26312,7 +26312,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "The grant also ends with the run its subject session is running when\nit is issued. Refused `run_not_active` when the session runs none.",
+            "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
             "properties": {
               "kind": {
                 "const": "current_run",
@@ -42318,7 +42318,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "The grant also ends with the run its subject session is running when\nit is issued. Refused `run_not_active` when the session runs none.",
+            "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
             "properties": {
               "kind": {
                 "const": "current_run",
@@ -46503,7 +46503,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "The grant also ends with the run its subject session is running when\nit is issued. Refused `run_not_active` when the session runs none.",
+        "description": "The grant also ends with the run its subject is running when it is\nissued: a session's own, or the run of the session a member\nidentity's member holds. A subject that runs none is refused with the\ntyped request refusal `run_not_active`.",
         "properties": {
           "kind": {
             "const": "current_run",

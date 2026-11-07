@@ -1248,13 +1248,6 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown
 
-# The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals
-# it names.
-class WireToolGrantErrorDataRunNotActive(TypedDict, total=False):
-    kind: Required[Literal['run_not_active']]
-
-WireToolGrantErrorData = WireToolGrantErrorDataRunNotActive
-
 # Who a presenter showed a rendering to. Closed.
 class DecisionAudienceApprover(TypedDict, total=False):
     approver_id: Required[str]

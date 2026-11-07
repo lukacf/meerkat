@@ -2679,8 +2679,10 @@ class MeerkatClient:
         ``scope="current_run"`` also scopes the grant to the run the subject
         is running now (an identity's: the run of the session its member
         holds on the server): it opens the target in that run only and ends
-        with it, and a subject that runs no turn refuses it (error ``data``
-        ``{"kind": "run_not_active"}``). Omitted, or ``"window"``, the grant
+        with it, and a subject that runs no turn refuses it (the request
+        refusal ``run_not_active``: error ``data``
+        ``{"kind": "tool_grant_request_refused", "tool_grant_request_refusal":
+        {"kind": "run_not_active"}}``). Omitted, or ``"window"``, the grant
         lasts for its window. ``decision_ref`` records the host's reference
         to the decision it made before issuing, as attribution. Returns the
         ``tool_grants/grant`` result, ``{"grant": {...}}``: a family grant's

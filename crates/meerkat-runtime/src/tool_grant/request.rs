@@ -18,7 +18,8 @@
 //!   meets the grant it issued and settles executed. It refuses a decision no
 //!   person decided (`not_a_human_decision`), a request whose subject ended
 //!   (`subject_ended`: a member identity whose mob is gone or was replaced,
-//!   or whose member left the roster), a run-scoped request whose run is
+//!   or whose member left the roster) or that the host cannot confirm now
+//!   (`subject_unknown`, fail closed), a run-scoped request whose run is
 //!   over (`run_ended`), and a body this version cannot read
 //!   (`unreadable_request`). The host's [`ToolGrantSubjectObserver`] answers
 //!   what the subject is now.
@@ -527,8 +528,9 @@ pub enum ToolGrantSubjectPresence {
     /// replaced, or whose member left the roster. Its grants ended with it,
     /// and none is issued to it after.
     Ended,
-    /// The host cannot tell now: the decision is asked about again at a
-    /// later pass.
+    /// The host cannot tell now (it cannot read its record of the subject):
+    /// fail closed, an approval of a request to it is refused and never
+    /// issues a grant.
     Unknown,
 }
 
@@ -626,7 +628,9 @@ impl DecisionExecutor for ToolGrantIssueExecutor {
             // after: a later member of its name never holds one asked for
             // this one.
             ToolGrantSubjectPresence::Ended => return Self::refused("subject_ended"),
-            ToolGrantSubjectPresence::Unknown => return DecisionExecution::Released,
+            // Fail closed: an approval never issues a grant to a subject the
+            // host cannot confirm.
+            ToolGrantSubjectPresence::Unknown => return Self::refused("subject_unknown"),
         };
         if let Some(run_id) = &body.run_scope
             && current_run.as_ref() != Some(run_id)

@@ -435,8 +435,8 @@ impl SessionRuntime {
         ToolGrantSubjectPresence::Held { current_run }
     }
 
-    /// A server without mobs cannot tell what a member identity is: a
-    /// decision about one waits for a host that can.
+    /// A server without mobs cannot tell what a member identity is: an
+    /// approval of a request to one is refused, fail closed.
     #[cfg(not(feature = "mob"))]
     async fn member_presence(
         &self,

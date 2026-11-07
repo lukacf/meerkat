@@ -343,7 +343,7 @@ pub use tool_grant::{
     RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
     ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
     ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant, WireToolGrantAuditEvent,
-    WireToolGrantAuditRow, WireToolGrantErrorData, WireToolGrantExpiryDriver, WireToolGrantIssuer,
+    WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer,
     WireToolGrantRefusalKind, WireToolGrantScope, WireToolGrantStatus, WireToolGrantSubject,
     WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };

@@ -532,7 +532,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     # Scoped tool grant vocabulary. Every alias the audit event union names
     # precedes it: the generated Python aliases evaluate in roster order. The
     # request subject, target and scope are closed; the result ones are
-    # tolerant; the error data is closed.
+    # tolerant.
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
     "ToolGrantScopeRequest",
@@ -544,7 +544,6 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
-    "WireToolGrantErrorData",
     # Durable decision vocabulary. The request audience is closed; the result
     # vocabularies are tolerant; the refusal and the error data are closed.
     "DecisionAudienceRequest",

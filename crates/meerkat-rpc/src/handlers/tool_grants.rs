@@ -9,9 +9,9 @@
 //! gate joined with its role's current gate, and needs the identity in the
 //! mob's roster. List and audit resolve the mob only, so a retired
 //! identity's history stays readable. Every refusal of a request these
-//! methods check is the typed `tool_grant_request_refused` refusal, but a
-//! `current_run` grant to a subject that runs no turn, refused as
-//! `run_not_active`.
+//! methods check is the typed `tool_grant_request_refused` refusal, a
+//! `current_run` grant to a subject that runs no turn included
+//! (`run_not_active`).
 //!
 //! A `current_run` grant takes the run the runtime records now for the
 //! session serving the subject: a session's own, or the session an
@@ -31,7 +31,7 @@ use meerkat_contracts::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RequestToolGrantParams, RequestToolGrantResult, RevokeToolGrantParams, RevokeToolGrantResult,
     ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
-    ToolGrantTargetRequest, WireToolGrantErrorData,
+    ToolGrantTargetRequest,
 };
 use meerkat_core::approval::decision::DecisionReference;
 use meerkat_core::tool_grant::{
@@ -97,19 +97,6 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
         _ => error::INTERNAL_ERROR,
     };
     RpcResponse::error(id, code, error_value.to_string())
-}
-
-/// A `current_run` grant's refusal when the subject runs no turn:
-/// `run_not_active`.
-fn run_not_active(id: Option<RpcId>, message: String) -> RpcResponse {
-    match serde_json::to_value(WireToolGrantErrorData::RunNotActive) {
-        Ok(data) => RpcResponse::error_with_data(id, error::INVALID_PARAMS, message, data),
-        Err(serialize_error) => RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("failed to serialize tool grant error data: {serialize_error}"),
-        ),
-    }
 }
 
 /// The session a session subject names. An id that names no session is the
@@ -347,7 +334,11 @@ async fn run_scope_of(
                         "no member of the identity {identity} in mob {mob_id} runs a turn here now"
                     ),
                 };
-                run_not_active(id, format!("{idle}: a current_run grant needs a run"))
+                refused(
+                    id,
+                    &ToolGrantRequestRefusal::RunNotActive,
+                    format!("{idle}: a current_run grant needs a run"),
+                )
             })
         }
     }

@@ -2241,8 +2241,10 @@ export class MeerkatClient {
    * for it. `options.scope` `"current_run"` also scopes the grant to the run
    * the subject is running now (an identity's: the run of the session its
    * member holds on the server): it opens the target in that run only and
-   * ends with it; a subject that runs no turn refuses it (`data.kind`
-   * `"run_not_active"`). Omitted, or `"window"`, the grant lasts for its
+   * ends with it; a subject that runs no turn refuses it (the request
+   * refusal `run_not_active`: `data.kind` `"tool_grant_request_refused"`,
+   * `data.tool_grant_request_refusal.kind` `"run_not_active"`). Omitted, or
+   * `"window"`, the grant lasts for its
    * window. `options.decisionRef` records the host's reference to the
    * decision it made before issuing, as attribution. Throws `INVALID_ARGS`
    * unless the target names exactly one of `tool` and `family`, and the

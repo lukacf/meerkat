@@ -212818,26 +212818,6 @@
     "title": "WireToolGrantAuditRow",
     "type": "object"
   },
-  "WireToolGrantErrorData": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals\nit names.",
-    "oneOf": [
-      {
-        "description": "A `current_run` grant names a session that runs no turn now (code\n-32602). Nothing was issued.",
-        "properties": {
-          "kind": {
-            "const": "run_not_active",
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind"
-        ],
-        "type": "object"
-      }
-    ],
-    "title": "WireToolGrantErrorData"
-  },
   "WireToolGrantExpiryDriver": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Which driver observed a grant's expiry or the end of its run.",

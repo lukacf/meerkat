@@ -2127,8 +2127,8 @@ no method loads, registers or wakes the session or the member.
   A session's run is its own; an identity's is the run of the session its
   member holds on this server, and the member's end of that run ends the
   grant. A subject that runs no turn (an idle session, or an identity whose
-  member runs no turn here) refuses a `current_run` grant with invalid params
-  and `data` `{"kind": "run_not_active"}`, and nothing is issued.
+  member runs no turn here) refuses a `current_run` grant with the request
+  refusal `run_not_active` (below), and nothing is issued.
   `decision_ref`, when given,
   is the host's reference to the decision it made before issuing (non-empty,
   at most 1024 bytes, no control character): the grant's `issuer` records it,
@@ -2181,7 +2181,8 @@ no method loads, registers or wakes the session or the member.
   undecided past its deadline issues nothing, and neither does an approval
   of an identity's request executed after the identity ended (its member
   retired, its entry ended, or its mob was reset or replaced), refused with
-  the reason `subject_ended`. A `current_run` request names
+  the reason `subject_ended`, or while the server cannot tell what the
+  identity is (`subject_unknown`, fail closed). A `current_run` request names
   the run its subject is running when it is asked, and is refused when the
   subject runs another run by its approval. When the request ends, its
   session receives a `tool_grant_request` external event, like any input:
@@ -2236,12 +2237,11 @@ identity; an unparseable session id included), `target_not_gated` (the
 subject's gate does not name the target), `invalid_window` (a window that is
 past, empty, longer than the maximum, or given twice or not at all),
 `empty_target`, `not_found` (an unknown or malformed grant id, with
-`grant_id`), `invalid_decision_ref` or `invalid_page_limit` (an audit `limit`
-of 0). `server_not_installed`, `no_live_grant` and `invalid_wait` are reserved
-for hosts that keep an installation list or attach a granted MCP server live;
-`rkat-rpc` never sends them. A `current_run` grant or request to a subject
-that runs no turn answers invalid params with `data` `{"kind":
-"run_not_active"}`. Other
+`grant_id`), `invalid_decision_ref`, `invalid_page_limit` (an audit `limit`
+of 0) or `run_not_active` (a `current_run` grant or request whose subject
+runs no turn). `server_not_installed`, `no_live_grant` and `invalid_wait` are
+reserved for hosts that keep an installation list or attach a granted MCP
+server live; `rkat-rpc` never sends them. Other
 errors use the standard codes: `SESSION_BUSY` when concurrent writers changed
 the grant under a grant or revoke twice, which a retry resolves; capability
 unavailable for an `identity` subject on a server that runs no mobs, a store

@@ -1016,12 +1016,6 @@ export interface WireToolGrantAuditEventUnknown {
 
 export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown;
 
-export interface WireToolGrantErrorDataRunNotActive {
-  kind: "run_not_active";
-}
-
-export type WireToolGrantErrorData = WireToolGrantErrorDataRunNotActive;
-
 export interface DecisionAudienceApprover {
   approver_id: string;
   kind: "approver";

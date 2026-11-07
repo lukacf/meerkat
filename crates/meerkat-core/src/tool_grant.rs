@@ -564,6 +564,11 @@ pub enum ToolGrantRequestRefusal {
     /// An audit page limit of zero.
     #[error("an audit page limit must be at least 1")]
     InvalidPageLimit,
+    /// A `current_run` scope whose subject runs no turn: an idle session, or
+    /// an identity whose member runs no turn on this host. Nothing was
+    /// issued or held.
+    #[error("the subject runs no turn: a current_run scope needs a run")]
+    RunNotActive,
 }
 
 impl ToolGrantRequestRefusal {

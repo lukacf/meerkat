@@ -97,8 +97,10 @@ pub enum ToolGrantTargetRequest {
 pub enum ToolGrantScopeRequest {
     /// The grant lasts for its window.
     Window {},
-    /// The grant also ends with the run its subject session is running when
-    /// it is issued. Refused `run_not_active` when the session runs none.
+    /// The grant also ends with the run its subject is running when it is
+    /// issued: a session's own, or the run of the session a member
+    /// identity's member holds. A subject that runs none is refused with the
+    /// typed request refusal `run_not_active`.
     CurrentRun {},
 }
 
@@ -300,17 +302,6 @@ pub struct RequestToolGrantParams {
 pub struct RequestToolGrantResult {
     pub grant: WireToolGrant,
     pub decision: crate::wire::WireDecision,
-}
-
-/// The typed `data` of a `tool_grants/*` refusal. Closed, like the refusals
-/// it names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WireToolGrantErrorData {
-    /// A `current_run` grant names a session that runs no turn now (code
-    /// -32602). Nothing was issued.
-    RunNotActive,
 }
 
 /// `tool_grants/revoke` parameters.

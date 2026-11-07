@@ -7,7 +7,7 @@ const { build } = require("esbuild");
 const { chromium } = require("playwright");
 
 async function runIndexedDbStorageLock() {
-  const bundle = await build({ entryPoints: [path.join(__dirname, "../src/lib/send-storage-lock.ts")], bundle: true,
+  const bundle = await build({ entryPoints: [path.join(__dirname, "storage-lock-entry.ts")], bundle: true,
     platform: "browser", format: "iife", globalName: "QueueLock", write: false });
   const evidence = process.env.META_BROWSER_EVIDENCE || path.join(__dirname, "../../output/playwright/console-acceptance");
   const server = http.createServer((req, res) => {
@@ -163,6 +163,40 @@ async function runIndexedDbStorageLock() {
     await queueIncrement(second);
     assert.equal(await completedIncrement(second), counter + 1);
     proof.failedCallbackReleased = true;
+
+    // Signing out removes the user's queues, and the lock's records of their
+    // keys: each record holds the last value its key had, so the queued text
+    // would outlive the sign-out in IndexedDB. Removing an imported older
+    // queue does the same for its key. Another user's record stays.
+    const purge = await second.evaluate(async () => {
+      const namespace = JSON.stringify(["", "console-storage:v1:a"]);
+      const own = QueueLock.consoleSendStorageKey(namespace, "identity:agent");
+      const other = QueueLock.consoleSendStorageKey(JSON.stringify(["", "console-storage:v1:b"]), "identity:agent");
+      const hostOnly = QueueLock.consoleSendStorageKey("host-namespace", "identity:agent");
+      for (const [key, text] of [[own, "a's private queued text"], [other, "b's queued text"], [hostOnly, "an older shared queue"]]) {
+        await QueueLock.withConsoleSendStorageLock(key, () => {
+          localStorage.setItem(key, JSON.stringify({ version: 1, attempts: [{ id: key, text }] }));
+        });
+      }
+      await QueueLock.purgeConsoleSendScope(localStorage, sessionStorage, namespace);
+      await QueueLock.removeOlderConsoleQueues(localStorage, JSON.stringify(["host-namespace", "console-storage:v1:a"]), "identity:agent", "host-namespace");
+      const db = await new Promise((resolve, reject) => {
+        const open = indexedDB.open("meta-console-queue-locks", 1);
+        open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error);
+      });
+      const read = key => new Promise((resolve, reject) => {
+        const request = db.transaction("locks", "readonly").objectStore("locks").get(key);
+        request.onsuccess = () => resolve(request.result ?? null); request.onerror = () => reject(request.error);
+      });
+      const records = { own: await read(own), other: await read(other), hostOnly: await read(hostOnly) };
+      db.close();
+      return { local: { own: localStorage.getItem(own), hostOnly: localStorage.getItem(hostOnly) }, records };
+    });
+    assert.deepEqual(purge.local, { own: null, hostOnly: null });
+    assert.equal(purge.records.own, null, "the signed-out user's queued text is gone from the lock database");
+    assert.equal(purge.records.hostOnly, null, "an imported older queue's text is gone from the lock database");
+    assert.match(JSON.stringify(purge.records.other), /b's queued text/, "another user's lock record stays");
+    proof.purgedLockRecords = true;
 
     await holdTransaction(first);
     await queueIncrement(second);

@@ -64,6 +64,13 @@ describe("personal approval cards", () => {
     expect(await screen.findByRole("button", { name: "Needs you, 2 pending approvals" })).toBeTruthy();
   });
 
+  it("the sidebar's Approvals count is the Needs you count", async () => {
+    const { fake } = gateway(person);
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    expect(await screen.findByRole("button", { name: "Needs you, 2 pending approvals" })).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("nav-badge:gating").textContent).toBe("2"));
+  });
+
   it("card_marks_for_you_and_decided_by", async () => {
     const { fake, decideElsewhere } = gateway(person);
     render(<ConsoleApp baseUrl="" transport={fake} />);

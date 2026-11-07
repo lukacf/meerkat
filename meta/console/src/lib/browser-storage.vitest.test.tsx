@@ -126,6 +126,23 @@ describe("storage hygiene", () => {
     expect(storageKeys(window.sessionStorage).filter((key) => key.includes(encoded))).toEqual([]);
   });
 
+  it("a draft whose save was still waiting is not written after a sign-out", async () => {
+    const state: { caller: Caller } = { caller: "a" };
+    render(<ConsoleApp baseUrl="" transport={transport(state)} />);
+    const composer = await screen.findByTestId(`chat-composer:${identity}`);
+    await settle(300);
+    // Typed, and signed out in another tab before the debounced save ran:
+    // the closing pane flushes the draft on its way out.
+    fireEvent.change(composer, { target: { value: "Typed right before signing out" } });
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: CALLER_KEY, newValue: JSON.stringify({ caller: null, at: Date.now() }) }));
+    });
+    expect(await screen.findByTestId("console-sign-in")).toBeVisible();
+    await settle(600);
+    const encoded = encodeURIComponent(namespaceOf("a"));
+    expect(storageKeys(window.sessionStorage).filter((key) => key.includes(encoded))).toEqual([]);
+  });
+
   it("preferences_are_per_user", async () => {
     const state: { caller: Caller } = { caller: "a" };
     let view = render(<ConsoleApp baseUrl="" transport={transport(state)} />);
@@ -245,6 +262,52 @@ describe("preferences across tabs", () => {
     // This tab pins the first agent: both pins are kept.
     fireEvent.click(screen.getAllByRole("button", { name: /^Pin Storage agent/ })[0]);
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem(pinsKey()!)!).sort()).toEqual([identity, second].sort()));
+  });
+
+  const twoAgents = () => {
+    const second = "identity:second-agent";
+    const fake = transport({ caller: "a" });
+    fake.loadExperience = vi.fn(async () => {
+      const experience = experienceFor("a");
+      experience.agent_sidebar.live_snapshot.agents.push({ ...experience.agent_sidebar.live_snapshot.agents[0], identity: second, member_id: second, agent_id: second, label: "Second agent" });
+      return experience;
+    }) as never;
+    const key = `meta-console-sidebar-agent-pins:${encodeURIComponent(namespaceOf("a"))}`;
+    return { second, fake, key };
+  };
+
+  it("a pin click keeps a pin another tab stored that this tab has not heard of", async () => {
+    const { second, fake, key } = twoAgents();
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await screen.findByTestId(`sidebar-agent:${identity}`);
+    await settle();
+    // Another tab of the same person pins the second agent; no storage event
+    // has reached this tab yet.
+    window.localStorage.setItem(key, JSON.stringify([second]));
+    fireEvent.click(screen.getAllByRole("button", { name: /^Pin Storage agent/ })[0]);
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem(key)!).sort()).toEqual([identity, second].sort()));
+  });
+
+  it("another tab's pins show here without a click", async () => {
+    const { second, fake, key } = twoAgents();
+    render(<ConsoleApp baseUrl="" transport={fake} />);
+    await screen.findByTestId(`sidebar-agent:${identity}`);
+    await settle();
+    expect(screen.queryAllByRole("button", { name: /^Unpin Second agent/ })).toHaveLength(0);
+    window.localStorage.setItem(key, JSON.stringify([second]));
+    act(() => { window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify([second]) })); });
+    await waitFor(() => expect(screen.queryAllByRole("button", { name: /^Unpin Second agent/ }).length).toBeGreaterThan(0));
+  });
+
+  it("a pin click pins under React StrictMode", async () => {
+    const { fake, key } = twoAgents();
+    render(<React.StrictMode><ConsoleApp baseUrl="" transport={fake} /></React.StrictMode>);
+    await screen.findByTestId(`sidebar-agent:${identity}`);
+    await settle();
+    fireEvent.click(screen.getAllByRole("button", { name: /^Pin Storage agent/ })[0]);
+    await settle(100);
+    expect(JSON.parse(window.localStorage.getItem(key) ?? "[]")).toEqual([identity]);
+    expect(screen.queryAllByRole("button", { name: /^Unpin Storage agent/ }).length).toBeGreaterThan(0);
   });
 
   it("an_idle_tab_does_not_rewrite_the_dock_layout", async () => {

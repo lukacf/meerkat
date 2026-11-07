@@ -949,7 +949,7 @@ describe("stock durable queue integration", () => {
     expect(screen.queryByText("Sending")).toBeNull();
   });
 
-  it("keeps an attachment send's text when it meets an ended login", async () => {
+  it("keeps an attachment send's text and files when it meets an ended login", async () => {
     vi.stubGlobal("URL", class extends URL {
       static createObjectURL = vi.fn(() => `blob:preview-${Math.random()}`);
       static revokeObjectURL = vi.fn();
@@ -966,6 +966,8 @@ describe("stock durable queue integration", () => {
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     await signInAgain();
     expect((screen.getByTestId(`chat-composer:${identity}`) as HTMLTextAreaElement).value).toBe("look at this from off the home network");
+    // The same person signed in again: the staged file is still there.
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Remove attachment" })).toHaveLength(1));
     expect(screen.queryByText("Sending")).toBeNull();
   });
 

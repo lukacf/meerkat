@@ -349,6 +349,28 @@ test("unadvertised gating is unsupported, stops polling and cannot accept a deci
   resource.dispose();
 });
 
+test("a 401 read leaves approvals readable again later, never denied for good", async () => {
+  const c = clock();
+  let reads = 0;
+  const unauthenticated = Object.assign(new Error("meta/gating/pending request failed 401"), { httpStatus: 401 });
+  const resource = createPendingApprovalResource({ scopeKey: "a", environment: c.environment,
+    load: async () => { reads += 1; if (reads === 2) throw unauthenticated; return { pending: [row("p1")] }; },
+    decide: async () => accepted("p1"),
+  });
+  try {
+    await tick();
+    assert.equal(resource.getSnapshot().status, "ready");
+    await resource.refresh(); await tick();
+    // The login ended: the console's sign-in state owns that, so the
+    // approvals stay readable (stale), not forbidden.
+    assert.notEqual(resource.getSnapshot().status, "forbidden");
+    assert.equal(resource.getSnapshot().status, "stale");
+    await resource.refresh(); await tick();
+    assert.equal(resource.getSnapshot().status, "ready");
+    assert.deepEqual(resource.getSnapshot().requests.map((request) => request.pendingId), ["p1"]);
+  } finally { resource.dispose(); }
+});
+
 test("a request decided elsewhere leaves a tombstone that names who decided it, from one audit read", async () => {
   const c = clock();
   let pending = [row("p1"), row("p2"), row("p3")];

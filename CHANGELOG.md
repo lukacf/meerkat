@@ -377,6 +377,10 @@ them.
 
 ### Changed
 
+- `meerkat-core`: `TurnRequestContext`'s `Debug` prints the value's length,
+  never its text, so a `{:?}` of transient or request-only turn context, or
+  of a value that carries it (`RuntimeTurnMetadata`, a prompt input, a work
+  spec), never writes the text to a log.
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the
   router holds no control that covers it, or because it was signed out

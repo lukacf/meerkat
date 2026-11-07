@@ -32,8 +32,18 @@ use crate::types::{
 /// process that admitted the input. The agent only borrows this clone-cheap
 /// value while composing foreground provider requests for that turn.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TurnRequestContext(#[cfg_attr(feature = "schema", schemars(length(min = 1)))] Arc<str>);
+
+/// `Debug` never prints the text, only its length: a request context can
+/// be a person's own memory or a caller's own context, and a `{:?}` of it or
+/// of a value that carries it (a tracing field, an error message) must not
+/// write it to a log.
+impl std::fmt::Debug for TurnRequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TurnRequestContext(<{} bytes redacted>)", self.0.len())
+    }
+}
 
 impl TurnRequestContext {
     /// Preserve the caller's exact UTF-8 bytes. Empty context is refused;

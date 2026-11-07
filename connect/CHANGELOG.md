@@ -25,6 +25,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   it reported `not_written`, the state of a refusal that a new review does
   not change. Nothing was written; review the request again.
 
+### Added
+
+- Console setup: a host can pass a recorder for the administrative changes the
+  Console admits (`PreparedGatewayAcquisition::with_administration_recorder`,
+  with Core's `AdministrationRecorder`). Each credential change a person makes
+  by answering a setup prompt (the service's installation into the realm's
+  configuration, and each credential stored for it) reaches the recorder as
+  one record once it settles, naming the person (the qualified principal) and
+  a digest of the login they answered in, what changed and how it ended,
+  never a value, the token or the login itself. Without a recorder nothing is
+  recorded, as before.
+
 ### Fixed
 
 - Console setup approvals record the person who answered, as Core records an

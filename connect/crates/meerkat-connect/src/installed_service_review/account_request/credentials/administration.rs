@@ -121,12 +121,20 @@ impl AdministrationEntry for AdministrationAttempt {
     }
 }
 /// The admission of a write this check entered. It holds the login's
-/// reservation until the write settles.
+/// reservation until the write settles, and states the person who answered
+/// for the host's recorder when the check has one: the write's owner then
+/// hands the recorder the write's record when it settles.
 fn admission(
     held: Arc<Mutex<Reservation>>,
-    _administrator: Option<&StatedAdministrator>,
+    administrator: Option<&StatedAdministrator>,
 ) -> EnteredAdministration {
-    EnteredAdministration::holding(held)
+    let entered = EnteredAdministration::holding(held);
+    match administrator {
+        Some(stated) => {
+            entered.administered_by(stated.administrator.clone(), stated.recorder.clone())
+        }
+        None => entered,
+    }
 }
 fn unavailable() -> AdministrationEntryRefusal {
     AdministrationEntryRefusal::Unavailable(

@@ -451,6 +451,27 @@ impl SessionBridge for ObservedBridge {
             .await
     }
 
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.inner.members_holding_run_starts_for_published_tools()
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.inner
+            .member_holds_run_starts_for_published_tools(member_id)
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        self.inner.resolve_member_build_preparation(member_id).await
+    }
+
     async fn member_durability(
         &self,
         session_id: &meerkat_core::types::SessionId,

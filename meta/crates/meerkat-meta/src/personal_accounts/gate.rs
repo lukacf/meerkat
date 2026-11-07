@@ -130,12 +130,11 @@ impl PersonalAccountGate {
 
     /// The MCP server a resolved plan's operation target names.
     fn plan_server(plan: &meerkat_core::ResolvedToolExecutionPlan) -> Option<String> {
+        use meerkat_core::ToolOperationTarget::{CheckedMcpServerOperation, McpServerOperation};
         match plan.single_operation_target() {
-            Ok(Some(meerkat_core::ToolOperationTarget::McpServerOperation { server, .. }))
-            | Ok(Some(meerkat_core::ToolOperationTarget::CheckedMcpServerOperation {
-                server,
-                ..
-            })) => Some(server.clone()),
+            Ok(Some(
+                McpServerOperation { server, .. } | CheckedMcpServerOperation { server, .. },
+            )) => Some(server.clone()),
             _ => None,
         }
     }

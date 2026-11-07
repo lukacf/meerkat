@@ -998,14 +998,14 @@ async fn a_revoked_owner_s_accounts_are_suspended_in_earlier_private_members() {
     accounts.bind_session_fences(fences.clone());
     let (url, notes) = endpoint().await;
     let adapter = member_adapter(&url).await;
-    let opened = SystemTime::now() - Duration::from_secs(600);
+    let opened = SystemTime::now() - Duration::from_mins(10);
     let earlier = PrivateOwner {
         opened_at: opened,
         ..owner("alice")
     };
 
     fences
-        .revoke_sessions("alice@example.test", opened - Duration::from_secs(60))
+        .revoke_sessions("alice@example.test", opened - Duration::from_mins(1))
         .expect("revoked before the member was opened");
     let served = call_notes(
         &gate(&adapter, &accounts, Some(earlier.clone())),

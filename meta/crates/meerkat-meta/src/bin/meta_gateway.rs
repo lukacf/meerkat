@@ -3937,7 +3937,9 @@ command = "files-server"
             config.join("mcp_accounts.toml"),
             "[servers.notes]\naccounts = \"personal\"\n",
         )?;
-        let accounts = load()?.expect("a personal server");
+        let Some(accounts) = load()? else {
+            anyhow::bail!("a personal server must compose personal accounts");
+        };
         assert!(accounts.config().is_personal("notes"));
 
         std::fs::write(

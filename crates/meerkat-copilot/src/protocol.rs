@@ -522,23 +522,29 @@ impl CopilotModelOffering {
             .filter(|endpoint| *endpoint != CopilotEndpoint::Unknown)
     }
 
-    /// The endpoints the account serves this model on: the ones it advertises
-    /// that Meerkat speaks, or Chat Completions when it advertises none at all
-    /// (the endpoint the OpenAI and Gemini families share). A model that
-    /// advertises only endpoints Meerkat does not speak is served on none.
+    /// The endpoints the account serves this model on: the ones it lists that
+    /// Meerkat speaks, or Chat Completions when its entry states no list (the
+    /// endpoint the OpenAI and Gemini families share). A model whose list is
+    /// empty, or names only endpoints Meerkat does not speak, is served on
+    /// none.
     fn served_endpoints(&self) -> impl Iterator<Item = CopilotEndpoint> + '_ {
         let default = self
             .supported_endpoints
-            .as_ref()
-            .is_none_or(Vec::is_empty)
+            .is_none()
             .then_some(CopilotEndpoint::ChatCompletions);
         self.endpoints().chain(default)
+    }
+
+    /// Whether the account lists the model with an empty endpoint list: its
+    /// catalog states that the model has no endpoints.
+    pub(crate) fn lists_no_endpoints(&self) -> bool {
+        self.supported_endpoints.as_ref().is_some_and(Vec::is_empty)
     }
 
     /// The endpoint `provider`'s family speaks to this model on the account:
     /// the OpenAI family takes Responses first, then Chat Completions; the
     /// Gemini family Chat Completions; the Anthropic family Messages. A model
-    /// that advertises no endpoint at all is served on Chat Completions.
+    /// whose entry states no endpoint list is served on Chat Completions.
     /// `None` when the account's policy for the model is not `enabled`.
     pub fn route_for(&self, provider: Provider) -> Option<CopilotEndpoint> {
         if !self.enabled() {
@@ -584,10 +590,10 @@ impl CopilotModelOffering {
     /// is the Anthropic family, which speaks Messages; otherwise a model
     /// offered on the Responses or the Chat Completions endpoint is the
     /// OpenAI family, whose route takes Responses first
-    /// ([`Self::route_for`]). A model that advertises no endpoint at all is
+    /// ([`Self::route_for`]). A model whose entry states no endpoint list is
     /// served on Chat Completions, so it is the OpenAI family. `None` when
-    /// the account's policy for the model is not `enabled` or it advertises
-    /// only endpoints Meerkat does not speak.
+    /// the account's policy for the model is not `enabled`, or its list is
+    /// empty or names only endpoints Meerkat does not speak.
     pub fn protocol_provider(&self) -> Option<Provider> {
         if !self.enabled() {
             return None;
@@ -784,8 +790,9 @@ impl CopilotModelSnapshot {
     /// ([`CopilotModelOffering::registry_definition`]). A model the list does
     /// not name is refused as not offered, naming the ids the account
     /// offers; a model whose policy state is not `enabled` is refused naming
-    /// the state; a model offered only on endpoints Meerkat does not speak is
-    /// refused as such. `credential` names the account in a refusal.
+    /// the state; a model listed with an empty endpoint list is refused as
+    /// having none; a model offered only on endpoints Meerkat does not speak
+    /// is refused as such. `credential` names the account in a refusal.
     pub fn account_model(
         &self,
         credential: &AuthCredentialIdentity,
@@ -803,6 +810,12 @@ impl CopilotModelSnapshot {
                 credential: credential.clone(),
                 model: model.to_string(),
                 state: state.to_string(),
+            });
+        }
+        if offering.lists_no_endpoints() {
+            return AccountModelLookup::Refused(AccountModelRefusal::NoEndpoints {
+                credential: credential.clone(),
+                model: model.to_string(),
             });
         }
         match offering.registry_definition() {
@@ -1152,10 +1165,11 @@ mod tests {
     /// The provider family Meerkat speaks to a model the registry does not
     /// define is the protocol of the endpoints the account advertises for
     /// it: the Messages endpoint is the Anthropic family, the Responses and
-    /// Chat Completions endpoints the OpenAI family, and a model that
-    /// advertises no endpoint at all is served on Chat Completions. The
-    /// vendor never decides it, and a model the policy disables or that
-    /// advertises only endpoints Meerkat does not speak has none.
+    /// Chat Completions endpoints the OpenAI family. The vendor never
+    /// decides it, and a model the policy disables, or whose list is empty or
+    /// names only endpoints Meerkat does not speak, has none (a model whose
+    /// entry states no list at all is served on Chat Completions; see
+    /// `a_model_without_supported_endpoints_is_served_on_chat_completions`).
     #[test]
     fn a_discovered_model_protocol_comes_from_its_endpoints_not_its_vendor() {
         use super::CopilotEndpoint::{ChatCompletions, Messages, Responses, Unknown};
@@ -1183,7 +1197,7 @@ mod tests {
             ),
             (None, vec![Responses], Some(Provider::OpenAI)),
             (Some("ExampleVendor"), vec![Unknown], None),
-            (Some("ExampleVendor"), Vec::new(), Some(Provider::OpenAI)),
+            (Some("ExampleVendor"), Vec::new(), None),
         ] {
             let snapshot = CopilotModelSnapshot::from_models(vec![discovered(
                 "account-model-1",
@@ -1339,22 +1353,22 @@ mod tests {
         );
     }
 
-    /// A model whose entry advertises no endpoint is served on Chat
+    /// A model whose entry states no endpoint list is served on Chat
     /// Completions by the OpenAI and Gemini families, the endpoint both
-    /// speak; the Anthropic family needs Messages advertised. A model that
-    /// advertises only endpoints Meerkat does not speak gets no default.
+    /// speak; the Anthropic family needs Messages listed. A model that lists
+    /// only endpoints Meerkat does not speak gets no default (an empty list:
+    /// `an_explicitly_empty_endpoint_list_is_refused`).
     #[test]
     fn a_model_without_supported_endpoints_is_served_on_chat_completions() {
         let listed: CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
             "data": [
                 {"id": "no-endpoints"},
-                {"id": "empty-endpoints", "supported_endpoints": []},
                 {"id": "unspoken-endpoints", "supported_endpoints": ["/v1/embeddings"]}
             ]
         }))
         .expect("model list");
         let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("unique model ids");
-        for id in ["no-endpoints", "empty-endpoints"] {
+        for id in ["no-endpoints"] {
             let offering = snapshot.model(id).expect("listed model");
             assert_eq!(
                 offering.route_for(Provider::OpenAI),

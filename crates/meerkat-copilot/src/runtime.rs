@@ -812,14 +812,19 @@ impl CopilotRouteResolution {
     ) -> String {
         // A model the account lists under a policy that is not `enabled` is
         // refused by naming the state the account states.
-        let refusing_state = self
+        // So is a model it lists with an empty endpoint list.
+        let listed = self
             .available_models
             .as_ref()
-            .and_then(|snapshot| snapshot.model(model))
-            .and_then(|offering| offering.refusing_policy_state());
+            .and_then(|snapshot| snapshot.model(model));
+        let refusing_state = listed.and_then(|offering| offering.refusing_policy_state());
         let mut message = match refusing_state {
             Some(state) => format!(
                 "Copilot account policy state for {} model '{model}' is '{state}', not 'enabled'",
+                provider.as_str(),
+            ),
+            None if listed.is_some_and(|offering| offering.lists_no_endpoints()) => format!(
+                "Copilot account lists no endpoints for {} model '{model}'",
                 provider.as_str(),
             ),
             None => format!(

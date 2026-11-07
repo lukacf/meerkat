@@ -109,6 +109,10 @@ them.
   `Unknown` is replaced by `Other(String)`, and the enum is no longer `Copy`.
   It still serializes as the state string. New
   `CopilotModelPolicyState::as_str`.
+- `meerkat-copilot`: `CopilotModel::supported_endpoints` and
+  `CopilotModelOffering::supported_endpoints` are
+  `Option<Vec<CopilotEndpoint>>`: `None` when the catalog entry states no
+  list, `Some(vec![])` for an explicitly empty one.
 
 ### Added
 
@@ -164,6 +168,8 @@ them.
 - `meerkat-llm-core`: `AccountModelRefusal::PolicyNotEnabled { credential,
   model, state }` refuses a model the account lists under a policy that is
   not `enabled`, naming the state.
+- `meerkat-llm-core`: `AccountModelRefusal::NoEndpoints { credential, model }`
+  refuses a model the account lists with an empty endpoint list.
 
 ### Changed
 
@@ -202,10 +208,13 @@ them.
   measured over that limit is refused as a context-length error, the class
   the agent compacts on, instead of an invalid request; Copilot's own answer
   to an over-limit prompt is not known, so no error body is assumed.
-- GitHub Copilot: a model whose catalog entry lists no endpoint is served on
-  `/chat/completions` by the OpenAI and Gemini routes (before, it could not
-  be selected). A model that lists only endpoints Meerkat does not speak
-  still has none.
+- GitHub Copilot: a model whose catalog entry states no endpoint list is
+  served on `/chat/completions` by the OpenAI and Gemini routes (before, it
+  could not be selected). An entry whose list is empty states that the model
+  has no endpoints, and the model is refused
+  (`AccountModelRefusal::NoEndpoints` for a model only the account defines,
+  "Copilot account lists no endpoints for ..." on a registry model's route).
+  A model that lists only endpoints Meerkat does not speak still has none.
 - GitHub Copilot: a model the account lists under a policy other than
   `enabled` is refused naming the state: an account-defined model with
   `AccountModelRefusal::PolicyNotEnabled` (before, "does not offer"), a

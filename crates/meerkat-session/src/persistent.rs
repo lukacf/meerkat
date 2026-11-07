@@ -32229,6 +32229,211 @@ mod tests {
         assert_teardown_required_projection_authority(error, "self-fence window");
     }
 
+    /// A host store whose commits, once `unsettle` is set, answer
+    /// `Indeterminate` first (applying nothing) and `Unavailable` after,
+    /// while every head read fails: nothing the writer asks settles a batch.
+    /// Renews succeed, so the writer's window stays open. It records the
+    /// commit id of every attempt.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug, Default)]
+    struct UnsettlingHost {
+        unsettle: std::sync::atomic::AtomicBool,
+        answered_unknown: std::sync::atomic::AtomicBool,
+        attempts: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::host_store::HostStore for UnsettlingHost {
+        async fn acquire_fence(
+            &self,
+            _mode: meerkat_core::host_store::AcquireMode,
+        ) -> Result<meerkat_core::host_store::FenceGrant, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::FenceGrant {
+                token: meerkat_core::host_store::FenceToken::new(1),
+                superseded_lease: std::time::Duration::ZERO,
+            })
+        }
+
+        async fn renew_fence(
+            &self,
+            _token: meerkat_core::host_store::FenceToken,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            Ok(())
+        }
+
+        fn fence_timing(&self) -> meerkat_core::host_store::FenceTiming {
+            meerkat_core::host_store::FenceTiming::default()
+        }
+
+        async fn load_head(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+        ) -> Result<
+            Option<meerkat_core::host_store::VersionedHead>,
+            meerkat_core::host_store::HostStoreError,
+        > {
+            if self.unsettle.load(Ordering::SeqCst) {
+                return Err(meerkat_core::host_store::HostStoreError::Unavailable(
+                    "the row keeps the batch unsettled".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+
+        async fn list_heads(
+            &self,
+            _kind: meerkat_core::host_store::ScopeKind,
+            _after: Option<&meerkat_core::host_store::ScopeName>,
+            _limit: usize,
+        ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::HeadPage {
+                heads: Vec::new(),
+                next: None,
+            })
+        }
+
+        async fn read_rows(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+            _from: meerkat_core::host_store::RowIndex,
+            _limit: usize,
+        ) -> Result<Vec<meerkat_core::host_store::Row>, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn commit(
+            &self,
+            batch: &meerkat_core::host_store::CommitBatch,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            if !self.unsettle.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.attempts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(batch.commit_id().as_str().to_string());
+            if self.answered_unknown.swap(true, Ordering::SeqCst) {
+                Err(meerkat_core::host_store::HostStoreError::Unavailable(
+                    "the row keeps the batch unsettled".to_string(),
+                ))
+            } else {
+                Err(meerkat_core::host_store::HostStoreError::Indeterminate(
+                    "the row's store applied nothing".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// A round commit whose batch the host store leaves unsettled past its
+    /// retry budget, its writer's window open throughout (the store answered
+    /// `Indeterminate`, then `Unavailable` to every retry and head read), may
+    /// or may not have landed, exactly as one stopped at its fence window. The
+    /// write answers a typed outcome-unknown store error, and the checkpoint
+    /// answers the teardown class at once, so the live actor is reloaded from
+    /// what the store holds after the reopen; the batch is never written
+    /// again. Before, the write answered `WriteFailed` and the checkpoint an
+    /// internal error, which fails the run as a crash would (class internal)
+    /// while the live actor stays loaded over a scope that refuses it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn a_round_commit_unsettled_past_its_retry_budget_answers_the_teardown_class_at_once() {
+        use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+        let host = Arc::new(UnsettlingHost::default());
+        let realm = SpiRealm::open(
+            Arc::clone(&host) as Arc<dyn meerkat_core::host_store::HostStore>,
+            SpiRealmConfig {
+                commit_retry_budget: std::time::Duration::from_secs(2),
+                ..SpiRealmConfig::default()
+            },
+        )
+        .await
+        .expect("the realm opens");
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+            SpiRuntimeStore::open(Arc::clone(&realm))
+                .await
+                .expect("the runtime store opens"),
+        );
+        let mut session = Session::new();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("encode initial WholeBlob session");
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: artifact.bytes_arc(),
+                },
+            )
+            .await
+            .expect("commit initial WholeBlob authority");
+        let authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("load initial WholeBlob authority")
+            .expect("initial WholeBlob authority should exist");
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            runtime_run: std::sync::Mutex::new(None),
+            service_turn: std::sync::Mutex::new(ServiceTurnSlot::Closed),
+            run_suspension: std::sync::OnceLock::new(),
+            rewrite_audit: None,
+        };
+        let run_id = RunId::new();
+        session.push(Message::User(UserMessage::text("a round's prompt")));
+        session
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .expect("the run's cursor");
+        host.unsettle.store(true, Ordering::SeqCst);
+
+        let outcome = meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await;
+        let attempts = host
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            attempts.len() >= 2 && attempts.iter().all(|id| *id == attempts[0]),
+            "one batch, retried within its budget and never written again: {attempts:?} \
+             ({outcome:?})"
+        );
+        assert!(
+            realm.realm_poisoned().is_none(),
+            "the realm keeps its fence"
+        );
+        assert!(realm.lease_is_live(), "the writer's window stays open");
+        let error = outcome.expect_err("the round commit's outcome is unknown");
+        assert_teardown_required_projection_authority(error, "retry budget");
+    }
+
     struct WholeBlobAuthorityReadProbe {
         inner: InMemoryRuntimeStore,
         bounded_authority_reads: AtomicUsize,

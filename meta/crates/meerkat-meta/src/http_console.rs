@@ -8485,7 +8485,7 @@ pub async fn console_rpc_multipart_handler(
             // /console/send gate-first ordering. Without this, a caller denied
             // `agent.send` on this identity could still write attacker-supplied
             // image bytes into the target identity's blob store (a pre-auth
-            // side effect / storage-amplification vector) — the send is denied
+            // side effect / storage-amplification vector): the send is denied
             // later, but the blob write already happened. Prime the attribute
             // cache first, from the Console's runtimes (its aggregator's when
             // it holds no runtime), so role/label-scoped deny rules resolve

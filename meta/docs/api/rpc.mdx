@@ -1335,7 +1335,7 @@ A row:
 | `actor.assurance` | `string` | `person_authenticated` or `service_credential`; absent otherwise |
 | `actor.login_scope_digest` | `string` | A person's login, as `sha256:` and the lowercase hex SHA-256 of the token's signed `sid`, else of the token's unpadded base64url SHA-256 digest (the form a gating decision record keeps); never the token |
 | `method` | `string` | The console method, or `/console/mcp-apps/call-tool` for an MCP app tool call |
-| `target` | `object` | The identifiers among the params (the member a change targets: `identity`, `member_id`, `agent_id`, `agent_identity`; an upserted access rule's `rule_id`; `realm`, `role`, `principal`, `name`, `decision`, `action`, `operation`, `enabled`, `expected_revision`; and the other `id` and `*_id` fields; a checked access edit's inside its `checked_v1` envelope), or a tool call's `identity` and `tool`; never content such as messages, memory bodies, labels or configurations |
+| `target` | `object` | The identifiers among the params (the member a change targets: `identity`, `member_id`, `agent_id`, `agent_identity`; an upserted access rule's `rule_id`; `realm`, `role`, `principal`, `name`, `decision`, `action`, `operation`, `enabled`, `expected_revision`; the known target ids `id`, `run_id`, `flow_id`, `session_id`, `resume_session_id`, `source_member_id`, `from_member_id`, `local_member_id`, `remote_member_id`, `remote_mob_id`, `remote_peer_id`, `mob_id`, `schedule_id`, `memory_id`, `pending_id`, `approver_id`, `operation_id`, `binding_id`, `subscription_id`, `source_id`, `batch_id` and `blob_id`; and the other `id` and `*_id` fields; a checked access edit's inside its `checked_v1` envelope), or a tool call's `identity` and `tool`; never content such as messages, memory bodies, labels or configurations |
 | `outcome` | `string` | `committed` (the owner answered with a result), `failed` (`-32603`, `-32000`, an HTTP 5xx, or any error a tool call is answered with once it reached the member's app: whether anything changed is not known) or `refused` (any other error) |
 | `code`, `kind` | `integer`, `string` | The error's code and its `data.kind` (for a tool call, the HTTP status and the answer's `error`), for `refused` and `failed` |
 | `receipt` | `object` | The identifiers in the owner's result (`id` and `*_id` fields, `revision`, `generation`, `agent_identity`, `supersedes`, and a quarantine decision's `audit_token`) |
@@ -1345,9 +1345,10 @@ A row is bounded whatever the caller sends: no key longer than 64 bytes, no
 value longer than 256 bytes, at most 16 `id` fields in its target and in its
 receipt beyond the change's known identifiers (the fields listed above),
 and at most 4 KiB in all. The known identifiers are kept first: a field
-gives way to the row's bound in this order, the `id` fields that are none of
-them first (the target's, then the receipt's), then the other named fields,
-and the member a change targets and the access rule it edits last. A
+gives way to the row's bound in this order, the target's `id` fields that
+are none of them first, then the target's other named fields and known
+ids, then the owner's receipt, and the member a change targets and the
+access rule it edits last. A
 `meta/fork_member` row names its actor, the side chat's creator, only to
 that person and to admins of an enforced access policy; every other reader
 gets the row without the actor's principal, issuer, subject and login

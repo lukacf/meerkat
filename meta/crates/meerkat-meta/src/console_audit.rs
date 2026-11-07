@@ -93,6 +93,43 @@ const TARGET_NAMED: &[&str] = &[
     "expected_revision",
 ];
 
+/// The known target ids: the `id` and `*_id` params the console's changes
+/// read, besides the member target fields and `rule_id` ([`Hold::Target`]).
+/// A row holds them as named fields, so invented `*_id` keys never push
+/// them out: `id` (a Flow Editor flow), `run_id` (a flow run, its labels, a
+/// member's run), `flow_id`, `session_id` and `resume_session_id` (a
+/// session a member attaches or resumes), `source_member_id` and
+/// `from_member_id` (a fork's source), `local_member_id`,
+/// `remote_member_id`, `remote_mob_id` and `remote_peer_id` (cross-mob
+/// wiring), `mob_id`, `schedule_id`, `memory_id`, `pending_id` and
+/// `approver_id` (a gating decision), `operation_id` (a topology
+/// operation), `binding_id` (a WorkGraph binding), `subscription_id`,
+/// `source_id` and `batch_id` (announcements) and `blob_id`.
+const TARGET_IDS: &[&str] = &[
+    "id",
+    "run_id",
+    "flow_id",
+    "session_id",
+    "resume_session_id",
+    "source_member_id",
+    "from_member_id",
+    "local_member_id",
+    "remote_member_id",
+    "remote_mob_id",
+    "remote_peer_id",
+    "mob_id",
+    "schedule_id",
+    "memory_id",
+    "pending_id",
+    "approver_id",
+    "operation_id",
+    "binding_id",
+    "subscription_id",
+    "source_id",
+    "batch_id",
+    "blob_id",
+];
+
 /// The fields of an owner's answer that a receipt keeps besides its `id`
 /// fields; the audit token of a quarantine decision is one, read from the
 /// decision ([`audit_receipt`]).
@@ -114,7 +151,8 @@ enum Hold {
     /// most [`MAX_ID_FIELDS`] of them are kept, and they give way first.
     Other,
     /// A field that names what a change is of (`realm`, `role`, `name`,
-    /// ...), or a known field of the owner's receipt.
+    /// ..., and the known target ids, [`TARGET_IDS`]), or a known field of
+    /// the owner's receipt.
     Named,
     /// The member a change targets (the fields the console's access check
     /// judges) or the access rule it edits.
@@ -125,7 +163,7 @@ enum Hold {
 fn target_hold(key: &str) -> Hold {
     if key == "rule_id" || crate::http_console::CONSOLE_RPC_MEMBER_TARGET_FIELDS.contains(&key) {
         Hold::Target
-    } else if TARGET_NAMED.contains(&key) {
+    } else if TARGET_NAMED.contains(&key) || TARGET_IDS.contains(&key) {
         Hold::Named
     } else {
         Hold::Other
@@ -141,12 +179,18 @@ fn receipt_hold(key: &str) -> Hold {
     }
 }
 
-/// The field of `fields` that holds least, by `hold`: the last key of the
-/// lowest hold.
-fn weakest(fields: &Map<String, Value>, hold: fn(&str) -> Hold) -> Option<(Hold, String)> {
-    let lowest = fields.keys().map(|key| hold(key)).min()?;
-    let key = fields.keys().rev().find(|key| hold(key) == lowest)?;
-    Some((lowest, key.clone()))
+/// When a field gives way to a row's bound, the lowest first: the caller's
+/// other `id` fields, then the caller's named fields, then the owner's
+/// receipt (its other `id` fields before its named ones), and the member a
+/// change targets and the access rule it edits last.
+fn give_way_order(in_receipt: bool, hold: Hold) -> u8 {
+    match (in_receipt, hold) {
+        (false, Hold::Other) => 0,
+        (false, Hold::Named) => 1,
+        (true, Hold::Other) => 2,
+        (true, Hold::Named | Hold::Target) => 3,
+        (false, Hold::Target) => 4,
+    }
 }
 
 /// The two record sets of the log, each with a bound of its own, so neither
@@ -365,12 +409,12 @@ impl ConsoleAuditEntry {
         .within_row_bound()
     }
 
-    /// This entry, made to fit [`MAX_ROW_BYTES`] with its number and time:
-    /// the field that holds least gives way first, a field at a time, and
-    /// the row says it was cut. An `id` field that is none of the change's
-    /// known identifiers goes before a named field, the target's before the
-    /// receipt's at the same [`Hold`], and the last key first; the member a
-    /// change targets and the access rule it edits go last.
+    /// This entry, made to fit [`MAX_ROW_BYTES`] with its number and time: a
+    /// field at a time gives way, in [`give_way_order`] (the caller's other
+    /// `id` fields, then the caller's named fields, then the owner's
+    /// receipt, and the member a change targets and the access rule it
+    /// edits last; the last key first among equals), and the row says it was
+    /// cut.
     fn within_row_bound(mut self) -> Self {
         /// The most a row's number and time add to its encoding.
         const NUMBER_AND_TIME_BYTES: usize = 64;
@@ -379,26 +423,28 @@ impl ConsoleAuditEntry {
             if size.saturating_add(NUMBER_AND_TIME_BYTES) <= MAX_ROW_BYTES {
                 return self;
             }
-            let from_target = match (
-                weakest(&self.target, target_hold),
-                weakest(&self.receipt, receipt_hold),
-            ) {
-                (Some((in_target, key)), Some((in_receipt, _))) if in_target <= in_receipt => {
-                    Some((true, key))
-                }
-                (_, Some((_, key))) => Some((false, key)),
-                (Some((_, key)), None) => Some((true, key)),
-                // Only the actor, the method and the outcome are left, each
-                // bounded on its own.
-                (None, None) => None,
-            };
-            let Some((from_target, key)) = from_target else {
+            let next = self
+                .target
+                .keys()
+                .map(|key| (give_way_order(false, target_hold(key)), false, key))
+                .chain(
+                    self.receipt
+                        .keys()
+                        .map(|key| (give_way_order(true, receipt_hold(key)), true, key)),
+                )
+                .min_by(|(order, _, key), (other_order, _, other_key)| {
+                    order.cmp(other_order).then_with(|| other_key.cmp(key))
+                })
+                .map(|(_, in_receipt, key)| (in_receipt, key.clone()));
+            // Only the actor, the method and the outcome are left, each
+            // bounded on its own.
+            let Some((in_receipt, key)) = next else {
                 return self;
             };
-            if from_target {
-                self.target.remove(&key);
-            } else {
+            if in_receipt {
                 self.receipt.remove(&key);
+            } else {
+                self.target.remove(&key);
             }
             self.truncated = true;
         }

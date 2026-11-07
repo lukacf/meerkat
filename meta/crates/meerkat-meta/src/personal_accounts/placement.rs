@@ -20,7 +20,9 @@ use meerkat_mob::{
     SpawnMemberCustomizer, SpawnMemberSpec,
 };
 
-use super::{McpAccountsConfig, PersonalAccountRefusal, PersonalMcpAccounts};
+use super::{
+    McpAccountsConfig, PersonalAccountRefusal, PersonalMcpAccounts, UnsupportedPersonalServer,
+};
 
 /// The spawn customizer [`PersonalMcpAccounts::placement_guard`] builds.
 pub(crate) struct PlacementGuard {
@@ -64,8 +66,15 @@ impl PlacementGuard {
     /// The refusal of `spec`, when it places a member on another host whose
     /// profile declares a personal server.
     pub(crate) fn refusal(&self, spec: &SpawnMemberSpec) -> Option<PersonalAccountRefusal> {
-        let _ = (spec, &self.profiles, first_personal_server);
-        None
+        spec.placement.as_ref()?;
+        let server = match &spec.override_profile {
+            Some(profile) => first_personal_server(&self.config, profile),
+            None => self.profiles.get(&spec.role_name).cloned(),
+        }?;
+        Some(PersonalAccountRefusal::Unsupported {
+            server,
+            reason: UnsupportedPersonalServer::HostedElsewhere,
+        })
     }
 
     fn check(&self, spec: &SpawnMemberSpec) -> Result<(), MobError> {

@@ -2976,7 +2976,6 @@ pub(super) async fn handle_fork_helper(
             runtime
                 .mob_runtime()
                 .private_owners()
-                .await
                 .record_roster_member(&handle, &source_member_id)
                 .await;
             let fork_result = match authority_target {

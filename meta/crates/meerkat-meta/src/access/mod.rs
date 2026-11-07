@@ -54,7 +54,6 @@ pub(crate) use controller::{
     MAX_LINEAGE_DEPTH,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
-pub(crate) use model::private_owner;
 pub use model::{
     ACCESS_ACTIONS, ACTION_ACCESS_ADMIN, ACTION_AGENT_MEMORY_ADMIN, ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ, ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN,
@@ -68,3 +67,4 @@ pub use model::{
     AccessConfigError, AccessControlConfig, AccessEffect, AccessGroup, AccessRule,
     PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions, validate_access_config,
 };
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};

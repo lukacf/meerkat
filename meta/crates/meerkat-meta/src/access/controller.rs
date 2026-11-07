@@ -744,7 +744,7 @@ impl AccessDecisionFence<'_> {
         // A runtime alias is judged as the member it names, as in
         // `AccessView::decide_agent`.
         let identity = match &alias {
-            RuntimeAliasMember::NotAnAlias => identity,
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if super::engine::matching_deny_rule(
@@ -807,7 +807,10 @@ fn lineage_exceeds_walk(
 
 /// How an agent spelling relates to the runtime alias namespace.
 enum RuntimeAliasMember {
-    NotAnAlias,
+    /// Not a runtime alias: the member cache key the spelling names, decoded
+    /// from the roster's comms-safe encoding (`mk--...`), so that every
+    /// spelling of a member is judged as that member.
+    NotAnAlias(String),
     /// The current incarnation of a known identity: its member cache key.
     Current(String),
     /// A runtime alias that is stale, unknown or malformed: the member cache
@@ -818,11 +821,13 @@ enum RuntimeAliasMember {
 impl RuntimeAliasMember {
     /// The member cache key whose lineage the private-owner rule reads for
     /// `spelling`: the member a runtime alias names, current or not, else
-    /// the spelling itself.
+    /// the member the decoded spelling names.
     fn member_key<'a>(&'a self, spelling: &'a str) -> &'a str {
         match self {
-            Self::Current(member_key) | Self::NotCurrent(Some(member_key)) => member_key,
-            Self::NotAnAlias | Self::NotCurrent(None) => spelling,
+            Self::Current(member_key)
+            | Self::NotCurrent(Some(member_key))
+            | Self::NotAnAlias(member_key) => member_key,
+            Self::NotCurrent(None) => spelling,
         }
     }
 }
@@ -982,7 +987,7 @@ impl AccessView {
         // judged as a name no rule describes. An admin passes, as for any
         // resource.
         let identity = match &alias {
-            RuntimeAliasMember::NotAnAlias => identity,
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if let Some(rule) = super::engine::matching_deny_rule(
@@ -1089,13 +1094,18 @@ impl AccessView {
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
     fn runtime_alias_member(&self, key: &str) -> RuntimeAliasMember {
-        let (namespace, alias) = match key.rfind("/rt:") {
+        // A console namespace (`<namespace>/<identity>`) keeps its prefix: an
+        // identity holds no `/`, so the last one ends the namespace.
+        let (namespace, alias) = match key.rfind('/') {
             Some(at) => (Some(&key[..at]), &key[at + 1..]),
             None => (None, key),
         };
         let alias = crate::member_comms_id::runtime_alias_str(alias);
         if !crate::member_comms_id::is_reserved_generated_alias(&alias) {
-            return RuntimeAliasMember::NotAnAlias;
+            return RuntimeAliasMember::NotAnAlias(match namespace {
+                Some(namespace) => format!("{namespace}/{alias}"),
+                None => alias.into_owned(),
+            });
         }
         let Some(durable) = crate::member_comms_id::durable_identity_from_runtime_alias(&alias)
         else {
@@ -1130,8 +1140,8 @@ impl AccessView {
     /// and as unknown otherwise.
     pub(crate) fn lineage_links(&self, identity: &str) -> usize {
         match self.runtime_alias_member(identity) {
-            RuntimeAliasMember::NotAnAlias => self.lineage_for(identity).len(),
-            RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
+            RuntimeAliasMember::NotAnAlias(member_key)
+            | RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
             RuntimeAliasMember::NotCurrent(_) => 0,
         }
     }
@@ -1411,6 +1421,8 @@ impl AccessView {
     /// the one-time subscribe prime and re-prime the cache before deciding, so
     /// the deny resolves against real attributes instead of failing open.
     pub fn knows_agent(&self, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let identity = alias.member_key(identity);
         let cache = self
             .inner
             .attributes
@@ -1420,6 +1432,17 @@ impl AccessView {
             || cache
                 .values()
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
+    }
+
+    /// Whether a console with sign-in withholds from this caller the member
+    /// `identity` names because the attribute cache does not know it: a
+    /// member that ended before this process read who it was private to may
+    /// have been private, so a signed-in caller who is not an admin is shown
+    /// no memory scope of it and attaches no session of it. An anonymous
+    /// caller of a console without sign-in, and an admin, are withheld
+    /// nothing for it.
+    pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
+        self.principal.subject.is_some() && !self.is_admin && !self.knows_agent(identity)
     }
 
     /// Can this principal read and edit the access configuration?

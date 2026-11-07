@@ -2529,6 +2529,14 @@ impl UnifiedRuntimeBuilder {
             if let Some(panel) = stack.panel.clone() {
                 runtime.set_memory_panel_store(panel);
             }
+            // The retirements the memory store recorded as private are part
+            // of the private-owner record's durable reads.
+            if let Some(store) = stack.steward_store.clone() {
+                runtime
+                    .mob_runtime
+                    .private_owners()
+                    .bind_private_retirements(store, config.realm.clone());
+            }
             // §10.1 dispatch-time taint join: bind the stack's tracker into
             // the member pre-build seam so every member's LLM client marks
             // untrusted ingestion synchronously - ahead of the async

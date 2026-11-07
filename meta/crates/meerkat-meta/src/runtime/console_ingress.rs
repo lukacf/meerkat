@@ -698,6 +698,10 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
         )
         .is_allow()
     });
+    // A member's peer list names no member hidden from the caller.
+    for member in &mut snapshot.members {
+        member.wired_to.retain(|peer| !view.hides_agent(peer));
+    }
     snapshot.agents.retain(|agent| {
         let identity = agent.identity.as_deref().unwrap_or(agent.agent_id.as_str());
         view.allows_agent(crate::access::ACTION_AGENT_VIEW, identity)

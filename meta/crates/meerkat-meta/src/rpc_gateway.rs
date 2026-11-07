@@ -11283,7 +11283,10 @@ impl std::ops::Deref for GatewayStdoutLine {
 struct GatewayExperimentalLiveSessionBindingAuthority {
     handle: meerkat_mob::MobHandle,
     machine: Arc<meerkat_runtime::MeerkatMachine>,
-    access: crate::AccessController,
+    /// The gateway's access controller, when one is configured: its rules
+    /// and the private-owner rule decide each binding use. Without one the
+    /// stdio gateway is the trusted host plane and decides no access.
+    access: Option<crate::AccessController>,
     principal: String,
     allowed_binding: meerkat_core::AuthBindingRef,
 }
@@ -11378,9 +11381,14 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveSessionBindingAuthority
         }
         let owner = self.resolve_exact_member(canonical_session_id).await?;
         let durable_identity = owner.identity().as_str().to_string();
-        let access = self.access.view_for_subject(Some(&self.principal));
-        if !access.allows_agent(crate::access::ACTION_AGENT_SEND, &durable_identity) {
-            return Err(ExperimentalLiveOpenAuthorityError::AccessDenied);
+        // The configured access decides with the live roster's attributes,
+        // read first, so its rules and the private-owner rule both apply.
+        if let Some(controller) = self.access.as_ref() {
+            crate::http_console::prime_access_cache_from_handle(&self.handle, controller).await;
+            let access = controller.view_for_subject(Some(&self.principal));
+            if !access.allows_agent(crate::access::ACTION_AGENT_SEND, &durable_identity) {
+                return Err(ExperimentalLiveOpenAuthorityError::AccessDenied);
+            }
         }
 
         let principal = crate::http_console::console_human_principal_ref(&self.principal)
@@ -19458,6 +19466,14 @@ external_addressable = true
                         Ok(stack) => stack,
                         Err(e) => return Err(fail_init(&request_id, -32602, e)),
                     };
+                    // The retirements the memory store recorded as private
+                    // are part of the private-owner record's durable reads.
+                    if let Some(store) = stack.steward_store.clone() {
+                        runtime
+                            .mob_runtime()
+                            .private_owners()
+                            .bind_private_retirements(store, agent_memory.config.realm.clone());
+                    }
                     let panel = stack.panel.clone();
                     let tracker = stack.taint;
                     let mut sinks = stack.sinks;
@@ -20259,10 +20275,11 @@ external_addressable = true
                             ),
                         )
                     })?;
-                        let access = gateway_options
-                            .access
-                            .clone()
-                            .unwrap_or_else(crate::AccessController::disabled);
+                        // The access controller the runtime holds (the
+                        // gateway's configured one, kept there before its
+                        // options moved on): without one the stdio gateway
+                        // is the trusted host plane.
+                        let access = runtime.access_controller().cloned();
                         let binding_authority =
                             Arc::new(GatewayExperimentalLiveSessionBindingAuthority {
                                 handle: runtime.mob_handle(),
@@ -26670,7 +26687,7 @@ mod strict_live_private_owner_tests {
         let authority = super::GatewayExperimentalLiveSessionBindingAuthority {
             handle: handle.clone(),
             machine: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
-            access,
+            access: Some(access),
             principal: "bob@example.test".to_string(),
             allowed_binding: binding.clone(),
         };

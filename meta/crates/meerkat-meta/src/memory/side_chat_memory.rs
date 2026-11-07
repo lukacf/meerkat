@@ -17,6 +17,12 @@
 //! no memory) gains none. A forged marker on another member only binds that
 //! member's memory tool to its own identity, as its own build does.
 //!
+//! A member private to a person ([`crate::access::PRIVATE_TO_LABEL`]: a
+//! private side chat and every member it creates) keeps its memory to
+//! itself the same way, and its recorder runs inside no mob: its
+//! `propose_to_mob`, which would move its memory into a scope its mob
+//! shares, is refused as the tool's call outside a mob.
+//!
 //! The slot is late-bound: a composition fills it when its memory stack
 //! attaches a recorder, as it fills the dispatch-time taint slot.
 
@@ -95,15 +101,23 @@ impl SideChatMemorySlot {
     }
 
     /// Bind the `memory` tool of a side chat's build to the side chat's own
-    /// identity (see the module docs). Nothing changes for a request that is
-    /// not a member build, a member that carries no side chat marker, an
+    /// identity (see the module docs), and the `memory` tool of a member
+    /// private to a person to a recorder inside no mob: its
+    /// `propose_to_mob`, which would move its memory into a scope its mob
+    /// shares, is refused. Nothing changes for a request that is not a
+    /// member build, a member that is neither a side chat nor private, an
     /// overlay without a `memory` tool, or an unfilled slot.
     pub(crate) fn bind_side_chat_memory(&self, req: &mut CreateSessionRequest) {
         let is_side_chat = req
             .labels
             .as_ref()
             .is_some_and(|labels| labels.contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL));
-        if !is_side_chat {
+        let private = req
+            .labels
+            .as_ref()
+            .and_then(crate::access::private_owner)
+            .is_some();
+        if !is_side_chat && !private {
             return;
         }
         let Some(source) = self.recorder_source() else {
@@ -147,7 +161,7 @@ impl SideChatMemorySlot {
             source.provider,
             source.config,
             identity,
-            Some(binding.mob_id.clone()),
+            (!private).then(|| binding.mob_id.clone()),
         );
         build.external_tools = Some(Arc::new(RecorderToolDispatcher::rebinding(
             Arc::clone(overlay),

@@ -31,8 +31,9 @@ use super::UnifiedRuntime;
 
 /// The `/healthz` answer: `ok` as plain text, the liveness probe's answer,
 /// and a JSON summary on request. The summary's `status` is `degraded` while
-/// Core holds restored members broken (`broken_members` names each, with
-/// Core's reason), while the identity runtime's lifecycle projection is off
+/// Core holds restored members broken (`broken_member_count` counts them and
+/// names none: a probe's reader is no audience of any member), while the
+/// identity runtime's lifecycle projection is off
 /// or keeps failing (`lifecycle_projection` says which, and why), as it is
 /// when the host's detached job projection says so, and `unreadable` when
 /// that projection says so. `lifecycle_projection` also names the journal
@@ -74,11 +75,12 @@ async fn healthz_response(
     );
     if !broken_members.is_empty() {
         // The worse of the two: a job health that is already unreadable
-        // stays unreadable.
+        // stays unreadable. The summary counts the broken members and names
+        // none: a health probe's reader is no audience of any member.
         if public_projection["status"] != "unreadable" {
             public_projection["status"] = serde_json::json!("degraded");
         }
-        public_projection["broken_members"] = broken_members_json(&broken_members);
+        public_projection["broken_member_count"] = serde_json::json!(broken_members.len());
     }
     if let Some(lifecycle_projection) =
         lifecycle_projection.filter(|status| status.degraded() || status.owed_events > 0)
@@ -107,8 +109,8 @@ fn wants_health_summary(headers: &HeaderMap) -> bool {
 
 /// The open Console's Host check on `/healthz`: the plain liveness answer
 /// serves any host, since a container probe names its pod or service rather
-/// than the console, while the JSON summary names members, so it answers
-/// only the hosts the listener serves.
+/// than the console, while the JSON summary describes the runtime's health,
+/// so it answers only the hosts the listener serves.
 async fn refuse_foreign_host_for_health_summary(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -516,6 +518,7 @@ impl UnifiedRuntime {
             Some(self.mob_runtime().clone()),
             self.access_controller().cloned(),
         )
+        .with_identity_runtime(self.identity_runtime_ref().cloned())
     }
 
     pub fn build_console_frontend_router(&self) -> Router {

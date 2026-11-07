@@ -108,6 +108,12 @@ pub(crate) fn private_owner(labels: &BTreeMap<String, String>) -> Option<&str> {
         .filter(|owner| !owner.is_empty())
 }
 
+/// The private owner of a member whose retirement the memory store recorded
+/// as private when no record names the person it was private to (it ended
+/// before this process read who its members belong to): a key no caller's
+/// scope equals, so it is hidden from everyone but the access admins.
+pub(crate) const UNKNOWN_PRIVATE_OWNER: &str = "console-caller:v1:unknown";
+
 /// The full action vocabulary, in display order.
 pub const ACCESS_ACTIONS: &[&str] = &[
     #[cfg(feature = "extension-state")]

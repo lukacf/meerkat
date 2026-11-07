@@ -3263,6 +3263,7 @@ fn install_agent_mob_tools(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     delivery: MobRuntimeDelivery,
+    private_owners: &crate::private_owners::PrivateOwners,
 ) -> Result<InstalledAgentMobTools, MobRuntimeDeliveryError> {
     // Child mobs start process-bound: a durable child root is applied at the
     // bootstrap boundary, so a caller can still opt out before any path opens.
@@ -3276,6 +3277,7 @@ fn install_agent_mob_tools(
         council_store.clone(),
         forked_participant_store.clone(),
         restore,
+        private_owners,
     )?;
     let (state, overrides, llm_slot, console_spawn_sink, identity_runtime) =
         install_agent_mob_tools_with(
@@ -3287,6 +3289,7 @@ fn install_agent_mob_tools(
             None,
             &delivery,
             None,
+            private_owners,
         )?;
     let install = AgentMobToolsInstall {
         slot,
@@ -3311,6 +3314,23 @@ fn install_agent_mob_tools(
     ))
 }
 
+/// The host customizer of the members of the mobs the agent mob tools
+/// create: `first` (a member auth binding's, when there is one), then the
+/// private-owner propagation ([`crate::private_owners::PrivateOwners`]), then
+/// the runtime-plane guard, which runs last as it must.
+fn child_spawn_member_customizer(
+    first: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    private_owners: &crate::private_owners::PrivateOwners,
+) -> Arc<dyn meerkat_mob::SpawnMemberCustomizer> {
+    crate::identity_first::ComposedSpawnMemberCustomizer::over(
+        Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+            first,
+            private_owners.child_spawn_customizer(),
+        )),
+        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
+    )
+}
+
 /// The unshared agent mob-tool state with its explicit stores, before any
 /// child root, child policy or realm-profile overlay is applied.
 fn new_agent_mob_state(
@@ -3327,6 +3347,7 @@ fn new_agent_mob_state(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     restore: AgentMobRestore,
+    private_owners: &crate::private_owners::PrivateOwners,
 ) -> Result<meerkat_mob_mcp::MobMcpState, MobRuntimeDeliveryError> {
     // Forward the workgraph service so agent-spawned child mobs
     // (delegate / mob_spawn_member) inherit apply-time attention overlays.
@@ -3340,12 +3361,11 @@ fn new_agent_mob_state(
     // root mob does.
     .with_member_restore_policy(restore.policy)
     .with_resume_restore_concurrency(restore.concurrency)
-    // Child mobs refuse runtime-plane member identities like the root mob.
-    // The child application tool policy, which runs after it, never changes
-    // a member's identity or labels.
-    .with_child_spawn_member_customizer(
-        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-    );
+    // Child mobs give every member a private member's mob seats that
+    // member's owner, and refuse runtime-plane member identities like the
+    // root mob. The child application tool policy, which runs after them,
+    // never changes a member's identity or labels.
+    .with_child_spawn_member_customizer(child_spawn_member_customizer(None, private_owners));
     // Explicit stores are installed before any persistent child root: the
     // native root upgrades only stores still at their default, so these stay
     // the host's choice.
@@ -3374,6 +3394,7 @@ fn install_agent_mob_tools_with(
     existing_slots: Option<(SharedConsoleSpawnSinkSlot, SharedIdentityRuntimeSlot)>,
     delivery: &MobRuntimeDelivery,
     replaced: Option<meerkat::ContinuationBindingGeneration>,
+    private_owners: &crate::private_owners::PrivateOwners,
 ) -> Result<
     (
         Arc<meerkat_mob_mcp::MobMcpState>,
@@ -3400,22 +3421,21 @@ fn install_agent_mob_tools_with(
     if let Some(hook) = child_policy.registration_hook {
         state = state.with_member_runtime_registration_hook(hook);
     }
-    // The child mobs' one host customizer slot holds the runtime-plane guard
-    // every agent mob-tool state starts with (`new_agent_mob_state`). With a
-    // member auth binding it holds the binding's customizer, then the guard,
-    // which runs last as it must, so child-mob members build with the
-    // binding too.
+    // The child mobs' one host customizer slot holds the private-owner
+    // propagation and the runtime-plane guard every agent mob-tool state
+    // starts with (`new_agent_mob_state`). With a member auth binding it
+    // holds the binding's customizer first, then those two, the guard
+    // running last as it must, so child-mob members build with the binding
+    // too.
     if let Some(binding) = child_policy.member_auth_binding.clone() {
         let binding_customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer> = Arc::new(
             crate::native_realm::MemberAuthBindingCustomizer::new(binding)
                 .with_recorded_form(child_policy.member_auth_binding_recorded.clone()),
         );
-        state = state.with_child_spawn_member_customizer(
-            crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                Some(binding_customizer),
-                crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-            ),
-        );
+        state = state.with_child_spawn_member_customizer(child_spawn_member_customizer(
+            Some(binding_customizer),
+            private_owners,
+        ));
     }
     // The definition overlay wraps whatever profile store the state holds:
     // with a durable child root that is the native durable store, so authored
@@ -7294,6 +7314,7 @@ impl MobBootstrapSpec {
             None,
             self.storage.forked_participant_store().cloned(),
             delivery,
+            &self.private_owners,
         )?;
         self.agent_mob_mcp_state = Some(agent_mob_mcp_state);
         self.implicit_delegate_retirement_overrides = Some(implicit_delegate_retirement_overrides);
@@ -7624,6 +7645,7 @@ impl MobBootstrapSpec {
             council_store,
             forked_participant_store.clone(),
             restore,
+            &self.private_owners,
         )
         .map_err(MobRuntimeError::Delivery)?;
         if let Some(durable) = &durable {
@@ -7647,6 +7669,7 @@ impl MobBootstrapSpec {
                 existing_slots,
                 &install.delivery,
                 Some(replaced),
+                &self.private_owners,
             )
             .map_err(MobRuntimeError::Delivery)?;
         self.agent_mob_mcp_state = Some(state);
@@ -8348,6 +8371,7 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -8994,6 +9018,7 @@ impl MobBootstrapSpec {
             },
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.durable_runtime_store = Some(durable_runtime_store);
@@ -9406,6 +9431,7 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -10509,11 +10535,22 @@ impl MobRuntime {
                 .set_after_destroy(Arc::clone(hook))
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
         }
-        #[cfg(feature = "extension-state")]
-        if let (Some(state), Some(hook)) = (&spec.agent_mob_mcp_state, &spec.before_create) {
+        // The agent mob tools' create admission: the host's own decides
+        // first, when there is one, then every mob a member creates records
+        // its creator's private owner, which the members seated in it take
+        // ([`crate::private_owners::PrivateOwners::before_create_hook`]).
+        if let Some(state) = &spec.agent_mob_mcp_state {
+            #[cfg(feature = "extension-state")]
+            let host_hook = spec.before_create.clone();
+            #[cfg(not(feature = "extension-state"))]
+            let host_hook = None;
             state
-                .set_before_create(Arc::clone(hook))
+                .set_before_create(
+                    spec.private_owners
+                        .before_create_hook(Arc::downgrade(state), host_hook),
+                )
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+            spec.private_owners.bind_child_mobs(state);
         }
         auto_mark_declared_resume_overrides(&mut spec.definition);
         let ephemeral_dir = spec._ephemeral_dir.clone();
@@ -10964,6 +11001,10 @@ impl MobRuntime {
         // A member created under one of the console's runtime-plane
         // identities before every creation path refused them still comes up.
         crate::member_comms_id::warn_reserved_identity_members(&handle).await;
+        // Who the members of this runtime's mobs are private to is read from
+        // their durable records in the background from the start, and read
+        // again until it is read; no request waits for it.
+        spec.private_owners.seed_in_background(&handle);
         Ok((
             Self {
                 handle,
@@ -11075,11 +11116,12 @@ impl MobRuntime {
         &self.side_chat_lineages
     }
 
-    /// Who each member of this runtime's mob is private to (see
-    /// [`crate::private_owners::PrivateOwners`]), once the mob's event log
-    /// has been read for the members this process did not build.
-    pub(crate) async fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
-        self.private_owners.seeded(&self.handle).await
+    /// Who each member of this runtime's mobs is private to (see
+    /// [`crate::private_owners::PrivateOwners`]), as far as it is known now:
+    /// the seed that reads the durable records runs in the background from
+    /// the runtime's start, and no caller waits for it.
+    pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
+        &self.private_owners
     }
 
     /// The Steward's source of the members of this runtime's mob private to

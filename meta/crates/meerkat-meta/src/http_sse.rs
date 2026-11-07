@@ -913,6 +913,10 @@ pub(crate) async fn project_structural_envelope_for_console(
 pub(crate) struct ProjectedStructuralEvent {
     envelope: crate::MobStructuralEventEnvelope,
     member: StructuralEventMember,
+    /// The members the event names besides the one it is attributed to: the
+    /// endpoints of a mob-level event, and the members of the run it belongs
+    /// to (its bound members and every member a step dispatched to).
+    endpoints: Vec<String>,
 }
 
 enum StructuralEventMember {
@@ -973,7 +977,20 @@ pub(crate) async fn project_structural_member(
     } else {
         StructuralEventMember::Mob
     };
-    ProjectedStructuralEvent { envelope, member }
+    let mut endpoints = projection.endpoints;
+    if let Some(run_id) = envelope
+        .run_id
+        .as_deref()
+        .and_then(|run_id| run_id.parse::<meerkat_mob::RunId>().ok())
+        && let Ok(Some(run)) = handle.flow_status(run_id).await
+    {
+        endpoints.extend(crate::http_console::run_members(&run));
+    }
+    ProjectedStructuralEvent {
+        envelope,
+        member,
+        endpoints,
+    }
 }
 
 impl ProjectedStructuralEvent {
@@ -986,6 +1003,16 @@ impl ProjectedStructuralEvent {
         visibility_policy: &dyn ConsoleVisibilityPolicy,
         access_view: Option<&AccessView>,
     ) -> Option<crate::MobStructuralEventEnvelope> {
+        // An event that names a member hidden from the caller (a wiring edge
+        // to it, an instruction for it, a run that reached it) is shown to no
+        // one but that member's audience.
+        if access_view.is_some_and(|view| {
+            self.endpoints
+                .iter()
+                .any(|endpoint| view.hides_agent(endpoint))
+        }) {
+            return None;
+        }
         let enforced_view = access_view.filter(|view| view.enforced());
         let mut envelope = self.envelope;
         let policy_identity = match self.member {

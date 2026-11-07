@@ -1076,7 +1076,7 @@ fn priming_records_an_ended_private_member_with_its_owner() {
         Vec::new(),
         &BTreeMap::new(),
         &BTreeSet::new(),
-        &BTreeMap::from([("alpha-side".to_string(), "alice-key".to_string())]),
+        &BTreeMap::from([("alpha-side".to_string(), Some("alice-key".to_string()))]),
         "",
     );
     let bob = controller.view_for_caller(Some(BOB), Some("bob-key"));
@@ -1495,7 +1495,10 @@ async fn an_aggregator_console_primes_before_it_decides_timeline_frames() -> Tes
             let response = app
                 .oneshot(
                     axum::http::Request::builder()
-                        .uri("/console/timeline")
+                        // The member's own timeline: a frame of a member the
+                        // console's identity records do not list is read only
+                        // by a query for its identity.
+                        .uri("/console/timeline?identity=alpha-side")
                         .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
                         .body(axum::body::Body::empty())
                         .expect("timeline request"),

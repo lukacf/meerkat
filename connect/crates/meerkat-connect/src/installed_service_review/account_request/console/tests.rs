@@ -937,10 +937,10 @@ async fn answer_console_review(
 }
 
 /// MU-11 row 2: a Console setup review records the person who answered it,
-/// not the presenter's construction label: Core's qualified principal key as
-/// the decision's actor, and as its provenance the approver as Core's
-/// consent records name one (principal, assurance, a digest of the login).
-/// The login itself is never recorded.
+/// not the presenter's construction label, as Core records an authenticated
+/// approver: the person's bare id as the decision's actor, and as its
+/// provenance Core's consent approver (the qualified principal, the
+/// assurance, a digest of the login). The login itself is never recorded.
 #[tokio::test]
 async fn console_review_records_the_answering_person() {
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -951,9 +951,7 @@ async fn console_review_records_the_answering_person() {
         let decision = record.decision.clone().unwrap();
         assert_eq!(
             decision.actor.as_str(),
-            meerkat_core::approval::decision::DecisionPrincipalKey::of(&person)
-                .unwrap()
-                .as_str(),
+            person.id.as_str(),
             "the person who answered decided, not the presenter"
         );
         let approver = &decision

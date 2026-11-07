@@ -290,10 +290,10 @@ async fn a_console_software_answer_records_the_answering_person() {
         .decision
         .unwrap();
     assert_eq!(decision.decision, ApprovalDecision::Approve);
-    assert_ne!(
+    assert_eq!(
         decision.actor.as_str(),
-        "connect-console-presenter",
-        "the software answer was recorded as the presenter's"
+        fixture_person().id.as_str(),
+        "the software answer was not recorded as the person's"
     );
     let approver = &decision
         .provenance

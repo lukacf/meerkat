@@ -65,6 +65,39 @@ def signed_login(scope, expires):
         hmac.new(KEY, body, hashlib.sha256).digest()).rstrip(b"=")).decode()
 
 
+def stored_decision_records(directory):
+    """Every approval record the Console's setup approval owners stored under
+    `directory` (their `consent-*/native-decisions.json`), by approval id."""
+    records = {}
+    for path in sorted(Path(directory).rglob("native-decisions.json")):
+        if not path.parent.name.startswith("consent-"):
+            continue
+        for record in json.loads(path.read_bytes())["approvals"]:
+            require(record["approval_id"] not in records, "an approval id is stored twice")
+            records[record["approval_id"]] = record
+    return records
+
+
+def check_answered_software_decision(directory, report):
+    """The stored software decision names the person who answered it, as Core
+    records an authenticated approver: the bare subject as the actor, and the
+    qualified principal, the assurance and the login's digest as the approver.
+    Never the presenter label, the token or the login itself."""
+    scope = report["enrollment"]["login_scope_id"]
+    approver = {"principal": human(), "assurance": "person_authenticated",
+                "authentication_scope_digest": "sha256:" + hashlib.sha256(scope.encode()).hexdigest()}
+    software = [row for row in report["decisions"] if row["kind"] == "software"]
+    require(len(software) == 1, "the software answer was not reported once")
+    record = stored_decision_records(directory).get(software[0]["prompt"]["prompt"]["approval_id"])
+    require(record is not None and record.get("decision") is not None,
+            "the stored software decision is missing")
+    decision = record["decision"]
+    require(decision["decision"] == "approve" and decision["actor"] == SUBJECT
+            and decision.get("provenance") == {"approver": approver},
+            "the stored software decision does not name the person who answered")
+    require(scope not in json.dumps(record), "the stored software decision holds the login itself")
+
+
 def approval_answer(review):
     require(type(review.get("review_id")) is int and review["review_id"] > 0,
             "actual review id missing")
@@ -409,7 +442,9 @@ class ConsoleScenario:
         pass
 
     def check_final_artifacts(self, directory, report):
-        pass
+        # The software prompt was answered in the Console by the fixture
+        # person: its stored decision must name that person (MU-11).
+        check_answered_software_decision(directory, report)
 
     def original_request(self):
         return self.v.ACQUISITION_REQUEST

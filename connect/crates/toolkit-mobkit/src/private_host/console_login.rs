@@ -236,6 +236,16 @@ impl ConsoleLogins {
         Ok(handle)
     }
 
+    /// Whether the login of this issuer, subject and scope exists but ended:
+    /// its host retired it, or it expired. An unknown login and an
+    /// unavailable pipe are not ended. A read only; it admits nothing.
+    pub fn ended(&self, issuer: &str, subject: &str, scope: &str) -> bool {
+        matches!(
+            self.resolve(issuer, subject, scope),
+            Err(ConsoleLoginRefusal::Retired | ConsoleLoginRefusal::Expired)
+        )
+    }
+
     /// Protected-parent lifetime lookup. The parent separately owns actual
     /// authentication/administration; this never resolves a verified carrier.
     pub(super) fn parent_enrollment(

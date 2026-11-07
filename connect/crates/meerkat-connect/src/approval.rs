@@ -1372,29 +1372,28 @@ impl ConsoleAnswerer {
         }
         Ok(Self {
             principal,
-            authentication_scope_digest: meerkat_core::approval::decision::Sha256Digest::of(
-                login_scope.as_bytes(),
-            ),
+            authentication_scope_digest:
+                meerkat_core::approval::consent::HostAuthenticationScope::new(login_scope).digest(),
         })
     }
 
-    /// What a decision records of this person: as its actor, Core's
-    /// canonical key of the qualified principal (two issuers' identical
-    /// subjects stay apart), and as its provenance the approver, named as
-    /// Core's consent records name one.
+    /// What a decision records of this person, as Core records an
+    /// authenticated approver: as its actor, the principal's bare id, and as
+    /// its provenance Core's consent approver (the qualified principal, the
+    /// assurance and the login's digest), the one record of who decided. Two
+    /// issuers' identical subjects stay apart by the approver's principal.
     fn recorded(&self) -> Result<RecordedDecider, ConnectError> {
-        let key = meerkat_core::approval::decision::DecisionPrincipalKey::of(&self.principal)
-            .map_err(|_| invalid("The Console answer names no verified person"))?;
-        let actor = ApprovalPrincipalId::new(key.as_str())
+        let actor = ApprovalPrincipalId::new(self.principal.id.as_str())
             .map_err(|error| ConnectError::native("identify the Console answerer", error))?;
+        let approver = meerkat_core::ApprovalConsentApprover {
+            principal: self.principal.clone(),
+            assurance: meerkat_core::ApprovalAssurance::PersonAuthenticated,
+            authentication_scope_digest: Some(self.authentication_scope_digest.clone()),
+        };
         Ok(RecordedDecider {
             actor,
             principal: self.principal.clone(),
-            provenance: serde_json::json!({"approver": {
-                "principal": self.principal,
-                "assurance": meerkat_core::ApprovalAssurance::PersonAuthenticated,
-                "authentication_scope_digest": self.authentication_scope_digest,
-            }}),
+            provenance: serde_json::json!({ "approver": approver }),
         })
     }
 }
@@ -1425,7 +1424,8 @@ impl RecordedDecider {
 enum Decider {
     /// This owner's presenter, or a policy's actor: the record's actor.
     Actor(ApprovalPrincipalId),
-    /// The person who answered in the Console.
+    /// The person who answered in the Console: the record's actor is the
+    /// bare id, and its approver's qualified principal names the person.
     Person {
         actor: ApprovalPrincipalId,
         principal: meerkat_core::PrincipalRef,
@@ -1433,10 +1433,26 @@ enum Decider {
 }
 
 impl Decider {
-    /// Whether `record` names this decider.
+    /// Whether `record` names this decider. A person is named by the
+    /// qualified principal of the record's approver, so two principals with
+    /// the same bare id but another kind or trust domain stay apart.
     fn names(&self, record: &meerkat_core::ApprovalDecisionRecord) -> bool {
         match self {
-            Self::Actor(actor) | Self::Person { actor, .. } => &record.actor == actor,
+            Self::Actor(actor) => &record.actor == actor,
+            Self::Person { actor, principal } => {
+                &record.actor == actor
+                    && record
+                        .provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.get("approver"))
+                        .and_then(|approver| {
+                            serde_json::from_value::<meerkat_core::ApprovalConsentApprover>(
+                                approver.clone(),
+                            )
+                            .ok()
+                        })
+                        .is_some_and(|approver| &approver.principal == principal)
+            }
         }
     }
 }

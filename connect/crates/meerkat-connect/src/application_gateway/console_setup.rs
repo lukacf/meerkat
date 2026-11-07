@@ -930,6 +930,13 @@ async fn serve_setup_presentations(
                         turns.clear();
                     }
                 }
+                // A presentation can end on the host's closure before the
+                // loop observes it: the intake ends here, and the request
+                // whose turn came retires with its enrollment, unstarted.
+                if presenters.is_some() && closed.is_closed_for_presenter() {
+                    presenters = None;
+                    turns.clear();
+                }
                 if presenters.is_some()
                     && let Some((login, (enrollment, event))) = next
                 {

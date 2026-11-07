@@ -11,8 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   routes (`POST /host/toolkit/setup/start`, `/answer`, `/credentials`,
   `/cancel-sign-in` and `/callback`) refuse a caller that is not a verified,
   current person (no token on a console without sign-in, a service token, a
-  token that names no person, a shared-account token, or a login that ended
-  before the answer was applied) with `403` and
+  token that names no person, a shared-account token, or a person whose
+  login ended before the route forwarded the answer; an answer already
+  forwarded is then not applied) with `403` and
   `{"error": "approver_unauthenticated"}`, a new refusal kind (the one the
   Meta console uses for approval decisions); nothing is answered.
 - Console setup: an answer from a login that has no open setup prompt is
@@ -26,17 +27,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- Console setup approvals record the person who answered. The decision's
-  actor is the person's qualified principal key
-  (`principal:["human","oidc-issuer:<issuer>","<sub>"]`), and its provenance
-  keeps the assurance (`person_authenticated`) and a digest of the login,
-  never the token or the login itself. Before, every Console answer was
-  recorded as the Console presenter (`connect-console-presenter`).
+- Console setup approvals record the person who answered, as Core records an
+  authenticated approver: the decision's actor is the person's id (the
+  verified token's `sub`), and the approver in its provenance holds the
+  qualified principal (kind `human`, that id, in the trust domain
+  `oidc-issuer:<issuer>`), the assurance (`person_authenticated`) and a
+  digest of the login, never the token or the login itself. Before, every
+  Console answer was recorded as the Console presenter
+  (`connect-console-presenter`).
 - Console setup: several people answer setup prompts at the same time. Each
   login has its own prompt, and one login's prompts come one at a time, in
   the order they arrived; an agent session still asks for one setup answer
-  at a time. Before, one person's open prompt held back every other
-  person's.
+  at a time. When the application runs with its operator terminal, setup
+  prompts, the Console's included, still come one at a time. Before, one
+  person's open prompt held back every other person's.
 - Setup: when a setup check answered again for a validation it had already
   accepted, with something that is not a valid proposal (for example a file
   list that names both a declaration and an activation document), the check

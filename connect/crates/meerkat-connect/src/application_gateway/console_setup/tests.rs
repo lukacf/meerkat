@@ -953,9 +953,12 @@ async fn the_presenter_loop_serves_two_logins_at_once_and_one_login_in_arrival_o
         .expect("the loop ended at closure")
         .unwrap();
     assert!(served.is_ok(), "the loop ended with {served:?}");
+    // The loop and its hooks are gone, so only what they already reported
+    // is left to read.
+    let late = observed.try_recv();
     assert!(
-        loop_quiet(&mut observed).await,
-        "a waiting request started after closure"
+        late.is_err(),
+        "a waiting request started after closure: {late:?}"
     );
     // The waiting request retired with its enrollment and the running ones
     // were joined: every review ended, and none was decided.

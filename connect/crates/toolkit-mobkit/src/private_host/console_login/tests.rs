@@ -14,6 +14,32 @@ fn owner() -> (watch::Sender<bool>, ConsoleLogins) {
     (send, ConsoleLogins::new(PrivateHostClosed(receive), None))
 }
 
+/// A retired or expired login is ended; a current or never enrolled one is
+/// not (MU-11: a setup answer from an ended login is refused as not a
+/// current person).
+#[tokio::test]
+async fn ended_tells_a_retired_or_expired_login_from_a_current_or_unknown_one() {
+    let (_connection, logins) = owner();
+    let now = now_ms().unwrap();
+    logins
+        .enroll(2, selection("current", now + 60_000))
+        .unwrap();
+    logins
+        .enroll(3, selection("retired", now + 60_000))
+        .unwrap();
+    logins.enroll(4, selection("expiring", now + 100)).unwrap();
+    let ended = |scope| logins.ended("https://console.example/issuer", "verified-sub", scope);
+    assert!(!ended("current"));
+    assert!(!ended("retired"));
+    assert!(!ended("never-enrolled"));
+    logins.retire(3).unwrap().drain().await.unwrap();
+    assert!(ended("retired"), "a retired login is ended");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(ended("expiring"), "an expired login is ended");
+    assert!(!ended("current"));
+    assert!(!ended("never-enrolled"));
+}
+
 #[tokio::test]
 async fn retirement_orders_reservations_and_keeps_another_login_usable() {
     let (_connection, logins) = owner();

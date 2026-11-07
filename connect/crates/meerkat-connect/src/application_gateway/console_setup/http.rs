@@ -156,6 +156,7 @@ fn selected(
         &viewer,
         |viewer| match panel.0.binding.current_login(viewer) {
             Ok(login) => LoginLookup::Current(login),
+            Err(_) if panel.0.binding.login_ended(viewer) => LoginLookup::Ended,
             Err(_) => LoginLookup::Refused(StatusCode::FORBIDDEN),
         },
         |login| {
@@ -247,9 +248,10 @@ pub(super) fn select_presentation<T>(
 }
 /// After the route's awaits: [`answering_login`] for the answer's carrier as
 /// the Console resolves it now (`viewer`), with the carrier's own `login`, so
-/// a person whose token stopped verifying answers nothing; then the action's
-/// own check (`checked`), the carrier's current login (`current`) and the
-/// exact presentation (`held`).
+/// a person whose token stopped verifying, or whose login ended (its host
+/// retired it, or it expired) while the answer waited, answers nothing; then
+/// the action's own check (`checked`), the carrier's current login
+/// (`current`) and the exact presentation (`held`).
 pub(super) fn still_current(
     viewer: Option<&ConsoleViewerContext>,
     login: &ConsoleLoginHandle,
@@ -257,7 +259,12 @@ pub(super) fn still_current(
     current: impl FnOnce() -> bool,
     held: impl FnOnce() -> Result<bool, StatusCode>,
 ) -> Result<(), Refusal> {
-    answering_login(viewer, |_| LoginLookup::Current(login.clone()))?;
+    use toolkit_mobkit::private_host::ConsoleLoginRefusal;
+    answering_login(viewer, |_| match login.check() {
+        Ok(()) => LoginLookup::Current(login.clone()),
+        Err(ConsoleLoginRefusal::Retired | ConsoleLoginRefusal::Expired) => LoginLookup::Ended,
+        Err(_) => LoginLookup::Refused(StatusCode::FORBIDDEN),
+    })?;
     if !checked || !current() {
         return Err(StatusCode::FORBIDDEN.into());
     }

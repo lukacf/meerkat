@@ -9,10 +9,14 @@
 //! file grant may name a symbolic link as its final component
 //! (`/etc/resolv.conf` on a systemd-resolved host), when the link names its
 //! regular-file target in one hop and only root or the effective uid can
-//! retarget it (`final_link_grantable`). The target is pinned at compile time
-//! and bound read-only at the link's own path; every launch checks that the
-//! link still resolves to it, and setup reopens it only while it is the
-//! pinned object.
+//! retarget it (`grantable_link_text`). The target is pinned at compile time
+//! and bound read-only at the link's own path. Every launch checks that the
+//! link keeps its text and still resolves to the pinned target. A target
+//! replaced under its own name (a new file renamed into place, as
+//! systemd-resolved rewrites its stub file) is captured again by the same
+//! rules and pinned in its place (`Mount::bind`); any other change refuses
+//! the launch. Setup reopens the target only while it is the object the
+//! launch validated.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, OsStr};
@@ -24,7 +28,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use meerkat_core::confinement::{FilesystemAccess, IpNetworkAccess, PathAccess};
@@ -109,9 +113,25 @@ struct SetupFailure {
 
 struct Mount {
     path: PathBuf,
+    // A read-only file grant whose final component is a symbolic link (see
+    // `grantable_link_text`): the link's text at capture, which the link must
+    // keep at every launch.
+    link: Option<PathBuf>,
     canonical: PathBuf,
     // The canonical name, opened again in the new mount namespace at setup.
     source: CString,
+    components: Vec<CString>,
+    destination: CString,
+    directory: bool,
+    writable: bool,
+    device: bool,
+    // The pinned object. Only a final link's target replaced under its own
+    // name is ever pinned again (`Mount::bind`).
+    pin: Mutex<Pin>,
+}
+
+/// The host object a mount pins.
+struct Pin {
     file: File,
     identity: (u64, u64),
     // fstat (st_dev, st_ino, st_rdev) of the pinned object. st_rdev also
@@ -119,19 +139,25 @@ struct Mount {
     // files.
     pinned: (libc::dev_t, libc::ino_t, libc::dev_t),
     ancestors: Vec<(PathBuf, u64, u64)>,
-    components: Vec<CString>,
-    destination: CString,
-    directory: bool,
-    writable: bool,
-    device: bool,
     // The host mount is noexec, which the bind remount must keep.
     noexec: bool,
 }
 
+/// What one launch binds of a mount, copied from its pin when the launch is
+/// validated, before fork, so setup reads no lock: the identity the reopened
+/// source must have, and the host mount's noexec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Bound {
+    pinned: (libc::dev_t, libc::ino_t, libc::dev_t),
+    noexec: bool,
+}
+
 /// Mechanical compiled resources. Every file descriptor pins the exact host
-/// object selected at setup. Per-launch checks cannot retarget these handles.
-/// Setup binds a source opened again by name in the new mount namespace, and
-/// only while it is still that pinned object.
+/// object selected at setup. Per-launch checks cannot retarget these handles;
+/// the one object they pin again is a final link's target replaced under its
+/// own name, by the capture-time rules (`Mount::bind`). Setup binds a source
+/// opened again by name in the new mount namespace, and only while it is
+/// still the object the launch validated.
 pub(super) struct LinuxPolicy {
     mounts: Vec<Mount>,
     filter: Vec<libc::sock_filter>,
@@ -203,15 +229,19 @@ impl LinuxPolicy {
             uid_map: format!("0 {} 1\n", unsafe { libc::geteuid() }).into_bytes(),
             gid_map: format!("0 {} 1\n", unsafe { libc::getegid() }).into_bytes(),
         });
-        policy.validate()?;
-        policy.probe()?;
+        let bound = policy.bind_mounts()?;
+        policy.probe(&bound)?;
         Ok(policy)
     }
 
-    pub(super) fn validate(&self) -> Result<(), ConfinementRefusal> {
-        for mount in &self.mounts {
-            mount.validate()?;
-        }
+    /// Checks every mount for a launch (see [`Mount::bind`]) and the staging
+    /// root, and returns what the launch binds of each mount.
+    fn bind_mounts(&self) -> Result<Vec<Bound>, ConfinementRefusal> {
+        let bound = self
+            .mounts
+            .iter()
+            .map(Mount::bind)
+            .collect::<Result<Vec<_>, _>>()?;
         {
             let stage = std::fs::symlink_metadata("/tmp")
                 .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
@@ -219,14 +249,24 @@ impl LinuxPolicy {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        Ok(())
+        Ok(bound)
     }
 
     pub(super) fn validate_launch(
         &self,
         launch: &ProcessLaunchSpec,
     ) -> Result<(), ConfinementRefusal> {
-        self.validate()?;
+        self.launch_bindings(launch)?;
+        Ok(())
+    }
+
+    /// [`Self::bind_mounts`] for `launch`, whose program and working
+    /// directory must be visible in its view.
+    fn launch_bindings(
+        &self,
+        launch: &ProcessLaunchSpec,
+    ) -> Result<Vec<Bound>, ConfinementRefusal> {
+        let bound = self.bind_mounts()?;
         {
             let visible = |path: &Path| {
                 self.mounts.iter().any(|mount| {
@@ -237,12 +277,13 @@ impl LinuxPolicy {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
         }
-        Ok(())
+        Ok(bound)
     }
 
     // Capability setup runs once per compiled host profile. It never executes
     // the requested target. Only the exact probe PID is waited/killed here.
-    fn probe(&self) -> Result<(), ConfinementRefusal> {
+    // `bound` is what the probe binds of each mount, validated before fork.
+    fn probe(&self, bound: &[Bound]) -> Result<(), ConfinementRefusal> {
         // One slot per mount for setup's reopened sources, allocated before
         // fork: the child only writes its own copy.
         let mut sources = vec![-1; self.mounts.len()];
@@ -253,7 +294,7 @@ impl LinuxPolicy {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         if pid == 0 {
-            let status = match self.apply(&mut sources) {
+            let status = match self.apply(bound, &mut sources) {
                 Ok(()) => 0,
                 Err(failure) => failure.step.probe_status(),
             };
@@ -300,8 +341,9 @@ impl LinuxPolicy {
     // Called only between fork and exec, or in the disposable capability probe.
     // This path performs raw syscalls and reads preallocated data only. No
     // allocation, host lock, callback, Rust destructor or async operation.
-    // `sources` is preallocated with one slot per mount.
-    fn apply(&self, sources: &mut [i32]) -> Result<(), SetupFailure> {
+    // `sources` is preallocated with one slot per mount, and `bound` holds
+    // what the launch validated of each mount.
+    fn apply(&self, bound: &[Bound], sources: &mut [i32]) -> Result<(), SetupFailure> {
         raw(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
             .map_err(SetupStep::NoNewPrivileges.failed())?;
         {
@@ -328,15 +370,15 @@ impl LinuxPolicy {
             // a descriptor pinned in the host namespace cannot be a bind
             // source here. Each source is opened again by its canonical name,
             // before the staging tmpfs covers /tmp, and is used only while it
-            // is still the pinned object.
-            if sources.len() != self.mounts.len() {
+            // is still the object the launch validated.
+            if sources.len() != self.mounts.len() || bound.len() != self.mounts.len() {
                 return Err(SetupFailure {
                     step: SetupStep::MountSource,
                     errno: libc::EINVAL,
                 });
             }
-            for (source, mount) in sources.iter_mut().zip(&self.mounts) {
-                *source = mount.reopen()?;
+            for ((source, mount), bound) in sources.iter_mut().zip(&self.mounts).zip(bound) {
+                *source = mount.reopen(bound.pinned)?;
             }
             raw(unsafe {
                 libc::mount(
@@ -355,8 +397,8 @@ impl LinuxPolicy {
                 )
             })
             .map_err(SetupStep::StageOpen.failed())?;
-            for (mount, &source) in self.mounts.iter().zip(sources.iter()) {
-                mount.install(root, source)?;
+            for ((mount, &source), bound) in self.mounts.iter().zip(sources.iter()).zip(bound) {
+                mount.install(root, source, bound.noexec)?;
             }
             raw(unsafe { libc::close(root) }).map_err(SetupStep::StageOpen.failed())?;
             // The synthetic ancestors are not writable scratch. Child mounts
@@ -477,8 +519,9 @@ fn validate_baseline_kind(
     }
 }
 
-/// Whether the symbolic link at `path`, the final component of a read-only
-/// file grant, may stand for `canonical`, the path it resolves to:
+/// The text of the symbolic link at `path`, the final component of a
+/// read-only file grant, when the link may stand for `canonical`, the path it
+/// resolves to:
 ///
 /// - One hop: the link's own text, resolved lexically from the link's
 ///   directory, is `canonical` itself. No other link takes part in the
@@ -491,27 +534,23 @@ fn validate_baseline_kind(
 ///   sticky (in a sticky directory only an entry's owner, the directory's
 ///   owner or root can rename or remove the entry).
 ///
-/// Any metadata error refuses.
-fn final_link_grantable(path: &Path, canonical: &Path) -> bool {
-    final_link_grantable_for(path, canonical, unsafe { libc::geteuid() })
+/// `None` when the link may not, and on any metadata error.
+fn grantable_link_text(path: &Path, canonical: &Path) -> Option<PathBuf> {
+    grantable_link_text_for(path, canonical, unsafe { libc::geteuid() })
 }
 
-/// [`final_link_grantable`] with `user` as the one trusted owner besides root.
-fn final_link_grantable_for(path: &Path, canonical: &Path, user: libc::uid_t) -> bool {
+/// [`grantable_link_text`] with `user` as the one trusted owner besides root.
+fn grantable_link_text_for(path: &Path, canonical: &Path, user: libc::uid_t) -> Option<PathBuf> {
     const STICKY: u32 = 0o1000;
     const GROUP_OR_OTHER_WRITE: u32 = 0o022;
-    let Some(directory) = path.parent() else {
-        return false;
-    };
+    let directory = path.parent()?;
     if !path
         .components()
         .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
     {
-        return false;
+        return None;
     }
-    let Ok(text) = std::fs::read_link(path) else {
-        return false;
-    };
+    let text = std::fs::read_link(path).ok()?;
     let mut target = directory.to_path_buf();
     for component in text.components() {
         match component {
@@ -522,15 +561,15 @@ fn final_link_grantable_for(path: &Path, canonical: &Path, user: libc::uid_t) ->
                 target.pop();
             }
             Component::Normal(name) => target.push(name),
-            Component::Prefix(_) => return false,
+            Component::Prefix(_) => return None,
         }
     }
     if target != canonical {
-        return false;
+        return None;
     }
     let trusted_owner =
         |metadata: &std::fs::Metadata| metadata.uid() == 0 || metadata.uid() == user;
-    std::fs::symlink_metadata(path)
+    let trusted = std::fs::symlink_metadata(path)
         .is_ok_and(|link| link.file_type().is_symlink() && trusted_owner(&link))
         && directory.ancestors().all(|ancestor| {
             std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| {
@@ -539,7 +578,8 @@ fn final_link_grantable_for(path: &Path, canonical: &Path, user: libc::uid_t) ->
                     && (metadata.mode() & GROUP_OR_OTHER_WRITE == 0
                         || metadata.mode() & STICKY != 0)
             })
-        })
+        });
+    trusted.then_some(text)
 }
 
 impl Mount {
@@ -547,14 +587,22 @@ impl Mount {
     /// that a read-only file grant may name a symbolic link as its final
     /// component (`/etc/resolv.conf` on a systemd-resolved host): its
     /// regular-file target is pinned here and bound read-only at the link's
-    /// own path, when [`final_link_grantable`] accepts the link.
+    /// own path, when [`grantable_link_text`] accepts the link, whose text is
+    /// kept.
     fn capture(path: &Path, baseline: bool, writable: bool) -> Result<Self, ConfinementRefusal> {
         let canonical =
             std::fs::canonicalize(path).map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
-        let link = !baseline && canonical != path;
-        if link && (writable || !final_link_grantable(path, &canonical)) {
-            return Err(ConfinementRefusal::UnsupportedRequirement);
-        }
+        let link = if !baseline && canonical != path {
+            if writable {
+                return Err(ConfinementRefusal::UnsupportedRequirement);
+            }
+            Some(
+                grantable_link_text(path, &canonical)
+                    .ok_or(ConfinementRefusal::UnsupportedRequirement)?,
+            )
+        } else {
+            None
+        };
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -574,7 +622,8 @@ impl Mount {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         // A final link stands only for a regular file.
-        if (metadata.is_file() && metadata.nlink() != 1) || (link && !metadata.is_file()) {
+        if (metadata.is_file() && metadata.nlink() != 1) || (link.is_some() && !metadata.is_file())
+        {
             return Err(ConfinementRefusal::UnsupportedRequirement);
         }
         let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
@@ -637,28 +686,61 @@ impl Mount {
         .map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
         Ok(Self {
             path: path.to_path_buf(),
+            link,
             canonical,
             source,
-            file,
-            identity: (metadata.dev(), metadata.ino()),
-            pinned,
-            ancestors,
             components,
             destination,
             directory: metadata.is_dir(),
             writable,
             device,
-            noexec,
+            pin: Mutex::new(Pin {
+                file,
+                identity: (metadata.dev(), metadata.ino()),
+                pinned,
+                ancestors,
+                noexec,
+            }),
         })
     }
 
-    fn validate(&self) -> Result<(), ConfinementRefusal> {
+    /// Checks this mount for a launch and returns what the launch binds.
+    ///
+    /// A final link whose target was replaced under its own name (a new file
+    /// renamed into place, as systemd-resolved rewrites its stub file) is
+    /// captured again by the capture-time rules, unchanged, and the new
+    /// target is pinned in its place, for this launch and every later one.
+    /// Every other change refuses the launch: a changed link text, a link that
+    /// no longer reaches the same canonical path in one hop, a target that is
+    /// not a regular file, a failed trust check, and any change to another
+    /// grant.
+    fn bind(&self) -> Result<Bound, ConfinementRefusal> {
+        let mut pin = self.pin.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Err(refusal) = self.check(&pin) {
+            *pin = self.recapture(&pin).ok_or(refusal)?;
+        }
+        Ok(Bound {
+            pinned: pin.pinned,
+            noexec: pin.noexec,
+        })
+    }
+
+    /// Whether this mount still names `pin`'s object as captured: the
+    /// granted path resolves to the same canonical path, a final link keeps
+    /// its text, the canonical path's ancestors are the same directories, and
+    /// the object at the canonical path is the pinned one.
+    fn check(&self, pin: &Pin) -> Result<(), ConfinementRefusal> {
         let current = std::fs::canonicalize(&self.path)
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         if current != self.canonical {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
-        for (path, device, inode) in &self.ancestors {
+        if let Some(link) = &self.link
+            && std::fs::read_link(&self.path).ok().as_ref() != Some(link)
+        {
+            return Err(ConfinementRefusal::BackendUnavailable);
+        }
+        for (path, device, inode) in &pin.ancestors {
             let current = std::fs::symlink_metadata(path)
                 .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
             if !current.is_dir()
@@ -670,23 +752,43 @@ impl Mount {
         }
         let named = std::fs::symlink_metadata(&self.canonical)
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
-        let pinned = self
+        let pinned = pin
             .file
             .metadata()
             .map_err(|_| ConfinementRefusal::BackendUnavailable)?;
         if named.file_type().is_symlink()
-            || (named.dev(), named.ino()) != self.identity
-            || (pinned.dev(), pinned.ino()) != self.identity
+            || (named.dev(), named.ino()) != pin.identity
+            || (pinned.dev(), pinned.ino()) != pin.identity
         {
             return Err(ConfinementRefusal::BackendUnavailable);
         }
         Ok(())
     }
 
+    /// A new pin for a final link whose canonical path no longer names the
+    /// pinned object: the link captured again by the capture-time rules,
+    /// unchanged, accepted only while the link keeps its captured text and
+    /// reaches the same canonical path. `None` for every other mount or
+    /// change.
+    fn recapture(&self, pin: &Pin) -> Option<Pin> {
+        let link = self.link.as_ref()?;
+        let named = std::fs::symlink_metadata(&self.canonical).ok()?;
+        if (named.dev(), named.ino()) == pin.identity {
+            return None;
+        }
+        let fresh = Self::capture(&self.path, false, self.writable).ok()?;
+        (fresh.link.as_ref() == Some(link) && fresh.canonical == self.canonical).then(|| {
+            fresh
+                .pin
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+        })
+    }
+
     // Between fork and exec, in the new mount namespace: opens this mount's
     // object again by its canonical name and returns it only while it is
-    // still the pinned object.
-    fn reopen(&self) -> Result<i32, SetupFailure> {
+    // still `pinned`, the object the launch validated.
+    fn reopen(&self, pinned: (libc::dev_t, libc::ino_t, libc::dev_t)) -> Result<i32, SetupFailure> {
         let kind = if self.directory { libc::O_DIRECTORY } else { 0 };
         let source = raw(unsafe {
             libc::open(
@@ -696,7 +798,7 @@ impl Mount {
         })
         .map_err(SetupStep::MountSource.failed())?;
         match stat_identity(source) {
-            Ok(identity) if identity == self.pinned => Ok(source),
+            Ok(identity) if identity == pinned => Ok(source),
             outcome => {
                 unsafe { libc::close(source) };
                 Err(SetupFailure {
@@ -708,8 +810,8 @@ impl Mount {
     }
 
     // Binds `source`, this mount's reopened object, at its destination and
-    // closes it.
-    fn install(&self, root: i32, source: i32) -> Result<(), SetupFailure> {
+    // closes it. `noexec` is the host mount's flag the launch validated.
+    fn install(&self, root: i32, source: i32, noexec: bool) -> Result<(), SetupFailure> {
         let mut parent = raw(unsafe { libc::fcntl(root, libc::F_DUPFD_CLOEXEC, 3) })
             .map_err(SetupStep::MountTarget.failed())?;
         for (index, name) in self.components.iter().enumerate() {
@@ -767,7 +869,7 @@ impl Mount {
                 std::ptr::null(),
                 destination,
                 std::ptr::null(),
-                Self::remount_flags(self.device, self.writable, self.noexec),
+                Self::remount_flags(self.device, self.writable, noexec),
                 std::ptr::null(),
             )
         })
@@ -1114,7 +1216,8 @@ pub(super) fn spawn(
     streams: SpawnIo,
     gate: Option<(BorrowedFd<'_>, &OsStr)>,
 ) -> io::Result<NativeChild> {
-    policy.validate_launch(&launch).map_err(io::Error::other)?;
+    // What this launch binds of each mount, validated here, before fork.
+    let bound = policy.launch_bindings(&launch).map_err(io::Error::other)?;
     let inherited_stdin = inherit(streams.stdin, libc::STDIN_FILENO)?;
     let inherited_stdout = inherit(streams.stdout, libc::STDOUT_FILENO)?;
     let inherited_stderr = inherit(streams.stderr, libc::STDERR_FILENO)?;
@@ -1181,13 +1284,13 @@ pub(super) fn spawn(
     // pre-exec child only writes its own copy.
     let mut sources = vec![-1; policy.mounts.len()];
     // SAFETY: The closure invokes only syscall helpers using preallocated
-    // strings, buffers, policy and FDs. Returning an error uses Command's
-    // existing owned error pipe; spawn does not report success after a setup
-    // failure.
+    // strings, buffers, policy, bindings and FDs. Returning an error uses
+    // Command's existing owned error pipe; spawn does not report success after
+    // a setup failure.
     unsafe {
         command.pre_exec(move || {
             policy
-                .apply(&mut sources)
+                .apply(&bound, &mut sources)
                 .map_err(|failure| io::Error::from_raw_os_error(failure.errno))?;
             raw(libc::chdir(directory.as_ptr())).map_err(io::Error::from_raw_os_error)?;
             if let Some(gate) = &gate {
@@ -1279,20 +1382,27 @@ mod tests {
         let null = Mount::capture(Path::new("/dev/null"), true, false).unwrap();
         let directory = Mount::capture(&work, false, true).unwrap();
         for mount in [&null, &directory] {
-            let source = mount.reopen().unwrap();
-            assert_eq!(stat_identity(source), Ok(mount.pinned));
+            let pinned = mount.bind().unwrap().pinned;
+            let source = mount.reopen(pinned).unwrap();
+            assert_eq!(stat_identity(source), Ok(pinned));
             unsafe { libc::close(source) };
         }
-        assert_eq!(null.pinned.2, libc::makedev(1, 3));
+        assert_eq!(null.bind().unwrap().pinned.2, libc::makedev(1, 3));
 
+        let pinned = directory.bind().unwrap().pinned;
         std::fs::rename(&work, root.join("retained-work")).unwrap();
         std::fs::create_dir(&work).unwrap();
         assert_eq!(
-            directory.reopen(),
+            directory.reopen(pinned),
             Err(SetupFailure {
                 step: SetupStep::MountIdentity,
                 errno: libc::ESTALE,
             })
+        );
+        // Only a final link's target is ever captured again.
+        assert_eq!(
+            directory.bind(),
+            Err(ConfinementRefusal::BackendUnavailable)
         );
     }
 
@@ -1340,9 +1450,14 @@ mod tests {
                 .as_bytes()
         );
         assert!(!mount.directory && !mount.writable);
-        assert_eq!(mount.validate(), Ok(()));
-        let source = mount.reopen().unwrap();
-        assert_eq!(stat_identity(source), Ok(mount.pinned));
+        assert_eq!(
+            mount.link.as_deref(),
+            Some(Path::new("../run/stub-resolv.conf")),
+            "the link's text is kept"
+        );
+        let pinned = mount.bind().unwrap().pinned;
+        let source = mount.reopen(pinned).unwrap();
+        assert_eq!(stat_identity(source), Ok(pinned));
         unsafe { libc::close(source) };
 
         let refused = Some(ConfinementRefusal::UnsupportedRequirement);
@@ -1405,13 +1520,12 @@ mod tests {
         // This test's link and directories belong to the effective uid: with
         // another uid trusted, they are another user's.
         let euid = unsafe { libc::geteuid() };
-        assert!(final_link_grantable_for(&link, &target, euid));
+        assert!(grantable_link_text_for(&link, &target, euid).is_some());
         if euid != 0 {
-            assert!(!final_link_grantable_for(
-                &link,
-                &target,
-                euid.wrapping_add(1)
-            ));
+            assert_eq!(
+                grantable_link_text_for(&link, &target, euid.wrapping_add(1)),
+                None
+            );
         }
     }
 
@@ -1450,48 +1564,186 @@ mod tests {
         assert_eq!(Mount::capture(&link, false, false).err(), refused);
     }
 
-    /// Every launch revalidates a final link against the target pinned at
-    /// capture: a retargeted link, or a target replaced under its name,
-    /// fails validation, and setup refuses a replaced target at its
-    /// identity step. No namespace is entered.
+    /// A launch binds the target it validated: once a final link's replaced
+    /// target is captured again, setup checks the reopened source against
+    /// the new file and refuses the replaced one, and a file swapped in after
+    /// the launch validated is refused at setup's identity step as before. No
+    /// namespace is entered.
     #[test]
-    fn a_final_link_grant_is_revalidated_against_its_pinned_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        set_mode(&root, 0o700);
-        let etc = directory(&root, "etc", 0o755);
-        let run = directory(&root, "run", 0o755);
-        let target = run.join("stub-resolv.conf");
-        std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
-        let link = etc.join("resolv.conf");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let mount = Mount::capture(&link, false, false).unwrap();
-        assert_eq!(mount.validate(), Ok(()));
+    fn a_launch_binds_the_final_link_target_it_captured_again() {
+        let identity_refused = Err(SetupFailure {
+            step: SetupStep::MountIdentity,
+            errno: libc::ESTALE,
+        });
+        let fixture = ResolverFixture::new();
+        let mount = &fixture.policy.mounts[1];
+        let before = mount.bind().unwrap();
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
 
-        let other = run.join("other.conf");
-        std::fs::write(&other, b"nameserver 192.0.2.1\n").unwrap();
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(&other, &link).unwrap();
+        let bound = fixture.policy.launch_bindings(&fixture.launch).unwrap()[1];
+        let replacement = std::fs::metadata(&fixture.target).unwrap();
         assert_eq!(
-            mount.validate(),
-            Err(ConfinementRefusal::BackendUnavailable)
+            (bound.pinned.0, bound.pinned.1),
+            (replacement.dev(), replacement.ino()),
+            "the launch binds the new file"
         );
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert_eq!(mount.validate(), Ok(()));
+        assert_ne!(bound.pinned, before.pinned);
+        assert_eq!(mount.bind(), Ok(bound), "the new file stays pinned");
+        let source = mount.reopen(bound.pinned).unwrap();
+        assert_eq!(stat_identity(source), Ok(bound.pinned));
+        unsafe { libc::close(source) };
+        assert_eq!(mount.reopen(before.pinned), identity_refused);
 
-        std::fs::rename(&target, run.join("retained")).unwrap();
-        std::fs::write(&target, b"nameserver 192.0.2.2\n").unwrap();
+        fixture.replace_target(b"nameserver 192.0.2.2\n");
+        assert_eq!(mount.reopen(bound.pinned), identity_refused);
+    }
+
+    /// A policy over a work directory and a read-only grant of the link
+    /// `etc/resolv.conf`, which names `../run/stub-resolv.conf` in one hop as
+    /// systemd-resolved installs it, with a launch in the work directory. No
+    /// namespace is probed or entered.
+    struct ResolverFixture {
+        _temp: tempfile::TempDir,
+        run: PathBuf,
+        target: PathBuf,
+        link: PathBuf,
+        policy: LinuxPolicy,
+        launch: ProcessLaunchSpec,
+    }
+
+    impl ResolverFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            // No directory below is group- or other-writable, whatever the
+            // umask.
+            set_mode(&root, 0o700);
+            let etc = directory(&root, "etc", 0o755);
+            let run = directory(&root, "run", 0o755);
+            let work = directory(&root, "work", 0o755);
+            let target = run.join("stub-resolv.conf");
+            std::fs::write(&target, b"nameserver 127.0.0.53\n").unwrap();
+            let link = etc.join("resolv.conf");
+            std::os::unix::fs::symlink("../run/stub-resolv.conf", &link).unwrap();
+            let policy = LinuxPolicy {
+                mounts: vec![
+                    Mount::capture(&work, false, true).unwrap(),
+                    Mount::capture(&link, false, false).unwrap(),
+                ],
+                filter: Vec::new(),
+                uid_map: Vec::new(),
+                gid_map: Vec::new(),
+            };
+            let launch =
+                ProcessLaunchSpec::new(work.join("target"), Vec::new(), work, Default::default())
+                    .unwrap();
+            assert_eq!(policy.validate_launch(&launch), Ok(()));
+            Self {
+                _temp: temp,
+                run,
+                target,
+                link,
+                policy,
+                launch,
+            }
+        }
+
+        /// Replaces the target the way systemd-resolved rewrites its stub
+        /// file: a new file written beside it and renamed over its name.
+        fn replace_target(&self, contents: &[u8]) {
+            let staged = self.run.join(".stub-resolv.conf.new");
+            std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, &self.target).unwrap();
+        }
+
+        /// Replaces the grant's link with one whose text is `text`.
+        fn relink(&self, text: &Path) {
+            std::fs::remove_file(&self.link).unwrap();
+            std::os::unix::fs::symlink(text, &self.link).unwrap();
+        }
+
+        fn validate_launch(&self) -> Result<(), ConfinementRefusal> {
+            self.policy.validate_launch(&self.launch)
+        }
+    }
+
+    /// R1: a final link's target replaced under its own name, as
+    /// systemd-resolved rewrites its stub file when its DNS settings change,
+    /// is captured again at the next launch, and the launch proceeds; so do
+    /// the launches after it, and after the next replacement.
+    #[test]
+    fn a_final_link_target_replaced_by_rename_is_captured_again_at_launch() {
+        let fixture = ResolverFixture::new();
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
         assert_eq!(
-            mount.validate(),
-            Err(ConfinementRefusal::BackendUnavailable)
+            fixture.validate_launch(),
+            Ok(()),
+            "a target replaced under its name is captured again and the launch proceeds"
         );
+        assert_eq!(fixture.validate_launch(), Ok(()));
+        fixture.replace_target(b"nameserver 127.0.0.53\n");
+        assert_eq!(fixture.validate_launch(), Ok(()));
+    }
+
+    /// R2: a target path replaced by a symbolic link is refused at launch,
+    /// whatever that link names: the grant's link would reach its target in
+    /// two hops, even when the second hop leads to the file pinned before.
+    #[test]
+    fn a_final_link_target_path_replaced_by_a_symlink_is_refused_at_launch() {
+        let refused = Err(ConfinementRefusal::BackendUnavailable);
+        // Another file, behind a link at the target's name.
+        let fixture = ResolverFixture::new();
+        std::fs::write(fixture.run.join("other.conf"), b"nameserver 192.0.2.1\n").unwrap();
+        std::fs::remove_file(&fixture.target).unwrap();
+        std::os::unix::fs::symlink("other.conf", &fixture.target).unwrap();
+        assert_eq!(fixture.validate_launch(), refused);
+        // The pinned file itself, moved and named through a link.
+        let fixture = ResolverFixture::new();
+        std::fs::rename(&fixture.target, fixture.run.join("moved.conf")).unwrap();
+        std::os::unix::fs::symlink("moved.conf", &fixture.target).unwrap();
+        assert_eq!(fixture.validate_launch(), refused);
+    }
+
+    /// R3: a retargeted final link is refused at launch, and so is a link
+    /// whose text changed while it still names the same file, with its
+    /// target replaced or not: only the target file may be replaced, under
+    /// the link as captured.
+    #[test]
+    fn a_retargeted_final_link_is_refused_at_launch() {
+        let refused = Err(ConfinementRefusal::BackendUnavailable);
+        let fixture = ResolverFixture::new();
+        std::fs::write(fixture.run.join("other.conf"), b"nameserver 192.0.2.1\n").unwrap();
+        fixture.relink(Path::new("../run/other.conf"));
+        assert_eq!(fixture.validate_launch(), refused);
+
+        let fixture = ResolverFixture::new();
+        fixture.relink(&fixture.target);
         assert_eq!(
-            mount.reopen(),
-            Err(SetupFailure {
-                step: SetupStep::MountIdentity,
-                errno: libc::ESTALE,
-            })
+            fixture.validate_launch(),
+            refused,
+            "the link's text changed, though it names the same file"
+        );
+
+        let fixture = ResolverFixture::new();
+        fixture.relink(&fixture.target);
+        fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
+        assert_eq!(fixture.validate_launch(), refused);
+    }
+
+    /// R4: only a target that is no longer the pinned file is captured
+    /// again. The pinned file moved into a replacement of its directory keeps
+    /// its identity, and the changed directory refuses the launch as before.
+    #[test]
+    fn a_final_link_target_directory_replaced_around_the_pinned_file_is_refused_at_launch() {
+        let fixture = ResolverFixture::new();
+        let retired = fixture.run.with_file_name("run.retired");
+        std::fs::rename(&fixture.run, &retired).unwrap();
+        std::fs::create_dir(&fixture.run).unwrap();
+        set_mode(&fixture.run, 0o755);
+        std::fs::rename(retired.join("stub-resolv.conf"), &fixture.target).unwrap();
+        assert_eq!(
+            fixture.validate_launch(),
+            Err(ConfinementRefusal::BackendUnavailable)
         );
     }
 
@@ -1520,7 +1772,10 @@ mod tests {
             0
         );
         let host = unsafe { host.assume_init() };
-        assert_eq!(null.noexec, (host.f_flag & libc::ST_NOEXEC) != 0);
+        assert_eq!(
+            null.bind().unwrap().noexec,
+            (host.f_flag & libc::ST_NOEXEC) != 0
+        );
     }
 
     // Runs `program` on one native syscall the way the kernel does and

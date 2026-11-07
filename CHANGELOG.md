@@ -228,8 +228,13 @@ them.
   host names on a host whose `/etc/resolv.conf` links to systemd-resolved's
   file (grant `/etc/resolv.conf` as a literal read path). The link's
   regular-file target is pinned when the requirement compiles and bound
-  read-only at the link's path; every launch checks that the link still
-  resolves to that file, and setup reopens it only while it is that file.
+  read-only at the link's path; every launch checks that the link keeps its
+  text and still resolves to that file, and setup reopens it only while it is
+  the file the launch checked. A file replaced under its name (a new file
+  renamed into place, as systemd-resolved rewrites its stub file when its DNS
+  settings change) is checked again by the same rules at the next launch and
+  pinned in its place, so confined launches keep resolving names after the
+  change; any other change to the link or the file refuses the launch.
   The link must name its target itself, through no other link, and the link
   and every directory above it must be owned by root or the effective user
   and writable by neither group nor others unless sticky; any other link is

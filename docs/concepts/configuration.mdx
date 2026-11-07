@@ -639,8 +639,11 @@ a `custom` requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }
 on a systemd-resolved host for name resolution with unrestricted `network`,
 when the link names its regular file directly, through no other link, and only
 root or the host's user can change the link or a directory above it. That file
-is bound read-only at the link's path, and a launch after the link or the file
-changed is refused. macOS refuses such a grant. Other platforms refuse every
+is bound read-only at the link's path. A file replaced under its name (a new
+file renamed into place, as systemd-resolved does when its DNS settings change)
+is checked again by the same rules at the next launch, which binds it; a launch
+after any other change to the link or the file is refused, a changed link text
+included. macOS refuses such a grant. Other platforms refuse every
 confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,

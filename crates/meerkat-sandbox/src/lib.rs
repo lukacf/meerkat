@@ -9,9 +9,12 @@
 //! final component (`/etc/resolv.conf` on a systemd-resolved host) when the
 //! link names its regular-file target directly, through no other link, and
 //! only root or the effective user can change the link or a directory above
-//! it. Linux binds that target read-only at the link's path. macOS
-//! (Seatbelt) refuses such a grant, as it refuses every mutable symbolic
-//! link.
+//! it. Linux binds that target read-only at the link's path. A target replaced
+//! under its own name (a new file renamed into place, as systemd-resolved
+//! rewrites its stub file) is checked again by the same rules at the next
+//! launch, which binds the new file; any other change to the link or its
+//! target refuses the launch. macOS (Seatbelt) refuses such a grant, as it
+//! refuses every mutable symbolic link.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};

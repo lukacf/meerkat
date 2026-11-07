@@ -218,6 +218,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   carry `can_manage_schedules`, and the stock Console offers schedule
   changes only where it is true.
 
+- A member whose session the host store refuses until its realm is reopened
+  reports `preview_unavailable: "store_refused"` (Core 0.9.11) in
+  `meta/member_status`, `meta/inspect_identity` and the console's per-member
+  progress, where it reported `read_failed`. The Meta SDKs pass the value
+  through, as they pass any reason they do not name.
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the

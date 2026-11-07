@@ -1591,7 +1591,7 @@ struct RequestRig {
 }
 
 /// A request lasts ten minutes from its issuance.
-const REQUESTED_FOR: Duration = Duration::from_secs(600);
+const REQUESTED_FOR: Duration = Duration::from_mins(10);
 
 impl RequestRig {
     fn new(durable: &Durable) -> Self {

@@ -10,12 +10,15 @@ sign-out fence of a login (`sid`) as the console does. It is an inert wire
 peer: no native process, session or provider starts.
 """
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
+import socket
 import stat
 import sys
+import threading
 import time
 from types import SimpleNamespace
 import uuid
@@ -45,6 +48,8 @@ class ConsoleNative:
         self.requests, self.sign_outs = [], []
         self.fences = {}
         self.sign_out = sign_out
+        # A replacement answer for `meta/console/whoami`, given the request id.
+        self.whoami_answer = None
 
     def transport(self):
         return httpx.MockTransport(self.handle)
@@ -75,6 +80,8 @@ class ConsoleNative:
             body = json.loads(request.content)
             method, identity = body.get("method"), body.get("id")
             if method == "meta/console/whoami":
+                if self.whoami_answer is not None:
+                    return self.whoami_answer(identity)
                 return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity, "result": self.whoami(claims)})
             if method == "meta/console/sign_out":
                 self.sign_outs.append(claims)
@@ -562,7 +569,7 @@ async def test_shared_account_cannot_answer_the_controller_review(tmp_path, revi
         await console.close()
 
 
-async def test_shared_account_cannot_answer_setup_prompts(tmp_path):
+async def test_shared_account_cannot_answer_setup_bridge_prompts(tmp_path):
     factory, children, _, traces = managed_connect_factory(tmp_path)
     native = ConsoleNative()
     console = shared_front(tmp_path, native, connect_factory=factory)
@@ -858,3 +865,514 @@ def test_legacy_ordinary_source_keeps_one_shared_account():
     # the legacy ordinary route keeps the single shared account.
     from launchkit.ordinary_application_source import _console_source
     assert json.loads(_console_source("guide")["application/console.json"]) == {"authentication": "local-password"}
+
+
+# Review fix round. P1-1: the console's live access file is private state.
+SECOND_ADMIN = ("# Meta access control. Managed by the console Access panel;\n"
+                "# hand edits are preserved until the next console save.\n\n"
+                'enabled = true\nadmins = ["' + OPERATOR + '", "' + ALICE + '"]\nrules = []\n\n[groups]\n').encode()
+
+
+async def test_a_console_access_edit_keeps_forge_managing_the_installation(tmp_path):
+    from launchkit import deployment_updates as updates
+    from launchkit.deployment import update_receipt
+    service, directory, destination, previous = await console_installation(tmp_path)
+    gid, did = service.guide.identity, previous["deployment_id"]
+    stopped = {"status": "stopped", "interactive_lifecycle_id": None, "interactive_cleanup": None,
+               "process_live": False, "runtime_pid": None}
+    update_receipt(directory, **stopped)
+    # The console's Access panel adds a second administrator to its live copy.
+    (destination / ".mobkit").mkdir(mode=0o700, exist_ok=True)
+    live = destination / ".mobkit/console-access.toml"
+    live.write_bytes(SECOND_ADMIN)
+    live.chmod(0o600)
+    installed = {"version": service.guide.state["version"], "deployment_id": did,
+                 "build_id": previous["build_id"], "source_digest": "c" * 64,
+                 "package_sha256": previous["package_sha256"]}
+    # Change private settings and the installed package download.
+    await service.configure(gid, **installed, settings={"OPENAI_API_KEY": "replacement-private-value"})
+    await service.installed_package(gid, did, previous["build_id"], "c" * 64, previous["package_sha256"])
+    # Restart, status and Stop; the inert worker confirms no native cleanup.
+    restarted = await service.action(gid, did, "restart")
+    assert restarted["status"] not in ("failed", "blocked"), restarted
+    await service.status(gid)
+    await service.action(gid, did, "stop")
+    await service.shutdown()
+    update_receipt(directory, **stopped)
+    # The next update stages, applies and leaves the live copy as the console wrote it.
+    receipt = await service.stage_update(gid, did, service.guide.state["version"], service.implementation.identity)
+    assert receipt["update"]["status"] == "staged", receipt["update"]["blockers"]
+    updates.activate(directory, receipt["update"]["update_id"])
+    assert live.read_bytes() == SECOND_ADMIN
+    assert (destination / "config/access.toml").read_bytes() == UPDATE_ACCESS
+
+
+def test_supervise_ignores_the_consoles_live_access_file(tmp_path):
+    import hashlib as digests
+    import types
+    from launchkit.blueprint import starter_blueprint
+    from launchkit.compiler import generate_files
+    content = generate_files(starter_blueprint())["remote_operations.py"]
+    operations = types.ModuleType("generated_remote_operations")
+    operations.__file__ = str(tmp_path / "remote_operations.py")
+    exec(compile(content, operations.__file__, "exec"), operations.__dict__)
+    root = tmp_path / "installed"
+    files = {"deployment.json": b"{}\n", "app.py": b"# app\n", "remote_operations.py": b"# operations\n",
+             "config/access.toml": UPDATE_ACCESS}
+    for name, data in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        path.chmod(0o644)
+    (root / "SHA256SUMS").write_text("".join(f"{digests.sha256(data).hexdigest()}  {name}\n"
+                                             for name, data in sorted(files.items())))
+    before = operations.source_digest(root)
+    (root / ".mobkit").mkdir(mode=0o700)
+    (root / ".mobkit/console-access.toml").write_bytes(SECOND_ADMIN)
+    assert operations.source_digest(root) == before
+    # The package's own file still has to be the accepted bytes.
+    (root / "config/access.toml").write_bytes(SECOND_ADMIN)
+    with pytest.raises(operations.DestinationError):
+        operations.source_digest(root)
+
+
+# P2-1: an attempt counts before the password work.
+def concurrent_clients(app, console, count, address="192.0.2.50"):
+    return [httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(address, 41000)),
+                              base_url=console.origin) for _ in range(count)]
+
+
+async def concurrent_attempts(clients, console, accounts, password="wrong-password-1"):
+    nonces = []
+    for client in clients:
+        assert (await client.get("/login")).status_code == 200
+        nonces.append(client.cookies[console.cookie + "_login"])
+    return [asyncio.create_task(client.post("/login", data={"nonce": nonce, "account": account, "password": password},
+                                            headers={"Origin": console.origin}))
+            for client, nonce, account in zip(clients, nonces, accounts)]
+
+
+async def test_concurrent_wrong_passwords_for_one_account_stay_within_its_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(console_auth, "PASSWORD_CHECKS", 1000, raising=False)
+    checks, original = [], console_auth.verify_console_password
+
+    def counted(stored, password):
+        checks.append(password)
+        time.sleep(0.02)
+        return original(stored, password)
+    monkeypatch.setattr(console_auth, "verify_console_password", counted)
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    clients = concurrent_clients(app, console, 40)
+    try:
+        answers = await asyncio.gather(*await concurrent_attempts(clients, console, [ALICE] * 40))
+        codes = [answer.status_code for answer in answers]
+        assert len(checks) <= console_auth.FAILURES_PER_ACCOUNT
+        assert codes.count(401) == len(checks) and codes.count(429) == 40 - len(checks)
+    finally:
+        for client in clients:
+            await client.aclose()
+        await console.close()
+
+
+# P2-2: the address limit keys on the socket peer, and password checks are capped.
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@asynccontextmanager
+async def listening(tmp_path, native, **options):
+    port = free_port()
+    console = ConsoleFront(tmp_path, port, OPERATOR, OPERATOR_PASSWORD, accounts=named_accounts(ALICE, BOB, CAROL),
+                           runtime_namespace="meta", transport=native.transport(), **options)
+    native.auth = console.native_auth
+    await console.start(NATIVE)
+    try:
+        yield console, f"http://127.0.0.1:{port}"
+    finally:
+        await console.close()
+
+
+async def listener_sign_in(base, console, account, password, headers=None):
+    headers = headers or {}
+    async with httpx.AsyncClient(base_url=base) as client:
+        assert (await client.get("/login", headers=headers)).status_code == 200
+        nonce = client.cookies[console.cookie + "_login"]
+        response = await client.post("/login", data={"nonce": nonce, "account": account, "password": password},
+                                     headers={"Origin": console.origin, **headers})
+        return response.status_code, client.cookies.get(console.cookie)
+
+
+async def test_a_client_set_forwarded_for_does_not_change_the_address_limit(tmp_path):
+    native = ConsoleNative()
+    async with listening(tmp_path, native) as (console, base):
+        for index in range(console_auth.FAILURES_PER_CLIENT):
+            status, _ = await listener_sign_in(base, console, f"guess-{index % 5}@example.test", "wrong-password-1",
+                                               {"X-Forwarded-For": "198.51.100.1"})
+            assert status == 401
+        # Another forwarded address from the same peer is the same client.
+        status, _ = await listener_sign_in(base, console, ALICE, ALICE_PASSWORD, {"X-Forwarded-For": "198.51.100.2"})
+        assert status == 429
+        assert {key[1] for key in console.failures if key[0] == "client"} == {"127.0.0.1"}
+
+
+async def test_password_checks_are_capped_across_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(console_auth, "PASSWORD_CHECKS", 3, raising=False)
+    release, entered = threading.Event(), []
+
+    def held(stored, password):
+        entered.append(password)
+        release.wait(10)
+        return False
+    monkeypatch.setattr(console_auth, "verify_console_password", held)
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    clients, tasks = concurrent_clients(app, console, 8), []
+    try:
+        tasks = await concurrent_attempts(clients, console, [f"person-{index}@example.test" for index in range(8)])
+        for _ in range(500):
+            if len(entered) >= 3 and sum(task.done() for task in tasks) >= 5:
+                break
+            await asyncio.sleep(0.01)
+        refused = [task for task in tasks if task.done()]
+        assert len(entered) == 3 and len(refused) == 5
+        assert all(task.result().status_code == 429 and "Try again shortly" in task.result().text for task in refused)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for client in clients:
+            await client.aclose()
+        await console.close()
+
+
+# P3-3 and P3-4: one password check per account, invalid names hashed never.
+async def test_every_account_costs_one_password_check(tmp_path, monkeypatch):
+    checks, original = [], console_auth.verify_console_password
+    monkeypatch.setattr(console_auth, "verify_console_password",
+                        lambda stored, password: checks.append(1) or original(stored, password))
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    try:
+        for account, password, status in ((None, OPERATOR_PASSWORD, 303), ("", "wrong-password-1", 401),
+                                          (ALICE, ALICE_PASSWORD, 303), ("nobody@example.test", "wrong-password-1", 401)):
+            async with browser(app, console) as client:
+                before = len(checks)
+                await sign_in(client, console, account, password, status=status)
+                assert len(checks) == before + 1, account
+    finally:
+        await console.close()
+
+
+async def test_names_that_cannot_be_accounts_share_one_limit_without_hashing(tmp_path, monkeypatch):
+    checks, original = [], console_auth.verify_console_password
+    monkeypatch.setattr(console_auth, "verify_console_password",
+                        lambda stored, password: checks.append(1) or original(stored, password))
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console, "192.0.2.60") as guessing:
+            for index in range(console_auth.FAILURES_PER_ACCOUNT):
+                await sign_in(guessing, console, f"not an account {index} " + "x" * 300, "wrong-password-1", status=401)
+            assert checks == []
+            await sign_in(guessing, console, "yet another invalid name!", "wrong-password-1", status=429)
+            # Real accounts are not held by those attempts.
+            await sign_in(guessing, console, ALICE, ALICE_PASSWORD)
+        assert len([key for key in console.failures if key[0] == "account"]) <= 2
+    finally:
+        await console.close()
+
+
+async def test_client_address_keys_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(console_auth, "FAILURE_CLIENTS", 5, raising=False)
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    try:
+        for index in range(12):
+            async with browser(app, console, f"192.0.2.{100 + index}") as client:
+                await sign_in(client, console, f"guess-{index}@example.test", "wrong-password-1", status=401)
+        assert len([key for key in console.failures if key[0] == "client"]) <= 5
+    finally:
+        await console.close()
+
+
+def test_new_password_hashes_meet_the_scrypt_floor_and_name_their_parameters():
+    stored = console_auth.hash_console_password(ALICE_PASSWORD)
+    algorithm, n, r, p, salt, digest = stored.split(":")
+    assert algorithm == "scrypt" and (int(n), int(r), int(p)) in {(2**14, 8, 5), (2**15, 8, 3), (2**16, 8, 2), (2**17, 8, 1)}
+    assert console_auth.verify_console_password(stored, ALICE_PASSWORD)
+    assert not console_auth.verify_console_password(stored, BOB_PASSWORD)
+
+    def stored_with(n, r, p):
+        salt = os.urandom(16)
+        derived = hashlib.scrypt(ALICE_PASSWORD.encode(), salt=salt, n=n, r=r, p=p, dklen=32,
+                                 maxmem=256 * 1024 * 1024)
+        encode = lambda data: base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+        return f"scrypt:{n}:{r}:{p}:{encode(salt)}:{encode(derived)}"
+    # A stored hash names its parameters; another allowed choice verifies.
+    assert console_auth.verify_console_password(stored_with(2**17, 8, 1), ALICE_PASSWORD)
+    # Parameters below the floor are refused.
+    for weak in ((2**14, 8, 1), (2**10, 8, 1)):
+        with pytest.raises(ValueError):
+            console_auth.verify_console_password(stored_with(*weak), ALICE_PASSWORD)
+
+
+# P3-1: the review is an administrator's, from its start.
+async def started_reviews(console):
+    for login in list(console._logins.values()):
+        if login.controller_review_start is not None:
+            await asyncio.gather(login.controller_review_start, return_exceptions=True)
+
+
+async def test_the_review_starts_at_an_administrators_first_login(tmp_path, reviews):
+    native = ConsoleNative(admins=(BOB,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice, browser(app, console) as bob:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            await started_reviews(console)
+            assert reviews == []
+            await sign_in(bob, console, BOB, BOB_PASSWORD)
+            assert (await review_state(bob)).json()["status"] == "prompt"
+            assert len(reviews) == 1 and reviews[0].login_scope_id == login_of(bob, console).login_scope_id
+    finally:
+        await console.close()
+
+
+@pytest.mark.parametrize("answer", ["transport", "not-served", "malformed"])
+async def test_the_review_is_unavailable_when_the_console_cannot_tell(tmp_path, reviews, answer):
+    native = ConsoleNative(admins=(ALICE,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            assert (await review_state(alice)).json()["status"] == "prompt"
+
+            def unknown(identity):
+                if answer == "transport":
+                    raise httpx.ConnectError("the console is unavailable")
+                if answer == "not-served":
+                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
+                        "error": {"code": -32601, "message": "Method not found"}})
+                return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity, "result": {"actor": "person"}})
+            native.whoami_answer = unknown
+            state = await alice.get("/console/forge/controller-review/state")
+            assert state.status_code == 503 and state.json() == {"error": {"code": "unavailable"}}
+            answered = await answer_review(alice, console)
+            assert answered.status_code == 503 and answered.json() == {"error": {"code": "unavailable"}}
+            assert reviews[0].answers == []
+    finally:
+        await console.close()
+
+
+async def test_an_administrator_demoted_between_state_and_answer_is_refused(tmp_path, reviews):
+    native = ConsoleNative(admins=(ALICE,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            assert (await review_state(alice)).json()["status"] == "prompt"
+            native.admins.discard(ALICE)
+            refused = await answer_review(alice, console)
+            assert refused.status_code == 403 and refused.json() == {"error": {"code": "not_administrator"}}
+            assert reviews[0].answers == []
+    finally:
+        await console.close()
+
+
+async def test_an_administrator_demoted_while_the_review_is_read_sees_nothing(tmp_path, reviews, monkeypatch):
+    native = ConsoleNative(admins=(ALICE,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            assert (await review_state(alice)).json()["status"] == "prompt"
+            observe = Review.observe
+
+            async def demoted(self):
+                native.admins.discard(ALICE)
+                return await observe(self)
+            monkeypatch.setattr(Review, "observe", demoted)
+            refused = await alice.get("/console/forge/controller-review/state")
+            assert refused.status_code == 403 and refused.json() == {"error": {"code": "not_administrator"}}
+            assert "review-approval" not in refused.text
+    finally:
+        await console.close()
+
+
+# P3-2: dot and empty path segments are refused before routing.
+async def raw_request(port, request):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(request)
+    await writer.drain()
+    answer = await reader.read(65536)
+    writer.close()
+    return int(answer.split(b" ", 2)[1])
+
+
+def raw_post(console, session, target, body, content_type=b"application/json"):
+    return (b"POST " + target + b" HTTP/1.1\r\nHost: 127.0.0.1:" + str(console.port).encode()
+            + b"\r\nOrigin: " + console.origin.encode() + b"\r\nContent-Type: " + content_type
+            + b"\r\nCookie: " + console.cookie.encode() + b"=" + session.encode()
+            + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+
+
+async def test_dot_and_empty_path_segments_are_refused_before_routing(tmp_path):
+    native = ConsoleNative()
+    async with listening(tmp_path, native) as (console, base):
+        status, session = await listener_sign_in(base, console, ALICE, ALICE_PASSWORD)
+        assert status == 303
+        before = len(native.requests)
+        body = b'{"approval_id":"x","decision":"approve","unexpected":true}'
+        for target in (b"/console/../host/toolkit/consent/decide?probe=1", b"/blobs/../healthz",
+                       b"/console/./rpc", b"/console//rpc", b"/console/rpc/..", b"/host//toolkit/consent/decide",
+                       b"/host/toolkit/./consent/decide"):
+            assert await raw_request(console.port, raw_post(console, session, target, body, b"text/plain")) == 400
+        assert len(native.requests) == before
+
+
+async def test_consent_route_forms_on_the_listener(tmp_path):
+    native = ConsoleNative()
+    async with listening(tmp_path, native) as (console, base):
+        status, session = await listener_sign_in(base, console, ALICE, ALICE_PASSWORD)
+        assert status == 303
+        body = b'{"approval_id":"x","decision":"deny"}'
+        for target, forwarded in ((b"/host/toolkit/consent/decide", True), (b"/host/toolkit/consent%2Fdecide", True),
+                                  (b"/host/toolkit/consent/decide/", False), (b"/HOST/toolkit/consent/decide", False)):
+            before = len(native.requests)
+            answered = await raw_request(console.port, raw_post(console, session, target, body))
+            if forwarded:
+                assert answered == 200 and len(native.requests) == before + 1
+                request = native.requests[-1]
+                assert request.url.raw_path == b"/host/toolkit/consent/decide"
+                assert request.headers["origin"] == console.origin
+            else:
+                assert answered == 404 and len(native.requests) == before
+
+
+# P3-5: the logout page says what is unconfirmed, all of it.
+async def test_logout_reports_both_unconfirmed_parts(tmp_path, monkeypatch):
+    def refused(identity):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": identity,
+            "error": {"code": -32603, "message": "synthetic console answer"}})
+    native = ConsoleNative(sign_out=refused)
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+
+    async def unconfirmed(login, reason):
+        raise RuntimeError("Console subscription cleanup is unconfirmed.")
+    monkeypatch.setattr(console, "_finish_login", unconfirmed)
+    try:
+        async with browser(app, console) as client:
+            await sign_in(client, console, ALICE, ALICE_PASSWORD)
+            response = await client.post("/logout", headers={"Origin": console.origin})
+            assert response.status_code == 503
+            assert "cleanup is unconfirmed" in response.text and "did not confirm" in response.text
+            assert "within three minutes" in response.text
+            assert console.sessions == {} and console.cookie not in client.cookies
+    finally:
+        # The unconfirmed cleanup stays reported at close, too.
+        await asyncio.gather(console.close(), return_exceptions=True)
+
+
+# P3-6: a frontend approval proof belongs to the login that prepared it.
+async def test_a_frontend_approval_proof_belongs_to_its_login(tmp_path):
+    from test_frontend_management import CONFIG, HOST, PATH, Owner
+    owner = Owner()
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    console.frontend_management = owner
+    console.frontend_host = lambda: dict(HOST)
+    console.frontend_private_fields = ("CONSOLE_LOGIN_PASSWORD",)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as first, browser(app, console) as second:
+            await sign_in(first, console, ALICE, ALICE_PASSWORD)
+            await sign_in(second, console, ALICE, ALICE_PASSWORD)
+            prepared = await first.post(PATH + "/prepare", json={"configuration": CONFIG,
+                "expected_revision": {"component": 7}}, headers={"Origin": console.origin})
+            assert prepared.status_code == 200, prepared.text
+            body = {"proposal": prepared.json()["proposal"],
+                    "approval": {"approved": True, **prepared.json()["approval"]}}
+            # The same account's other login cannot use this login's proof.
+            assert (await second.post(PATH + "/submit", json=body, headers={"Origin": console.origin})).status_code == 403
+            # After the login that prepared it ends, the proof approves nothing.
+            assert (await first.post("/logout", headers={"Origin": console.origin})).status_code == 303
+            assert (await second.post(PATH + "/submit", json=body, headers={"Origin": console.origin})).status_code == 403
+            assert not any(request.approved for request in owner.calls)
+    finally:
+        await console.close()
+
+
+# P3-7: signing in over a live session ends the earlier login.
+async def test_signing_in_over_a_live_session_ends_the_earlier_login(tmp_path):
+    native = ConsoleNative()
+    console = front(tmp_path, native)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as shared_browser:
+            await sign_in(shared_browser, console, ALICE, ALICE_PASSWORD)
+            earlier = login_of(shared_browser, console)
+            await sign_in(shared_browser, console, BOB, BOB_PASSWORD)
+            later = login_of(shared_browser, console)
+            assert later.principal == BOB and earlier.retired and earlier.session not in console.sessions
+            for _ in range(200):
+                if native.sign_outs:
+                    break
+                await asyncio.sleep(0.01)
+            assert [claims["sid"] for claims in native.sign_outs] == [earlier.login_scope_id]
+    finally:
+        await console.close()
+
+
+# P3-8: setup refuses an installation account that is a named account.
+def test_setup_refuses_an_installation_account_that_is_a_named_account(generated_setup, monkeypatch, capsys):
+    module, root = generated_setup
+    named_console_source(root)
+    env = root / ".env"
+    env.write_text(f'CONSOLE_USER_ID="{OPERATOR}"\nCONSOLE_LOGIN_PASSWORD="{OPERATOR_PASSWORD}"\n')
+    env.chmod(0o600)
+    console_auth.save_console_accounts(root, named_accounts(ALICE), None, OPERATOR)
+    users = iter([ALICE, "renamed-operator"])
+
+    def answer(prompt):
+        return next(users) if prompt.startswith("Console user") else ""
+    monkeypatch.setattr("builtins.input", answer)
+    monkeypatch.setattr(module.getpass, "getpass", lambda prompt: "")
+    assert module.main() == 0
+    assert "named account" in capsys.readouterr().out
+    assert 'CONSOLE_USER_ID="renamed-operator"' in env.read_text()
+    assert set(console_auth.load_console_accounts(root, "renamed-operator")) == {ALICE}
+
+
+# Logout fences the consent route and the review too.
+async def test_logout_fences_the_consent_and_review_routes(tmp_path, reviews):
+    native = ConsoleNative(admins=(ALICE,))
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            assert (await review_state(alice)).json()["status"] == "prompt"
+            session = alice.cookies[console.cookie]
+            assert (await alice.post("/logout", headers={"Origin": console.origin})).status_code == 303
+            # The browser presents the ended login's cookie again.
+            alice.cookies.set(console.cookie, session)
+            before = len(native.requests)
+            consent = await alice.post("/host/toolkit/consent/decide", json={"approval_id": "x", "decision": "deny"},
+                                       headers={"Origin": console.origin})
+            review = await answer_review(alice, console)
+            assert consent.status_code == 401 and review.status_code == 401
+            assert len(native.requests) == before and reviews[0].answers == []
+    finally:
+        await console.close()

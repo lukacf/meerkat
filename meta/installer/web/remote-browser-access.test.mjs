@@ -256,6 +256,15 @@ test("mount and reload observe only; deliberate connect publishes the same-port 
   });
 });
 
+test("a ready Console with named accounts tells each person to use their own account", async () => {
+  const named = { ...ready, scope: { ...ready.scope, authentication: "local-accounts" } };
+  await mountedAccess(named, async ({ document, link }) => {
+    assert.ok(link());
+    assert.match(document.body.textContent, /Sign in with your own account name and password/);
+    assert.doesNotMatch(document.body.textContent, /Sign in with the Console password you chose/);
+  });
+});
+
 test("a client removal intent immediately hides ready links but retains deliberate uncertain tunnel cleanup", async () => {
   await mountedAccess(ready, async ({ document, button, link, rerender, setClose, calls }) => {
     assert.ok(link());

@@ -264,6 +264,7 @@ async def test_callback_input_refusals_do_not_complete_native(tmp_path, case):
 
 
 @pytest.mark.parametrize("redirect", ["https://foreign.example.test/callback", ORIGIN + "/login",
+    ORIGIN + "/host/toolkit/consent/decide",
     ORIGIN + "/console/rpc", ORIGIN + "/native-auth/%73erver", ORIGIN + "/native-auth/caf\u00e9"])
 async def test_unmountable_native_redirect_never_starts_or_presents(tmp_path, redirect):
     async with boundary(tmp_path) as (front, client, peer, key, contexts):

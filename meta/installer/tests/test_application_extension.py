@@ -959,7 +959,7 @@ async def test_public_runtime_config_preserves_authenticated_revision_and_policy
                         .console_config(config.console_config_path).http_listen("127.0.0.1:0")
                         .console_auth_required(True).auth(Front.native_auth).declare_spec_update(7)
                         .gating(str(tmp_path / "config/gating.toml"))
-                        .access_control(str(tmp_path / "config/access.toml"))
+                        .access_control(str(tmp_path / ".mobkit/console-access.toml"))
                         .routing(str(tmp_path / "deployment/routing.toml")))
             assert MobKitRuntime(config)._build_init_params() == MobKitRuntime(previous._config)._build_init_params()
         async def connect(self):
@@ -983,6 +983,80 @@ async def test_public_runtime_config_preserves_authenticated_revision_and_policy
     await module.run(spec, args)
     assert len(configs) == 1 and configs[0].host_runnables == []
     assert lifecycle == ["connect", "front_close", "shutdown", "pool_close", "tools_close"]
+
+
+async def test_console_access_lives_in_private_state_and_is_seeded_once(tmp_path, monkeypatch):
+    """The console's Access panel writes a live copy in private state.
+
+    The package's config/access.toml stays the accepted bytes Forge checks.
+    The first start seeds the live copy; later starts keep the console's edits.
+    """
+    import stat
+    import meerkat_mobkit
+
+    module = load_host(monkeypatch, tmp_path)
+    files = generate_files(starter_blueprint())
+    spec = json.loads(files["deployment.json"])
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/mob.toml").write_text(files["config/mob.toml"])
+    packaged = 'enabled = true\nadmins = ["operator"]\nrules = []\n\n[groups]\n'
+    (tmp_path / "config/access.toml").write_text(packaged)
+    binary = tmp_path / "gateway"
+    binary.touch()
+    monkeypatch.setattr(module, "gateway_path", lambda: binary)
+    monkeypatch.setenv("OPENAI_API_KEY", "isolated-test-value")
+    configs = []
+
+    class LocalTools:
+        def __init__(self, *args):
+            pass
+        def for_agent(self, agent):
+            return []
+        async def close(self):
+            pass
+
+    class Pool:
+        def __init__(self, spec):
+            pass
+        def for_class(self, item):
+            return []
+        async def start(self):
+            pass
+        async def close(self):
+            pass
+
+    class Runtime:
+        def __init__(self, config):
+            configs.append(config)
+        async def connect(self):
+            pass
+        async def identity_bootstrap_status(self):
+            return SimpleNamespace(complete=True, ready=True, counts=SimpleNamespace(broken=0))
+        async def shutdown(self):
+            pass
+
+    async def prepare_storage(root, factory):
+        pass
+
+    monkeypatch.setattr(module, "ConnectorTools", LocalTools)
+    monkeypatch.setattr(module, "MCPPool", Pool)
+    Runtime._rpc = supported_host_carriers
+    monkeypatch.setattr(meerkat_mobkit, "MobKitRuntime", Runtime)
+    monkeypatch.setitem(sys.modules, "storage_setup", SimpleNamespace(prepare_storage=prepare_storage))
+    args = SimpleNamespace(connections_check=False, activate_revision=7, definition_revision=False,
+                           list_flows=False, run_flow=None, smoke=False)
+    await module.run(spec, args)
+    live = tmp_path / ".mobkit/console-access.toml"
+    assert configs[-1].access_config_path == str(live)
+    assert live.read_text() == packaged and stat.S_IMODE(live.stat().st_mode) == 0o600
+    # The console's Access panel adds a second administrator to its live copy.
+    edited = ("# Meta access control. Managed by the console Access panel;\n"
+              "# hand edits are preserved until the next console save.\n\n"
+              'enabled = true\nadmins = ["operator", "second@example.test"]\nrules = []\n\n[groups]\n')
+    live.write_text(edited)
+    await module.run(spec, args)
+    assert configs[-1].access_config_path == str(live) and live.read_text() == edited
+    assert (tmp_path / "config/access.toml").read_text() == packaged
 
 
 DYNAMIC_APPLICATION = '''import copy

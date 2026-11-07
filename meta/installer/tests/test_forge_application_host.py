@@ -444,10 +444,10 @@ def test_logical_console_declaration_is_exact_and_never_claims_authentication(se
         selected.host.validate_settings("original-guide", {"CONSOLE_USER_ID": "other"})
 
 
-def test_installed_access_edits_keep_the_operator_and_forge_settings_open(selected, tmp_path):
-    # The console's Access panel owns the installed config/access.toml once the
-    # application runs. Forge keeps its own operator an admin of an enabled
-    # configuration and the package it recorded exact, not the file's bytes.
+def test_installed_access_toml_stays_the_exact_package_bytes(selected, tmp_path):
+    # The console's Access panel writes its live copy in private state
+    # (.mobkit/console-access.toml). The installed config/access.toml stays
+    # the package's exact bytes, which every Forge check compares.
     operator, other = "inert-selected-operator", "second-admin@example.test"
     access = ('enabled = true\nadmins = ["' + operator + '"]\nrules = []\n\n[groups]\n').encode()
     sources = {"application/configuration.json": encoded({"fields": []}),
@@ -470,19 +470,20 @@ def test_installed_access_edits_keep_the_operator_and_forge_settings_open(select
     package = {name: (content, 0o644) for name, content in sources.items()}
     receipt, settings = {"source_kind": "application"}, {"CONSOLE_USER_ID": operator}
     host.validate_installed_settings("original-guide", receipt, destination, package, settings)
-    edited = destination / "config/access.toml"
-    edited.write_bytes(("# Meta access control. Managed by the console Access panel;\n"
+    second_admin = ("# Meta access control. Managed by the console Access panel;\n"
         "# hand edits are preserved until the next console save.\n\n"
-        'enabled = true\nadmins = ["' + operator + '", "' + other + '"]\n\n'
-        '[[rules]]\nid = "people-use-agents"\neffect = "allow"\nsubjects = ["' + other + '"]\n'
-        'actions = ["agent.view", "agent.send"]\n\n[groups]\n').encode())
-    edited.chmod(0o644)
+        'enabled = true\nadmins = ["' + operator + '", "' + other + '"]\nrules = []\n\n[groups]\n').encode()
+    # The console's own edit lives outside the package and changes nothing here.
+    live = destination / ".mobkit/console-access.toml"
+    live.parent.mkdir(mode=0o700)
+    live.write_bytes(second_admin)
     host.validate_installed_settings("original-guide", receipt, destination, package, settings)
-    for changed in ('enabled = true\nadmins = ["' + other + '"]\n',
-                    'enabled = false\nadmins = ["' + operator + '"]\n', "enabled = [\n"):
-        edited.write_bytes(changed.encode())
-        with pytest.raises(CustodyError):
-            host.validate_installed_settings("original-guide", receipt, destination, package, settings)
+    # The same edit in the package's file is a changed installation.
+    edited = destination / "config/access.toml"
+    edited.write_bytes(second_admin)
+    edited.chmod(0o644)
+    with pytest.raises(CustodyError):
+        host.validate_installed_settings("original-guide", receipt, destination, package, settings)
     edited.write_bytes(access)
     host.validate_installed_settings("original-guide", receipt, destination, package, settings)
     # The package Forge recorded must still equal the selected source exactly.

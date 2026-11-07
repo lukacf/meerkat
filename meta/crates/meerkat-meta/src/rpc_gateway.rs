@@ -26597,3 +26597,89 @@ mod identity_creation_launch_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "openai-live"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod strict_live_private_owner_tests {
+    //! The SDK gateway's strict live binding authority decides with the
+    //! configured access controller, primed from the roster first, so its
+    //! access rules and the private-owner rule both apply.
+
+    use std::sync::Arc;
+
+    use meerkat::experimental_gpt_live::{
+        ExperimentalLiveOpenAuthorityError, ExperimentalLiveSessionBindingAuthority as _,
+    };
+
+    /// A principal other than a private member's owner may not use a live
+    /// binding on it, even under an access configuration that lets everyone
+    /// drive every agent; a shared member stays open to them.
+    #[tokio::test]
+    async fn the_strict_live_authority_applies_the_private_owner_rule() {
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(
+                meerkat_mob::MobDefinition::from_toml(
+                    "[mob]\nid = 'strict-live-private'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
+                     [profiles.worker.tools]\ncomms = true\n",
+                )
+                .expect("definition"),
+            )
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let handle = runtime.mob_handle();
+        handle
+            .spawn_spec(
+                meerkat_mob::SpawnMemberSpec::new(
+                    "worker",
+                    meerkat_mob::AgentIdentity::from("alpha-side"),
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await
+            .expect("seat the private member");
+        let side = meerkat_mob::AgentIdentity::from("alpha-side");
+        handle.ensure_member_live(&side).await.expect("live");
+        let session = handle
+            .resolve_bridge_session_id(&side)
+            .await
+            .expect("the private member's session");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let access = crate::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            rules: vec![crate::access::AccessRule {
+                id: "everyone-drives-every-agent".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["*".to_string()],
+                ..crate::access::AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+        let authority = super::GatewayExperimentalLiveSessionBindingAuthority {
+            handle: handle.clone(),
+            machine: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            access,
+            principal: "bob@example.test".to_string(),
+            allowed_binding: binding.clone(),
+        };
+        let decided = authority.authorize_binding_use(&session, &binding).await;
+        assert!(
+            matches!(
+                decided,
+                Err(ExperimentalLiveOpenAuthorityError::AccessDenied)
+            ),
+            "another principal may not use a live binding on a private member"
+        );
+    }
+}

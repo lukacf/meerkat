@@ -1452,17 +1452,19 @@ model = "gpt-5.5"
             .expect("json body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["status"], "unreadable", "{body}");
-        assert_eq!(
-            body["broken_members"][0]["member_id"], "personal:alice",
-            "{body}"
+        assert_eq!(body["broken_member_count"], 1, "{body}");
+        assert!(
+            !body.to_string().contains("personal:alice"),
+            "the summary names no member: {body}"
         );
     }
 
     /// While Core holds restored members broken, the JSON summary reads
-    /// degraded and names each member with Core's reason; the plain-text
-    /// liveness answer stays `ok`.
+    /// degraded and counts them, naming none (the probe needs no sign-in,
+    /// and a member's name, a private member's too, is no one's to read
+    /// there); the plain-text liveness answer stays `ok`.
     #[tokio::test]
-    async fn healthz_reads_degraded_and_names_the_broken_members() {
+    async fn healthz_reads_degraded_and_names_no_broken_member() {
         let projection = Arc::new(std::sync::RwLock::new(None));
         let broken = vec![(
             crate::member_comms_id::roster_member_id_for_identity("personal:alice"),
@@ -1494,13 +1496,11 @@ model = "gpt-5.5"
             .expect("json body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["status"], "degraded", "{body}");
-        assert_eq!(
-            body["broken_members"],
-            serde_json::json!([{
-                "member_id": "personal:alice",
-                "error": "restored member cannot publish its comms endpoint",
-            }]),
-            "{body}"
+        assert_eq!(body["broken_member_count"], 1, "{body}");
+        assert!(body.get("broken_members").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("personal:alice"),
+            "the summary names no member: {body}"
         );
     }
 

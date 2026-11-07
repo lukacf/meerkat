@@ -314,7 +314,11 @@ fn agent_stream_allowed(view: &AccessView, agent_id: &str, policy_identity: &str
 /// ([`AccessView::hides_agent`]: private to another person), under the name
 /// the request used or the member it resolved to. Such a stream is refused
 /// as a stream of an unknown member, enforced access or not.
-fn agent_stream_hidden(view: &AccessView, agent_id: &str, policy_identity: &str) -> bool {
+pub(crate) fn agent_stream_hidden(
+    view: &AccessView,
+    agent_id: &str,
+    policy_identity: &str,
+) -> bool {
     view.hides_agent(agent_id) || view.hides_agent(policy_identity)
 }
 

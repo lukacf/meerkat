@@ -3248,6 +3248,10 @@ mod console_side_chat_tests;
 mod console_private_side_chat_tests;
 
 #[cfg(test)]
+#[path = "console_private_audience_tests.rs"]
+mod console_private_audience_tests;
+
+#[cfg(test)]
 #[path = "console_schedule_tests.rs"]
 mod console_schedule_tests;
 
@@ -5129,6 +5133,30 @@ fn normalized_console_rpc_string_param(params: &Value, key: &str) -> Option<Stri
 const CONSOLE_RPC_MEMBER_TARGET_FIELDS: [&str; 4] =
     ["identity", "member_id", "agent_id", "agent_identity"];
 
+/// One field of a console method's params that names a member: the path of
+/// object keys to it from the params, and what the method does with it.
+#[allow(dead_code)]
+pub(crate) struct ConsoleMemberField {
+    pub(crate) path: &'static [&'static str],
+    pub(crate) kind: ConsoleMemberFieldKind,
+}
+
+/// What a console method does with the member a field names.
+#[allow(dead_code)]
+pub(crate) enum ConsoleMemberFieldKind {
+    /// A member it reads or acts on.
+    Subject,
+    /// The member it creates.
+    NewMember,
+}
+
+/// The member fields of a console method's params, `None` for a method the
+/// table does not list.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn console_method_member_fields(_method: &str) -> Option<&'static [ConsoleMemberField]> {
+    None
+}
+
 /// The present, non-empty member target fields of a request.
 fn console_rpc_member_targets(params: &Value) -> Vec<(&'static str, String)> {
     CONSOLE_RPC_MEMBER_TARGET_FIELDS
@@ -5172,6 +5200,16 @@ fn console_rpc_member_target_conflict(params: &Value) -> Option<JsonRpcError> {
             "fields": fields,
         })),
     })
+}
+
+/// Leave out of an announcement method's answer the rows of members hidden
+/// from the caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn retain_announcement_rows_visible_to(
+    _view: &AccessView,
+    _method: &str,
+    _result: &mut Value,
+) {
 }
 
 /// `meta/mob_announcements/subscriptions/put` names the member its deliveries

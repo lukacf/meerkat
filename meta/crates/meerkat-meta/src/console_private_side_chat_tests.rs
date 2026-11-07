@@ -18,31 +18,31 @@ use super::console_token_lapse_tests::{console_rpc_as, now_seconds, token};
 use super::*;
 use crate::console_aggregator::AllowAllConsoleVisibilityPolicy;
 
-type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+pub(super) type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-const ALICE: &str = "alice@example.test";
-const ROOT: &str = "root@example.test";
+pub(super) const ALICE: &str = "alice@example.test";
+pub(super) const ROOT: &str = "root@example.test";
 /// The label a member's private owner is named in.
-const PRIVATE_TO: &str = "console.private_to";
+pub(super) const PRIVATE_TO: &str = "console.private_to";
 
-fn alice_claims() -> Value {
+pub(super) fn alice_claims() -> Value {
     json!({ "sub": "oidc-sub-alice", "email": ALICE, "provider": "google_oauth" })
 }
 
-fn bob_claims() -> Value {
+pub(super) fn bob_claims() -> Value {
     json!({ "sub": "oidc-sub-bob", "email": BOB, "provider": "google_oauth" })
 }
 
-fn root_claims() -> Value {
+pub(super) fn root_claims() -> Value {
     json!({ "sub": "oidc-sub-root", "email": ROOT, "provider": "google_oauth" })
 }
 
-fn bearer(claims: Value) -> String {
+pub(super) fn bearer(claims: Value) -> String {
     token(claims, Some(now_seconds() + 3600))
 }
 
 /// A console runtime whose sessions persist, as a durable fork needs.
-async fn runtime(
+pub(super) async fn runtime(
     mob_id: &str,
 ) -> Result<(tempfile::TempDir, MobRuntime), Box<dyn std::error::Error + Send + Sync>> {
     let (temp_dir, spec) = persistent_console_spec(mob_id, "", "")?;
@@ -52,7 +52,7 @@ async fn runtime(
 
 /// An access configuration under which every signed-in caller may do
 /// everything to every agent, with `root` its one admin.
-fn everyone_drives_every_agent() -> AccessController {
+pub(super) fn everyone_drives_every_agent() -> AccessController {
     AccessController::new(crate::access::AccessControlConfig {
         enabled: true,
         admins: vec![ROOT.to_string()],
@@ -70,7 +70,10 @@ fn everyone_drives_every_agent() -> AccessController {
 
 /// The console of `runtime` with sign-in on (the Enforced posture) for Alice,
 /// Bob and root, under `access`.
-fn enforced_console(runtime: &MobRuntime, access: Option<AccessController>) -> ConsoleJsonState {
+pub(super) fn enforced_console(
+    runtime: &MobRuntime,
+    access: Option<AccessController>,
+) -> ConsoleJsonState {
     let mut state = state();
     state
         .decisions
@@ -83,7 +86,7 @@ fn enforced_console(runtime: &MobRuntime, access: Option<AccessController>) -> C
 }
 
 /// The console of `runtime` without sign-in (the Open posture).
-fn open_console(runtime: &MobRuntime) -> ConsoleJsonState {
+pub(super) fn open_console(runtime: &MobRuntime) -> ConsoleJsonState {
     let mut state = state();
     state.decisions.console.require_app_auth = false;
     state.runtime = Some(runtime.clone());
@@ -93,7 +96,7 @@ fn open_console(runtime: &MobRuntime) -> ConsoleJsonState {
 /// `meta/fork_member` of `source` into `side_chat` on the console route as
 /// the holder of `bearer` (none on an open console), retried while the
 /// runtime still settles the source's last turn.
-async fn fork_on_console(
+pub(super) async fn fork_on_console(
     app: &Router,
     bearer: Option<&str>,
     source: &str,
@@ -114,7 +117,7 @@ async fn fork_on_console(
 }
 
 /// The experience's sidebar agent rows as the holder of `bearer` reads them.
-async fn sidebar(app: &Router, bearer: Option<&str>) -> Vec<Value> {
+pub(super) async fn sidebar(app: &Router, bearer: Option<&str>) -> Vec<Value> {
     use tower::ServiceExt;
     let mut request = axum::http::Request::builder()
         .method("GET")
@@ -142,12 +145,16 @@ async fn sidebar(app: &Router, bearer: Option<&str>) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn row<'a>(rows: &'a [Value], member: &str) -> Option<&'a Value> {
+pub(super) fn row<'a>(rows: &'a [Value], member: &str) -> Option<&'a Value> {
     rows.iter().find(|row| row["member_id"] == json!(member))
 }
 
 /// `POST /console/send` to `identity` as the holder of `bearer`.
-async fn send_on_console(app: &Router, bearer: &str, identity: &str) -> (StatusCode, Value) {
+pub(super) async fn send_on_console(
+    app: &Router,
+    bearer: &str,
+    identity: &str,
+) -> (StatusCode, Value) {
     use tower::ServiceExt;
     let response = app
         .clone()
@@ -177,55 +184,66 @@ async fn send_on_console(app: &Router, bearer: &str, identity: &str) -> (StatusC
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-/// The answer an unknown member gets on the console's JSON-RPC route.
-fn assert_unknown_identity(answer: &Value, identity: &str) {
-    assert_eq!(answer["error"]["code"], json!(-32001), "{answer:#}");
+/// `method` with `params(name)` answers `hidden`, a member hidden from the
+/// holder of `bearer`, exactly as it answers a name no member holds: the
+/// method's own answer for an absent member.
+pub(super) async fn assert_answers_as_absent(
+    app: &Router,
+    bearer: &str,
+    method: &str,
+    hidden: &str,
+    params: impl Fn(&str) -> Value,
+) {
+    const ABSENT: &str = "member-absent-here";
+    let hidden_answer = console_rpc_as(app, Some(bearer), method, params(hidden)).await;
+    let absent_answer = console_rpc_as(app, Some(bearer), method, params(ABSENT)).await;
     assert_eq!(
-        answer["error"]["message"],
-        json!(format!("unknown identity: {identity}")),
-        "{answer:#}"
+        hidden_answer.to_string().replace(hidden, "<member>"),
+        absent_answer.to_string().replace(ABSENT, "<member>"),
+        "{method} answers {hidden} as an absent member: hidden {hidden_answer:#}, \
+         absent {absent_answer:#}"
     );
-    assert!(answer["error"]["data"].is_null(), "{answer:#}");
 }
 
 /// What every member other than the side chat's creator meets: the side
 /// chat is on no surface it reads, and every request naming it is answered
-/// as for an unknown member. Nothing it asks for happens.
+/// as a request naming a member that does not exist. Nothing it asks for
+/// happens.
 async fn assert_hidden_from(app: &Router, runtime: &MobRuntime, bearer: &str, side_chat: &str) {
     assert!(
         row(&sidebar(app, Some(bearer)).await, side_chat).is_none(),
         "the side chat is on no sidebar but its creator's and the admins'"
     );
-    let read = console_rpc_as(
+    assert_answers_as_absent(
         app,
-        Some(bearer),
+        bearer,
         "meta/get_member",
-        json!({ "member_id": side_chat }),
+        side_chat,
+        |name| json!({ "member_id": name }),
     )
     .await;
-    assert_unknown_identity(&read, side_chat);
     let (status, sent) = send_on_console(app, bearer, side_chat).await;
     assert_eq!(
         (status, &sent["error"]),
         (StatusCode::NOT_FOUND, &json!("unknown_identity")),
         "a send to the side chat is answered as a send to an unknown member: {sent:#}"
     );
-    let retired = console_rpc_as(
+    assert_answers_as_absent(
         app,
-        Some(bearer),
+        bearer,
         "meta/retire",
-        json!({ "member_id": side_chat }),
+        side_chat,
+        |name| json!({ "identity": name }),
     )
     .await;
-    assert_unknown_identity(&retired, side_chat);
-    let forked = console_rpc_as(
+    assert_answers_as_absent(
         app,
-        Some(bearer),
+        bearer,
         "meta/fork_member",
-        json!({ "source_member_id": side_chat, "agent_identity": format!("{side_chat}-again") }),
+        side_chat,
+        |name| json!({ "source_member_id": name, "agent_identity": format!("{name}-again") }),
     )
     .await;
-    assert_unknown_identity(&forked, side_chat);
     assert!(
         runtime
             .handle()
@@ -370,7 +388,7 @@ async fn open_console_side_chat_stays_shared() -> TestResult {
 /// Fork `source` into `side_chat` as the console's side chat fork seats one,
 /// with `labels` as the side chat's own roster labels, retried while the
 /// runtime still settles the source's last turn.
-async fn fork_with_labels(
+pub(super) async fn fork_with_labels(
     runtime: &MobRuntime,
     source: &str,
     side_chat: &str,
@@ -762,7 +780,7 @@ async fn reserved_side_chat_labels_refused_from_callers() -> TestResult {
 
 /// The labels the mob's durable event log records for the last spawn of
 /// member `alias`, which outlives the member.
-async fn spawned_labels(
+pub(super) async fn spawned_labels(
     runtime: &MobRuntime,
     alias: &str,
 ) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -891,14 +909,14 @@ async fn private_side_chat_helper_stays_private_after_retire() -> TestResult {
         row(&sidebar(&app, Some(&bob)).await, "alpha-helper").is_none(),
         "another person sees the helper on no surface"
     );
-    let read = console_rpc_as(
+    assert_answers_as_absent(
         &app,
-        Some(&bob),
+        &bob,
         "meta/get_member",
-        json!({ "member_id": "alpha-helper" }),
+        "alpha-helper",
+        |name| json!({ "member_id": name }),
     )
     .await;
-    assert_unknown_identity(&read, "alpha-helper");
     assert!(
         row(
             &sidebar(&app, Some(&bearer(alice_claims()))).await,

@@ -524,6 +524,10 @@ reads:
   asking for 2048 heads per call (256 before 0.9.7) and at least one call
   per kind, archived sessions and chunk scopes included. A store may answer
   fewer heads per call with `HeadPage::next` set; Core reads on from there.
+  From 0.9.11 Core lists the four kinds at once, each kind's pages one after
+  another (a call's `after` is the `next` of the answer before it), so up to
+  four `list_heads` calls of one realm run concurrently, never two of one
+  kind.
 - **Head entries kept as chunks.** A head entry over 32 KiB is kept in a
   chunk scope: one `load_head` and its rows for each such entry of every
   runtime, dormant or not, and of every realm record.
@@ -659,8 +663,13 @@ on the database's clock, in a row of their own.
   their marker's commit order, collapse duplicate commit ids, keep the lowest
   commit id per version, and return the highest version's head and its rows
   minus the removed ranges.
-- **Fence.** Acquiring appends a fence row with the next token and waits
-  until it is visible. Renewing checks that no higher token exists and
+- **Fence.** Acquiring appends a fence row with the next token, and returns
+  only once every batch the store orders before it is visible to every
+  later load: each such batch shows to every load from then on, and no
+  lower-token batch ordered after it ever does (obligation 5). Its own row
+  being visible proves this only when the store's visibility follows its
+  commit order, so that a read that shows the row shows every change
+  committed before it. Renewing checks that no higher token exists and
   appends a lease row.
 - **Clock.** Commit timestamps are the store's own, and ties break by commit
   id.

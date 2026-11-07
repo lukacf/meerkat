@@ -140,6 +140,13 @@ them.
 
 ### Changed
 
+- `meerkat-runtime`: a host store realm lists the four scope kinds at once,
+  at the open and at a re-acquire, each kind's pages one after another, so
+  a listing waits for its slowest kind rather than for the sum of them. A
+  writer stopped on a slow store resumes sooner; the retry budget and the
+  fencing are unchanged. A store now sees up to four `list_heads` calls of
+  one realm at once, never two of one kind.
+
 - `meerkat-runtime`: a store that answers a grant at or below the installed
   token now loses the realm (fail closed). A re-acquire's grant must answer a
   token above the one the writer holds; one that does not breaks the store's

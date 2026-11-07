@@ -922,8 +922,12 @@ pub trait HostStore: Send + Sync {
     /// Acquire the realm's fence: answer a token higher than any acquired
     /// before, durably, so that batches carrying lower tokens whose commit
     /// point comes later never become visible, and loads from now on show
-    /// every batch committed before (obligation 5). The store records the
-    /// new holder's lease ([`HostStore::fence_timing`]). With
+    /// every batch committed before (obligation 5). The acquire returns
+    /// only once every batch the store orders before it is visible to
+    /// every later load, and its own row being visible (for a store that
+    /// records the acquire as a row) proves this only when the store's
+    /// visibility follows its commit order. The store records the new
+    /// holder's lease ([`HostStore::fence_timing`]). With
     /// [`AcquireMode::Exclusive`], a live holder makes it answer
     /// [`HostStoreError::Held`]; with [`AcquireMode::Takeover`], the grant
     /// carries what remained of that holder's recorded lease.
@@ -956,7 +960,9 @@ pub trait HostStore: Send + Sync {
     /// Visible scopes of `kind` whose names sort after `after` (from the
     /// first when `None`), in name order, each with its visible head: at
     /// most `limit`. Serves both listing and the bulk load at boot and
-    /// failover (obligation 9).
+    /// failover (obligation 9). Core lists the four kinds at once, each
+    /// kind's pages one after another, so up to four calls of one realm
+    /// run concurrently, never two of one kind.
     async fn list_heads(
         &self,
         kind: ScopeKind,

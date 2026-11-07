@@ -50,7 +50,9 @@
 //!   re-acquire compares only with what the open's listing installed: the
 //!   open holds the gate a re-acquire takes until that listing is in place,
 //!   and the re-acquire of a realm whose open failed before it neither
-//!   acquires nor lists.
+//!   acquires nor lists. Both listings run after their acquire returned,
+//!   once per grant: the four scope kinds at once, each kind's pages in
+//!   order, and a failed page fails the whole listing.
 //! - **An acquire the realm gave up on** (it runs under the realm's acquire
 //!   timeout) may still be granted by a store that completes a request its
 //!   caller dropped: a token this writer never recorded then holds the fence.
@@ -126,8 +128,8 @@ use tokio::time::Instant;
 
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HostStore,
-    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeKind, ScopeName, ScopeRef,
-    ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
+    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeHead, ScopeKind, ScopeName,
+    ScopeRef, ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -1676,26 +1678,47 @@ impl SpiRealm {
         }))
     }
 
-    /// The version of every visible scope, from one listing.
+    /// The version of every visible scope, from one listing
+    /// ([`Self::list_kinds`]).
     async fn list_versions(&self) -> Result<HashMap<(ScopeKind, String), ScopeVersion>, SpiError> {
         let mut versions = HashMap::new();
-        for kind in LISTED_KINDS {
-            let mut after: Option<ScopeName> = None;
-            loop {
-                let page = self
-                    .host
-                    .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
-                    .await?;
-                for scope in page.heads {
-                    versions.insert((kind, scope.name.as_str().to_string()), scope.head.version);
-                }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
-                }
+        for (kind, heads) in self.list_kinds().await? {
+            for scope in heads {
+                versions.insert((kind, scope.name.as_str().to_string()), scope.head.version);
             }
         }
         Ok(versions)
+    }
+
+    /// Every head of the listed kinds, in one pass: the kinds at once, each
+    /// kind's pages in order ([`Self::list_kind`]), so a listing waits for
+    /// its slowest kind rather than for the sum of them. The first page that
+    /// fails fails the whole pass and drops the other kinds' calls; the
+    /// caller installs nothing of it, and lists again only after a fresh
+    /// acquire.
+    async fn list_kinds(&self) -> Result<Vec<(ScopeKind, Vec<ScopeHead>)>, SpiError> {
+        let listed =
+            futures::future::try_join_all(LISTED_KINDS.map(|kind| self.list_kind(kind))).await?;
+        Ok(LISTED_KINDS.into_iter().zip(listed).collect())
+    }
+
+    /// Every head of `kind`, page after page: each call's cursor is the
+    /// `next` of the answer before it, so a kind never has two pages in
+    /// flight and no cursor crosses kinds.
+    async fn list_kind(&self, kind: ScopeKind) -> Result<Vec<ScopeHead>, SpiError> {
+        let mut heads = Vec::new();
+        let mut after: Option<ScopeName> = None;
+        loop {
+            let page = self
+                .host
+                .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
+                .await?;
+            heads.extend(page.heads);
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(heads),
+            }
+        }
     }
 
     /// Record what a landed batch did to the scope versions this writer
@@ -1829,57 +1852,50 @@ impl SpiRealm {
         format!("{}.{}", self.writer, self.next_token())
     }
 
+    /// List every head at the open ([`Self::list_kinds`]) and install what
+    /// the listing shows: the listed heads of each family, the chunk table,
+    /// and the scope versions a re-acquire compares with. Nothing is
+    /// installed when the listing fails.
     async fn list_all(&self) -> Result<(), SpiError> {
         let mut listed: HashMap<String, Vec<ListedHead>> = HashMap::new();
         let mut chunks: HashMap<String, ChunkMeta> = HashMap::new();
         let mut known: HashMap<(ScopeKind, String), ScopeVersion> = HashMap::new();
-        for kind in LISTED_KINDS {
-            let mut after: Option<ScopeName> = None;
-            loop {
-                let page = self
-                    .host
-                    .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
-                    .await?;
-                for scope in page.heads {
-                    known.insert((kind, scope.name.as_str().to_string()), scope.head.version);
-                    let Some(tag) = codec::name_tag(&scope.name).map(str::to_string) else {
-                        // Not a name this journal writes: leave it alone.
-                        continue;
-                    };
-                    if tag == CHUNK_TAG {
-                        if kind != ScopeKind::Record {
-                            return Err(SpiError::Corrupt(format!(
-                                "chunk scope {} has kind {kind}",
-                                scope.name
-                            )));
-                        }
-                        let head = ChunkHeadV1::decode(&scope.head.head)?;
-                        chunks.insert(
-                            scope.name.as_str().to_string(),
-                            ChunkMeta {
-                                version: scope.head.version,
-                                owner: head.owner,
-                            },
-                        );
-                        continue;
-                    }
-                    let head = ScopeHeadV1::decode(&scope.head.head)?;
-                    if head.fam != tag || !codec::name_encodes(&scope.name, &tag, &head.key) {
+        for (kind, heads) in self.list_kinds().await? {
+            for scope in heads {
+                known.insert((kind, scope.name.as_str().to_string()), scope.head.version);
+                let Some(tag) = codec::name_tag(&scope.name).map(str::to_string) else {
+                    // Not a name this journal writes: leave it alone.
+                    continue;
+                };
+                if tag == CHUNK_TAG {
+                    if kind != ScopeKind::Record {
                         return Err(SpiError::Corrupt(format!(
-                            "scope {} does not encode its head's family {} and key",
-                            scope.name, head.fam
+                            "chunk scope {} has kind {kind}",
+                            scope.name
                         )));
                     }
-                    listed.entry(tag).or_default().push(ListedHead {
-                        name: scope.name,
-                        version: scope.head.version,
-                        head,
-                    });
+                    let head = ChunkHeadV1::decode(&scope.head.head)?;
+                    chunks.insert(
+                        scope.name.as_str().to_string(),
+                        ChunkMeta {
+                            version: scope.head.version,
+                            owner: head.owner,
+                        },
+                    );
+                    continue;
                 }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
+                let head = ScopeHeadV1::decode(&scope.head.head)?;
+                if head.fam != tag || !codec::name_encodes(&scope.name, &tag, &head.key) {
+                    return Err(SpiError::Corrupt(format!(
+                        "scope {} does not encode its head's family {} and key",
+                        scope.name, head.fam
+                    )));
                 }
+                listed.entry(tag).or_default().push(ListedHead {
+                    name: scope.name,
+                    version: scope.head.version,
+                    head,
+                });
             }
         }
         *lock(&self.listed) = listed;

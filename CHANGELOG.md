@@ -383,8 +383,9 @@ them.
   again later, as before.
 - GitHub Copilot: a model listing that meets a 408, 502, 503 or 504, or a
   network failure or timeout, is tried once more at once, both attempts
-  within the listing's existing 30-second bound; any other answer is final,
-  as before.
+  within the listing's existing 30-second bound (the first within 15
+  seconds, so a first attempt that does not answer leaves the second the
+  rest); any other answer is final, as before.
 - GitHub Copilot: when a temporary token exchange failure leaves no valid
   token and the exchange sent `Retry-After`, every turn until then fails
   with the outage's retryable error without calling the exchange (for at

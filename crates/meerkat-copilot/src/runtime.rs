@@ -2446,7 +2446,8 @@ impl CopilotAuthorizer {
 /// The account's model list. An answer the next try may change (a 408,
 /// 502, 503 or 504, or a network failure or timeout) gets one immediate
 /// second attempt, inside the listing's one HTTP bound: both attempts
-/// together take at most [`COPILOT_HTTP_TIMEOUT`].
+/// together take at most [`COPILOT_HTTP_TIMEOUT`], the first at most half of
+/// it.
 async fn fetch_copilot_models(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
@@ -2456,7 +2457,8 @@ async fn fetch_copilot_models(
     fetch_copilot_models_within(transport, config, api_base, token, COPILOT_HTTP_TIMEOUT).await
 }
 
-/// [`fetch_copilot_models`] with both attempts together inside `bound`.
+/// [`fetch_copilot_models`] inside `bound`: the first attempt gets half of
+/// it, so one that does not answer leaves the second attempt the rest.
 async fn fetch_copilot_models_within(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
@@ -2465,21 +2467,27 @@ async fn fetch_copilot_models_within(
     bound: StdDuration,
 ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let attempts = async {
-        match list_copilot_models_once(transport, config, &url, token).await {
-            Err(error) if error.worth_an_immediate_retry() => {
-                list_copilot_models_once(transport, config, &url, token).await
-            }
-            answer => answer,
-        }
+    let deadline = tokio::time::Instant::now() + bound;
+    let timed_out = || {
+        Err(CopilotModelDiscoveryError::Transport(
+            CopilotHttpTransportError::Timeout,
+        ))
     };
-    tokio::time::timeout(bound, attempts)
+    let first = tokio::time::timeout(
+        bound / 2,
+        list_copilot_models_once(transport, config, &url, token),
+    )
+    .await
+    .unwrap_or_else(|_| timed_out());
+    match first {
+        Err(error) if error.worth_an_immediate_retry() => tokio::time::timeout_at(
+            deadline,
+            list_copilot_models_once(transport, config, &url, token),
+        )
         .await
-        .unwrap_or_else(|_| {
-            Err(CopilotModelDiscoveryError::Transport(
-                CopilotHttpTransportError::Timeout,
-            ))
-        })
+        .unwrap_or_else(|_| timed_out()),
+        answer => answer,
+    }
 }
 
 /// One `GET {api_base}/models` with `token`.

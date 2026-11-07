@@ -1519,13 +1519,17 @@ async fn placed_spawn_shows_its_resolved_profile_to_the_customizer_before_compil
     let realm_store: std::sync::Arc<dyn meerkat_mob::store::RealmProfileStore> = realm;
     let inline = judged_profile(&base, "judged: inline");
     let judge = std::sync::Arc::new(PlacedProfileJudge::default());
+    // The judge sits in a customizer chain, as a host composes its
+    // customizers: the chain forwards the check to it.
+    let chain: std::sync::Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer> =
+        std::sync::Arc::new(meerkat_mob::SpawnMemberCustomizerChain::new().then(
+            std::sync::Arc::clone(&judge)
+                as std::sync::Arc<dyn meerkat_mob::runtime::SpawnMemberCustomizer>,
+        ));
     let scripted = spawn_scripted_host_peer("placed-profile-host").await;
     let controlling = create_controlling_mob_with_customizer_definition_and_storage(
         "placed-profile",
-        Some(std::sync::Arc::clone(&judge)
-            as std::sync::Arc<
-                dyn meerkat_mob::runtime::SpawnMemberCustomizer,
-            >),
+        Some(chain),
         move |definition| {
             definition.profiles.insert(
                 meerkat_mob::ProfileName::from("inline-judged"),

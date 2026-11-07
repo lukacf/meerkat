@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `ToolCallRequester`, `RequesterPrincipal` and `parseToolCallRequester`: the
+  original requester of the run a callback serves, which the gateway names
+  on `callback/call_tool` and `callback/job/start`. A tool handler receives
+  it as its optional second argument (`undefined` when the run has none),
+  and `DetachedJobContext.requester` is the requester of the run that
+  submitted the job. `parseToolCallRequester` reads it as the runtime's
+  grammar does, and a malformed value is `undefined`, so a person-scoped
+  tool fails closed. A tool that acts in one person's name checks that the
+  requester is not `carried` and that its principal's `kind`, `id` and
+  `trustDomainId` are its owner's.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

@@ -4,6 +4,17 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `ToolCallRequester` and `RequesterPrincipal`: the original requester of the
+  run a callback serves, which the gateway names on `callback/call_tool` and
+  `callback/job/start`. A tool handler that declares a `requester` parameter
+  receives it (`None` when the run has none); a handler without the
+  parameter is called as before. `DetachedJobContext.requester` is the
+  requester of the run that submitted the job. `ToolCallRequester.from_wire`
+  reads it as the runtime's grammar does, and a malformed value is `None`, so
+  a person-scoped tool fails closed. A tool that acts in one person's name
+  compares `requester.direct_principal` with its owner's principal (`kind`,
+  `id` and `trust_domain_id`).
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

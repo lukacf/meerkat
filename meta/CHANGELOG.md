@@ -81,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     `Host` serves the router on its own server instead;
   - a probe that asks `/healthz` for JSON by a pod or service name now gets
     403; the plain `/healthz` answer is unchanged.
+- A detached callback job the gateway submits stores its requester as one
+  more optional field. A gateway rolled back to 0.9.10 while such a job runs
+  removes the field for good on the job's next write: after upgrading again,
+  the job's attempts name no requester (a person-scoped tool refuses them),
+  and a replay of the submitting call is refused as a submission conflict.
+  A host store's own `job_store` (`HostStoreMetaStores::job_store`) persists
+  the requester, compares it when it deduplicates a submission and keeps it
+  through compare-and-swap, as Core's notes describe.
 
 ### Added
 

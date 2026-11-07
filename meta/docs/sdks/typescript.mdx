@@ -256,6 +256,7 @@ draft.registerTool("read_mail", async (args, requester) => {
   if (
     requester === undefined ||
     requester.carried ||
+    requester.principal.kind !== "human" ||
     requester.principal.id !== OWNER_SUB ||
     requester.principal.trustDomainId !== OWNER_DOMAIN
   ) {

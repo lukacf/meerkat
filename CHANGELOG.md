@@ -542,7 +542,18 @@ them.
 
 - A stored detached job writes its requester as one more optional field. An
   older Core that reads the job drops it, so the job's later attempts start
-  with no requester and a person-scoped tool refuses them.
+  with no requester and a person-scoped tool refuses them. An older Core that
+  writes the job (its claim, a heartbeat, its completion) removes the field
+  for good: after upgrading again, the job's attempts still name no
+  requester, and a replay of the submitting call (the same submission key,
+  now with its requester) is refused with
+  `DetachedJobError::SubmissionConflict` instead of deduplicating.
+- A host that supplies its own `DetachedJobStore` persists
+  `JobSpec::requester`, treats a submission under an admitted key with
+  another requester (or none where the job has one, or the reverse) as a
+  conflict, and keeps the field unchanged through compare-and-swap, as the
+  bundled stores do; `requester: None` keeps a struct literal compiling, not
+  a store correct.
 
 ### Known limitations
 

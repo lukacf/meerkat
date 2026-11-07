@@ -4741,6 +4741,7 @@ async fn handle_meerkat_run_with_help_tools(
                 blob_store_override: None,
                 mob_tools: None,
                 grant_gated_tools: None,
+                grant_gated_tools_where_mounted: None,
             };
             build.apply_generated_create_only_mob_operator_access(
                 ToolCategoryOverride::from_override(input.enable_mob),
@@ -5245,6 +5246,7 @@ async fn handle_meerkat_resume(
             blob_store_override: None,
             mob_tools: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
             input.enable_mob,

@@ -290,6 +290,35 @@ such as a typo, fails the member's build with `DeclaredToolUnknown`, unless the
 profile declares an MCP server that maps no `tool_names` or opts into a bundle
 the build withholds; then the name is checked only at call time.
 
+### Granting tools to a member at run time
+
+`tools.grant_gated` mounts built-in tool families and tool names hidden: the
+member is not shown them and every call is refused until a live
+[scoped tool grant](/concepts/tools#scoped-tool-grants) opens them, for a
+bounded window. Leave a gated family's switch off; the gate mounts it closed,
+and a binary that does not know the gate keeps it off.
+
+```toml
+[profiles.worker.tools]
+comms = true
+grant_gated = { families = ["shell"], tools = ["deploy"] }
+```
+
+At every build, resume included, a member's gate is its own profile's gate
+joined with its role's current gate, so a member spawned with its own profile
+still gets its role's gate at its next build. A store-owned identity declared
+with its role's named profile is built from the role's definition, as a worker
+of the role is: its own gate is the role's current gate, less the families its
+declaration switches off; one declared with an exact profile of its own
+(`profile_override`) gets the role's gate as role entries. A role entry never
+fails the build: a role tool name is gated from the moment it appears, a role
+family is gated where the member mounts it, and a role family the member does
+not mount is ignored. A grant to the member's identity (`tool_grants/grant`
+with `{"kind": "identity", "mob_id", "identity"}`) follows the member across
+respawns and restarts, and ends when the identity ends (a plain retire, or a
+reset of the mob). A member whose gate names anything cannot be placed on
+another host.
+
 ### Opting into host tool bundles
 
 `tools.bundles` names host tool bundles a profile opts into. It is the lenient

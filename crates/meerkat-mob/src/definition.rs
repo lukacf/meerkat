@@ -887,6 +887,8 @@ fn inspect_profile_keys(
         }
         // The `tools` sub-table of an inline profile has its own closed field
         // set; a typo there (`comm = true`) silently leaves the category off.
+        // The grant gate inside it is closed the same way: a typo there
+        // (`famlies`) would silently leave the gate narrower.
         if binding.as_inline().is_some() {
             if let Some(raw_tools) = raw_profile.get("tools").and_then(toml::Value::as_table) {
                 keys.extend(
@@ -895,6 +897,18 @@ fn inspect_profile_keys(
                         .filter(|key| !ToolConfig::FIELD_NAMES.contains(&key.as_str()))
                         .map(|key| format!("tools.{key}")),
                 );
+                if let Some(raw_gate) = raw_tools.get("grant_gated").and_then(toml::Value::as_table)
+                {
+                    keys.extend(
+                        raw_gate
+                            .keys()
+                            .filter(|key| {
+                                !meerkat_core::tool_grant::GrantGatedTools::FIELD_NAMES
+                                    .contains(&key.as_str())
+                            })
+                            .map(|key| format!("tools.grant_gated.{key}")),
+                    );
+                }
             }
         }
         if !keys.is_empty() {
@@ -1440,6 +1454,40 @@ model = "claude-sonnet-4-5"
                 Some("profiles.shared.model"),
                 Some("profiles.shared.role_summary")
             ]
+        );
+    }
+
+    /// `tools.grant_gated` is a key the tools table declares, and a
+    /// typo inside the gate is reported with its location, as a typo under
+    /// `tools` is, instead of silently leaving the gate narrower.
+    #[test]
+    fn parse_toml_reads_the_grant_gate_and_warns_on_its_unknown_keys() {
+        let content = r#"
+[mob]
+id = "gated"
+
+[profiles.worker]
+model = "claude-sonnet-4-5"
+
+[profiles.worker.tools]
+comms = true
+grant_gated = { families = ["shell"], famlies = ["memory"] }
+"#;
+        let parsed = MobDefinition::parse_toml(content).expect("a gate typo warns, not refuses");
+        assert_eq!(
+            parsed.unknown_profile_keys,
+            vec![UnknownProfileKeys {
+                profile: ProfileName::from("worker"),
+                keys: vec!["tools.grant_gated.famlies".to_string()],
+            }]
+        );
+        let worker = parsed.definition.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .expect("inline profile");
+        assert_eq!(
+            serde_json::to_value(&worker.tools).expect("tools serialize")["grant_gated"],
+            serde_json::json!({"families": ["shell"]}),
+            "the gate's known keys are kept"
         );
     }
 

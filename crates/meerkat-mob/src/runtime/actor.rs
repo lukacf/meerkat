@@ -16696,6 +16696,7 @@ impl MobActor {
             definition: self.definition.clone(),
             events: self.events.clone(),
             identity_member: self.identity_member.clone(),
+            identity: Arc::clone(&self.identity),
             member_binding_fold: self.member_binding_fold.clone(),
             run_store: self.run_store.clone(),
             runtime_metadata: self.runtime_metadata.clone(),
@@ -36949,6 +36950,19 @@ impl MobActor {
             held,
         };
         let preparation = spawn_preparation::typed_preparation(async move {
+            // The profile the member's build runs on: a store-owned identity
+            // declared with its role's named profile takes its role's current
+            // tool grant gate as its own, as a worker of the role does.
+            let profile = super::member_grant_gate::member_build_profile(
+                preparation_context.identity.as_ref(),
+                &preparation_context.definition,
+                preparation_context.realm_profile_store.as_ref(),
+                &agent_identity,
+                &profile_name,
+                &profile,
+            )
+            .await?
+            .into_owned();
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
             // straight to finalization. The bridge session must already exist
@@ -40786,11 +40800,20 @@ impl MobActor {
         let external_tools =
             self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
         let labels = labels.unwrap_or_default();
+        let build_profile = super::member_grant_gate::member_build_profile(
+            self.identity.as_ref(),
+            &self.definition,
+            self.realm_profile_store.as_ref(),
+            agent_identity,
+            &profile_name,
+            &profile,
+        )
+        .await?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
             agent_identity,
-            profile: &profile,
+            profile: &build_profile,
             definition: &self.definition,
             realm_profile_store: self.realm_profile_store.as_ref(),
             external_tools,
@@ -54219,6 +54242,24 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
+            // An identity's tool grants end with the identity: a retirement
+            // that ends it ends them here, before its terminal row, so a name
+            // created again later inherits none. A failure fails the step,
+            // which keeps the retirement for its retry.
+            #[cfg(feature = "runtime-adapter")]
+            {
+                if super::identity_entry::retirement_ends_identity(
+                    self.dsl_authority.state(),
+                    &ctx.entry.agent_identity,
+                    &ctx.entry.agent_runtime_id,
+                ) {
+                    self.end_identity_tool_grants(
+                        &ctx.entry.agent_identity,
+                        format!("the identity '{}' left the mob", ctx.entry.agent_identity),
+                    )
+                    .await?;
+                }
+            }
             let journal_session = if is_peer_only { None } else { session_id };
             Self::require_member_lifecycle_journal_effect(
                 &prepared.transition,
@@ -61142,6 +61183,19 @@ impl MobActor {
             "reset_to_running",
         )?;
 
+        // The reset ends every identity the mob held, its identity entries
+        // included, and keeps the mob's incarnation, so a name declared
+        // again after it would match their scoped tool grants: they end here,
+        // after the member retirements and before the epoch marker commits.
+        // A failure fails the reset (retry it; the mob is left Stopped). A
+        // crash between the two leaves those identities without grants,
+        // which fails closed.
+        #[cfg(feature = "runtime-adapter")]
+        if let Err(error) = self.end_reset_identity_tool_grants().await {
+            self.fail_reset_to_stopped().await;
+            return Err(error);
+        }
+
         // --- Event rewrite phase: append the new epoch marker. ---
         // Append-only epoch model: projections clear on MobReset; the original
         // MobCreated definition remains the durable resume authority for this
@@ -65065,6 +65119,61 @@ impl MobActor {
         let key = Self::retire_event_key(agent_identity, generation);
         let index = self.retired_event_index.read().await;
         Ok(index.contains(&key))
+    }
+
+    /// End every live scoped tool grant of `identity` in this mob
+    /// incarnation, recording `reason`: its identity ended. Without a
+    /// runtime there are no grants.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_identity_tool_grants(
+        &self,
+        identity: &AgentIdentity,
+        reason: String,
+    ) -> Result<(), MobError> {
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(());
+        };
+        let subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+            self.definition.id.as_str(),
+            &self.incarnation,
+            identity.as_str(),
+        );
+        runtime
+            .end_tool_grants_of(
+                &subject,
+                meerkat_runtime::tool_grant::ToolGrantRevocation {
+                    actor: None,
+                    reason: Some(reason),
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "ending the tool grants of the identity '{identity}' failed: {error}"
+                ))
+            })
+    }
+
+    /// End the live scoped tool grants of every identity MobMachine holds as
+    /// a reset commits: each identity an incarnation held since the last
+    /// reset (its members', the retired ones included) and each identity
+    /// entry, seated or not. The reset ends them all and keeps the mob's
+    /// incarnation.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_reset_identity_tool_grants(&self) -> Result<(), MobError> {
+        let state = self.dsl_authority.state();
+        let identities = state
+            .identity_runtime_generations
+            .keys()
+            .chain(state.identity_entry_origins.keys())
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for identity in &identities {
+            self.end_identity_tool_grants(identity, "the mob was reset".to_string())
+                .await?;
+        }
+        Ok(())
     }
 
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.

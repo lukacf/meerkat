@@ -87,6 +87,7 @@ pub enum GrantGateRefusal {
 /// names, stay closed until a live grant opens them. Set per build (session
 /// options or a mob profile) and persisted with the session's tooling, so a
 /// resume restores it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantGatedTools {
     /// Built-in tool family names (`shell`, `workgraph`, ...).
@@ -98,6 +99,11 @@ pub struct GrantGatedTools {
 }
 
 impl GrantGatedTools {
+    /// Every key a gate declares, exactly as the serde derive reads them. A
+    /// definition parser compares an authored gate's keys against it, so a
+    /// typo is reported instead of silently leaving the gate narrower.
+    pub const FIELD_NAMES: &'static [&'static str] = &["families", "tools"];
+
     /// Whether nothing is gated.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -116,6 +122,32 @@ impl GrantGatedTools {
     pub fn with_tool(mut self, name: impl Into<ToolName>) -> Self {
         self.tools.insert(name);
         self
+    }
+
+    /// Gate everything `other` gates too.
+    pub fn extend(&mut self, other: &Self) {
+        self.families.extend(other.families.iter().cloned());
+        for name in other.tools.iter() {
+            self.tools.insert(name.clone());
+        }
+    }
+
+    /// The entries of this gate that `other` does not gate.
+    #[must_use]
+    pub fn without(&self, other: &Self) -> Self {
+        let mut rest = Self::default();
+        rest.families.extend(
+            self.families
+                .iter()
+                .filter(|family| !other.families.contains(*family))
+                .cloned(),
+        );
+        for name in self.tools.iter() {
+            if !other.tools.contains(name.as_str()) {
+                rest.tools.insert(name.clone());
+            }
+        }
+        rest
     }
 }
 
@@ -277,6 +309,24 @@ impl ToolGrantSubject {
         Self::Session { session_id }
     }
 
+    /// The subject of one mob member identity's grants, in the incarnation
+    /// of the mob that `incarnation` witnesses: the only constructor a member
+    /// build or a grant surface uses for an identity. The incarnation is read
+    /// from the mob runtime's sealed witness, never from decoded input, so an
+    /// identity grant never reaches a later mob created under the same id.
+    #[must_use]
+    pub fn member(
+        mob_id: impl Into<String>,
+        incarnation: &crate::service::LiveMobIncarnation,
+        identity: impl Into<String>,
+    ) -> Self {
+        Self::Identity {
+            mob_id: mob_id.into(),
+            mob_incarnation: incarnation.incarnation().to_string(),
+            identity: identity.into(),
+        }
+    }
+
     /// The key a store files this subject's grants and audit rows under.
     #[must_use]
     pub fn key(&self) -> ToolGrantSubjectKey {
@@ -364,13 +414,29 @@ impl ToolGrantTarget {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolGrantIssuer {
     /// An operator, through a trusted host surface. `caller` is the host's
-    /// attribution of the operator, when it has one.
+    /// attribution of the operator, when it has one. `decision_ref` is the
+    /// host's opaque reference to the decision it made before issuing (for
+    /// example a person's approval in the host's own records): attribution
+    /// only, written with the grant and never resolved, checked or trusted.
     Operator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_ref: Option<crate::approval::decision::DecisionReference>,
     },
     /// An approved grant request.
     Approval { approval_id: String },
+}
+
+impl ToolGrantIssuer {
+    /// An operator issuer with no attribution and no decision reference.
+    #[must_use]
+    pub fn operator() -> Self {
+        Self::Operator {
+            caller: None,
+            decision_ref: None,
+        }
+    }
 }
 
 /// One grant's immutable descriptor. The lifecycle machine never interprets
@@ -444,6 +510,71 @@ impl ToolGrantRefusal {
     #[must_use]
     pub fn into_tool_error(self, tool: &str) -> crate::error::ToolError {
         crate::error::ToolError::policy_denied(self.denial(tool))
+    }
+}
+
+/// Structured-data `kind` of a refused grant request on the wire. The
+/// `tool_grant_request_refusal` member carries the typed
+/// [`ToolGrantRequestRefusal`].
+pub const TOOL_GRANT_REQUEST_REFUSED_KIND: &str = "tool_grant_request_refused";
+
+/// Why a request to a grant surface (grant, revoke, list, audit, a host's
+/// live attach) was refused: one closed vocabulary for every surface that
+/// serves grants, answered as invalid params carrying the refusal under
+/// [`TOOL_GRANT_REQUEST_REFUSED_KIND`]. A sibling of [`GrantGateRefusal`],
+/// which refuses a build, not a request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolGrantRequestRefusal {
+    /// No such session or mob, or no such identity in the mob's roster.
+    #[error("the grant subject is unknown")]
+    SubjectUnknown,
+    /// The subject's gate does not name the target: for an identity, the
+    /// gate its next build resolves.
+    #[error("the subject's grant gate does not name the target")]
+    TargetNotGated,
+    /// A server target that no installed or configured server provides: a
+    /// host that keeps an installation list checks it.
+    #[error("no installed or configured MCP server is named '{server}'")]
+    ServerNotInstalled { server: String },
+    /// A live attach of a server that no live grant of the identity covers,
+    /// from a host that attaches granted servers live.
+    #[error("no live grant covers the MCP server '{server}'")]
+    NoLiveGrant { server: String },
+    /// A live attach wait that is not a whole number of milliseconds within
+    /// the host surface's bound.
+    #[error("the attach wait is not a whole number of milliseconds within the bound")]
+    InvalidWait,
+    /// A window that is past, empty or longer than the maximum lifetime, or
+    /// not bounded by exactly one of a duration and a deadline.
+    #[error("the grant window is past, empty, too long, or not bounded exactly once")]
+    InvalidWindow,
+    /// A target that names no tool.
+    #[error("a tool grant must name at least one tool")]
+    EmptyTarget,
+    /// An unknown or unparseable grant id.
+    #[error("tool grant '{grant_id}' was not found")]
+    NotFound { grant_id: String },
+    /// A decision reference that is empty, too long or holds a control
+    /// character.
+    #[error("the decision reference is empty, too long or holds a control character")]
+    InvalidDecisionRef,
+    /// An audit page limit of zero.
+    #[error("an audit page limit must be at least 1")]
+    InvalidPageLimit,
+}
+
+impl ToolGrantRequestRefusal {
+    /// The refusal's wire data: `{"kind": "tool_grant_request_refused",
+    /// "tool_grant_request_refusal": {...}}`.
+    #[must_use]
+    pub fn data(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": TOOL_GRANT_REQUEST_REFUSED_KIND,
+            "tool_grant_request_refusal": self,
+        })
     }
 }
 
@@ -566,6 +697,21 @@ pub trait SessionToolGrants: Send + Sync {
     ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
         let _ = request;
         Err(ToolGrantAgentRequestRefusal::NotTaken)
+    }
+
+    /// The seam of a mob member's build over the same grants: it reads the
+    /// member's identity subject first (`member` in the mob incarnation that
+    /// `incarnation` witnesses), then this seam's session, so a member's
+    /// refusals are audited under its identity. `None` (the default) when this
+    /// seam reads no identity subjects: the member build then reads its
+    /// session's grants only.
+    fn for_member(
+        &self,
+        member: &crate::MobMemberBinding,
+        incarnation: &crate::service::LiveMobIncarnation,
+    ) -> Option<Arc<dyn SessionToolGrants>> {
+        let _ = (member, incarnation);
+        None
     }
 }
 

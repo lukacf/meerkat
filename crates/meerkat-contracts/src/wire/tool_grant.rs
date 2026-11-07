@@ -14,10 +14,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A session build's scoped tool grant gate (`session/create`
-/// `grant_gated_tools`): the built-in tool families and the tool names the
+/// A scoped tool grant gate: the built-in tool families and the tool names a
 /// build mounts hidden and refuses at dispatch until a live grant opens them.
-/// A field this version does not know is refused, never ignored.
+/// A session's build takes it on `session/create` (`grant_gated_tools`); a
+/// mob profile declares its members' (`tools.grant_gated`). A field this
+/// version does not know is refused, never ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -28,6 +29,14 @@ pub struct WireGrantGatedTools {
     /// Tool names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+}
+
+impl WireGrantGatedTools {
+    /// Whether nothing is gated: an empty gate is omitted where it rides.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.families.is_empty() && self.tools.is_empty()
+    }
 }
 
 impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
@@ -41,6 +50,17 @@ impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
     }
 }
 
+impl From<&meerkat_core::tool_grant::GrantGatedTools> for WireGrantGatedTools {
+    fn from(gate: &meerkat_core::tool_grant::GrantGatedTools) -> Self {
+        let mut tools: Vec<String> = gate.tools.iter().map(ToString::to_string).collect();
+        tools.sort();
+        Self {
+            families: gate.families.iter().cloned().collect(),
+            tools,
+        }
+    }
+}
+
 /// The subject a request names: whose grants it writes or reads. Closed: a
 /// kind or a field this version does not know is refused, never ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,8 +69,8 @@ impl From<WireGrantGatedTools> for meerkat_core::tool_grant::GrantGatedTools {
 pub enum ToolGrantSubjectRequest {
     /// One session's grants.
     Session { session_id: String },
-    /// One mob member identity's grants. Refused by servers that do not
-    /// support identity subjects.
+    /// One mob member identity's grants, in the mob's running incarnation.
+    /// A server that runs no mobs refuses it.
     Identity { mob_id: String, identity: String },
 }
 
@@ -123,10 +143,14 @@ pub enum WireToolGrantTarget {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireToolGrantIssuer {
-    /// An operator, through a host surface.
+    /// An operator, through a host surface. `decision_ref` is the host's
+    /// reference to the decision it made before issuing, when it gave one:
+    /// attribution only.
     Operator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_ref: Option<String>,
     },
     /// An approval decision.
     Approval { approval_id: String },
@@ -234,6 +258,12 @@ pub struct GrantToolParams {
     /// window grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ToolGrantScopeRequest>,
+    /// The host's opaque reference to the decision it made before issuing
+    /// (for example a person's approval in its own records): non-empty, at
+    /// most 1024 bytes, no control character. Recorded in the grant's issuer
+    /// as attribution; nothing resolves or trusts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_ref: Option<String>,
 }
 
 /// `tool_grants/grant` result.
@@ -519,6 +549,7 @@ mod tests {
             duration_ms: Some(60_000),
             reason: None,
             scope: None,
+            decision_ref: None,
         };
         let value = serde_json::to_value(&params).unwrap();
         assert_eq!(
@@ -568,6 +599,29 @@ mod tests {
                 "a scope this version does not know is refused"
             );
         }
+    }
+
+    /// An operator grant may name the decision its host made before
+    /// issuing it; the issuer on a record carries it back.
+    #[test]
+    fn grant_params_and_operator_issuers_carry_a_decision_ref() {
+        let value = json!({
+            "subject": {"kind": "identity", "mob_id": "mob-1", "identity": "worker-1"},
+            "target": {"kind": "family", "family": "shell"},
+            "duration_ms": 60_000,
+            "decision_ref": "approval-7",
+        });
+        let params: GrantToolParams =
+            serde_json::from_value(value.clone()).expect("a decision_ref is a known field");
+        assert_eq!(serde_json::to_value(&params).unwrap(), value);
+
+        let issuer = json!({"kind": "operator", "caller": "ops", "decision_ref": "approval-7"});
+        let decoded: WireToolGrantIssuer = serde_json::from_value(issuer.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            issuer,
+            "the issuer keeps its decision_ref"
+        );
     }
 
     #[test]

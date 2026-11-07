@@ -1889,6 +1889,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             read_only: tools.read_only,
             deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),
+            grant_gated: (&tools.grant_gated).into(),
         },
         peer_description: profile.peer_description.clone(),
         external_addressable: profile.external_addressable,
@@ -6465,6 +6466,9 @@ pub struct MobHandle {
     /// composition has one: member binding history reads its journal and
     /// identity intent rows in one store transaction. Read-only here.
     pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    /// The mob's identity intents: a member's grant gate reads its
+    /// identity's sealed declaration. Read-only here.
+    pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
     /// The member binding fold this handle and its clones keep between
     /// member binding history reads, so a read folds only the journal tail.
     pub(super) member_binding_fold: Arc<super::delivery_scope::MemberBindingFoldCache>,
@@ -17535,6 +17539,16 @@ impl MobHandle {
     /// couldn't be cleanly dismantled) that the caller needs to see;
     /// `reset` by design avoids that regime and so has no equivalent
     /// data to surface.
+    ///
+    /// # Scoped tool grants
+    ///
+    /// A reset ends every identity the mob held, its identity entries
+    /// included, and keeps the mob's incarnation. Before its epoch marker
+    /// commits it ends the live scoped tool grants of each of them, so a
+    /// name declared again after the reset holds none of them. A failure to
+    /// end them fails the reset and leaves the mob Stopped: retry the reset.
+    /// A crash between the end of the grants and the epoch marker leaves
+    /// those identities without grants, which fails closed.
     ///
     /// # Dogma fit (B3)
     ///

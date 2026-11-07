@@ -155,11 +155,11 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
-| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's or a mob member identity's grant-gated tool name or built-in tool family for a bounded window |
 | `tool_grants/request` | Tool grants | `RequestToolGrantParams` | `RequestToolGrantResult` | Ask for a grant of a session's grant-gated tool name or family, which a person approves through a durable decision |
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
-| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
-| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
+| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first |
+| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's or a mob member identity's scoped tool grants |
 | `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
 | `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
 | `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
@@ -2067,10 +2067,12 @@ a decision on an approval the pipe never presented is refused.
 A session created with `grant_gated_tools` mounts its gated tool families and
 names hidden: the model is not shown them and every call is refused until a
 live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
-`tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list` and
-`tool_grants/audit` manage a session's grants, and `tool_grants/request` asks
-for a grant a person approves. They read and write grant rows (and a request
-its decision) only: no method loads, registers or wakes the session.
+A mob member's build gates what its profile's `tools.grant_gated` and its
+role's current gate name. `tool_grants/grant`, `tool_grants/revoke`,
+`tool_grants/list` and `tool_grants/audit` manage the grants of a session or
+of a mob member identity, and `tool_grants/request` asks for a grant a person
+approves. They read and write grant rows (and a request its decision) only:
+no method loads, registers or wakes the session or the member.
 
 ```json Request
 {
@@ -2106,37 +2108,46 @@ its decision) only: no method loads, registers or wakes the session.
 }
 ```
 
-- **`tool_grants/grant`** opens a `target` for the `subject` session: a tool
-  name (`{"kind": "tool", "name": ...}`) the session gates by name or through a
-  gated family, or a family the session gates (`{"kind": "family", "family":
-  ...}`; the server fills in `names` with the names the family can provide, so
-  omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
-  bounds the grant, at most the host's maximum lifetime (24 hours by default).
-  `scope` is `{"kind": "window"}` (the default) or `{"kind": "current_run"}`:
-  the grant then also admits only the calls of the run the session is running
-  now, and ends with that run (the grant's `scope` is `{"kind":
-  "current_run", "run_id": ...}`). A session that runs no turn refuses a
-  `current_run` grant with invalid params and `data` `{"kind":
-  "run_not_active"}`, and nothing is issued.
-  A session before or during its first turn is granted from its staged build.
-  A gate no grant could honour fails the session's build, which a deferred
-  create reports at its first `turn/start`.
+- **`tool_grants/grant`** opens a `target` for the `subject`: a tool name
+  (`{"kind": "tool", "name": ...}`) the subject's gate names or a gated family
+  provides, or a family the gate names (`{"kind": "family", "family": ...}`;
+  the server fills in `names` with the names the family can provide, so omit
+  them). The subject is a session (`{"kind": "session", "session_id": ...}`),
+  whose recorded gate the target must be in, or a mob member identity
+  (`{"kind": "identity", "mob_id": ..., "identity": ...}`), which must be in
+  the mob's roster and whose gate is the one its next build resolves: its
+  profile's gate joined with its role's current gate (the role's current gate
+  is the own gate of a store-owned identity declared with its role's named
+  profile). Exactly one of
+  `duration_ms` and `expires_at_ms` (UNIX ms) bounds the grant, at most the
+  host's maximum lifetime (24 hours by default). `scope` is `{"kind":
+  "window"}` (the default) or `{"kind": "current_run"}`: the grant then also
+  admits only the calls of the run the session is running now, and ends with
+  that run (the grant's `scope` is `{"kind": "current_run", "run_id": ...}`).
+  A session that runs no turn refuses a `current_run` grant with invalid
+  params and `data` `{"kind": "run_not_active"}`, and nothing is issued.
+  `decision_ref`, when given,
+  is the host's reference to the decision it made before issuing (non-empty,
+  at most 1024 bytes, no control character): the grant's `issuer` records it,
+  as attribution only. A session before or during its first turn is granted
+  from its staged build. A gate no grant could honour fails the session's
+  build, which a deferred create reports at its first `turn/start`.
 - **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
   revoking a grant that already ended answers it as it stands, and `changed`
   says whether this revoke ended it. A revoke at or after the deadline records
   the expiry instead.
-- **`tool_grants/list`** answers the session's grants, each due one settled as
+- **`tool_grants/list`** answers the subject's grants, each due one settled as
   `expired` first. Ended grants (`expired`, `revoked`, `run_ended`) are listed
   only with `include_ended`; `unreadable` names any stored grant this server
   cannot read (written by a newer version, or damaged), which opens nothing.
-  On a server that keeps durable decisions the session's grant requests follow
+  On a server that keeps durable decisions the subject's grant requests follow
   its grants: each open or approved one as `requested`, and with
   `include_ended` each rejected, expired, withdrawn or refused one whose
   deadline is within the grant policy's maximum lifetime of now as `declined`
   (its `ended_at_ms` when it ended; an older one stays readable through
   `decision/list`). A request whose grant was issued is listed as that grant
   only.
-- **`tool_grants/audit`** answers a page of the session's audit log, `granted`
+- **`tool_grants/audit`** answers a page of the subject's audit log, `granted`
   (with the grant's `scope`), `expired` (with the `driver` that observed it:
   `timer`, `boundary`, `dispatch`, `read`, `revoke`, or `run` and `recovery`
   for a run that ended at or after the deadline), `revoked`, `run_ended` (with
@@ -2147,14 +2158,15 @@ its decision) only: no method loads, registers or wakes the session.
   caps at 1000; a full page carries `next_sequence`, the next page's
   `after_sequence`. A row this server cannot read is named in `unreadable`
   with its `sequence`, and the rest of the page is served.
-- **`tool_grants/request`** asks for a grant a person approves. It names the
-  `subject`, `target` and `scope` as a grant does, `duration_ms` (the grant's
-  window from its issuance, at most the host's maximum lifetime) and an
-  optional `reason`, and holds a durable decision of kind `tool_grant.issue`
-  for the approver id `operator`, which expires after an hour undecided. This
-  server is its requester (the runtime host `rkat-rpc` of the realm); the
-  stdio operator can grant directly, so approving a request this server made
-  adds an approval record, not authority. Nothing
+- **`tool_grants/request`** asks for a grant a person approves. It names a
+  session `subject`, and the `target` and `scope` as a grant does,
+  `duration_ms` (the grant's window from its issuance, at most the host's
+  maximum lifetime) and an optional `reason`, and holds a durable decision of
+  kind `tool_grant.issue` for the approver id `operator`, which expires after
+  an hour undecided. This server is its requester (the runtime host
+  `rkat-rpc` of the realm); the stdio operator can grant directly, so
+  approving a request this server made adds an approval record, not
+  authority. Nothing
   is issued: the result is the request as a list shows it (status
   `requested`, the `grant_id` its grant gets, its `issuer` `{"kind":
   "approval", "approval_id": ...}` naming the decision) and the `decision`.
@@ -2175,9 +2187,21 @@ its decision) only: no method loads, registers or wakes the session.
   server runs the executor of the kind, its agents' requests name the
   realm's agent `rkat-agent` as their requester.
 
-List and audit read the session's grant rows without checking that the
-session exists: an archived session's grants stay listable and auditable, and
-a session id with no grants, or one no session has, answers empty.
+List and audit read the subject's grant rows without checking that the
+session or the member exists: an archived session's grants and a retired
+identity's grants stay listable and auditable, and a subject with no grants
+answers empty. An identity subject resolves its mob only, in the mob's running
+incarnation.
+
+A member identity's grant opens its names for the member's builds while the
+mob runs at the incarnation it was issued in, across respawns, restarts and
+upgrades; a mob destroyed and created again under the same id is a new
+incarnation, whose identities hold none of the old grants. A member's
+`tool_grant_required` refusals are audited under its identity. An identity's
+grants end, `revoked`, when the identity ends: a plain retire of its member,
+the end of its identity entry, or a reset of its mob, which ends every
+identity the mob held, so a name declared again after the reset holds none of
+them. A respawn keeps them.
 
 A grant's `status` is `active`, `expired`, `revoked` or `run_ended`; a grant
 request's is `requested` or `declined`. A request's
@@ -2188,15 +2212,26 @@ issuer, audit event kind, expiry driver, refusal reason) decodes a value a
 later version adds as `unknown`, which this server never sends: a client
 older than run scopes reads `run_ended` as `unknown`.
 
-Errors use the standard codes: invalid params for a window that is past,
-empty, longer than the maximum or given twice or not at all, a target the
-session does not gate, family `names` in a request, an unknown or malformed
-grant id, and a `current_run` grant to a session that runs no turn (with
-`data` `{"kind": "run_not_active"}`); `SESSION_NOT_FOUND` for a grant to a
-session that does not
-exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
-under a grant or revoke twice, which a retry resolves; capability unavailable
-for an `identity` subject (this server grants to sessions only), a store
+Every refusal of a request answers invalid params with typed data, the
+request refusal under `tool_grant_request_refusal`:
+
+```json
+{"kind": "tool_grant_request_refused", "tool_grant_request_refusal": {"kind": "subject_unknown"}}
+```
+
+Its `kind` is `subject_unknown` (no such session, or no such mob or member
+identity; an unparseable session id included), `target_not_gated` (the
+subject's gate does not name the target), `invalid_window` (a window that is
+past, empty, longer than the maximum, or given twice or not at all),
+`empty_target`, `not_found` (an unknown or malformed grant id, with
+`grant_id`), `invalid_decision_ref` or `invalid_page_limit` (an audit `limit`
+of 0). `server_not_installed`, `no_live_grant` and `invalid_wait` are reserved
+for hosts that keep an installation list or attach a granted MCP server live;
+`rkat-rpc` never sends them. A `current_run` grant to a session that runs no
+turn answers invalid params with `data` `{"kind": "run_not_active"}`. Other
+errors use the standard codes: `SESSION_BUSY` when concurrent writers changed
+the grant under a grant or revoke twice, which a retry resolves; capability
+unavailable for an `identity` subject on a server that runs no mobs, a store
 without grant support, or a request to a server that keeps no durable
 decisions. A request's decision is held as any decision is: its errors are
 the [durable decision errors](#durable-decisions).

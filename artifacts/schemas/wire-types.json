@@ -113438,9 +113438,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -117107,9 +117113,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -127848,6 +127860,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -128519,6 +128535,27 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -137243,6 +137280,27 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -137417,6 +137475,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -138438,6 +138500,27 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -138612,6 +138695,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -149354,9 +149441,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -149695,9 +149788,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -160525,9 +160624,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -179943,7 +180048,7 @@
   "WireGrantGatedTools": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "A session build's scoped tool grant gate (`session/create`\n`grant_gated_tools`): the built-in tool families and the tool names the\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA field this version does not know is refused, never ignored.",
+    "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
     "properties": {
       "families": {
         "description": "Built-in tool families, such as `shell`.",
@@ -194967,6 +195072,27 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -195008,6 +195134,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -196476,6 +196606,29 @@
     "type": "object"
   },
   "WireMobToolConfig": {
+    "$defs": {
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "description": "Tool configuration embedded in a wire mob profile override.",
@@ -196494,6 +196647,10 @@
           "type": "string"
         },
         "type": "array"
+      },
+      "grant_gated": {
+        "$ref": "#/$defs/WireGrantGatedTools",
+        "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
       },
       "image_generation": {
         "default": false,
@@ -211481,9 +211638,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -211836,9 +211999,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -212440,9 +212609,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -212700,9 +212875,15 @@
     "description": "Who issued a grant.",
     "oneOf": [
       {
-        "description": "An operator, through a host surface.",
+        "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
         "properties": {
           "caller": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision_ref": {
             "type": [
               "string",
               "null"

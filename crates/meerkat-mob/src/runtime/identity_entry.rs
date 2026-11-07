@@ -30,7 +30,11 @@
 //! ([`super::MobHandle::remove_identity`], which tombstones its name), the
 //! mob's destroy and the mob's reset end an entry. An unseated roster-owned
 //! entry is not journaled: after a restart, the next apply declares it
-//! again.
+//! again. An entry's end ends its identity's live scoped tool grants: its
+//! member's retirement ends them when the seal or the removal ends the
+//! entry, and the reset ends them for every entry it ends. A destroy needs
+//! nothing: the next create mints a new incarnation, whose identities hold
+//! none of the old grants.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -1712,6 +1716,33 @@ pub(crate) fn plain_retirement_facts(
         identity_entry,
         None,
     ))
+}
+
+/// Whether the end of a plain retirement of `identity`'s incarnation
+/// `agent_runtime_id` ends the identity itself, read from `state`,
+/// MobMachine's state before the terminal step: the identity is bound to
+/// the retiring incarnation, no respawn holds it for a successor, and it is
+/// no identity entry the retirement keeps (an entry outlives a retirement
+/// that neither unlists nor removes it). The identity's tool grants end with
+/// it, so a name created again later inherits none. A rotation's terminal,
+/// which seats the next incarnation, is not a plain retirement.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn retirement_ends_identity(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+    agent_runtime_id: &crate::ids::AgentRuntimeId,
+) -> bool {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    let bound = state.identity_to_runtime.get(&dsl_identity)
+        == Some(&mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id));
+    if !bound || state.pending_respawn_topology.contains(&dsl_identity) {
+        return false;
+    }
+    machine_entry_origin(state, identity).is_none()
+        || matches!(
+            stored_retirement_cause(state, identity),
+            Some(MemberRetirementCause::Unlisted | MemberRetirementCause::Removed)
+        )
 }
 
 /// What the row of `rotate_member`'s fresh life of an identity no member

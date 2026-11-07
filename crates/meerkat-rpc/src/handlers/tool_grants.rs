@@ -1,19 +1,25 @@
-//! `tool_grants/*` JSON-RPC handlers: the scoped tool grants of a session.
+//! `tool_grants/*` JSON-RPC handlers: the scoped tool grants of a session or
+//! of a mob member identity.
 //!
 //! Every method reads and writes grant rows through the runtime's grant
-//! service only: it never loads, registers or wakes the subject's session.
-//! A grant reads the gate the session records (its staged build before or
-//! during its first turn, its persisted metadata after) and refuses a
-//! target the session does not gate. A `current_run` grant takes the run the
-//! runtime records for the session now; a session that runs none (idle, or
-//! not served here) refuses it as `run_not_active`.
+//! service only: it never loads, registers or wakes the subject's session or
+//! member. A session grant reads the gate the session records (its staged
+//! build before or during its first turn, its persisted metadata after). An
+//! identity grant reads the gate the member's next build resolves, its own
+//! gate joined with its role's current gate, and needs the identity in the
+//! mob's roster. List and audit resolve the mob only, so a retired
+//! identity's history stays readable. Every refusal of a request these
+//! methods check is the typed `tool_grant_request_refused` refusal, but a
+//! `current_run` grant to a session that runs no turn, refused as
+//! `run_not_active`.
 //!
-//! `tool_grants/request` checks its subject, target and scope the same way
-//! and holds a durable decision of kind `tool_grant.issue` (this host is its
-//! requester) instead of issuing anything: the runtime's executor of the kind
-//! issues the grant once a person approved it. `tool_grants/list` lists the
-//! subject's open and approved requests beside its grants, as `requested`,
-//! and with `include_ended` its recently declined ones too.
+//! A `current_run` grant takes the run the runtime records for the session
+//! now. `tool_grants/request` checks its subject, target and scope the same
+//! way and holds a durable decision of kind `tool_grant.issue` (this host is
+//! its requester) instead of issuing anything: the runtime's executor of the
+//! kind issues the grant once a person approved it. `tool_grants/list` lists
+//! the subject's open and approved requests beside its grants, as
+//! `requested`, and with `include_ended` its recently declined ones too.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -25,10 +31,11 @@ use meerkat_contracts::{
     ToolGrantAuditParams, ToolGrantAuditResult, ToolGrantScopeRequest, ToolGrantSubjectRequest,
     ToolGrantTargetRequest, WireToolGrantErrorData,
 };
+use meerkat_core::approval::decision::DecisionReference;
 use meerkat_core::tool_grant::{
-    GrantGatedTools, ToolGrantId, ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget,
+    GrantGatedTools, ToolGrantId, ToolGrantIssuer, ToolGrantRequestRefusal, ToolGrantSubject,
+    ToolGrantTarget,
 };
-use meerkat_core::types::ToolName;
 use meerkat_core::{RunId, SessionId};
 use meerkat_runtime::RuntimeStoreError;
 use meerkat_runtime::decision::wire::wire_decision;
@@ -54,11 +61,29 @@ const DEFAULT_AUDIT_PAGE: usize = 100;
 /// The largest audit page: a request asking for more reads this many.
 const MAX_AUDIT_PAGE: usize = 1_000;
 
+/// The typed refusal of a grant request: invalid params carrying
+/// `{"kind": "tool_grant_request_refused", "tool_grant_request_refusal": ...}`.
+fn refused(
+    id: Option<RpcId>,
+    refusal: &ToolGrantRequestRefusal,
+    message: impl Into<String>,
+) -> RpcResponse {
+    RpcResponse::error_with_data(id, error::INVALID_PARAMS, message, refusal.data())
+}
+
 fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError) -> RpcResponse {
+    let refusal = match &error_value {
+        ToolGrantServiceError::InvalidWindow { .. } => Some(ToolGrantRequestRefusal::InvalidWindow),
+        ToolGrantServiceError::EmptyTarget => Some(ToolGrantRequestRefusal::EmptyTarget),
+        ToolGrantServiceError::NotFound { grant_id } => Some(ToolGrantRequestRefusal::NotFound {
+            grant_id: grant_id.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(refusal) = refusal {
+        return refused(id, &refusal, error_value.to_string());
+    }
     let code = match &error_value {
-        ToolGrantServiceError::InvalidWindow { .. }
-        | ToolGrantServiceError::EmptyTarget
-        | ToolGrantServiceError::NotFound { .. } => error::INVALID_PARAMS,
         // Concurrent writers changed the row under this one twice: the
         // busy class, which a retry resolves by reading the row afresh.
         ToolGrantServiceError::Conflict { .. } => error::SESSION_BUSY,
@@ -72,15 +97,11 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
     RpcResponse::error(id, code, error_value.to_string())
 }
 
-/// A typed `tool_grants/*` refusal: `code`, `message` and the typed `data`.
-fn refusal_with_data(
-    id: Option<RpcId>,
-    code: i32,
-    message: impl Into<String>,
-    data: WireToolGrantErrorData,
-) -> RpcResponse {
-    match serde_json::to_value(data) {
-        Ok(data) => RpcResponse::error_with_data(id, code, message, data),
+/// A `current_run` grant's refusal when the subject runs no turn:
+/// `run_not_active`.
+fn run_not_active(id: Option<RpcId>, message: String) -> RpcResponse {
+    match serde_json::to_value(WireToolGrantErrorData::RunNotActive) {
+        Ok(data) => RpcResponse::error_with_data(id, error::INVALID_PARAMS, message, data),
         Err(serialize_error) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,
@@ -89,108 +110,240 @@ fn refusal_with_data(
     }
 }
 
-/// The session a subject names. This server grants to sessions only.
+/// The session a session subject names. An id that names no session is the
+/// typed `subject_unknown`.
 #[allow(clippy::result_large_err)]
-fn subject_session(
+fn session_of(
     id: Option<RpcId>,
-    subject: &ToolGrantSubjectRequest,
+    raw: &str,
     runtime: &SessionRuntime,
 ) -> Result<SessionId, RpcResponse> {
-    match subject {
+    parse_session_id_for_runtime(id.clone(), raw, runtime).map_err(|response| {
+        let message = response
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| format!("no session '{raw}'"));
+        refused(id, &ToolGrantRequestRefusal::SubjectUnknown, message)
+    })
+}
+
+/// A write's subject, resolved: whose grants, the gate a target must be in,
+/// and the session serving the subject here when there is one.
+struct GrantSubject {
+    subject: ToolGrantSubject,
+    gate: GrantGatedTools,
+    serving: Option<SessionId>,
+}
+
+async fn subject_for_grant(
+    id: Option<RpcId>,
+    request: &ToolGrantSubjectRequest,
+    runtime: &SessionRuntime,
+) -> Result<GrantSubject, RpcResponse> {
+    match request {
         ToolGrantSubjectRequest::Session { session_id } => {
-            parse_session_id_for_runtime(id, session_id, runtime)
+            let session_id = session_of(id.clone(), session_id, runtime)?;
+            let gate = match runtime.session_grant_gate(&session_id).await {
+                Ok(Some(gate)) => gate,
+                Ok(None) => {
+                    return Err(refused(
+                        id,
+                        &ToolGrantRequestRefusal::SubjectUnknown,
+                        format!("Session not found: {session_id}"),
+                    ));
+                }
+                Err(error_value) => return Err(RpcResponse::from_error(id, error_value)),
+            };
+            Ok(GrantSubject {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                gate,
+                serving: Some(session_id),
+            })
         }
-        ToolGrantSubjectRequest::Identity { .. } => Err(RpcResponse::error(
+        ToolGrantSubjectRequest::Identity { mob_id, identity } => {
+            members::identity_for_grant(id, mob_id, identity, runtime).await
+        }
+    }
+}
+
+/// A read's subject, resolved: whose grants, and the session serving the
+/// subject here when there is one. A session subject is not looked up, and
+/// an identity subject resolves its mob only.
+async fn subject_for_read(
+    id: Option<RpcId>,
+    request: &ToolGrantSubjectRequest,
+    runtime: &SessionRuntime,
+) -> Result<(ToolGrantSubject, Option<SessionId>), RpcResponse> {
+    match request {
+        ToolGrantSubjectRequest::Session { session_id } => {
+            let session_id = session_of(id, session_id, runtime)?;
+            Ok((
+                ToolGrantSubject::session(session_id.clone()),
+                Some(session_id),
+            ))
+        }
+        ToolGrantSubjectRequest::Identity { mob_id, identity } => {
+            members::identity_for_read(id, mob_id, identity, runtime).await
+        }
+    }
+}
+
+/// Identity subjects: the members of the mobs this server runs.
+#[cfg(feature = "mob")]
+mod members {
+    use super::*;
+
+    /// The handle of the mob `mob_id`; a mob this server does not run is
+    /// the typed `subject_unknown`.
+    async fn mob_handle(
+        id: Option<RpcId>,
+        mob_id: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<meerkat_mob::MobHandle, RpcResponse> {
+        let unknown = || {
+            refused(
+                id.clone(),
+                &ToolGrantRequestRefusal::SubjectUnknown,
+                format!("no mob '{mob_id}'"),
+            )
+        };
+        let Some(state) = runtime.mob_state() else {
+            return Err(unknown());
+        };
+        match state.handle_for(&meerkat_mob::MobId::from(mob_id)).await {
+            Ok(handle) => Ok(handle),
+            Err(meerkat_mob::MobError::MobNotFound(_)) => Err(unknown()),
+            Err(error_value) => Err(crate::handlers::mob::mob_call_error(id, &error_value)),
+        }
+    }
+
+    pub(super) async fn identity_for_grant(
+        id: Option<RpcId>,
+        mob_id: &str,
+        identity: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<GrantSubject, RpcResponse> {
+        let handle = mob_handle(id.clone(), mob_id, runtime).await?;
+        let member = meerkat_mob::AgentIdentity::from(identity);
+        let gate = match handle.member_grant_gate(&member).await {
+            Ok(gate) => gate,
+            Err(meerkat_mob::MobError::MemberNotFound(_)) => {
+                return Err(refused(
+                    id,
+                    &ToolGrantRequestRefusal::SubjectUnknown,
+                    format!("no member '{identity}' in mob '{mob_id}'"),
+                ));
+            }
+            Err(error_value) => return Err(crate::handlers::mob::mob_call_error(id, &error_value)),
+        };
+        Ok(GrantSubject {
+            subject: ToolGrantSubject::member(mob_id, &handle.live_incarnation(), identity),
+            gate: gate.named(),
+            serving: handle.resolve_bridge_session_id(&member).await,
+        })
+    }
+
+    pub(super) async fn identity_for_read(
+        id: Option<RpcId>,
+        mob_id: &str,
+        identity: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<(ToolGrantSubject, Option<SessionId>), RpcResponse> {
+        let handle = mob_handle(id, mob_id, runtime).await?;
+        let serving = handle
+            .resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from(identity))
+            .await;
+        Ok((
+            ToolGrantSubject::member(mob_id, &handle.live_incarnation(), identity),
+            serving,
+        ))
+    }
+}
+
+/// Identity subjects: a server without mobs has none.
+#[cfg(not(feature = "mob"))]
+mod members {
+    use super::*;
+
+    fn unsupported(id: Option<RpcId>) -> RpcResponse {
+        RpcResponse::error(
             id,
             meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            "this server grants tools to sessions only: identity subjects are unsupported",
-        )),
+            "this server runs no mobs: identity subjects are unsupported",
+        )
+    }
+
+    pub(super) async fn identity_for_grant(
+        id: Option<RpcId>,
+        _mob_id: &str,
+        _identity: &str,
+        _runtime: &SessionRuntime,
+    ) -> Result<GrantSubject, RpcResponse> {
+        Err(unsupported(id))
+    }
+
+    pub(super) async fn identity_for_read(
+        id: Option<RpcId>,
+        _mob_id: &str,
+        _identity: &str,
+        _runtime: &SessionRuntime,
+    ) -> Result<(ToolGrantSubject, Option<SessionId>), RpcResponse> {
+        Err(unsupported(id))
     }
 }
 
-/// The target a grant request names, checked against the gate its session
-/// records: a tool name the session gates (by name, or through a gated
-/// family), or a family the session gates, with every name the family can
-/// provide (the gate admits only the names the session's build gated).
-fn resolve_target(
-    target: ToolGrantTargetRequest,
-    gate: &GrantGatedTools,
-) -> Result<ToolGrantTarget, String> {
-    match target {
-        ToolGrantTargetRequest::Tool { name } => {
-            let gated = gate.tools.contains(&name)
-                || gate.families.iter().any(|family| {
-                    meerkat::tool_family_names(family)
-                        .is_some_and(|names| names.contains(&name.as_str()))
-                });
-            if !gated {
-                return Err(format!(
-                    "the session does not grant-gate the tool '{name}': a grant opens only \
-                     names its build gated"
-                ));
-            }
-            Ok(ToolGrantTarget::Tool {
-                name: ToolName::from(name),
-            })
-        }
-        ToolGrantTargetRequest::Family { family } => {
-            if !gate.families.contains(&family) {
-                return Err(format!(
-                    "the session does not grant-gate the tool family '{family}'"
-                ));
-            }
-            let Some(names) = meerkat::tool_family_names(&family) else {
-                return Err(format!("'{family}' is not a built-in tool family"));
-            };
-            Ok(ToolGrantTarget::Family {
-                family,
-                names: names.into_iter().map(ToolName::from).collect(),
-            })
-        }
-    }
-}
-
-/// The gate `session_id` records, or the session's absence.
+/// The target a request names, resolved against its subject's gate: the
+/// typed refusal when the gate does not name it.
 #[allow(clippy::result_large_err)]
-async fn session_gate(
+fn target_of(
     id: Option<RpcId>,
-    session_id: &SessionId,
-    runtime: &SessionRuntime,
-) -> Result<GrantGatedTools, RpcResponse> {
-    match runtime.session_grant_gate(session_id).await {
-        Ok(Some(gate)) => Ok(gate),
-        Ok(None) => Err(RpcResponse::error(
-            id,
-            error::SESSION_NOT_FOUND,
-            format!("Session not found: {session_id}"),
-        )),
-        Err(error_value) => Err(RpcResponse::from_error(id, error_value)),
-    }
+    requested: ToolGrantTargetRequest,
+    gate: &GrantGatedTools,
+) -> Result<ToolGrantTarget, RpcResponse> {
+    let named = match &requested {
+        ToolGrantTargetRequest::Tool { name } => format!("the tool '{name}'"),
+        ToolGrantTargetRequest::Family { family } => format!("the tool family '{family}'"),
+    };
+    meerkat::resolve_grant_target(requested, gate).map_err(|refusal| {
+        let message = match refusal {
+            ToolGrantRequestRefusal::TargetNotGated => format!(
+                "the subject's grant gate does not name {named}: a grant opens only names the \
+                 subject's build gates"
+            ),
+            _ => refusal.to_string(),
+        };
+        refused(id, &refusal, message)
+    })
 }
 
 /// The run a requested scope binds: none for a window, and for
-/// `current_run` the run the runtime records for `session_id` now, which a
-/// session that runs none refuses as `run_not_active`.
+/// `current_run` the run the runtime records for the subject's session now,
+/// which a session that runs none refuses as `run_not_active`. An identity
+/// subject's `current_run` is refused the same way.
 #[allow(clippy::result_large_err)]
 async fn run_scope_of(
     id: Option<RpcId>,
     scope: Option<ToolGrantScopeRequest>,
-    session_id: &SessionId,
+    subject: &ToolGrantSubject,
     runtime: &SessionRuntime,
 ) -> Result<Option<RunId>, RpcResponse> {
     match scope {
         None | Some(ToolGrantScopeRequest::Window {}) => Ok(None),
         Some(ToolGrantScopeRequest::CurrentRun {}) => {
+            let ToolGrantSubject::Session { session_id } = subject else {
+                return Err(run_not_active(
+                    id,
+                    "a current_run grant names a session's run".to_owned(),
+                ));
+            };
             match runtime.runtime_adapter().current_run(session_id).await {
                 Some(run_id) => Ok(Some(run_id)),
-                None => Err(refusal_with_data(
+                None => Err(run_not_active(
                     id,
-                    error::INVALID_PARAMS,
                     format!(
                         "the session {session_id} runs no turn now: a current_run grant needs \
                          a run"
                     ),
-                    WireToolGrantErrorData::RunNotActive,
                 )),
             }
         }
@@ -211,38 +364,51 @@ pub async fn handle_grant(
         (Some(expires_at_ms), None) => ToolGrantWindow::Until { expires_at_ms },
         (None, Some(duration_ms)) => ToolGrantWindow::For(Duration::from_millis(duration_ms)),
         _ => {
-            return RpcResponse::error(
+            return refused(
                 id,
-                error::INVALID_PARAMS,
+                &ToolGrantRequestRefusal::InvalidWindow,
                 "a tool grant is bounded by exactly one of expires_at_ms and duration_ms",
             );
         }
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    let decision_ref = match params.decision_ref.map(DecisionReference::new).transpose() {
+        Ok(decision_ref) => decision_ref,
+        Err(error_value) => {
+            return refused(
+                id,
+                &ToolGrantRequestRefusal::InvalidDecisionRef,
+                error_value.to_string(),
+            );
+        }
+    };
+    let subject = match subject_for_grant(id.clone(), &params.subject, &runtime).await {
+        Ok(subject) => subject,
         Err(response) => return response,
     };
-    let gate = match session_gate(id.clone(), &session_id, &runtime).await {
-        Ok(gate) => gate,
-        Err(response) => return response,
-    };
-    let target = match resolve_target(params.target, &gate) {
+    let target = match target_of(id.clone(), params.target, &subject.gate) {
         Ok(target) => target,
-        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+        Err(response) => return response,
     };
-    let run_scope = match run_scope_of(id.clone(), params.scope, &session_id, &runtime).await {
+    let run_scope = match run_scope_of(id.clone(), params.scope, &subject.subject, &runtime).await {
         Ok(run_scope) => run_scope,
         Err(response) => return response,
     };
     let request = ToolGrantRequest {
-        subject: ToolGrantSubject::session(session_id),
+        subject: subject.subject,
         target,
-        issuer: ToolGrantIssuer::Operator { caller: None },
+        issuer: ToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref,
+        },
         reason: params.reason,
         window,
         run_scope,
     };
-    match runtime.runtime_adapter().grant_tool(request).await {
+    match runtime
+        .runtime_adapter()
+        .grant_tool(request, subject.serving.as_ref())
+        .await
+    {
         Ok(grant) => RpcResponse::success(
             id,
             GrantToolResult {
@@ -260,7 +426,7 @@ pub async fn handle_grant(
 /// decision is held for the approver id `operator` until the request's
 /// deadline. Nothing is issued here: the runtime's executor of the kind
 /// issues the grant, under the id the answer names, once a person approved
-/// it.
+/// it. A request names a session subject.
 pub async fn handle_request(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -274,19 +440,22 @@ pub async fn handle_request(
         Ok(decisions) => decisions,
         Err(response) => return response,
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    if matches!(params.subject, ToolGrantSubjectRequest::Identity { .. }) {
+        return RpcResponse::error(
+            id,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            "this server holds grant requests for sessions only",
+        );
+    }
+    let subject = match subject_for_grant(id.clone(), &params.subject, &runtime).await {
+        Ok(subject) => subject,
         Err(response) => return response,
     };
-    let gate = match session_gate(id.clone(), &session_id, &runtime).await {
-        Ok(gate) => gate,
-        Err(response) => return response,
-    };
-    let target = match resolve_target(params.target, &gate) {
+    let target = match target_of(id.clone(), params.target, &subject.gate) {
         Ok(target) => target,
-        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+        Err(response) => return response,
     };
-    let run_scope = match run_scope_of(id.clone(), params.scope, &session_id, &runtime).await {
+    let run_scope = match run_scope_of(id.clone(), params.scope, &subject.subject, &runtime).await {
         Ok(run_scope) => run_scope,
         Err(response) => return response,
     };
@@ -295,7 +464,7 @@ pub async fn handle_request(
         Err(message) => return RpcResponse::error(id, error::INTERNAL_ERROR, message),
     };
     let request = ToolGrantIssueRequest {
-        subject: ToolGrantSubject::session(session_id),
+        subject: subject.subject,
         target,
         duration: Duration::from_millis(params.duration_ms),
         run_scope,
@@ -344,7 +513,13 @@ pub async fn handle_revoke(
     let grant_id = match ToolGrantId::parse(&params.grant_id) {
         Ok(grant_id) => grant_id,
         Err(error_value) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string());
+            return refused(
+                id,
+                &ToolGrantRequestRefusal::NotFound {
+                    grant_id: params.grant_id,
+                },
+                error_value.to_string(),
+            );
         }
     };
     let revocation = ToolGrantRevocation {
@@ -384,12 +559,15 @@ pub async fn handle_list(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    let (subject, serving) = match subject_for_read(id.clone(), &params.subject, &runtime).await {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
-    let subject = ToolGrantSubject::session(session_id);
-    let listing = match runtime.runtime_adapter().list_tool_grants(&subject).await {
+    let listing = match runtime
+        .runtime_adapter()
+        .list_tool_grants(&subject, serving.as_ref())
+        .await
+    {
         Ok(listing) => listing,
         Err(error_value) => return grant_error_to_response(id, error_value),
     };
@@ -457,9 +635,9 @@ pub async fn handle_audit(
     let limit = match params.limit {
         None => DEFAULT_AUDIT_PAGE,
         Some(0) => {
-            return RpcResponse::error(
+            return refused(
                 id,
-                error::INVALID_PARAMS,
+                &ToolGrantRequestRefusal::InvalidPageLimit,
                 "an audit page limit must be at least 1",
             );
         }
@@ -467,17 +645,13 @@ pub async fn handle_audit(
             .unwrap_or(MAX_AUDIT_PAGE)
             .min(MAX_AUDIT_PAGE),
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    let (subject, _serving) = match subject_for_read(id.clone(), &params.subject, &runtime).await {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
     match runtime
         .runtime_adapter()
-        .read_tool_grant_audit(
-            &ToolGrantSubject::session(session_id),
-            params.after_sequence,
-            limit,
-        )
+        .read_tool_grant_audit(&subject, params.after_sequence, limit)
         .await
     {
         Ok(page) => {
@@ -504,73 +678,17 @@ pub async fn handle_audit(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_target_must_be_gated_by_the_session() {
-        let gate = GrantGatedTools::default()
-            .with_family("shell")
-            .with_tool("deploy");
-
-        assert_eq!(
-            resolve_target(
-                ToolGrantTargetRequest::Tool {
-                    name: "deploy".to_string()
-                },
-                &gate
-            ),
-            Ok(ToolGrantTarget::Tool {
-                name: ToolName::from("deploy")
-            })
-        );
-        // A name a gated family provides is gated through the family.
-        assert!(
-            resolve_target(
-                ToolGrantTargetRequest::Tool {
-                    name: "shell".to_string()
-                },
-                &gate
-            )
-            .is_ok()
-        );
-        let Ok(ToolGrantTarget::Family { family, names }) = resolve_target(
-            ToolGrantTargetRequest::Family {
-                family: "shell".to_string(),
-            },
-            &gate,
-        ) else {
-            panic!("a gated family resolves");
-        };
-        assert_eq!(family, "shell");
-        assert!(names.contains("shell"), "{names:?}");
-
-        for refused in [
-            ToolGrantTargetRequest::Tool {
-                name: "web_search".to_string(),
-            },
-            ToolGrantTargetRequest::Family {
-                family: "tasks".to_string(),
-            },
-        ] {
-            assert!(
-                resolve_target(refused.clone(), &gate).is_err(),
-                "{refused:?} must be refused"
-            );
-        }
-    }
-
     /// A grant row that concurrent writers kept changing answers the busy
     /// class, which a retry resolves; the other service faults stay
-    /// internal.
+    /// internal; the request's own faults are typed refusals.
     #[test]
-    fn a_contended_grant_write_answers_busy() {
-        let code = |error_value| {
-            grant_error_to_response(None, error_value)
-                .error
-                .map(|error| error.code)
-        };
+    fn grant_service_errors_answer_their_classes() {
+        let response = |error_value| grant_error_to_response(None, error_value);
+        let code = |error_value| response(error_value).error.map(|error| error.code);
         assert_eq!(
             code(ToolGrantServiceError::Conflict {
                 grant_id: "g1".to_string()
@@ -580,6 +698,19 @@ mod tests {
         assert_eq!(
             code(ToolGrantServiceError::Clock),
             Some(error::INTERNAL_ERROR)
+        );
+        let not_found = response(ToolGrantServiceError::NotFound {
+            grant_id: "g1".to_string(),
+        })
+        .error
+        .expect("refused");
+        assert_eq!(not_found.code, error::INVALID_PARAMS);
+        assert_eq!(
+            not_found.data,
+            Some(serde_json::json!({
+                "kind": "tool_grant_request_refused",
+                "tool_grant_request_refusal": {"kind": "not_found", "grant_id": "g1"},
+            }))
         );
     }
 }

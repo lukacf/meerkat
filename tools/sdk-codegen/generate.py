@@ -128,6 +128,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberListEntryWire",
     "WireMemberProgressSnapshot",
     "WireMemberCustodyDeferral",
+    # A profile's member tool grant gate, listed before the tool config that
+    # carries it.
+    "WireGrantGatedTools",
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
@@ -899,6 +902,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireContentInput",
         "WireAuthBindingRef",
         "WireMobProfile",
+        "WireGrantGatedTools",
         "WireMobToolConfig",
         "WireResolvedModelCapabilities",
         "PublicTurnToolOverlay",

@@ -2638,9 +2638,24 @@ class MeerkatClient:
     async def decide_approval(self, params: ApprovalDecideParams) -> dict[str, Any]:
         return await self._request("approval/decide", _wire_params(params))
 
+    @staticmethod
+    def _tool_grant_subject(
+        session_id: str | None, mob_id: str | None, identity: str | None
+    ) -> dict[str, Any]:
+        """The ``tool_grants/*`` subject: a session, or a mob member identity."""
+        if session_id is not None:
+            if mob_id is not None or identity is not None:
+                raise ValueError(
+                    "name either session_id or mob_id with identity, not both"
+                )
+            return {"kind": "session", "session_id": session_id}
+        if mob_id is None or identity is None:
+            raise ValueError("name either session_id or mob_id with identity")
+        return {"kind": "identity", "mob_id": mob_id, "identity": identity}
+
     async def grant_tool(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         tool: str | None = None,
         family: str | None = None,
@@ -2648,17 +2663,25 @@ class MeerkatClient:
         expires_at_ms: int | None = None,
         reason: str | None = None,
         scope: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
+        decision_ref: str | None = None,
     ) -> dict[str, Any]:
-        """Grant one of a session's grant-gated tool names or tool families.
+        """Grant one of a subject's grant-gated tool names or tool families.
 
-        Name exactly one of ``tool`` and ``family``: the session's build must
-        gate it (``create_session(grant_gated_tools=...)``). Bound the grant
-        by exactly one of ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at
-        most the server's maximum lifetime. ``scope="current_run"`` also
-        scopes the grant to the run the session is running now: it opens the
-        target in that run only and ends with it, and a session that runs no
-        turn refuses it (error ``data`` ``{"kind": "run_not_active"}``).
-        Omitted, or ``"window"``, the grant lasts for its window. Returns the
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``): an identity's grant applies to the
+        member's builds in the mob's running incarnation, across respawns.
+        Name exactly one of ``tool`` and ``family``: the session's build, or
+        the member's gate (its profile's joined with its role's), must gate
+        it. Bound the grant by exactly one of ``duration_ms`` and
+        ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
+        ``scope="current_run"`` also scopes the grant to the run the session
+        is running now: it opens the target in that run only and ends with
+        it, and a session that runs no turn refuses it (error ``data``
+        ``{"kind": "run_not_active"}``). Omitted, or ``"window"``, the grant
+        lasts for its window. ``decision_ref`` records the host's reference
+        to the decision it made before issuing, as attribution. Returns the
         ``tool_grants/grant`` result, ``{"grant": {...}}``: a family grant's
         ``target.names`` are the names the server took for it.
         """
@@ -2676,7 +2699,7 @@ class MeerkatClient:
             else {"kind": "family", "family": family}
         )
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "target": target,
         }
         if duration_ms is not None:
@@ -2687,6 +2710,8 @@ class MeerkatClient:
             params["reason"] = reason
         if scope is not None:
             params["scope"] = {"kind": scope}
+        if decision_ref is not None:
+            params["decision_ref"] = decision_ref
         return await self._request("tool_grants/grant", params)
 
     async def request_tool_grant(
@@ -2751,40 +2776,51 @@ class MeerkatClient:
         return await self._request("tool_grants/revoke", params)
 
     async def list_tool_grants(
-        self, session_id: str, *, include_ended: bool = False
+        self,
+        session_id: str | None = None,
+        *,
+        include_ended: bool = False,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """List a session's scoped tool grants, each due one read as expired.
+        """List a subject's scoped tool grants, each due one read as expired.
 
-        Ended (expired, revoked or run-ended) grants are listed only with
-        ``include_ended``. On a 0.9.11 or newer server that keeps durable
-        decisions, the session's grant requests (:meth:`request_tool_grant`)
-        follow its grants: open and approved ones as ``requested`` and, with
-        ``include_ended``, declined ones as ``declined``. Returns
-        ``{"grants": [...]}``, with an ``"unreadable"`` list naming any stored
-        grant the server cannot read.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``); a retired identity's history stays
+        readable. Ended (expired, revoked or run-ended) grants are listed
+        only with ``include_ended``. On a 0.9.11 or newer server that keeps
+        durable decisions, the subject's grant requests
+        (:meth:`request_tool_grant`) follow its grants: open and approved ones
+        as ``requested`` and, with ``include_ended``, recently declined ones
+        as ``declined``. Returns ``{"grants": [...]}``, with an
+        ``"unreadable"`` list naming any stored grant the server cannot read.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "include_ended": include_ended,
         }
         return await self._request("tool_grants/list", params)
 
     async def tool_grant_audit(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         after_sequence: int | None = None,
         limit: int | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """Read a page of the audit log of a session's scoped tool grants.
+        """Read a page of the audit log of a subject's scoped tool grants.
 
-        Rows come in sequence order, after ``after_sequence`` when given.
-        Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
-        may follow: pass it as the next page's ``after_sequence``. A row the
-        server cannot read is named in ``"unreadable"``.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``). Rows come in sequence order, after
+        ``after_sequence`` when given. Returns ``{"rows": [...]}``, with
+        ``"next_sequence"`` while more rows may follow: pass it as the next
+        page's ``after_sequence``. A row the server cannot read is named in
+        ``"unreadable"``.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
         }
         if after_sequence is not None:
             params["after_sequence"] = after_sequence

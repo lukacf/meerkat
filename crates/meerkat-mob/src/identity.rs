@@ -551,6 +551,31 @@ impl TryFrom<meerkat_contracts::wire::WireMemberToolDeclaration> for MemberToolD
     }
 }
 
+/// Where an identity's desired material took its profile from. It decides
+/// the tool grant gate the identity's member builds with: a member built from
+/// its role's named profile takes the role's current gate as its own at
+/// every build, as a worker of the role does; one declared with an exact
+/// profile of its own joins the role's gate as role entries, as a member
+/// spawned with its own profile does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesiredProfileSource {
+    /// The role's named canonical profile: the declaration names no
+    /// `profile_override`.
+    #[default]
+    Definition,
+    /// The declaration's exact portable profile (`profile_override`).
+    Override,
+}
+
+impl DesiredProfileSource {
+    /// Whether the material took the role's named profile (the default).
+    #[must_use]
+    pub fn is_definition(&self) -> bool {
+        matches!(self, Self::Definition)
+    }
+}
+
 /// Fully resolved, authority-free desired construction material.
 ///
 /// Unlike `PortableMemberSpec`, this value has no mob id, member identity, or
@@ -562,6 +587,12 @@ impl TryFrom<meerkat_contracts::wire::WireMemberToolDeclaration> for MemberToolD
 pub struct DesiredMemberMaterial {
     pub profile_name: ProfileName,
     pub profile: PortableProfile,
+    /// Where `profile` came from: the role's named profile (the default,
+    /// omitted when serialized, so material sealed before this field reads
+    /// as it) or the declaration's own exact profile. It decides the tool
+    /// grant gate the identity's member builds with.
+    #[serde(default, skip_serializing_if = "DesiredProfileSource::is_definition")]
+    pub profile_source: DesiredProfileSource,
     pub definition_extract: PortableDefinitionExtract,
     pub overlay: DesiredMemberOverlay,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3847,6 +3878,7 @@ pub(crate) fn identity_adoption_fixture(
     let material = DesiredMemberMaterial {
         profile_name,
         profile,
+        profile_source: DesiredProfileSource::Definition,
         definition_extract: PortableDefinitionExtract {
             profile_names: vec!["worker".to_string()],
             ..PortableDefinitionExtract::default()

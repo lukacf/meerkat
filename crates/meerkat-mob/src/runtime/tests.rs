@@ -8917,6 +8917,7 @@ fn sample_definition() -> MobDefinition {
                 mcp_servers: vec![],
                 rust_bundles: vec![],
                 bundles: Vec::new(),
+                grant_gated: Default::default(),
             },
             peer_description: "The lead".into(),
             external_addressable: true,

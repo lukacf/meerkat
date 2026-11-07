@@ -1361,7 +1361,10 @@ fn tool_grant_results_pin_their_field_names() {
             family: "shell".to_string(),
             names: vec!["shell".to_string()],
         },
-        issuer: WireToolGrantIssuer::Operator { caller: None },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
         reason: None,
         status: WireToolGrantStatus::Active,
         issued_at_ms: 1_000,
@@ -1729,7 +1732,10 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
         target: WireToolGrantTarget::Tool {
             name: "deploy".to_string(),
         },
-        issuer: WireToolGrantIssuer::Operator { caller: None },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
         reason: None,
         status: WireToolGrantStatus::RunEnded,
         issued_at_ms: 1_000,
@@ -1788,6 +1794,7 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
         duration_ms: Some(60_000),
         reason: None,
         scope: None,
+        decision_ref: None,
     })
     .expect("serialize");
     assert!(window.get("scope").is_none(), "{window}");
@@ -1802,6 +1809,7 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
         duration_ms: Some(60_000),
         reason: None,
         scope: Some(ToolGrantScopeRequest::CurrentRun {}),
+        decision_ref: None,
     })
     .expect("serialize");
     assert_eq!(

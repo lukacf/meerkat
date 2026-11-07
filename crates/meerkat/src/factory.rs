@@ -967,7 +967,9 @@ pub struct AgentBuildConfig {
     /// The witness of the mob runtime performing this member build (a fresh
     /// spawn, a restore or a wake), set only by that runtime; see
     /// `SessionBuildOptions::mob_incarnation`, which carries it to a host's
-    /// member build hook. Never persisted, and not consumed by the build.
+    /// member build hook. Never persisted. The build forms the member's tool
+    /// grant subject from it: its identity in this incarnation, read before
+    /// its session.
     pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
@@ -1098,6 +1100,15 @@ pub struct AgentBuildConfig {
     /// `None` restores the recorded gate. A gate needs the runtime's grant
     /// service, on the session's runtime bindings.
     pub grant_gated_tools: Option<meerkat_core::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: a tool name is installed whether or not the build
+    /// mounts it (it is gated from the moment it appears), a family where
+    /// the build mounts it; a family the build does not mount, and a name the
+    /// build's tool policy refuses, are ignored. The session records the
+    /// entries the build installed with its own. Set by the mob runtime's
+    /// member builds only.
+    pub grant_gated_tools_where_mounted: Option<meerkat_core::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -1256,6 +1267,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("grant_gated_tools", &self.grant_gated_tools)
             .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
+            )
+            .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
             )
@@ -1353,6 +1368,7 @@ impl AgentBuildConfig {
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -1495,6 +1511,7 @@ impl AgentBuildConfig {
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
         self.grant_gated_tools = build.grant_gated_tools.clone();
+        self.grant_gated_tools_where_mounted = build.grant_gated_tools_where_mounted.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1598,6 +1615,7 @@ impl AgentBuildConfig {
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
             grant_gated_tools: self.grant_gated_tools.clone(),
+            grant_gated_tools_where_mounted: self.grant_gated_tools_where_mounted.clone(),
         }
     }
 }
@@ -1744,6 +1762,133 @@ pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
 /// surfaces as the typed `AgentError::ToolGrantGateRefused`.
 pub use meerkat_core::tool_grant::GrantGateRefusal as GrantGateBuildError;
 
+/// The grant target a grant request names, checked against `gate`: the gate
+/// a session's build recorded, or every entry a mob member identity's gate
+/// names. A tool name must be gated by name or through a gated family; a
+/// family must be gated, and the grant takes every name the family can
+/// provide (the gate admits only the names a build gated). Every grant
+/// surface resolves targets here, so no surface owns the rule.
+///
+/// # Errors
+/// [`ToolGrantRequestRefusal::EmptyTarget`] for an empty tool name, and
+/// [`ToolGrantRequestRefusal::TargetNotGated`] for a target the gate does not
+/// name.
+///
+/// [`ToolGrantRequestRefusal::EmptyTarget`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::EmptyTarget
+/// [`ToolGrantRequestRefusal::TargetNotGated`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::TargetNotGated
+pub fn resolve_grant_target(
+    target: meerkat_contracts::ToolGrantTargetRequest,
+    gate: &meerkat_core::tool_grant::GrantGatedTools,
+) -> Result<
+    meerkat_core::tool_grant::ToolGrantTarget,
+    meerkat_core::tool_grant::ToolGrantRequestRefusal,
+> {
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+    match target {
+        ToolGrantTargetRequest::Tool { name } => {
+            if name.is_empty() {
+                return Err(ToolGrantRequestRefusal::EmptyTarget);
+            }
+            let gated = gate.tools.contains(&name)
+                || gate.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(&name.as_str()))
+                });
+            if !gated {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from(name),
+            })
+        }
+        ToolGrantTargetRequest::Family { family } => {
+            if !gate.families.contains(&family) {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            let Some(names) = tool_family_names(&family) else {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            };
+            Ok(ToolGrantTarget::Family {
+                family,
+                names: names.into_iter().map(ToolName::from).collect(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod grant_target_tests {
+    use super::*;
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{GrantGatedTools, ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+
+    #[test]
+    fn a_target_must_be_named_by_the_gate() {
+        let gate = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy");
+
+        assert_eq!(
+            resolve_grant_target(
+                ToolGrantTargetRequest::Tool {
+                    name: "deploy".to_string()
+                },
+                &gate
+            ),
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from("deploy")
+            })
+        );
+        // A name a gated family provides is gated through the family.
+        assert!(
+            resolve_grant_target(
+                ToolGrantTargetRequest::Tool {
+                    name: "shell".to_string()
+                },
+                &gate
+            )
+            .is_ok()
+        );
+        let Ok(ToolGrantTarget::Family { family, names }) = resolve_grant_target(
+            ToolGrantTargetRequest::Family {
+                family: "shell".to_string(),
+            },
+            &gate,
+        ) else {
+            panic!("a gated family resolves");
+        };
+        assert_eq!(family, "shell");
+        assert!(names.contains("shell"), "{names:?}");
+
+        for refused in [
+            ToolGrantTargetRequest::Tool {
+                name: "web_search".to_string(),
+            },
+            ToolGrantTargetRequest::Family {
+                family: "tasks".to_string(),
+            },
+        ] {
+            assert_eq!(
+                resolve_grant_target(refused.clone(), &gate),
+                Err(ToolGrantRequestRefusal::TargetNotGated),
+                "{refused:?} must be refused"
+            );
+        }
+        assert_eq!(
+            resolve_grant_target(
+                ToolGrantTargetRequest::Tool {
+                    name: String::new()
+                },
+                &gate
+            ),
+            Err(ToolGrantRequestRefusal::EmptyTarget)
+        );
+    }
+}
+
 /// Whether a build's gate covers web search, by name or through its family.
 /// Such a build disables every provider-native tool, so the gated `web_search`
 /// tool is its only search path and the gate adjudicates every search.
@@ -1824,24 +1969,47 @@ fn mount_grant_gated_families(
     Ok(())
 }
 
+/// A build's resolved grant gate: the gate to install (`None` for an empty
+/// gate) and the gate the session records, the build's own entries and the
+/// role entries it installed.
+struct ResolvedGrantGate {
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    recorded: meerkat_core::tool_grant::GrantGatedTools,
+}
+
 /// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
 /// every gated tool name is mounted (a name a pending source may provide once
 /// it connects is gated from the moment it appears), the build's tool policy
 /// refuses no gated name, every gated family has a mounted name, and the
-/// runtime carries the session's grants. Answers the gate to install, or
-/// `None` for an empty gate. A gate that covers web search has already
-/// disabled every provider-native tool for the build
-/// (`grant_gate_covers_web_search`), so no gated name is served natively.
+/// runtime carries the session's grants. These rules hold the build's own
+/// entries (`gated`), each refused typed.
+///
+/// The role entries of a mob member's gate (`where_mounted`, the entries of
+/// its role's current gate its own gate lacks) never refuse the build: a
+/// role tool name is installed whether or not the build mounts it now, so it
+/// is gated from the moment it appears; a role family is installed when the
+/// build mounts any of its names. A role family the build mounts none of,
+/// and a role name the build's tool policy refuses, are ignored outright:
+/// their tools cannot appear within the build, so no grant could open them.
+///
+/// A gate that covers web search has already disabled every provider-native
+/// tool for the build (`grant_gate_covers_web_search`), so no gated name is
+/// served natively.
 fn grant_gate_for_build(
     gated: &meerkat_core::tool_grant::GrantGatedTools,
+    where_mounted: &meerkat_core::tool_grant::GrantGatedTools,
     tools: &Arc<dyn AgentToolDispatcher>,
     tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
     declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
     session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
-) -> Result<Option<meerkat_core::tool_grant::ToolGrantGate>, GrantGateBuildError> {
+) -> Result<ResolvedGrantGate, GrantGateBuildError> {
     use meerkat_core::types::ToolName;
-    if gated.is_empty() {
-        return Ok(None);
+    let mut recorded = gated.clone();
+    if gated.is_empty() && where_mounted.is_empty() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
     }
     let mut families = BTreeMap::new();
     for family in &gated.families {
@@ -1857,8 +2025,8 @@ fn grant_gate_for_build(
                 .collect::<BTreeSet<_>>(),
         );
     }
-    let table = meerkat_core::tool_grant::GatedToolTable::new(
-        families,
+    let own = meerkat_core::tool_grant::GatedToolTable::new(
+        families.clone(),
         gated.tools.iter().cloned().collect(),
     );
 
@@ -1888,7 +2056,7 @@ fn grant_gate_for_build(
     let pending_sources = !tools.pending_catalog_sources().is_empty()
         || declared_tool_restriction
             .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty());
-    for name in table.tools() {
+    for name in own.tools() {
         let name = name.as_str();
         if mounted.contains(name) {
             continue;
@@ -1911,29 +2079,33 @@ fn grant_gate_for_build(
         });
     }
 
-    if let Some(policy) = tool_execution_policy {
-        for name in table.gated_names() {
-            let name = name.as_str();
-            let refused = if mounted.contains(name) {
+    // Whether the build's tool policy refuses `name`: a mounted name by its
+    // mutation class, a name not mounted yet by name only, since only a
+    // refusal by name is certain before the name appears.
+    let policy_refuses = |name: &str| {
+        tool_execution_policy.is_some_and(|policy| {
+            if mounted.contains(name) {
                 !policy.permits_call(name, tools.tool_mutation_class(name))
-            } else if table.tools().contains(name) {
-                // Not mounted yet: only a refusal by name is certain now.
-                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
             } else {
-                false
-            };
-            if refused {
-                return Err(GrantGateBuildError::PolicyRefused {
-                    tool: name.to_string(),
-                });
+                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
             }
+        })
+    };
+    for name in own.gated_names() {
+        let name = name.as_str();
+        // A gated family's name that is not mounted is never callable, so
+        // only a mounted one, or an individually gated one, can be refused.
+        if (mounted.contains(name) || own.tools().contains(name)) && policy_refuses(name) {
+            return Err(GrantGateBuildError::PolicyRefused {
+                tool: name.to_string(),
+            });
         }
     }
 
     // Every gated family reaches the final dispatcher: a family none of whose
     // names this build mounts (comms without a comms runtime, a builtin
     // family the build leaves off) could never open.
-    for (family, names) in table.families() {
+    for (family, names) in own.families() {
         if !names.iter().any(|name| mounted.contains(name.as_str())) {
             return Err(GrantGateBuildError::FamilyNotMounted {
                 family: family.clone(),
@@ -1941,10 +2113,48 @@ fn grant_gate_for_build(
         }
     }
 
+    // The role entries: installed where this build can ever show them,
+    // ignored outright otherwise, never refused.
+    let mut tool_names: BTreeSet<ToolName> = gated.tools.iter().cloned().collect();
+    for family in &where_mounted.families {
+        let Some(names) = tool_family_names(family) else {
+            tracing::warn!(
+                family = family.as_str(),
+                "a role's grant gate names no built-in tool family; the member's build ignores it"
+            );
+            continue;
+        };
+        let names: BTreeSet<ToolName> = names
+            .into_iter()
+            .filter(|name| !policy_refuses(name))
+            .map(ToolName::from)
+            .collect();
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            continue;
+        }
+        families.insert(family.clone(), names);
+        recorded.families.insert(family.clone());
+    }
+    for name in where_mounted.tools.iter() {
+        if policy_refuses(name.as_str()) {
+            continue;
+        }
+        tool_names.insert(name.clone());
+        recorded.tools.insert(name.clone());
+    }
+    let table = meerkat_core::tool_grant::GatedToolTable::new(families, tool_names);
+    if table.is_empty() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
+    }
+
     let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
-    Ok(Some(meerkat_core::tool_grant::ToolGrantGate::new(
-        grants, table,
-    )))
+    Ok(ResolvedGrantGate {
+        gate: Some(meerkat_core::tool_grant::ToolGrantGate::new(grants, table)),
+        recorded,
+    })
 }
 
 /// Where the operator-instruction entry rows `session` wrote itself stand in
@@ -5878,7 +6088,9 @@ impl AgentFactory {
         }
         // The grant gate is durable session truth, like the launch policy: a
         // resume that names no gate restores the recorded one, so a gated
-        // session cannot shed its gate by being resumed.
+        // session cannot shed its gate by being resumed. A mob member's build
+        // always names its gate (the one its profiles declare now, the empty
+        // gate included), so this serves plain sessions.
         if build_config.grant_gated_tools.is_none() && !metadata.tooling.grant_gated.is_empty() {
             build_config.grant_gated_tools = Some(metadata.tooling.grant_gated.clone());
         }
@@ -7743,8 +7955,21 @@ impl AgentFactory {
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
         // The build's scoped tool grant gate. The session's metadata records
         // the category overrides the caller asked for, before the gate mounts
-        // its gated families as if enabled.
+        // its gated families as if enabled. A mob member's build carries the
+        // entries of its role's gate its own gate lacks apart: the gate
+        // installs them where the build mounts them and never refuses for
+        // them.
         let grant_gated = build_config.grant_gated_tools.clone().unwrap_or_default();
+        let grant_gated_where_mounted = build_config
+            .grant_gated_tools_where_mounted
+            .clone()
+            .unwrap_or_default();
+        // A mob member's build reads its identity's grants, formed from the
+        // sealed incarnation witness its mob runtime handed the build.
+        let grant_member = build_config
+            .mob_member_binding
+            .clone()
+            .zip(build_config.mob_incarnation);
         let recorded_overrides = RecordedToolOverrides::of(&build_config);
         mount_grant_gated_families(&mut build_config, &grant_gated)
             .map_err(BuildAgentError::GrantGate)?;
@@ -8121,7 +8346,8 @@ impl AgentFactory {
             || tool_execution_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.is_unrestricted())
-            || grant_gate_covers_web_search(&grant_gated);
+            || grant_gate_covers_web_search(&grant_gated)
+            || grant_gate_covers_web_search(&grant_gated_where_mounted);
         // Refuse a fallback the browser profile cannot provision before any
         // credential is resolved. Governed inputs already disable native
         // search; the final identity is rechecked before helper provisioning.
@@ -10465,14 +10691,28 @@ impl AgentFactory {
             RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
-        let tool_grant_gate = grant_gate_for_build(
+        // A mob member's build reads its identity's grants first, then its
+        // session's; a seam without identity subjects reads the session's.
+        let session_grants = session_grants.map(|grants| match &grant_member {
+            Some((member, incarnation)) => grants.for_member(member, incarnation).unwrap_or(grants),
+            None => grants,
+        });
+        let ResolvedGrantGate {
+            gate: tool_grant_gate,
+            recorded: recorded_grant_gate,
+        } = grant_gate_for_build(
             &grant_gated,
+            &grant_gated_where_mounted,
             &tools,
             tool_execution_policy.as_ref(),
             declared_tool_restriction.as_ref(),
             session_grants,
         )
         .map_err(BuildAgentError::GrantGate)?;
+        // The session records its own gate entries and the role entries this
+        // build installed.
+        let mut factory_metadata = factory_metadata;
+        factory_metadata.tooling.grant_gated = recorded_grant_gate;
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
             let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(

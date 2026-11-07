@@ -17,6 +17,7 @@ import asyncio
 import base64
 from contextlib import AsyncExitStack
 import hashlib
+from html.parser import HTMLParser
 import json
 import math
 import os
@@ -186,13 +187,35 @@ def oidc_front(root, native, issuer, *, allowed=(ALICE,), principal=OPERATOR_EMA
     return console
 
 
-async def start_sign_in(client, console, *, status=303):
+class PageTags(HTMLParser):
+    """A page's start tags and their attributes, as a browser reads them."""
+
+    def __init__(self, page):
+        super().__init__()
+        self.tags = []
+        self.feed(page)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, dict(attrs)))
+
+
+def onward_target(response):
+    """Where the start's page sends the browser: one meta refresh and one link, to the same address."""
+    tags = PageTags(response.text).tags
+    refresh = [attrs.get("content", "") for tag, attrs in tags if tag == "meta" and attrs.get("http-equiv") == "refresh"]
+    links = [attrs.get("href") for tag, attrs in tags if tag == "a"]
+    assert len(refresh) == 1 and refresh[0].startswith("0;url=") and links == [refresh[0].removeprefix("0;url=")]
+    return links[0]
+
+
+async def start_sign_in(client, console, *, status=200):
     form = await client.get("/login")
     assert form.status_code == 200, form.text
     nonce = client.cookies[console.cookie + "_login"]
     started = await client.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
     assert started.status_code == status, started.text
-    return started.headers.get("location")
+    return onward_target(started) if status == 200 else None
 
 
 async def oidc_sign_in(client, console, issuer, *, status=200, **person):
@@ -337,6 +360,30 @@ def test_oidc_front_starts_after_a_start_killed_while_recording_its_identity(tmp
     assert sorted(path.name for path in state.iterdir()) == sorted(
         [console_auth.OIDC_ISSUER_FILE, console_auth.OIDC_KEY_FILE])
     assert (state / console_auth.OIDC_ISSUER_FILE).stat().st_nlink == 1
+
+
+# A start removes only the front's own temporary files. Every published
+# record stays, however old: the access copy, the named accounts and the OIDC
+# issuer and key, while an old temporary file beside them goes.
+def test_a_start_keeps_every_published_record_however_old(tmp_path):
+    from test_console_named_accounts import named_accounts
+    root = tmp_path / "application"
+    (root / "config").mkdir(parents=True)
+    (root / "config/access.toml").write_bytes(b'enabled = true\nadmins = ["operator"]\nrules = []\n\n[groups]\n')
+    issuer = console_auth._front_identity(root)[0]
+    console_auth.save_console_accounts(root, named_accounts(ALICE), None, "operator")
+    live = console_auth.console_access_file(root)
+    state = root / ".mobkit"
+    published = {path.name: path.read_bytes() for path in state.iterdir()}
+    assert set(published) == {"console-access.toml", console_auth.ACCOUNTS_FILE, console_auth.OIDC_ISSUER_FILE,
+                              console_auth.OIDC_KEY_FILE}
+    left = state / (".console-access." + "0" * 16 + ".pending")
+    left.write_bytes(b"")
+    hour_ago = time.time() - 3600
+    for path in state.iterdir():
+        os.utime(path, (hour_ago, hour_ago))
+    assert console_auth.console_access_file(root) == live and console_auth._front_identity(root)[0] == issuer
+    assert {path.name: path.read_bytes() for path in state.iterdir()} == published
 
 
 # Row 3: the console accepts the front's own tokens and nothing else: not
@@ -584,7 +631,15 @@ async def test_oidc_limits_pending_sign_ins_and_failures_per_address(tmp_path, c
             assert stale.status_code == 403 and "expired" in stale.text
             fresh = await forms[3].post("/login", data={"nonce": forms[3].cookies[console.cookie + "_login"]},
                                         headers={"Origin": console.origin})
-            assert fresh.status_code == 303
+            assert fresh.status_code == 200 and onward_target(fresh).startswith(ISSUER_URL + "/authorize?")
+            # The forms table as a whole drops its oldest form, whatever its
+            # address, so callers spread over many addresses cannot grow it.
+            spread = [await stack.enter_async_context(browser(app, console, f"192.0.2.{60 + index}"))
+                      for index in range(console_auth.LOGIN_FORMS + 1)]
+            for person in spread:
+                assert (await person.get("/login")).status_code == 200
+            first = spread[0].cookies[console.cookie + "_login"]
+            assert len(console.login_tokens) == console_auth.LOGIN_FORMS and first not in console.login_tokens
         async with browser(app, console, "192.0.2.40") as failing, browser(app, console, "192.0.2.50") as fine:
             issuer.tamper = True
             for _ in range(console_auth.FAILURES_PER_CLIENT):
@@ -660,32 +715,27 @@ async def test_oidc_refuses_a_provider_it_cannot_use_safely(tmp_path, discovery)
     app = console.application(NATIVE)
     try:
         async with browser(app, console) as alice:
-            # The sign-in page names the provider's authorization endpoint in
-            # its policy, so it is offered only for a usable provider.
-            page = await alice.get("/login")
-            assert page.status_code == 503 and "identity provider" in page.text and "<form" not in page.text
-            assert console.cookie + "_login" not in alice.cookies
-            # A provider that changes after the page was served is refused at the start.
-            issuer.discovery = {}
+            # The sign-in page names no provider; the start reads its discovery document.
             form = await alice.get("/login")
-            issuer.discovery = discovery
-            console._oidc_discovery = None
             nonce = alice.cookies[console.cookie + "_login"]
             started = await alice.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
             assert started.status_code == 503 and "identity provider" in started.text
             assert "location" not in started.headers and form.status_code == 200
+            assert not [tag for tag, attrs in PageTags(started.text).tags
+                        if tag == "meta" and attrs.get("http-equiv") == "refresh"]
+            assert console.cookie + "_oidc" not in alice.cookies
     finally:
         await console.close()
 
 
-# The sign-in page's form posts to the front, which answers with a redirect to
-# the identity provider. Chromium applies form-action to the redirects of a
-# form submission too, so the page admits the front and exactly the origin of
-# the provider's authorization endpoint, nothing wider.
-@pytest.mark.parametrize("endpoint, origin", [
-    (ISSUER_URL + "/authorize", "https://login.example.test"),
-    ("https://auth.example.test:8443/oauth2/v2/authorize?tenant=a", "https://auth.example.test:8443")])
-async def test_oidc_sign_in_page_lets_its_form_go_on_to_the_provider_only(tmp_path, endpoint, origin):
+# The sign-in form posts only to the front. Chromium checks form-action on
+# every redirect of a form submission, and a provider may redirect its
+# authorization endpoint on to another origin, or have an IPv6 address no CSP
+# source can name; so the start answers with a same-origin page (below), and
+# the sign-in page's policy keeps form-action 'self' alone.
+@pytest.mark.parametrize("endpoint", [ISSUER_URL + "/authorize",
+                                      "https://auth.example.test:8443/oauth2/v2/authorize?tenant=a"])
+async def test_oidc_sign_in_page_posts_only_to_the_front(tmp_path, endpoint):
     native, issuer = OidcNative(), MockIssuer(discovery={"authorization_endpoint": endpoint})
     console = oidc_front(tmp_path, native, issuer)
     app = console.application(NATIVE)
@@ -696,12 +746,93 @@ async def test_oidc_sign_in_page_lets_its_form_go_on_to_the_provider_only(tmp_pa
             assert (page.status_code, again.status_code) == (200, 403)
             for response in (page, again):
                 directives = [part.strip() for part in response.headers["content-security-policy"].split(";")]
-                assert [part for part in directives if part.startswith("form-action")] == [
-                    f"form-action 'self' {origin}"]
-                assert directives == ["default-src 'none'", "style-src 'unsafe-inline'",
-                                      f"form-action 'self' {origin}", "frame-ancestors 'none'"]
+                assert directives == ["default-src 'none'", "style-src 'unsafe-inline'", "form-action 'self'",
+                                      "frame-ancestors 'none'"]
             started = await start_sign_in(alice, console)
             assert started.startswith(endpoint.split("?")[0] + "?")
+    finally:
+        await console.close()
+
+
+# The start answers its form with a same-origin page that moves on to the
+# provider by meta refresh, plus a link, the way the landing page moves on to
+# the Console: a meta refresh is no form submission, so form-action does not
+# apply to it or to the provider's own redirects after it.
+async def test_oidc_start_answers_with_a_page_that_moves_on_to_the_provider(tmp_path):
+    native, issuer = OidcNative(), MockIssuer()
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await alice.get("/login")
+            nonce = alice.cookies[console.cookie + "_login"]
+            started = await alice.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
+            assert started.status_code == 200 and "location" not in started.headers
+            assert started.headers["cache-control"] == "no-store"
+            assert started.headers["referrer-policy"] == "no-referrer"
+            target = onward_target(started)
+            parsed = urlsplit(target)
+            assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == ISSUER_URL + "/authorize"
+            query = dict(parse_qsl(parsed.query))
+            state = query["state"]
+            assert query["redirect_uri"] == console.origin + console_auth.OIDC_CALLBACK_PATH
+            assert query["code_challenge_method"] == "S256" and state in console._oidc_pending
+            # The binding cookie is set on that page, and the form's cookie is spent.
+            cookies = started.headers.get_list("set-cookie")
+            binding = [value for value in cookies if value.startswith(console.cookie + "_oidc=")]
+            assert len(binding) == 1 and "samesite=lax" in binding[0].lower() and "httponly" in binding[0].lower()
+            assert alice.cookies[console.cookie + "_oidc"] and console.cookie + "_login" not in alice.cookies
+            # The browser following that page completes the sign-in.
+            assert (await alice.get(issuer.authorize(target)[1])).status_code == 200
+    finally:
+        await console.close()
+
+
+# The authorization URL is one inert attribute value: an endpoint whose query
+# carries "&", quotes and angle brackets neither ends the attribute nor adds
+# markup, and the browser reads back exactly the URL the front built.
+async def test_oidc_start_page_escapes_the_authorization_url(tmp_path):
+    endpoint = ISSUER_URL + "/authorize?tenant=a&quote=\"&apostrophe='&markup=<b>x</b>"
+    native, issuer = OidcNative(), MockIssuer(discovery={"authorization_endpoint": endpoint})
+    console = oidc_front(tmp_path, native, issuer)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            await alice.get("/login")
+            nonce = alice.cookies[console.cookie + "_login"]
+            started = await alice.post("/login", data={"nonce": nonce}, headers={"Origin": console.origin})
+            assert started.status_code == 200
+            tags = [tag for tag, _ in PageTags(started.text).tags]
+            assert tags.count("a") == 1 and "b" not in tags
+            # One meta refresh and one link, both to exactly the URL the front built.
+            target = onward_target(started)
+            assert target.startswith(endpoint + "&")
+            query = dict(parse_qsl(urlsplit(target).query))
+            assert (query["tenant"], query["quote"], query["apostrophe"], query["markup"]) == ("a", '"', "'", "<b>x</b>")
+            assert (await alice.get(issuer.authorize(target)[1])).status_code == 200
+    finally:
+        await console.close()
+
+
+# A provider on this computer's IPv6 loopback address is a usable issuer: its
+# address goes into no CSP source, so the start works as for any other.
+async def test_oidc_sign_in_starts_with_an_ipv6_loopback_issuer(tmp_path):
+    address = "http://[::1]:8180"
+    issuer = MockIssuer(discovery={"issuer": address, "authorization_endpoint": address + "/authorize",
+                                   "token_endpoint": address + "/token", "jwks_uri": address + "/jwks"})
+    native = OidcNative()
+    settings = console_auth.ConsoleOidc(issuer=address, client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
+                                        allowed_emails=(ALICE,), transport=issuer.transport())
+    console = ConsoleFront(tmp_path, 8855, OPERATOR_EMAIL, None, runtime_namespace="meta",
+                           transport=native.transport(), oidc=settings)
+    native.auth = console.native_auth
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice:
+            page = await alice.get("/login")
+            assert "form-action 'self';" in page.headers["content-security-policy"] and "[::1]" not in page.text
+            target = await start_sign_in(alice, console)
+            assert target.startswith(address + "/authorize?")
     finally:
         await console.close()
 
@@ -847,11 +978,10 @@ async def test_oidc_sign_in_meets_one_overall_deadline_at_the_provider(tmp_path,
             late = await alice.get(issuer.authorize(started)[1])
             assert late.status_code == 504 and "did not answer in time" in late.text
             assert console._oidc_exchanges == 0 and not console.sessions and not native.requests
-            # The page for a provider whose discovery does not answer in time is typed too.
+            # A start whose discovery does not answer in time is typed too.
             console._oidc_discovery = None
             delays.update({"/.well-known/openid-configuration": 1.0})
-            page = await alice.get("/login")
-            assert page.status_code == 504 and "did not answer in time" in page.text
+            await start_sign_in(alice, console, status=504)
     finally:
         await console.close()
 

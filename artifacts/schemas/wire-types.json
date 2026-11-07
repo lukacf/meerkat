@@ -40004,7 +40004,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -43434,7 +43435,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -59881,7 +59883,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -84362,7 +84365,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -119518,7 +119522,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -120543,7 +120548,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -121538,7 +121544,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -163883,6 +163890,23 @@
           "detail"
         ],
         "type": "object"
+      },
+      {
+        "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "source_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
       }
     ],
     "title": "WireAuthError"
@@ -165133,6 +165157,23 @@
               },
               "kind": {
                 "const": "credential_store_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "source_unavailable",
                 "type": "string"
               }
             },
@@ -166998,7 +167039,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -184022,7 +184064,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },

@@ -7101,6 +7101,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "      'credential_interaction_required',",
             "      'credential_access_pending',",
             "      'credential_store_unavailable',",
+            "      'source_unavailable',",
             "    ],",
             "    `${path}.kind`,",
             "    'wire auth error kind',",

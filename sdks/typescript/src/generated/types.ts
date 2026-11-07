@@ -4056,7 +4056,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -7491,7 +7491,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 

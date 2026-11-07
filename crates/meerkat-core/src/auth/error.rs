@@ -80,6 +80,12 @@ pub enum AuthError {
     /// observed or failed). Not absence.
     #[error("credential store unavailable: {0}")]
     CredentialStoreUnavailable(String),
+    /// The credential's source (a token exchange, an identity or token
+    /// endpoint) cannot answer now: nothing was refused, and a later attempt
+    /// can succeed without any change to the credential or its
+    /// configuration. Not a credential fact.
+    #[error("credential source unavailable: {reason}")]
+    SourceUnavailable { reason: String },
 }
 
 impl AuthError {
@@ -105,6 +111,7 @@ impl AuthError {
             Self::CredentialInteractionRequired => AuthErrorKind::CredentialInteractionRequired,
             Self::CredentialAccessPending => AuthErrorKind::CredentialAccessPending,
             Self::CredentialStoreUnavailable(_) => AuthErrorKind::CredentialStoreUnavailable,
+            Self::SourceUnavailable { .. } => AuthErrorKind::SourceUnavailable,
         }
     }
 }
@@ -134,6 +141,7 @@ pub enum AuthErrorKind {
     CredentialInteractionRequired,
     CredentialAccessPending,
     CredentialStoreUnavailable,
+    SourceUnavailable,
 }
 
 impl AuthErrorKind {
@@ -158,7 +166,25 @@ impl AuthErrorKind {
             Self::CredentialInteractionRequired => "credential_interaction_required",
             Self::CredentialAccessPending => "credential_access_pending",
             Self::CredentialStoreUnavailable => "credential_store_unavailable",
+            Self::SourceUnavailable => "source_unavailable",
         }
+    }
+
+    /// Whether a failure of this kind clears on its own, with no change to
+    /// the credential or its configuration: the credential's source cannot
+    /// answer now ([`Self::SourceUnavailable`]), the operating-system
+    /// credential store cannot answer now
+    /// ([`Self::CredentialStoreUnavailable`]), or a lookup of the credential
+    /// is already in flight ([`Self::CredentialAccessPending`]). A build that
+    /// fails for such a cause is worth trying again later.
+    #[must_use]
+    pub const fn clears_on_its_own(self) -> bool {
+        matches!(
+            self,
+            Self::SourceUnavailable
+                | Self::CredentialStoreUnavailable
+                | Self::CredentialAccessPending
+        )
     }
 }
 
@@ -238,5 +264,63 @@ mod tests {
         assert_eq!(s, "\"missing_secret\"");
         let back: AuthErrorKind = serde_json::from_str(&s).unwrap();
         assert_eq!(back, k);
+    }
+
+    /// An unavailable credential source keeps its kind and reason through
+    /// the wire form, and its kind is the wire token `source_unavailable`.
+    #[test]
+    fn a_source_unavailable_error_keeps_its_kind_and_reason() {
+        let error = AuthError::SourceUnavailable {
+            reason: "token exchange answered 503".into(),
+        };
+        assert_eq!(error.kind(), AuthErrorKind::SourceUnavailable);
+        assert_eq!(error.kind().as_str(), "source_unavailable");
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"kind": "source_unavailable", "reason": "token exchange answered 503"})
+        );
+        let back: AuthError = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, error);
+    }
+
+    /// Exactly the kinds whose cause passes without any change to the
+    /// credential clear on their own.
+    #[test]
+    fn only_the_transient_kinds_clear_on_their_own() {
+        let clearing = [
+            AuthErrorKind::SourceUnavailable,
+            AuthErrorKind::CredentialStoreUnavailable,
+            AuthErrorKind::CredentialAccessPending,
+        ];
+        for kind in [
+            AuthErrorKind::MissingSecret,
+            AuthErrorKind::UnsupportedCombination,
+            AuthErrorKind::MissingRequiredMetadata,
+            AuthErrorKind::WorkspaceMismatch,
+            AuthErrorKind::StaleCredential,
+            AuthErrorKind::RefreshRequired,
+            AuthErrorKind::LeaseAbsent,
+            AuthErrorKind::UserReauthRequired,
+            AuthErrorKind::Expired,
+            AuthErrorKind::RefreshFailed,
+            AuthErrorKind::ResolveRequired,
+            AuthErrorKind::InteractiveLoginRequired,
+            AuthErrorKind::HostOwnedUnavailable,
+            AuthErrorKind::Io,
+            AuthErrorKind::Other,
+            AuthErrorKind::CredentialAccessDenied,
+            AuthErrorKind::CredentialInteractionRequired,
+            AuthErrorKind::CredentialAccessPending,
+            AuthErrorKind::CredentialStoreUnavailable,
+            AuthErrorKind::SourceUnavailable,
+        ] {
+            assert_eq!(
+                kind.clears_on_its_own(),
+                clearing.contains(&kind),
+                "{}",
+                kind.as_str()
+            );
+        }
     }
 }

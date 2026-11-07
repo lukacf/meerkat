@@ -173,6 +173,47 @@ fn writes_are_revision_conditional_and_never_wait() {
         .expect("replace once released");
 }
 
+/// Calls of one process take turns on the file: reads and writes from many
+/// threads never fail each other as held by another owner. Without turns,
+/// one connection opening while another closes (and checkpoints the
+/// write-ahead log) answers busy at once under the zero busy timeout, and
+/// two of the process's writers refuse each other.
+#[test]
+fn concurrent_calls_of_one_process_never_fail_each_other() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = std::sync::Arc::new(SqliteDecisionStore::in_store_path(dir.path()));
+    store
+        .insert_if_absent(&open_row("subject-seed"))
+        .expect("create the file");
+    let workers: Vec<_> = (0..8)
+        .map(|worker| {
+            let store = std::sync::Arc::clone(&store);
+            std::thread::spawn(move || {
+                let mut contended = 0_usize;
+                for round in 0..40 {
+                    let row = open_row(&format!("subject-{worker}-{round}"));
+                    let failures = [
+                        store.insert_if_absent(&row).err(),
+                        store.get(&row.decision_id).err(),
+                        store.list(&DecisionListFilter::default(), None, 10).err(),
+                        store.owed(None, 10).err(),
+                    ];
+                    contended += failures
+                        .iter()
+                        .filter(|failure| matches!(failure, Some(ApprovalStoreError::Contended)))
+                        .count();
+                }
+                contended
+            })
+        })
+        .collect();
+    let contended: usize = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker"))
+        .sum();
+    assert_eq!(contended, 0, "calls of one process refused each other");
+}
+
 #[test]
 fn a_future_domain_version_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");

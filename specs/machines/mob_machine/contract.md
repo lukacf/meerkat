@@ -7230,6 +7230,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `expected_session_named`
   - `session_binding_differs`
+  - `not_external_work_to_an_identity_member`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 

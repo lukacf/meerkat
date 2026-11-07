@@ -9168,6 +9168,7 @@ ResolveSubmitWorkRejectionStaleSessionBinding(agent_identity, agent_runtime_id, 
     /\ ((IF (agent_runtime_id \in DOMAIN runtime_fence_tokens) THEN Some((IF agent_runtime_id \in DOMAIN runtime_fence_tokens THEN runtime_fence_tokens[agent_runtime_id] ELSE "None")) ELSE None) = Some(fence_token))
     /\ (expected_session_id # None)
     /\ ((IF (agent_identity \in DOMAIN member_session_bindings) THEN Some((IF agent_identity \in DOMAIN member_session_bindings THEN member_session_bindings[agent_identity] ELSE "None")) ELSE None) # expected_session_id)
+    /\ (IF (origin # "External") THEN TRUE ELSE (((agent_identity \in DOMAIN identity_entry_origins) = FALSE) /\ ((agent_identity \in identity_entry_unreadable) = FALSE)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_510183d759a9c568

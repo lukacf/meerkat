@@ -13461,7 +13461,11 @@ macro_rules! mob_catalog_machine_dsl {
         // against. Runtime id and fence can stay current while the member's
         // session binding moves (session recovery under the same runtime),
         // so a mismatch is its own typed refusal, never a retarget. Declared
-        // after the other classifications: first match wins.
+        // after the other classifications. External work to an identity
+        // entry, or to a name reserved unreadable, is refused as an identity
+        // member whatever session it names: a stale session answer would
+        // invite a retry that can only be refused again, so this arm never
+        // answers it.
         transition ResolveSubmitWorkRejectionStaleSessionBinding {
             on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, expected_session_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
@@ -13470,6 +13474,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "expected_session_named" { expected_session_id != None }
             guard "session_binding_differs" { self.member_session_bindings.get_cloned(agent_identity) != expected_session_id }
+            guard "not_external_work_to_an_identity_member" {
+                origin != WorkOrigin::External
+                || (self.identity_entry_origins.contains_key(agent_identity) == false
+                    && self.identity_entry_unreadable.contains(agent_identity) == false)
+            }
             update {}
             to Running
             emit SubmitWorkRejected {

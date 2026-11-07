@@ -1755,5 +1755,19 @@ PY
   mutate doors entry_refusal_unanswered "Invariant AuditDoorsEntryExactlyOne" <<'PY'
 replace_in_arm("ResolveSubmitWorkRejectionIdentityMember", '(origin = "External")', "FALSE")
 PY
+
+  # The stale session refusal answers external work to an entry that names
+  # another session too (its guard against identity members dropped),
+  # beside the identity member refusal.
+  mutate doors stale_session_answers_entry "Invariant AuditDoorsAtMostOne" <<'PY'
+drop_guard("ResolveSubmitWorkRejectionStaleSessionBinding", "DOMAIN identity_entry_origins")
+PY
+
+  # The stale session refusal answers external work to a name reserved
+  # unreadable that names another session too (the unreadable half of its
+  # guard read as TRUE), beside the unreadable name's refusal.
+  mutate doors stale_session_answers_unreadable "Invariant AuditDoorsAtMostOne" <<'PY'
+replace_in_arm("ResolveSubmitWorkRejectionStaleSessionBinding", "((agent_identity \\in identity_entry_unreadable) = FALSE)", "TRUE")
+PY
 fi
 echo "created identity audit passed"

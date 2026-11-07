@@ -1663,6 +1663,57 @@ async fn scheduled_fire_requester_is_schedule_sender() -> TestResult {
     Ok(())
 }
 
+/// A fire names its sender as that caller's live sends are named at fire
+/// time. A person defined the schedule, and their issuer's tokens are then
+/// classified as shared accounts (`shared_account_tokens`): a live token of
+/// that issuer names an account many people may hold, not one person. So
+/// the fire names no person: its sender is a token principal and its turn
+/// has no requester.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_after_its_issuer_turned_shared_names_no_person() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-shared-issuer").await?;
+    let controller = enforced(vec![grant(
+        "erin-drives-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN).under(&controller)).await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let mut shared_issuer = console_decisions(true, false, &[ERIN]);
+    shared_issuer.trusted_oidc.shared_account_tokens = true;
+    let signed_in = doors(
+        &fixture,
+        shared_issuer,
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(
+        sent[0].payload["sender"]["kind"],
+        json!("token_principal"),
+        "a shared account's fire names no person: {sent:#?}"
+    );
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the agent admitted the scheduled send"
+    );
+    assert_eq!(
+        turn_requester(&fixture, "alpha", "Post the morning summary.").await,
+        None,
+        "the fired turn has no requester"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// On a console without sign-in, a fire sends as the console's shared
 /// account, deduplicated in that account's scope, as its live sends are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

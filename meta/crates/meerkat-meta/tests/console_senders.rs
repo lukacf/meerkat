@@ -721,3 +721,253 @@ async fn person_send_carries_its_sender_label() {
     );
     let _ = runtime.shutdown().await;
 }
+
+/// The JSON pointers in `value` that name a requester (a non-null
+/// `requester` key) or that hold a string containing `needle` (a person's
+/// `sub`, which only their qualified principal carries).
+fn requester_paths(value: &Value, needle: &str, at: &str, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text.contains(needle) => out.push(at.to_string()),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                requester_paths(item, needle, &format!("{at}/{index}"), out);
+            }
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                let path = format!("{at}/{key}");
+                if key == "requester" && !item.is_null() {
+                    out.push(path.clone());
+                }
+                requester_paths(item, needle, &path, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every pointer of `values` that names alice's requester.
+fn alice_requester_paths<'a>(values: impl IntoIterator<Item = &'a Value>) -> Vec<String> {
+    let needle = subject_of(ALICE);
+    let mut paths = Vec::new();
+    for (index, value) in values.into_iter().enumerate() {
+        requester_paths(value, &needle, &format!("/{index}"), &mut paths);
+    }
+    paths
+}
+
+/// `GET path` with bob's token: an SSE stream bob reads as a viewer.
+async fn open_stream_as_bob(app: &axum::Router, path: &str) -> axum::response::Response {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header(header::AUTHORIZATION, person_bearer(BOB))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK, "{path} opens for bob");
+    response
+}
+
+/// The events an SSE stream sends, as (event name, data) pairs, through the
+/// end of the run whose `run_started` names `content` (its `run_completed`
+/// or `run_failed`), or until `WAIT` runs out. Runs before it (the member's
+/// first turn, from its spawn) are read past.
+async fn sse_events_through_the_run_of(
+    response: axum::response::Response,
+    content: &str,
+) -> Vec<(String, Value)> {
+    use futures::StreamExt;
+    let mut stream = response.into_body().into_data_stream();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut buffer = String::new();
+    let mut events = Vec::new();
+    let mut started = false;
+    loop {
+        while let Some(end) = buffer.find("\n\n") {
+            let block: String = buffer.drain(..end + 2).collect();
+            let mut name = String::new();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event:") {
+                    name = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push_str(value.trim_start());
+                }
+            }
+            if data.is_empty() {
+                continue;
+            }
+            started |= name == "run_started" && data.contains(content);
+            let done = started && matches!(name.as_str(), "run_completed" | "run_failed");
+            events.push((
+                name,
+                serde_json::from_str(&data).unwrap_or(Value::String(data)),
+            ));
+            if done {
+                return events;
+            }
+        }
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(chunk))) => buffer.push_str(&String::from_utf8_lossy(&chunk)),
+            _ => return events,
+        }
+    }
+}
+
+/// Whether `events` hold the start and the end of the run whose
+/// `run_started` names `content`.
+fn carried_the_run_of(events: &[(String, Value)], content: &str) -> bool {
+    let start = events
+        .iter()
+        .position(|(name, data)| name == "run_started" && data.to_string().contains(content));
+    start.is_some_and(|start| {
+        events[start..]
+            .iter()
+            .any(|(name, _)| name == "run_completed")
+    })
+}
+
+/// Once a person's send on an Enforced console has run, another viewer of
+/// the agent reads no frame of its timeline that names the person's
+/// requester: not the send's `user_input` frame, not the frames of the run's
+/// events, and not the frames the session history projects (whose committed
+/// messages carry the requester in their transcript identity). The sender's
+/// display name stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_timeline_frame_another_viewer_reads_names_the_requester() {
+    let state = state_dir();
+    let runtime = boot_with_member(state.path(), &mob_id("timeline-viewer")).await;
+    let app = runtime.build_reference_app_router(decisions(true));
+    let (status, sent) = send(
+        &app,
+        &person_bearer(ALICE),
+        "viewed from alice",
+        "alice-viewed",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    assert_eq!(
+        requester_rows(&runtime, "viewed from alice").await,
+        vec![Some(TurnRequester::direct(person(ALICE)))],
+        "alice's turn names her as its direct requester"
+    );
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let frames = loop {
+        let page = rpc(
+            &app,
+            &person_bearer(BOB),
+            "meta/console/query_timeline",
+            json!({ "identity": MEMBER }),
+        )
+        .await;
+        let frames: Vec<Value> = page["result"]["frames"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let history_has = |kind: &str| {
+            frames
+                .iter()
+                .any(|frame| frame["kind"] == kind && frame["source"]["kind"] == "session_history")
+        };
+        if (history_has("user_input") && history_has("text_complete"))
+            || tokio::time::Instant::now() >= deadline
+        {
+            break frames;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["source"]["kind"] == "session_history"),
+        "bob reads the session history's frames: {frames:#?}"
+    );
+    let leaked = alice_requester_paths(&frames);
+    assert!(
+        leaked.is_empty(),
+        "frames bob reads name alice's requester at {leaked:?}: {frames:#?}"
+    );
+    let user_input = frames
+        .iter()
+        .find(|frame| {
+            frame["kind"] == "user_input"
+                && frame["source"]["kind"] == "send"
+                && frame["payload"]["content"] == json!("viewed from alice")
+        })
+        .unwrap_or_else(|| panic!("alice's send frame: {frames:#?}"));
+    assert_eq!(
+        user_input["payload"]["sender"]["display_name"],
+        json!(ALICE),
+        "the sender's display name stays"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// Another viewer reads the run of a person's send on the agent's event
+/// stream (`/agents/{id}/events`) without the person's requester: the run's
+/// lifecycle events carry its transcript identity with the requester left
+/// out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_event_stream_names_no_requester() {
+    let state = state_dir();
+    let runtime = boot_with_member(state.path(), &mob_id("agent-stream")).await;
+    let app = runtime.build_reference_app_router(decisions(true));
+    let stream = open_stream_as_bob(&app, &format!("/agents/{MEMBER}/events")).await;
+    let (status, sent) = send(
+        &app,
+        &person_bearer(ALICE),
+        "streamed from alice",
+        "alice-agent-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let events = sse_events_through_the_run_of(stream, "streamed from alice").await;
+    assert!(
+        carried_the_run_of(&events, "streamed from alice"),
+        "bob's stream carried alice's run: {events:#?}"
+    );
+    let leaked = alice_requester_paths(events.iter().map(|(_, data)| data));
+    assert!(
+        leaked.is_empty(),
+        "agent stream events bob reads name alice's requester at {leaked:?}: {events:#?}"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A mob observer reads the run of a person's send on the mob-wide stream
+/// (`/mob/events`) without the person's requester.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mob_event_stream_names_no_requester() {
+    let state = state_dir();
+    let runtime = boot_with_member(state.path(), &mob_id("mob-stream")).await;
+    let app = runtime.build_reference_app_router(decisions(true));
+    let stream = open_stream_as_bob(&app, "/mob/events").await;
+    let (status, sent) = send(
+        &app,
+        &person_bearer(ALICE),
+        "observed from alice",
+        "alice-mob-stream",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let events = sse_events_through_the_run_of(stream, "observed from alice").await;
+    assert!(
+        carried_the_run_of(&events, "observed from alice"),
+        "the mob stream carried alice's run: {events:#?}"
+    );
+    let leaked = alice_requester_paths(events.iter().map(|(_, data)| data));
+    assert!(
+        leaked.is_empty(),
+        "mob stream events bob reads name alice's requester at {leaked:?}: {events:#?}"
+    );
+    let _ = runtime.shutdown().await;
+}

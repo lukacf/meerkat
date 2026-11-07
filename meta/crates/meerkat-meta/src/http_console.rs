@@ -17908,10 +17908,18 @@ async fn prime_access_cache_from_runtime_in_namespace(
             .await,
         );
     }
-    // Every member the private-owner record knows, private or not, as far
-    // as its background seed has read: an ended member it does not know is
-    // withheld from a signed-in caller who is not an admin.
-    let known_members = runtime.private_owners().memory_members();
+    // Every ended member the private-owner record knows, private or not, as
+    // far as its background seed has read: an ended member it does not know
+    // is withheld from a signed-in caller who is not an admin. A member still
+    // on a roster is recorded from its row, under its console identity,
+    // never as ended.
+    let live_rows: BTreeSet<String> = members
+        .iter()
+        .filter_map(|member| member.agent_id.as_deref())
+        .map(crate::member_comms_id::logical_memory_identity)
+        .collect();
+    let mut known_members = runtime.private_owners().memory_members();
+    known_members.retain(|identity, _| !live_rows.contains(identity));
     record_live_and_registered_attributes(
         access,
         members,

@@ -20,7 +20,11 @@ export interface ConsoleAttentionItem {
   /** A reply to the caller's own request. Items of other kinds are skipped. */
   kind: "private_reply";
   createdAtMs: number;
-  text: string;
+  /** The reply as the gateway's payload policies left it; `null` when they
+   *  left no text (the card then says its content is hidden by policy). */
+  text: string | null;
+  /** Whether a payload policy rewrote the reply. */
+  redacted: boolean;
   origin: ConsoleAttentionOrigin;
 }
 
@@ -43,8 +47,10 @@ function stringOf(value: unknown): string | null {
 }
 
 /** The items of one `meta/console/attention` answer, bounded: a malformed
- *  item, or one of a kind this console does not know, is dropped. `null` when
- *  the answer holds no item list at all. */
+ *  item, or one of a kind this console does not know, is dropped. A reply a
+ *  payload policy rewrote is kept, one it left no text in too (`text` null),
+ *  so the person still sees and dismisses it. `null` when the answer holds
+ *  no item list at all. */
 export function normalizeConsoleAttention(result: unknown): ConsoleAttentionItem[] | null {
   if (!result || typeof result !== "object") return null;
   const raw = (result as { items?: unknown }).items;
@@ -58,6 +64,7 @@ export function normalizeConsoleAttention(result: unknown): ConsoleAttentionItem
     if (record.kind !== "private_reply") continue;
     const id = stringOf(record.id);
     const text = stringOf(record.text);
+    const redacted = record.redacted === true;
     const origin = record.origin && typeof record.origin === "object"
       ? record.origin as Record<string, unknown>
       : null;
@@ -67,15 +74,17 @@ export function normalizeConsoleAttention(result: unknown): ConsoleAttentionItem
     const createdAtMs = typeof record.created_at_ms === "number" && Number.isFinite(record.created_at_ms)
       ? record.created_at_ms
       : null;
-    if (!id || !text || !identity || !interactionId || !inputFrameId || createdAtMs === null || seen.has(id)) continue;
+    // A reply without text is one a policy left none of: kept, marked redacted.
+    if (!id || (!text && !redacted) || !identity || !interactionId || !inputFrameId || createdAtMs === null || seen.has(id)) continue;
     seen.add(id);
     items.push({
       id,
       kind: "private_reply",
       createdAtMs,
-      text: text.length > CONSOLE_ATTENTION_LIMITS.textLength
+      text: text && text.length > CONSOLE_ATTENTION_LIMITS.textLength
         ? `${text.slice(0, CONSOLE_ATTENTION_LIMITS.textLength - 1)}…`
         : text,
+      redacted,
       origin: { identity, interactionId, inputFrameId },
     });
   }

@@ -6862,6 +6862,10 @@ button.topo-roletree__agent:focus-visible {
   overflow-wrap: anywhere;
   color: var(--_cc-foreground);
 }
+.cc-private-reply__text--hidden {
+  font-style: italic;
+  color: var(--_cc-foreground-muted);
+}
 .cc-private-reply .cc-approval__actions {
   margin-top: 14px;
 }

@@ -25249,18 +25249,20 @@ function normalizeConsoleAttention(result) {
     if (record10.kind !== "private_reply") continue;
     const id = stringOf(record10.id);
     const text14 = stringOf(record10.text);
+    const redacted = record10.redacted === true;
     const origin = record10.origin && typeof record10.origin === "object" ? record10.origin : null;
     const identity = stringOf(origin?.identity);
     const interactionId = stringOf(origin?.interaction_id);
     const inputFrameId = stringOf(origin?.input_frame_id);
     const createdAtMs = typeof record10.created_at_ms === "number" && Number.isFinite(record10.created_at_ms) ? record10.created_at_ms : null;
-    if (!id || !text14 || !identity || !interactionId || !inputFrameId || createdAtMs === null || seen.has(id)) continue;
+    if (!id || !text14 && !redacted || !identity || !interactionId || !inputFrameId || createdAtMs === null || seen.has(id)) continue;
     seen.add(id);
     items.push({
       id,
       kind: "private_reply",
       createdAtMs,
-      text: text14.length > CONSOLE_ATTENTION_LIMITS.textLength ? "".concat(text14.slice(0, CONSOLE_ATTENTION_LIMITS.textLength - 1), "\u2026") : text14,
+      text: text14 && text14.length > CONSOLE_ATTENTION_LIMITS.textLength ? "".concat(text14.slice(0, CONSOLE_ATTENTION_LIMITS.textLength - 1), "\u2026") : text14,
+      redacted,
       origin: { identity, interactionId, inputFrameId }
     });
   }
@@ -32388,36 +32390,45 @@ function PrivateReplyCard({ item, onDismiss }) {
   const identity = item.origin.identity;
   const name2 = agentDisplayName(identity, directory) || identity;
   const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
-  return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("article", { className: "cc-approval cc-private-reply", "data-kind": "private-reply", "data-testid": "console-attention:".concat(item.id), children: [
-    /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("header", { className: "cc-approval__header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", children: "Reply from ".concat(name2) }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { className: "cc-private-reply__audience", title: "Only you can see this reply", children: "Only you" })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-private-reply__text", children: item.text }),
-    /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-approval__asked", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(RelativeTime, { value: item.createdAtMs, prefix: "Answered" }) }),
-    openChat || onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
-      openChat ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
-        Button,
-        {
-          size: "sm",
-          onClick: openChat,
-          "aria-label": "Open ".concat(name2, "'s chat"),
-          "data-testid": "console-attention-open:".concat(item.id),
-          children: "Open the chat"
-        }
-      ) : null,
-      onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
-        Button,
-        {
-          size: "sm",
-          onClick: () => onDismiss(item),
-          "aria-label": "Dismiss the reply from ".concat(name2),
-          "data-testid": "console-attention-dismiss:".concat(item.id),
-          children: "Dismiss"
-        }
-      ) : null
-    ] }) : null
-  ] });
+  return /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)(
+    "article",
+    {
+      className: "cc-approval cc-private-reply",
+      "data-kind": "private-reply",
+      "data-redacted": item.redacted ? "true" : void 0,
+      "data-testid": "console-attention:".concat(item.id),
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("header", { className: "cc-approval__header", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("div", { className: "cc-approval__heading", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("strong", { className: "cc-approval__title", children: "Reply from ".concat(name2) }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(Chip, { className: "cc-private-reply__audience", title: "Only you can see this reply", children: "Only you" })
+        ] }),
+        item.text === null ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-private-reply__text cc-private-reply__text--hidden", children: "Content hidden by policy" }) : /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-private-reply__text", children: item.text }),
+        /* @__PURE__ */ (0, import_jsx_runtime48.jsx)("p", { className: "cc-approval__asked", children: /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(RelativeTime, { value: item.createdAtMs, prefix: "Answered" }) }),
+        openChat || onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsxs)("div", { className: "cc-approval__actions", children: [
+          openChat ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+            Button,
+            {
+              size: "sm",
+              onClick: openChat,
+              "aria-label": "Open ".concat(name2, "'s chat"),
+              "data-testid": "console-attention-open:".concat(item.id),
+              children: "Open the chat"
+            }
+          ) : null,
+          onDismiss ? /* @__PURE__ */ (0, import_jsx_runtime48.jsx)(
+            Button,
+            {
+              size: "sm",
+              onClick: () => onDismiss(item),
+              "aria-label": "Dismiss the reply from ".concat(name2),
+              "data-testid": "console-attention-dismiss:".concat(item.id),
+              children: "Dismiss"
+            }
+          ) : null
+        ] }) : null
+      ]
+    }
+  );
 }
 function ApprovalAttention({ snapshot, onOpen, hostItems = 0, replies = 0 }) {
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";

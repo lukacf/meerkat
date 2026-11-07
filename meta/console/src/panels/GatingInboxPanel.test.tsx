@@ -474,6 +474,7 @@ describe("GatingInboxPanel private replies", () => {
     kind: "private_reply" as const,
     createdAtMs: Date.now() - 60_000,
     text: "Your release is approved.",
+    redacted: false,
     origin: { identity: "alpha", interactionId: "interaction-1", inputFrameId: "frame-1" },
   };
   const hostItem = { sourceId: "host", sourceLabel: "Host", id: "a", title: "Confirm a setting", href: "/host/items/a", details: [] };

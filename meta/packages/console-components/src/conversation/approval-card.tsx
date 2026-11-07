@@ -379,7 +379,8 @@ export function HostAttentionCard({ item }: { item: HostAttentionItem }) {
 }
 
 /** A reply meant for the signed-in person alone (`meta/console/attention`),
- * in the approval card's family: which agent answered, when, and the text.
+ * in the approval card's family: which agent answered, when, and the text,
+ * or that a payload policy hid its content when the policy left no text.
  * The chat it answers opens from here when the host can open agents.
  * Dismiss takes it off the person's list (the reply stays delivered); a
  * read-only console passes no `onDismiss` and offers none. */
@@ -393,14 +394,23 @@ export function PrivateReplyCard({ item, onDismiss }: {
   const name = agentDisplayName(identity, directory) || identity;
   const openChat = navigation?.openAgent ? () => navigation.openAgent?.(identity, "chat") : null;
   return (
-    <article className="cc-approval cc-private-reply" data-kind="private-reply" data-testid={`console-attention:${item.id}`}>
+    <article
+      className="cc-approval cc-private-reply"
+      data-kind="private-reply"
+      data-redacted={item.redacted ? "true" : undefined}
+      data-testid={`console-attention:${item.id}`}
+    >
       <header className="cc-approval__header">
         <div className="cc-approval__heading">
           <strong className="cc-approval__title">{`Reply from ${name}`}</strong>
         </div>
         <Chip className="cc-private-reply__audience" title="Only you can see this reply">Only you</Chip>
       </header>
-      <p className="cc-private-reply__text">{item.text}</p>
+      {item.text === null ? (
+        <p className="cc-private-reply__text cc-private-reply__text--hidden">Content hidden by policy</p>
+      ) : (
+        <p className="cc-private-reply__text">{item.text}</p>
+      )}
       <p className="cc-approval__asked">
         <RelativeTime value={item.createdAtMs} prefix="Answered" />
       </p>

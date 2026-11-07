@@ -205,6 +205,10 @@
   overflow-wrap: anywhere;
   color: var(--_cc-foreground);
 }
+.cc-private-reply__text--hidden {
+  font-style: italic;
+  color: var(--_cc-foreground-muted);
+}
 .cc-private-reply .cc-approval__actions { margin-top: 14px; }
 .cc-approval-attention { padding: 7px 8px; border-bottom: 1px solid var(--line, var(--_cc-border-soft, #555)); }
 .cc-approval-attention__open { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink-muted, var(--_cc-foreground-muted)); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }

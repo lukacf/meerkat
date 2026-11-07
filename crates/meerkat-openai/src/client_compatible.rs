@@ -910,6 +910,10 @@ impl OpenAiCompatibleClient {
                     let body = self.build_chat_completions_body(&projected_request)?;
                     let content = meerkat_core::HttpAuthorizationContent {
                         has_images: projected_request.has_images(),
+                        initiator: prepared.map_or_else(
+                            || projected_request.initiator(),
+                            PreparedLlmRequest::initiator,
+                        ),
                     };
                     let url = self.chat_completions_endpoint();
                     let mut diagnostics = Vec::new();
@@ -2191,6 +2195,121 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    /// Records the initiator every request hands it and answers a 401 with a
+    /// retry.
+    #[derive(Default)]
+    struct InitiatorRecordingAuthorizer {
+        initiators: std::sync::Mutex<Vec<meerkat_core::HttpRequestInitiator>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpAuthorizer for InitiatorRecordingAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer recorded".to_string()));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "initiator-recording"
+        }
+
+        fn append_content_headers(
+            &self,
+            content: meerkat_core::HttpAuthorizationContent,
+            _headers: &mut Vec<(String, String)>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            self.initiators.lock().unwrap().push(content.initiator);
+            Ok(())
+        }
+    }
+
+    /// A Chat Completions request tells its authorizer who initiated it, from
+    /// its last input: the agent after a tool result, the user after a user
+    /// message; a 401 retry tells the same.
+    #[tokio::test]
+    async fn chat_requests_name_who_initiated_them_on_every_attempt() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let tool_turn = vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![meerkat_core::ToolResult::new(
+                "call_1".to_string(),
+                "found".to_string(),
+                false,
+            )]),
+        ];
+        let cases = [
+            (
+                "a user message",
+                vec![Message::User(UserMessage::text("hello"))],
+                User,
+            ),
+            ("a tool result", tool_turn, Agent),
+        ];
+        for (case, messages, initiator) in cases {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let app = Router::new()
+                .route("/chat/completions", post(chat_auth_retry))
+                .with_state(ChatAuthRetryState {
+                    calls: Arc::clone(&calls),
+                });
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve test server");
+            });
+            let authorizer = Arc::new(InitiatorRecordingAuthorizer::default());
+            let client = OpenAiCompatibleClient::new_with_options(
+                OpenAiCompatibleMode::ChatCompletions,
+                "remote-model".to_string(),
+                format!("http://{addr}"),
+                None,
+                options(true, true, true, true),
+            )
+            .with_authorizer(authorizer.clone());
+            let request = LlmRequest::new("catalog-model", messages);
+            let _ = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{case}: the 401 is retried once"
+            );
+            assert_eq!(
+                *authorizer.initiators.lock().unwrap(),
+                vec![initiator; 2],
+                "{case}: both attempts name the same initiator"
+            );
+        }
     }
 
     /// Every Authorization value the canary authorizer signs with carries

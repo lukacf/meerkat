@@ -167,7 +167,9 @@ pub enum LlmError {
     /// The provider's response ended before its terminal event: a stream
     /// that stopped without `Done` (`ensure_terminal_done`), an SSE buffer cut
     /// mid-event, or a terminal response the provider marked incomplete for a
-    /// reason with no stop-reason mapping. Retryable: nothing of the attempt
+    /// reason with no stop-reason mapping. It is also how a GitHub Copilot
+    /// Responses stream fails whose terminal output does not line up with the
+    /// output items the stream announced. Retryable: nothing of the attempt
     /// is committed (the adapter returns the error before assembling a
     /// result), and the agent loop's bounded retry policy replays the turn
     /// under the same assistant message id.

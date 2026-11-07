@@ -3103,6 +3103,10 @@ impl HttpAuthorizer for CopilotAuthorizer {
         crate::GITHUB_COPILOT_AUTHORIZER_LABEL
     }
 
+    /// `Copilot-Vision-Request` on a request with images, and `X-Initiator`:
+    /// `agent` when the request continues the agent's own work (its last
+    /// input is a tool result or the assistant's own output, or it is a
+    /// request-local call such as a compaction summary), `user` otherwise.
     fn append_content_headers(
         &self,
         content: meerkat_core::HttpAuthorizationContent,
@@ -3111,6 +3115,11 @@ impl HttpAuthorizer for CopilotAuthorizer {
         if content.has_images {
             headers.push(("Copilot-Vision-Request".to_string(), "true".to_string()));
         }
+        let initiator = match content.initiator {
+            meerkat_core::HttpRequestInitiator::User => "user",
+            meerkat_core::HttpRequestInitiator::Agent => "agent",
+        };
+        headers.push(("X-Initiator".to_string(), initiator.to_string()));
         Ok(())
     }
 
@@ -5624,6 +5633,55 @@ mod tests {
             integration_ids,
             vec![Some("vscode-chat".to_string()); 3],
             "token exchange, model listing, inference"
+        );
+    }
+
+    /// Inference names who initiated each request in `X-Initiator`: `agent`
+    /// when the agent continues its own work, `user` otherwise. An image
+    /// request still names vision.
+    #[tokio::test]
+    async fn inference_names_who_initiated_the_request() {
+        use meerkat_core::HttpAuthorizationContent;
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let authorizer = CopilotAuthorizer {
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
+            binding,
+            env,
+            transport: Arc::new(ScriptedTransport::new(Vec::new())),
+        };
+        let headers_for = |has_images, initiator| {
+            let mut headers = Vec::new();
+            authorizer
+                .append_content_headers(
+                    HttpAuthorizationContent {
+                        has_images,
+                        initiator,
+                    },
+                    &mut headers,
+                )
+                .expect("content headers");
+            headers
+        };
+        let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+        assert_eq!(
+            headers_for(false, Agent),
+            vec![header("X-Initiator", "agent")]
+        );
+        assert_eq!(
+            headers_for(false, User),
+            vec![header("X-Initiator", "user")]
+        );
+        assert_eq!(
+            headers_for(true, Agent),
+            vec![
+                header("Copilot-Vision-Request", "true"),
+                header("X-Initiator", "agent")
+            ]
         );
     }
 

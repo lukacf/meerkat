@@ -129,6 +129,8 @@ pub use crate::runtime::host_materialize::HostMemberSubstrate;
 
 use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
 
+mod instruction_targets;
+
 async fn commit_revived_member_publication(
     outcome: &mut RevivedMemberOutcome,
     incarnation: meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation,
@@ -6134,6 +6136,11 @@ pub struct MobHostActor {
     /// the first uncertain write's own error, which every later refusal
     /// names.
     durable_uncertainty_fail_stop: UncertainDurabilityFailStop<MobHostActorError>,
+    /// A placed member's operator-instruction writes (V7
+    /// `RecordMemberInstructionTarget`, `ReleaseMemberInstructionTarget`):
+    /// admitted on the responder turn, served off it, one at a time per
+    /// member session.
+    instruction_writes: instruction_targets::InstructionWriteLanes,
 }
 
 /// Prepare one validated durable snapshot, publish the initial descriptor,
@@ -6310,6 +6317,7 @@ pub async fn spawn_mob_host_actor(
         generation_start_seqs,
         registered_member_incarnations: HashMap::new(),
         durable_uncertainty_fail_stop: Default::default(),
+        instruction_writes: Default::default(),
     };
 
     // COMMIT: reserve the exact owner + identity without making it resolvable,
@@ -6411,9 +6419,19 @@ async fn run_host_responder(
     mut observation_ack_rx: mpsc::Receiver<HostTurnOutcomeAckRequest>,
     forked_participant_sweep_interval: Duration,
 ) {
+    use futures::FutureExt as _;
+    use futures::StreamExt as _;
+
     let notify = actor.host_runtime.inbox_notify();
     let mut forked_participant_tick = tokio::time::interval(forked_participant_sweep_interval);
     forked_participant_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A placed member's operator-instruction writes, served off the
+    // responder turn: each answers its request when it finishes, and the
+    // ones still running when the responder stops are dropped (a write a
+    // member session had already taken still lands; the controller retries
+    // the rest).
+    let mut instruction_writes =
+        futures::stream::FuturesUnordered::<instruction_targets::InstructionWriteFuture>::new();
     'responder: loop {
         let notified = notify.notified();
         tokio::pin!(notified);
@@ -6465,6 +6483,10 @@ async fn run_host_responder(
                     continue;
                 }
                 () = &mut notified => continue,
+                Some(done) = instruction_writes.next(), if !instruction_writes.is_empty() => {
+                    actor.finish_instruction_write(done).await;
+                    continue;
+                }
                 request = observation_pending_rx.recv() => {
                     match request {
                         Some(request) => {
@@ -6499,6 +6521,18 @@ async fn run_host_responder(
         }
         for candidate in &candidates {
             actor.serve_candidate(candidate).await;
+        }
+        // The operator-instruction writes this batch admitted run off the
+        // responder turn; answer the ones that already finished.
+        instruction_writes.extend(
+            actor
+                .instruction_writes
+                .take_admitted()
+                .into_iter()
+                .map(instruction_targets::AdmittedInstructionWrite::run),
+        );
+        while let Some(Some(done)) = instruction_writes.next().now_or_never() {
+            actor.finish_instruction_write(done).await;
         }
         // Residency may have changed (materialize / release / revoke):
         // reconcile the observation projection + journal registrations.
@@ -7455,6 +7489,14 @@ impl MobHostActor {
             }
             BridgeCommand::HostFeatures(payload) => {
                 self.serve_host_features_candidate(candidate, payload).await;
+            }
+            BridgeCommand::RecordMemberInstructionTarget(payload) => {
+                self.serve_record_member_instruction_target(candidate, payload)
+                    .await;
+            }
+            BridgeCommand::ReleaseMemberInstructionTarget(payload) => {
+                self.serve_release_member_instruction_target(candidate, payload)
+                    .await;
             }
             BridgeCommand::IssueHostBindingDescriptor(payload) => {
                 self.serve_issue_host_binding_descriptor_candidate(candidate, payload)

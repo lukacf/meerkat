@@ -26,7 +26,18 @@ const controllerConfig = {
   // caller signed in to this browser. Empty until the capabilities load,
   // and on a surface that names no caller.
   callerScope: "",
+  // Whether the caller must be read again before the next request: an
+  // answer said it may have changed (a 401, or Meta's refusal of the
+  // caller). A capabilities read clears it.
+  callerScopeStale: false,
 };
+
+// The capabilities method, which names the caller.
+const CAPABILITIES_METHOD = "meta/capabilities";
+// Meta's refusal of a change for its caller: made for another caller
+// (`caller_changed`), or after the caller's login ended
+// (`caller_not_current`).
+const CALLER_REFUSED_CODE = -32056;
 
 export function configure(options) {
   const rpcUrl = String(options?.rpcUrl || "").trim();
@@ -39,6 +50,7 @@ export function configure(options) {
 export function configureCallerScope(capabilities) {
   const scope = capabilities?.auth?.caller_scope;
   controllerConfig.callerScope = typeof scope === "string" ? scope.trim() : "";
+  controllerConfig.callerScopeStale = false;
   return controllerConfig.callerScope;
 }
 
@@ -217,6 +229,12 @@ export function configureAuthoringMethodsFromSchema(schema) {
 
 let requestId = 0;
 export async function callRpc(method, params, options = {}) {
+  if (controllerConfig.callerScopeStale && method !== CAPABILITIES_METHOD) {
+    // An answer said the caller may have changed: read it again before
+    // anything else goes out, so a change names the caller the surface
+    // names now. A read that fails sends nothing and leaves it stale.
+    configureCallerScope(await callRpc(CAPABILITIES_METHOD, {}, options));
+  }
   const requestParams = params || {};
   const scopedParams = controllerConfig.callerScope
     && typeof requestParams === "object"
@@ -236,10 +254,12 @@ export async function callRpc(method, params, options = {}) {
     }),
   });
   if (!response.ok) {
+    if (response.status === 401) controllerConfig.callerScopeStale = true;
     throw new Error(`Meta API ${response.status}`);
   }
   const payload = await response.json();
   if (payload.error) {
+    if (payload.error.code === CALLER_REFUSED_CODE) controllerConfig.callerScopeStale = true;
     throw new Error(payload.error.message || "Meta API error");
   }
   return payload.result;

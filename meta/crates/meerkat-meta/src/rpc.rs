@@ -2118,10 +2118,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
-/// Flow Editor draft store write the authoritative launch reads
-/// ([`candidate_launch_refuses_draft_store_write`]). Reads still answer:
-/// the declaration read, the WorkGraph reads, the draft reads, a deploy
-/// plan, a structural validation and a BigQuery read among them.
+/// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
+/// still answer: the declaration read, the WorkGraph reads, the draft reads,
+/// a deploy plan, a structural validation and a BigQuery read among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2131,45 +2130,73 @@ pub(crate) fn candidate_launch_refuses(
         || mob_methods::is_member_declaration_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
-        || candidate_launch_refuses_draft_store_write(method, params, state_dir)
+        || candidate_launch_refuses_mobpack_change(method, params, state_dir)
 }
 
-/// The Flow Editor draft store methods that write the store.
-const MOBPACK_DRAFT_STORE_WRITE_METHODS: &[&str] = &[
-    "meta/mobpacks/create",
-    "meta/mobpacks/save",
-    "meta/mobpacks/delete",
-    "meta/mobpacks/undo",
-    "meta/mobpacks/redo",
-];
+/// What a Flow Editor change does on the host ([`mobpack_authoring_change`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobpackAuthoringChange {
+    /// Writes the Flow Editor's draft store.
+    DraftStoreWrite,
+    /// Writes a mobpack archive and runs `rkat` on the host.
+    HostRun,
+}
 
-/// Whether a candidate launch refuses a Flow Editor draft store write: every
-/// one but a write to a store file the caller names (`store_path`) outside
-/// the launch's `state_dir` and the gateway home that is not the store
-/// `META_FLOW_EDITOR_DRAFT_STORE` names
+/// The change a mobpack authoring request makes, `None` for one that only
+/// reads and renders. This is the one list of the Flow Editor's changes:
+/// the draft store writes (`meta/mobpacks/create`, `save`, `delete`, `undo`
+/// and `redo`), a deploy with `execute` and a validation with
+/// `rkat_validate`, each arm decided on the request as its handler parses
+/// it. The Console's caller check of the Flow Editor
+/// ([`is_mobpack_authoring_change`]) and a candidate launch's refusal
+/// ([`candidate_launch_refuses_mobpack_change`]) both read it, so the two
+/// cannot drift.
+pub(crate) fn mobpack_authoring_change(
+    method: &str,
+    params: &Value,
+) -> Option<MobpackAuthoringChange> {
+    match method {
+        "meta/mobpacks/create"
+        | "meta/mobpacks/save"
+        | "meta/mobpacks/delete"
+        | "meta/mobpacks/undo"
+        | "meta/mobpacks/redo" => Some(MobpackAuthoringChange::DraftStoreWrite),
+        "meta/mobpacks/deploy" if crate::mobpack::deploy_execute_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        "meta/mobpacks/validate" if crate::mobpack::validate_with_rkat_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a mobpack authoring request changes anything
+/// ([`mobpack_authoring_change`]).
+pub(crate) fn is_mobpack_authoring_change(method: &str, params: &Value) -> bool {
+    mobpack_authoring_change(method, params).is_some()
+}
+
+/// Whether a candidate launch refuses a Flow Editor change
+/// ([`mobpack_authoring_change`]): each one that runs `rkat` on the host,
+/// and each draft store write but one to a store file the caller names
+/// (`store_path`) outside the launch's `state_dir` and the gateway home
+/// that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names
 /// ([`draft_store_write_reaches_a_read_store`]).
-fn candidate_launch_refuses_draft_store_write(
+fn candidate_launch_refuses_mobpack_change(
     method: &str,
     params: &Value,
     state_dir: Option<&std::path::Path>,
 ) -> bool {
-    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
-        && draft_store_write_reaches_a_read_store(
+    match mobpack_authoring_change(method, params) {
+        Some(MobpackAuthoringChange::HostRun) => true,
+        Some(MobpackAuthoringChange::DraftStoreWrite) => draft_store_write_reaches_a_read_store(
             params,
             state_dir,
             crate::mobpack::env_draft_store_path().as_deref(),
-        )
-}
-
-/// Whether a mobpack authoring request changes anything: a draft store
-/// write ([`MOBPACK_DRAFT_STORE_WRITE_METHODS`]), or a deploy with
-/// `execute` or a validation with `rkat_validate`, each of which writes an
-/// archive and runs `rkat` on the host. Every other authoring method only
-/// reads and renders.
-pub(crate) fn is_mobpack_authoring_change(method: &str, params: &Value) -> bool {
-    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
-        || (matches!(method, "meta/mobpacks/deploy" | "meta/mobpacks/validate")
-            && candidate_launch_refuses_host_execution(method, params))
+        ),
+        None => false,
+    }
 }
 
 /// Whether a draft write with `params` reaches a store the authoritative
@@ -2237,19 +2264,15 @@ fn resolved_host_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The arms of methods a candidate otherwise serves that run something on
-/// the host or write outside it: `meta/mobpacks/deploy` with `execute`
-/// (writes a mobpack archive and runs `rkat mob run`),
-/// `meta/mobpacks/validate` with `rkat_validate` (writes an archive and runs
-/// `rkat mob validate`), `meta/session_store/bigquery`'s row insert, and a
-/// `meta/gating/evaluate` of an R3 action that names an approval route
-/// (`approval_recipient` and `approval_channel`), which sends the approval
-/// request through the delivery module. Each is decided on the request as
-/// its handler parses it.
+/// the host or write outside it, other than the Flow Editor's changes
+/// ([`candidate_launch_refuses_mobpack_change`]):
+/// `meta/session_store/bigquery`'s row insert, and a `meta/gating/evaluate`
+/// of an R3 action that names an approval route (`approval_recipient` and
+/// `approval_channel`), which sends the approval request through the
+/// delivery module. Each is decided on the request as its handler parses
+/// it.
 fn candidate_launch_refuses_host_execution(method: &str, params: &Value) -> bool {
-    let flag = |name: &str| params.get(name).and_then(Value::as_bool).unwrap_or(false);
     match method {
-        "meta/mobpacks/deploy" => flag("execute"),
-        "meta/mobpacks/validate" => flag("rkat_validate") || flag("rkatValidate"),
         "meta/gating/evaluate" => parse_gating_evaluate_params(params).is_ok_and(|request| {
             let named = |field: Option<&str>| field.is_some_and(|value| !value.trim().is_empty());
             request.risk_tier == GatingRiskTier::R3

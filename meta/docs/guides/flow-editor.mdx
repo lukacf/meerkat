@@ -300,7 +300,9 @@ unless it runs them under `meerkat_meta::with_host_path_skill_reads`.
 On a runtime's listener the Flow Editor RPC resolves its caller as the
 console does, and its changes are console changes: the draft writes
 (`meta/mobpacks/create`, `save`, `delete`, `undo` and `redo`), a deploy with
-`execute` and a validation with `rkat_validate`.
+`execute` and a validation with `rkat_validate`. These are the methods and
+arms a candidate launch refuses too, read from one list. A validation without
+`rkat_validate` checks the document in process only and is no change.
 
 - `meta/capabilities` reports the caller's scope as `auth.caller_scope`, the
   value `meta/console/whoami` reports to the same caller. The editor sends it
@@ -308,6 +310,10 @@ console does, and its changes are console changes: the draft writes
   another caller's (someone else signed in to this browser since the editor
   loaded) is refused with `-32056` `caller_changed` before anything is read or
   written. A read ignores the field, and no method sees it as a param.
+- After a 401, or a `-32056` refusal of its caller, the stock editor reads
+  `meta/capabilities` again before it sends anything else, so its next change
+  names the caller the surface names now. It does not send the refused change
+  again.
 - A change checks its caller again right before it is made: a draft write
   after the draft store's reads, and a deploy or a validation before it
   writes its archive and runs `rkat`. Once the caller's token expired, its

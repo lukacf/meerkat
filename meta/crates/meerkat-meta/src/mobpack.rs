@@ -14069,7 +14069,10 @@ pub fn validate_mobpack(params: &Value) -> Result<MobpackValidationResult, Strin
     Ok(validation)
 }
 
-fn validate_with_rkat_requested(params: &Value) -> bool {
+/// Whether a `meta/mobpacks/validate` request asks for the validation
+/// through `rkat` (`rkat_validate`, or `rkatValidate` when that is absent),
+/// which writes an archive and runs `rkat mob validate`.
+pub(crate) fn validate_with_rkat_requested(params: &Value) -> bool {
     params
         .get("rkat_validate")
         .or_else(|| params.get("rkatValidate"))
@@ -14345,6 +14348,16 @@ pub fn export_mobpack(params: &Value) -> Result<MobpackExportResult, String> {
     })
 }
 
+/// Whether a `meta/mobpacks/deploy` request asks to run the deploy
+/// (`execute`), which writes a mobpack archive and runs `rkat mob run`,
+/// rather than to plan it.
+pub(crate) fn deploy_execute_requested(params: &Value) -> bool {
+    params
+        .get("execute")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn deploy_mobpack(params: &Value) -> Result<MobpackDeployResult, String> {
     enforce_mobpack_draft_expected_revision(params, "meta/mobpacks/deploy")?;
     let export = export_mobpack(params)?;
@@ -14352,10 +14365,7 @@ pub fn deploy_mobpack(params: &Value) -> Result<MobpackDeployResult, String> {
         .decode(export.content_base64.as_bytes())
         .map_err(|err| format!("failed to decode exported mobpack: {err}"))?;
     let pack_sha256 = source_file_sha256(&bytes);
-    let execute = params
-        .get("execute")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let execute = deploy_execute_requested(params);
     // A plan for a caller without host access names no host path: its pack
     // path is the caller's own or the bare file name, and its command runs
     // `rkat`, never a binary the host configured. A deploy that runs reports

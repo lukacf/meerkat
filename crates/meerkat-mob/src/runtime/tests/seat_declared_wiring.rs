@@ -1129,14 +1129,26 @@ async fn later_members_are_not_wired_to_an_exempt_member() {
     let exempt_worker = AgentIdentity::from("exempt-worker");
     let worker = AgentIdentity::from("bound-worker");
     let reviewer = AgentIdentity::from("bound-reviewer");
-    for member in vec![
-        spec("lead", &lead),
-        exempt(spec("lead", &side_lead)),
-        exempt(spec("worker", &exempt_worker)),
-        spec("worker", &worker),
-        spec("reviewer", &reviewer),
+    // Each spec is built where it is spawned: an array or a vector of the
+    // five specs trips Clippy's large stack array or useless vector bound,
+    // depending on the features a build turns on.
+    for (role, member, exempt_member) in [
+        ("lead", &lead, false),
+        ("lead", &side_lead, true),
+        ("worker", &exempt_worker, true),
+        ("worker", &worker, false),
+        ("reviewer", &reviewer, false),
     ] {
-        mob.handle.spawn_spec(member).await.expect("spawn a member");
+        let member_spec = spec(role, member);
+        let member_spec = if exempt_member {
+            exempt(member_spec)
+        } else {
+            member_spec
+        };
+        mob.handle
+            .spawn_spec(member_spec)
+            .await
+            .expect("spawn a member");
     }
     assert_eq!(
         mob.edges(),

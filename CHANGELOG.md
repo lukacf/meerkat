@@ -369,6 +369,15 @@ them.
   way; before, its timer could end the wait without telling the server. The
   caller is never held while the notice is sent. A session that ends with
   calls in flight is unchanged.
+- `meerkat-mcp`: on a streamable-HTTP connection, a request the host stops
+  waiting for also ends its own HTTP exchange: the response it waits for,
+  its JSON body or its SSE stream is dropped, so the connection closes (an
+  HTTP/2 stream is reset). A server in stateless mode ignores
+  `notifications/cancelled` and sees this disconnect instead. The
+  cancellation notification is still sent for stateful servers. Before, the
+  transport kept reading the abandoned response until the server answered,
+  and a request still waiting for a JSON answer held up every later message
+  on that connection, its cancellation included.
 - `meerkat-mob`: a declared role migration (`MobHandle::apply_declared_roster`
   answering `DeclaredEntryOutcome::RoleMigrated`) builds its successor on
   the member's own session with the declaration's build inputs, as a

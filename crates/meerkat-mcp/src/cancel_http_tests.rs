@@ -3,10 +3,11 @@
 //! one `notifications/cancelled` for that read, and a response that arrives
 //! after the abandonment is dropped without a second one.
 //!
-//! The transport worker reads a JSON answer inline, so while the abandoned
-//! read is still open nothing else can be posted on the connection: the
-//! cancellation goes out once the server answers. The caller is never held
-//! for it.
+//! The abandoned read's own HTTP exchange ends at once, so the transport is
+//! free and the cancellation goes out right away; the server, whose request
+//! went with the exchange, never answers it. (Without that abort the worker,
+//! which reads a JSON answer inline, would hold the cancellation until the
+//! server answered.) The caller is never held for it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::McpConnection;
@@ -158,7 +159,9 @@ async fn a_json_read_past_its_deadline_returns_promptly_and_is_cancelled_once() 
     fixture.server.block.store(true, Ordering::SeqCst);
 
     let started = tokio::time::Instant::now();
-    let deadline = started + Duration::from_millis(300);
+    // Room for the request to be posted before the deadline even on a busy
+    // runner, so the row never takes the path of an abandon that lands first.
+    let deadline = started + Duration::from_millis(800);
     let read = connection
         .read_resource_entering("ui://fixture/slow", None, deadline, || {
             // A slow entry step: the read is handed over 50 ms into its time.
@@ -169,12 +172,12 @@ async fn a_json_read_past_its_deadline_returns_promptly_and_is_cancelled_once() 
     let waited = started.elapsed();
     assert!(read.is_err(), "the read timed out: {read:?}");
     assert!(
-        waited < Duration::from_secs(1),
+        waited < Duration::from_secs(2),
         "the caller returned at its deadline, not later: {waited:?}"
     );
 
-    // The abandoned read still occupies the transport; once the server
-    // answers it, the cancellation goes out, and only one.
+    // The cancellation goes out at once, and only one. Releasing the server's
+    // handler changes nothing: its exchange already ended with the abandon.
     fixture.server.release.add_permits(1);
     let _ =
         tokio::time::timeout(Duration::from_secs(3), fixture.traffic.cancelled.notified()).await;

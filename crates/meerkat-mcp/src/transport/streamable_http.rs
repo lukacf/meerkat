@@ -52,6 +52,9 @@ pub(crate) struct ReqwestStreamableHttpClient {
     /// Keeps the attempt counting this client live until its last clone (in
     /// the transport worker and its stream tasks) is released.
     _live: Option<Arc<crate::connect_attempt::AttemptLease>>,
+    /// The connection's abandoned requests: a request its caller stopped
+    /// waiting for ends its HTTP exchange here.
+    abandoned: super::abandoned::AbandonedRequests,
 }
 
 /// The governed attachment control of one HTTP connection attempt, asked by
@@ -412,6 +415,7 @@ impl ReqwestStreamableHttpClient {
             egress: EgressGuard::default(),
             attempt: None,
             _live: None,
+            abandoned: Default::default(),
         }
     }
 
@@ -429,6 +433,7 @@ impl ReqwestStreamableHttpClient {
             egress: EgressGuard::default(),
             attempt: None,
             _live: None,
+            abandoned: Default::default(),
         }
     }
 
@@ -440,6 +445,15 @@ impl ReqwestStreamableHttpClient {
     /// Apply the host egress profile of this attempt to every request.
     pub(crate) fn with_egress(mut self, egress: EgressGuard) -> Self {
         self.egress = egress;
+        self
+    }
+
+    /// End the HTTP exchange of every request the connection abandons.
+    pub(crate) fn with_abandoned_requests(
+        mut self,
+        abandoned: super::abandoned::AbandonedRequests,
+    ) -> Self {
+        self.abandoned = abandoned;
         self
     }
 
@@ -460,6 +474,47 @@ impl ReqwestStreamableHttpClient {
         match &self.attempt {
             None => Ok(work.await),
             Some(attempt) => attempt.abortable(work).await.ok_or_else(attempt_cancelled),
+        }
+    }
+
+    /// `work` unless `in_flight`'s request is abandoned first: the exchange
+    /// is dropped at its current await, and with it the HTTP response.
+    async fn unless_abandoned<T>(
+        in_flight: Option<&super::abandoned::InFlight>,
+        work: impl std::future::Future<Output = Result<T, StreamableHttpError<reqwest::Error>>>,
+    ) -> Result<T, StreamableHttpError<reqwest::Error>> {
+        match in_flight {
+            None => work.await,
+            Some(in_flight) => tokio::select! {
+                biased;
+                () = in_flight.abandoned() => Err(StreamableHttpError::UnexpectedServerResponse(
+                    Cow::Borrowed("request abandoned by the caller"),
+                )),
+                result = work => result,
+            },
+        }
+    }
+
+    /// `stream`, ended when `in_flight`'s request is abandoned, and keeping
+    /// its registration until the stream itself is dropped.
+    fn until_abandoned(
+        in_flight: Option<super::abandoned::InFlight>,
+        stream: BoxStream<'static, Result<Sse, sse_stream::Error>>,
+    ) -> BoxStream<'static, Result<Sse, sse_stream::Error>> {
+        use futures::StreamExt as _;
+        match in_flight {
+            None => stream,
+            Some(in_flight) => {
+                let token = in_flight.token();
+                stream
+                    .take_until(async move { token.cancelled().await })
+                    // The registration lives as long as the stream.
+                    .map(move |event| {
+                        let _registered = &in_flight;
+                        event
+                    })
+                    .boxed()
+            }
         }
     }
 
@@ -814,6 +869,12 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         let dispatch = request_dispatch(&message);
+        // A request's exchange ends when its caller abandons it: the response
+        // it waits for, its JSON body, or the SSE stream it opens.
+        let in_flight = match &message {
+            ClientJsonRpcMessage::Request(request) => Some(self.abandoned.register(&request.id)),
+            _ => None,
+        };
         // A known-dead session is never entered again, not even by a request
         // that was queued before the expiry was recorded.
         if session_id.is_some() && self.session_expiry.expired() {
@@ -863,16 +924,18 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         // Physical entry: after this request's preparation and credential
         // read, immediately before it is handed to the HTTP client.
         self.first_request.enter()?;
-        let result = self
-            .unless_cancelled(async {
+        let result = Self::unless_abandoned(
+            in_flight.as_ref(),
+            self.unless_cancelled(async {
                 // From the moment the request is handed over, the server may
                 // open a session even if its answer is never observed.
                 if let Some(attempt) = &self.attempt {
                     attempt.record_request_sent();
                 }
                 client.execute(request).await
-            })
-            .await?;
+            }),
+        )
+        .await?;
         // The clients' own resolver refused the destination. A required
         // profile's clients follow no redirect, so this is the request's own
         // first and only hop: nothing was connected for it.
@@ -972,14 +1035,16 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
         if !status.is_success() {
-            let body = self
-                .unless_cancelled(read_bounded_body(response))
-                .await?
-                .map_err(|_| {
-                    StreamableHttpError::UnexpectedServerResponse(
-                        "invalid or oversized MCP response".into(),
-                    )
-                })?;
+            let body = Self::unless_abandoned(
+                in_flight.as_ref(),
+                self.unless_cancelled(read_bounded_body(response)),
+            )
+            .await?
+            .map_err(|_| {
+                StreamableHttpError::UnexpectedServerResponse(
+                    "invalid or oversized MCP response".into(),
+                )
+            })?;
             if content_type
                 .as_deref()
                 .is_some_and(|ct| ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()))
@@ -996,19 +1061,21 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
                 let event_stream =
                     protected_sse_stream(response, self.protected_metadata.clone(), false);
                 Ok(StreamableHttpPostResponse::Sse(
-                    self.until_cancelled(event_stream),
+                    Self::until_abandoned(in_flight, self.until_cancelled(event_stream)),
                     session_id,
                 ))
             }
             Some(ct) if ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()) => {
-                let body = self
-                    .unless_cancelled(read_bounded_body(response))
-                    .await?
-                    .map_err(|_| {
-                        StreamableHttpError::UnexpectedServerResponse(
-                            "invalid or oversized MCP response".into(),
-                        )
-                    })?;
+                let body = Self::unless_abandoned(
+                    in_flight.as_ref(),
+                    self.unless_cancelled(read_bounded_body(response)),
+                )
+                .await?
+                .map_err(|_| {
+                    StreamableHttpError::UnexpectedServerResponse(
+                        "invalid or oversized MCP response".into(),
+                    )
+                })?;
                 let message = self.protected_metadata.parse(&body).map_err(|_| {
                     StreamableHttpError::UnexpectedServerResponse(
                         "invalid MCP JSON-RPC response".into(),

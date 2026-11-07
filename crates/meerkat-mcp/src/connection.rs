@@ -2326,12 +2326,14 @@ impl McpConnection {
         let session_expiry = SessionExpiryRecorder::default();
         let recorder = recorder.unwrap_or_default();
         let egress = EgressGuard::new(http_egress.clone());
+        let abandoned = crate::transport::abandoned::AbandonedRequests::default();
         let mut http_client =
             ReqwestStreamableHttpClient::new_with_auth_challenge(headers, recorder.clone())
                 .with_protected_metadata(protected_metadata.clone())
                 .with_session_expiry(session_expiry.clone())
                 .with_first_request_entry(first_request.clone())
-                .with_egress(egress.clone());
+                .with_egress(egress.clone())
+                .with_abandoned_requests(abandoned.clone());
         let oauth_target = bearer.as_ref().map(|bearer| bearer.target().clone());
         let account = Arc::new(connection_account(config, bearer.as_ref()));
         if let Some(bearer) = bearer {
@@ -2356,7 +2358,7 @@ impl McpConnection {
                 egress: egress.recorded(),
                 shut_down: false,
             })?;
-        let service = client_custody
+        let mut service = client_custody
             .deposit(service, REMOTE_CLOSE_BOUND)
             .map_err(|_| StreamableConnectError {
                 reason: McpError::RouterShutDown.to_string(),
@@ -2365,6 +2367,9 @@ impl McpConnection {
                 egress: None,
                 shut_down: true,
             })?;
+        // The connection abandons requests through the registry its HTTP
+        // client ends their exchanges by.
+        service.abandoned = abandoned;
         Ok(Self {
             config: config.clone(),
             connection_id,
@@ -3294,6 +3299,7 @@ impl ClientCustody {
                 mcp_apps,
                 custody: self.clone(),
                 bound,
+                abandoned: Default::default(),
             });
         }
         // Closed first (its close index began its close): no client stays
@@ -3443,6 +3449,9 @@ pub(crate) struct HeldClient {
     custody: ClientCustody,
     /// How long a close started by this handle's drop waits for the service.
     bound: Duration,
+    /// The requests this connection abandons, whose HTTP exchange its
+    /// streamable-HTTP client ends (unused by other transports).
+    abandoned: crate::transport::abandoned::AbandonedRequests,
 }
 
 impl std::ops::Deref for HeldClient {
@@ -3462,6 +3471,7 @@ impl HeldClient {
             mcp_apps: client.supports_mcp_apps(),
             custody: custody.clone(),
             bound: REMOTE_CLOSE_BOUND,
+            abandoned: Default::default(),
         };
         *custody.slot() = ClientSlot::Held(client);
         held
@@ -3995,7 +4005,7 @@ impl CallAdmission<'_> {
 // OAuth target) are passed separately so both callers share one path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_tool_on(
-    service: &rmcp::service::Peer<rmcp::RoleClient>,
+    service: &HeldClient,
     server: &str,
     admission: CallAdmission<'_>,
     protected_metadata: &ProtectedMetadataState,
@@ -4084,9 +4094,10 @@ const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
 
 /// Tells the server about a request this host stops waiting for. Dropped
 /// before the request settled (the caller's future was dropped: its deadline
-/// expired or it was cancelled), the guard sends `notifications/cancelled`
-/// for the request id, once, from a task: the caller is never held while
-/// the notice is sent. A request settled by its response or an error sends
+/// expired or it was cancelled), the guard ends the request's HTTP exchange
+/// on a streamable-HTTP connection and sends `notifications/cancelled` for
+/// the request id, once, from a task: the caller is never held while the
+/// notice is sent. A request settled by its response or an error sends
 /// nothing.
 ///
 /// Known limit: rmcp writes every outbound message from a task of its own, so
@@ -4095,17 +4106,22 @@ const ABANDONED_REQUEST_REASON: &str = "request abandoned by the caller";
 /// can reach the server before the request does. The server cannot match it
 /// and keeps working; this was seen in about 3 of 1500 immediate abandons on
 /// a multi-threaded runtime. Ordinary deadlines fire long after the request
-/// was written. A real fix needs rmcp to write a request before later
-/// messages. Without this guard no cancellation is sent at all.
+/// was written. On a streamable-HTTP connection this cannot happen: the
+/// guard abandons the request in the registry before it sends the notice, so
+/// a request not yet posted is never posted. Over stdio and legacy SSE it
+/// can; a real fix needs rmcp to write a request before later messages.
+/// Without this guard no cancellation is sent at all.
 struct AbandonedRequest {
     peer: Option<rmcp::service::Peer<rmcp::RoleClient>>,
+    abandoned: crate::transport::abandoned::AbandonedRequests,
     id: rmcp::model::RequestId,
 }
 
 impl AbandonedRequest {
-    fn arm(peer: &rmcp::service::Peer<rmcp::RoleClient>, id: rmcp::model::RequestId) -> Self {
+    fn arm(client: &HeldClient, id: rmcp::model::RequestId) -> Self {
         Self {
-            peer: Some(peer.clone()),
+            peer: Some(rmcp::service::Peer::clone(client)),
+            abandoned: client.abandoned.clone(),
             id,
         }
     }
@@ -4121,6 +4137,10 @@ impl Drop for AbandonedRequest {
         let Some(peer) = self.peer.take() else {
             return;
         };
+        // A server in stateless mode ignores notifications: it sees the
+        // request's own HTTP exchange end. A streamable-HTTP client ends it
+        // now, even while its transport is still waiting on another request.
+        self.abandoned.abandon(&self.id);
         // A drop cannot wait for the send, so the notification goes from a
         // task. Without a runtime the transport is shutting down with it and
         // nothing can be sent.
@@ -7391,6 +7411,14 @@ mod cancel_tests;
 #[cfg(test)]
 #[path = "cancel_http_tests.rs"]
 mod cancel_http_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_tests.rs"]
+mod http_abandon_tests;
+
+#[cfg(test)]
+#[path = "http_abandon_session_tests.rs"]
+mod http_abandon_session_tests;
 
 #[cfg(test)]
 #[path = "process_confinement_tests.rs"]

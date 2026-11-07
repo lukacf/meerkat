@@ -10,13 +10,16 @@ import {
 import type { Tone } from "../../../packages/console-components/src/panel-kit";
 import { phaseWords, type DecisionCardView } from "./decision-cards";
 
+/** The tone of a wire phase. A phase this console does not know reads
+ *  neutral. */
 function phaseTone(phase: string): Tone {
   switch (phase) {
     case "open":
       return "warn";
-    case "decided":
+    case "approved":
     case "executed":
       return "ok";
+    case "rejected":
     case "execution_refused":
       return "crit";
     default:
@@ -101,14 +104,23 @@ export function DecisionCard({ card, now }: { card: DecisionCardView; now: numbe
 }
 
 /** The durable decisions of the Pending tab, soonest deadline first. No card
- *  offers a decision, whether or not a person is signed in. */
-export function DecisionCardList({ cards, signedIn = false }: {
+ *  offers a decision, whether or not a person is signed in. While the last
+ *  page read names a cursor, "Load more" asks for the page after it; no
+ *  page is read by itself. */
+export function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMore, loadingMore = false }: {
   cards: readonly DecisionCardView[];
   signedIn?: boolean;
+  /** The cursor of the last page read, while more may follow. */
+  nextAfter?: string;
+  /** Read the page after `after`. */
+  onLoadMore?: (after: string) => void;
+  /** Whether that page is being read. */
+  loadingMore?: boolean;
 }): React.JSX.Element | null {
   const deadlines = cards.map((card) => (card.phase === "open" ? card.deadlineAtMs : undefined));
   const now = useApprovalClock(deadlines);
-  if (!cards.length) return null;
+  const more = nextAfter !== undefined && onLoadMore !== undefined ? { after: nextAfter, load: onLoadMore } : null;
+  if (!cards.length && !more) return null;
   return (
     <section
       className="gating-inbox__cards gating-inbox__decisions"
@@ -117,6 +129,17 @@ export function DecisionCardList({ cards, signedIn = false }: {
       data-testid="decision-card-list"
     >
       {cards.map((card) => <DecisionCard key={card.decisionId} card={card} now={now} />)}
+      {more ? (
+        <button
+          type="button"
+          className="cc-decision__more"
+          data-testid="decision-card-load-more"
+          disabled={loadingMore}
+          onClick={() => more.load(more.after)}
+        >
+          {loadingMore ? "Loading more decisions" : "Load more decisions"}
+        </button>
+      ) : null}
     </section>
   );
 }

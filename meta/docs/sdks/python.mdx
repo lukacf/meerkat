@@ -1407,7 +1407,7 @@ attestation=None)`. Each answers the gateway's result as a `dict`.
 from meerkat_meta import DecisionAttestation
 
 runtime.on_decision_notice(lambda notice: print(notice["event"], notice["decision_id"]))
-page = await mob.decisions_list(phase="open")  # notices arrive before the answer
+page = await mob.decisions_list(phase="open")  # notices are written before the answer
 await mob.decisions_decide(
     decision_id,
     approve=True,
@@ -1422,8 +1422,10 @@ await mob.decisions_decide(
 )
 ```
 
-`MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`
-the gateway writes before a list answers. Without an `attestation` the stdio
+`MetaRuntime.on_decision_notice(handler)` receives each `meta/decisions/notice`.
+The gateway writes the notices before a list answers; the SDK runs each
+handler on its own, so a handler may still be running after `decisions_list`
+returns. Without an `attestation` the stdio
 operator decides, eligible only for a decision presented to it on this
 connection. A decide called while the SDK serves a host tool callback raises
 `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`) and

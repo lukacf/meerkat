@@ -72,7 +72,8 @@ export interface DecisionDecideOptions {
  * host channel that authenticates the people who decide through it.
  * `ingress` is 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, never
  * `operator` (the built-in stdio operator); `maxClockSkewMs` is how far
- * ahead of the gateway's clock an attested event's time may be.
+ * ahead of the gateway's clock an attested event's time may be, at most one
+ * hour (3_600_000).
  */
 export interface DecisionIngressDeclaration {
   ingress: string;

@@ -4,7 +4,8 @@
 //! the people who decide through it and attests them with a stdio
 //! `meta/decisions/decide`. The declaration holds no approver mapping: the
 //! approver map in the access configuration lists which of its people hold
-//! which approver ids (`ingress_subjects`, `people`).
+//! which approver ids (`ingress_subjects`, `people`). Its clock skew is at
+//! most one hour.
 //!
 //! ```json
 //! {"ingresses": [{"ingress": "chat", "attests": "person", "max_clock_skew_ms": 5000}]}
@@ -16,6 +17,9 @@ use crate::access::{AccessConfigError, AccessController, OPERATOR_INGRESS, is_in
 
 /// What a declared ingress attests: a person authenticated on the event.
 const ATTESTS_PERSON: &str = "person";
+
+/// The largest clock skew an ingress may declare: one hour.
+const MAX_CLOCK_SKEW_MS: u64 = 3_600_000;
 
 /// The decision ingresses a launch declares. Each name is an ingress token
 /// (1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`), declared once, and never the
@@ -45,7 +49,7 @@ impl DecisionIngressDeclaration {
     }
 
     /// How far, in milliseconds, the time the ingress observed an event may
-    /// be ahead of this host's clock.
+    /// be ahead of this host's clock: at most one hour.
     pub fn max_clock_skew_ms(&self) -> u64 {
         self.max_clock_skew_ms
     }
@@ -76,8 +80,16 @@ impl DecisionIngressDeclarations {
 pub enum DecisionIngressError {
     InvalidName(String),
     ReservedName,
-    UnsupportedAttests { ingress: String, attests: String },
+    UnsupportedAttests {
+        ingress: String,
+        attests: String,
+    },
     Duplicate(String),
+    /// The declared clock skew is more than one hour.
+    SkewAboveOneHour {
+        ingress: String,
+        max_clock_skew_ms: u64,
+    },
 }
 
 impl std::fmt::Display for DecisionIngressError {
@@ -95,6 +107,14 @@ impl std::fmt::Display for DecisionIngressError {
                 "ingress {ingress:?}: attests {attests:?} is not supported (attests \"person\")"
             ),
             Self::Duplicate(ingress) => write!(f, "ingress {ingress:?} is declared twice"),
+            Self::SkewAboveOneHour {
+                ingress,
+                max_clock_skew_ms,
+            } => write!(
+                f,
+                "ingress {ingress:?}: max_clock_skew_ms {max_clock_skew_ms} is more than one hour \
+                 ({MAX_CLOCK_SKEW_MS})"
+            ),
         }
     }
 }
@@ -132,6 +152,12 @@ impl TryFrom<RawDecisionIngressDeclarations> for DecisionIngressDeclarations {
                 return Err(DecisionIngressError::UnsupportedAttests {
                     ingress: declaration.ingress,
                     attests: declaration.attests,
+                });
+            }
+            if declaration.max_clock_skew_ms > MAX_CLOCK_SKEW_MS {
+                return Err(DecisionIngressError::SkewAboveOneHour {
+                    ingress: declaration.ingress,
+                    max_clock_skew_ms: declaration.max_clock_skew_ms,
                 });
             }
             if ingresses

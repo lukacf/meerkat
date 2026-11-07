@@ -17,8 +17,9 @@ export interface DecisionPresentationView {
 export interface DecisionCardView {
   decisionId: string;
   kind: string;
-  /** The wire phase: open, decided, executed, execution_refused, expired,
-   *  withdrawn. */
+  /** The wire phase: open, approved, rejected, expired, withdrawn, executed
+   *  or execution_refused (a phase this console does not know shows as it
+   *  is). */
   phase: string;
   deadlineAtMs?: number;
   decidedAtMs?: number;
@@ -132,6 +133,12 @@ export function wholeDecisionIds(page: unknown): string[] {
   });
 }
 
+/** Soonest deadline first; the decision id breaks ties. */
+function byDeadline(left: DecisionCardView, right: DecisionCardView): number {
+  return (left.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) - (right.deadlineAtMs ?? Number.MAX_SAFE_INTEGER)
+    || left.decisionId.localeCompare(right.decisionId);
+}
+
 /** The cards of one `meta/decisions/list` page, soonest deadline first;
  *  `renderings` holds the renderings read for its whole decisions. */
 export function decisionCardsOf(page: unknown, renderings: ReadonlyMap<string, string>): DecisionCardView[] {
@@ -151,9 +158,30 @@ export function decisionCardsOf(page: unknown, renderings: ReadonlyMap<string, s
       return card ? [card] : [];
     })
     : [];
-  return [...whole, ...statuses].sort((left, right) =>
-    (left.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) - (right.deadlineAtMs ?? Number.MAX_SAFE_INTEGER)
-    || left.decisionId.localeCompare(right.decisionId));
+  return [...whole, ...statuses].sort(byDeadline);
+}
+
+/** The params of one `meta/decisions/list` page of open decisions: at most
+ *  `limit` rows, after the cursor `after` when the panel follows one. */
+export function decisionPageParams(limit: number, after?: string): Record<string, unknown> {
+  return after === undefined ? { phase: "open", limit } : { phase: "open", limit, after };
+}
+
+/** The cursor of one `meta/decisions/list` page: the decision id to read the
+ *  next page after, present only while more may follow. */
+export function decisionPageCursor(page: unknown): string | undefined {
+  return textOf(recordOf(page)?.next_after);
+}
+
+/** `current` and the cards of a further page, one card per decision (the
+ *  later read wins), soonest deadline first. */
+export function mergeDecisionCards(
+  current: readonly DecisionCardView[],
+  more: readonly DecisionCardView[],
+): DecisionCardView[] {
+  const byId = new Map<string, DecisionCardView>();
+  for (const card of [...current, ...more]) byId.set(card.decisionId, card);
+  return [...byId.values()].sort(byDeadline);
 }
 
 /** The rendering of one `meta/decisions/rendering` answer. */

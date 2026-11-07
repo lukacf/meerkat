@@ -59629,6 +59629,7 @@ var INVALID_ACCESS_REASONS = {
   invalid_ingress_subject: { words: "An approver's ingress identity needs a subject without surrounding spaces", showDetail: true },
   approver_person_without_identity: { words: "An approver's person entry names no identity", showDetail: true },
   unknown_ingress: { words: "An approver names an ingress this runtime does not declare", showDetail: true },
+  duplicate_person_identity: { words: "An approver lists one identity in two person entries", showDetail: true },
   invalid_toml: { words: "The access configuration file cannot hold this configuration", showDetail: false }
 };
 function isKnownInvalidAccessReason(reason) {
@@ -67034,6 +67035,9 @@ function wholeDecisionIds(page) {
     return id ? [id] : [];
   });
 }
+function byDeadline2(left, right) {
+  return (left.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) - (right.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) || left.decisionId.localeCompare(right.decisionId);
+}
 function decisionCardsOf(page, renderings) {
   const record10 = recordOf8(page);
   if (!record10) return [];
@@ -67047,7 +67051,18 @@ function decisionCardsOf(page, renderings) {
     const card = status ? statusCard(status) : null;
     return card ? [card] : [];
   }) : [];
-  return [...whole, ...statuses].sort((left, right) => (left.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) - (right.deadlineAtMs ?? Number.MAX_SAFE_INTEGER) || left.decisionId.localeCompare(right.decisionId));
+  return [...whole, ...statuses].sort(byDeadline2);
+}
+function decisionPageParams(limit, after) {
+  return after === void 0 ? { phase: "open", limit } : { phase: "open", limit, after };
+}
+function decisionPageCursor(page) {
+  return textOf4(recordOf8(page)?.next_after);
+}
+function mergeDecisionCards(current, more) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const card of [...current, ...more]) byId.set(card.decisionId, card);
+  return [...byId.values()].sort(byDeadline2);
 }
 function renderingOf(answer) {
   const rendering = recordOf8(answer)?.rendering;
@@ -67063,9 +67078,10 @@ function phaseTone(phase2) {
   switch (phase2) {
     case "open":
       return "warn";
-    case "decided":
+    case "approved":
     case "executed":
       return "ok";
+    case "rejected":
     case "execution_refused":
       return "crit";
     default:
@@ -67135,18 +67151,32 @@ function DecisionCard({ card, now: now3 }) {
     }
   );
 }
-function DecisionCardList({ cards, signedIn = false }) {
+function DecisionCardList({ cards, signedIn = false, nextAfter, onLoadMore, loadingMore = false }) {
   const deadlines = cards.map((card) => card.phase === "open" ? card.deadlineAtMs : void 0);
   const now3 = useApprovalClock(deadlines);
-  if (!cards.length) return null;
-  return /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(
+  const more = nextAfter !== void 0 && onLoadMore !== void 0 ? { after: nextAfter, load: onLoadMore } : null;
+  if (!cards.length && !more) return null;
+  return /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)(
     "section",
     {
       className: "gating-inbox__cards gating-inbox__decisions",
       "aria-label": "Decisions",
       "data-signed-in": signedIn ? "true" : "false",
       "data-testid": "decision-card-list",
-      children: cards.map((card) => /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(DecisionCard, { card, now: now3 }, card.decisionId))
+      children: [
+        cards.map((card) => /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(DecisionCard, { card, now: now3 }, card.decisionId)),
+        more ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(
+          "button",
+          {
+            type: "button",
+            className: "cc-decision__more",
+            "data-testid": "decision-card-load-more",
+            disabled: loadingMore,
+            onClick: () => more.load(more.after),
+            children: loadingMore ? "Loading more decisions" : "Load more decisions"
+          }
+        ) : null
+      ]
     }
   );
 }
@@ -67411,6 +67441,9 @@ function GatingInboxPanel({
   hostDecideSources,
   showPending,
   decisions: durableDecisions,
+  decisionsNextAfter,
+  onLoadMoreDecisions,
+  decisionsLoadingMore = false,
   signedIn = false
 }) {
   const [tab2, setTab] = import_react62.default.useState("pending");
@@ -67464,9 +67497,19 @@ function GatingInboxPanel({
   const hostItems = tab2 === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab2 === "pending" ? hostAttention?.failedSources ?? [] : [];
   const decisionCards = tab2 === "pending" ? durableDecisions ?? [] : [];
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0;
+  const decisionCursor = tab2 === "pending" && onLoadMoreDecisions ? decisionsNextAfter : void 0;
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0 || decisionCursor !== void 0;
   const hostList = hostShown ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)(import_jsx_runtime91.Fragment, { children: [
-    decisionCards.length ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(DecisionCardList, { cards: decisionCards, signedIn }) : null,
+    decisionCards.length || decisionCursor !== void 0 ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(
+      DecisionCardList,
+      {
+        cards: decisionCards,
+        signedIn,
+        nextAfter: decisionCursor,
+        onLoadMore: onLoadMoreDecisions,
+        loadingMore: decisionsLoadingMore
+      }
+    ) : null,
     hostItems.length > 0 || hostFailedSources.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime91.jsxs)("div", { className: "gating-inbox__cards gating-inbox__host", "data-testid": "host-attention-list", children: [
       hostItems.map((item) => /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(HostAttentionCard, { item }, "".concat(item.sourceId, ":").concat(item.id))),
       hostFailedSources.length ? /* @__PURE__ */ (0, import_jsx_runtime91.jsx)(Notice, { tone: "warn", role: "status", className: "gating-inbox__host-note", children: "Could not read: ".concat(hostFailedSources.join(", ")) }) : null
@@ -93816,21 +93859,25 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   }), [baseUrl, panelRefreshFlight]);
   const [decisionRead, setDecisionRead] = import_react102.default.useState({ scope: "", cards: [] });
+  async function readDecisionPage(after) {
+    const target = controlWorkbenchTarget("gating");
+    const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listDecisions, target, decisionPageParams(DECISION_PAGE_LIMIT, after));
+    const renderings = /* @__PURE__ */ new Map();
+    await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
+      try {
+        const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.getDecisionRendering, target, { decision_id: decisionId }));
+        if (rendering !== void 0) renderings.set(decisionId, rendering);
+      } catch {
+      }
+    }));
+    return { cards: decisionCardsOf(page, renderings), nextAfter: decisionPageCursor(page) };
+  }
   const refreshDecisions = import_react102.default.useCallback(() => panelRefreshFlight("decisions", async () => {
     const scope = accessScopeRef.current;
-    const target = controlWorkbenchTarget("gating");
     try {
-      const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listDecisions, target, { phase: "open", limit: DECISION_PAGE_LIMIT });
-      const renderings = /* @__PURE__ */ new Map();
-      await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
-        try {
-          const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.getDecisionRendering, target, { decision_id: decisionId }));
-          if (rendering !== void 0) renderings.set(decisionId, rendering);
-        } catch {
-        }
-      }));
+      const first = await readDecisionPage();
       if (scope !== accessScopeRef.current) return;
-      setDecisionRead({ scope, cards: decisionCardsOf(page, renderings) });
+      setDecisionRead({ scope, cards: first.cards, nextAfter: first.nextAfter });
     } catch (error49) {
       if (scope !== accessScopeRef.current) return;
       setDecisionRead({ scope, cards: [] });
@@ -93838,7 +93885,23 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error49;
     }
   }), [baseUrl, panelRefreshFlight]);
+  const loadMoreDecisions = import_react102.default.useCallback((after) => {
+    const scope = accessScopeRef.current;
+    setDecisionRead((current) => current.scope === scope ? { ...current, loadingMore: true } : current);
+    void (async () => {
+      try {
+        const more = await readDecisionPage(after);
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => current.scope === scope && current.nextAfter === after ? { scope, cards: mergeDecisionCards(current.cards, more.cards), nextAfter: more.nextAfter } : current);
+      } catch {
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => current.scope === scope ? { ...current, loadingMore: false } : current);
+      }
+    })();
+  }, [baseUrl]);
   const decisionCards = decisionRead.scope === accessScope ? decisionRead.cards : [];
+  const decisionNextAfter = decisionRead.scope === accessScope ? decisionRead.nextAfter : void 0;
+  const decisionLoadingMore = decisionRead.scope === accessScope && decisionRead.loadingMore === true;
   const refreshRoutingData = import_react102.default.useCallback(() => panelRefreshFlight("routing", async () => {
     const scope = accessScopeRef.current;
     setRoutingRead((current) => current.scope === scope ? { ...current, loading: true } : { ...emptyRoutingRead(), scope, loading: true });
@@ -95639,6 +95702,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostDecideSources: hostAttentionSources,
           showPending: approvalOpens,
           decisions: decisionCards,
+          decisionsNextAfter: decisionNextAfter,
+          onLoadMoreDecisions: loadMoreDecisions,
+          decisionsLoadingMore: decisionLoadingMore,
           signedIn: Boolean(experience?.access?.subject)
         }
       );
@@ -95751,6 +95817,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostDecideSources: hostAttentionSources,
           showPending: approvalOpens,
           decisions: decisionCards,
+          decisionsNextAfter: decisionNextAfter,
+          onLoadMoreDecisions: loadMoreDecisions,
+          decisionsLoadingMore: decisionLoadingMore,
           signedIn: Boolean(experience?.access?.subject)
         }
       );

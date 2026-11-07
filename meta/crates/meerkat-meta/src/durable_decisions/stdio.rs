@@ -55,7 +55,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::approvers::{
-    DeciderIdentity, LiveHolderEligibility, decider_principal, holding, ingress_person,
+    DecideInput, DeciderIdentity, LiveHolderEligibility, decider_principal, holding,
+    ingress_person, local_operator_principal,
 };
 use super::owner::{DecisionEventBinding, RuntimeDecisions};
 use super::wire::{
@@ -397,6 +398,9 @@ impl StdioDecisionConnection {
             operator.principal.clone(),
             Some(&operator.principal),
         );
+        // The commit reads the map again and refuses a decide whose key it
+        // read before the map linked the operator to the requester.
+        let input = DecideInput::new(&row, &decider, Some(&operator.principal));
         let approver = if decider == operator.principal {
             operator.approver.clone()
         } else {
@@ -428,8 +432,13 @@ impl StdioDecisionConnection {
             Ok(decision) => decision,
             Err(error) => return invalid(id, &error),
         };
-        let eligibility =
-            LiveHolderEligibility::operator(access, approver_id, presented, Arc::clone(&self.open));
+        let eligibility = LiveHolderEligibility::operator(
+            access,
+            approver_id,
+            input,
+            presented,
+            Arc::clone(&self.open),
+        );
         match owner.decide(&decision_id, &decision, &eligibility) {
             Ok(row) => wire::success(
                 id,
@@ -481,7 +490,12 @@ impl StdioDecisionConnection {
             Ok(now_ms) => now_ms,
             Err(error) => return wire::failure(id, wire::INTERNAL_ERROR, error.to_string(), None),
         };
-        if attestation.observed_at_ms > now_ms.saturating_add(declaration.max_clock_skew_ms()) {
+        // A skew is at most an hour, so only a clock near its end overflows:
+        // such a reading accepts no event.
+        let within_skew = now_ms
+            .checked_add(declaration.max_clock_skew_ms())
+            .is_some_and(|latest_ms| attestation.observed_at_ms <= latest_ms);
+        if !within_skew {
             return wire::invalid_params(
                 id,
                 format!(
@@ -565,6 +579,9 @@ impl StdioDecisionConnection {
             .and_then(|access| holding(&access.snapshot().0, &approver_id, &identity));
         let operator = self.operator.as_ref().map(|operator| &operator.principal);
         let decider = decider_principal(&row, held.as_ref(), person, operator);
+        // The commit reads the map again and refuses a decide whose key it
+        // read before the map linked the person to the requester.
+        let input = DecideInput::new(&row, &decider, operator);
         let approver =
             match AuthenticatedApprover::new(decider, ApprovalAssurance::PersonAuthenticated) {
                 Ok(approver) => approver.with_authentication_scope(HostAuthenticationScope::new(
@@ -595,7 +612,7 @@ impl StdioDecisionConnection {
             Ok(decision) => decision,
             Err(error) => return invalid(id, &error),
         };
-        let eligibility = LiveHolderEligibility::attested(access, approver_id, identity);
+        let eligibility = LiveHolderEligibility::attested(access, approver_id, identity, input);
         match owner.decide(&decision_id, &decision, &eligibility) {
             Ok(row) => wire::success(
                 id,
@@ -631,9 +648,8 @@ impl StdioDecisionConnection {
 /// operating-system user, device trusted, in a scope of the connection's
 /// own. `None` when the user cannot be named as an approver.
 fn local_operator(realm: &RealmId, connection: uuid::Uuid) -> Option<StdioOperator> {
-    let principal = match meerkat::governed_realm::stock::StockPrincipals::for_local_operator(realm)
-    {
-        Ok(principals) => principals.operator,
+    let principal = match local_operator_principal(realm) {
+        Ok(principal) => principal,
         Err(error) => {
             tracing::warn!(%error, "the stdio operator cannot be named; it decides nothing");
             return None;
@@ -709,6 +725,22 @@ pub(crate) fn list_filter(
     Ok(filter)
 }
 
+/// The page size `params` name: the default when they name none. A page of
+/// no decisions is refused; a larger page than the store's reads as the
+/// store's.
+pub(crate) fn page_limit(id: &Value, params: &DecisionListParams) -> Result<usize, Value> {
+    match params.limit {
+        None => Ok(DEFAULT_LIST_PAGE),
+        Some(0) => Err(wire::invalid_params(
+            id,
+            "a decision page limit must be at least 1",
+        )),
+        Some(limit) => Ok(usize::try_from(limit)
+            .unwrap_or(DECISION_PAGE_MAX)
+            .min(DECISION_PAGE_MAX)),
+    }
+}
+
 /// The page `params` names, and the owner it was read through.
 pub(crate) fn read_page<'a>(
     id: &Value,
@@ -716,20 +748,7 @@ pub(crate) fn read_page<'a>(
     decisions: &'a RuntimeDecisions,
 ) -> Result<(&'a DurableDecisionService, DecisionListing), Value> {
     let filter = list_filter(id, params)?;
-    // A page of no decisions is refused; a larger page than the store's
-    // reads as the store's.
-    let limit = match params.limit {
-        None => DEFAULT_LIST_PAGE,
-        Some(0) => {
-            return Err(wire::invalid_params(
-                id,
-                "a decision page limit must be at least 1",
-            ));
-        }
-        Some(limit) => usize::try_from(limit)
-            .unwrap_or(DECISION_PAGE_MAX)
-            .min(DECISION_PAGE_MAX),
-    };
+    let limit = page_limit(id, params)?;
     if !decisions.is_available() {
         return Err(wire::no_decision_store(id));
     }

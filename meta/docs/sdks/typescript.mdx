@@ -95,7 +95,7 @@ const rt = await Meta.builder()
   .build();
 
 rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
-const page = await mob.decisionsList({ phase: "open" }); // notices arrive first
+const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
 await mob.decisionsDecide(decisionId, {
   approve: true,
   presentedDigest: subjectDigest,
@@ -110,8 +110,9 @@ await mob.decisionsDecide(decisionId, {
 ```
 
 `decisionIngresses` declares the ingresses as `runtime_options.decisions`.
-`MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`
-the gateway writes before a list answers. Without an `attestation` the stdio
+`MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
+The gateway writes the notices before a list answers; a handler may still be
+running after `decisionsList` resolves. Without an `attestation` the stdio
 operator decides, eligible only for a decision presented to it on this
 connection. A decide called while the SDK serves a host tool callback rejects
 with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)

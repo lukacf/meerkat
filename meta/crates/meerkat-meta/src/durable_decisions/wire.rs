@@ -58,8 +58,10 @@ impl MetaDecisionStatus {
 
 /// One page of decisions: the rows the caller reads whole, the rows it may
 /// see the status of, and the rows the server cannot read. `next_after`
-/// names the decision id to read the next page after; a page the caller sees
-/// nothing of may still have one.
+/// names the decision id to read the next page after, and never a decision
+/// the caller was not given: the store's cursor on the stdio host and for a
+/// Console administrator, and for any other Console caller the last row of
+/// the page, only while more of what it may see may follow.
 #[derive(Debug, Clone, Serialize)]
 pub struct MetaDecisionListResult {
     pub decisions: Vec<WireDecision>,
@@ -112,7 +114,8 @@ pub struct MetaDecisionDecideParams {
     pub attestation: Option<DecisionAttestationRequest>,
 }
 
-/// What a `meta/decisions/notice` says happened.
+/// What a `meta/decisions/notice` says happened. Tolerant: a host decodes an
+/// event a later version adds as `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetaDecisionNoticeEvent {
@@ -122,6 +125,10 @@ pub enum MetaDecisionNoticeEvent {
     /// The decision shown to the stdio operator, recorded as presented on
     /// this connection under the notice's id.
     Presented,
+    /// Forward compatibility: an event this version does not know. The
+    /// server never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `meta/decisions/notice`: one open decision, noticed once per stdio

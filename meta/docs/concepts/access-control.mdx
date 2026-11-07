@@ -182,18 +182,19 @@ The same map is the only approver source for durable decisions (see [durable dec
 [approvers."team:owners"]
 subjects = ["owner@example.org"]
 ingress_subjects = [
-  { ingress = "chat", subject = "U123" },   # a person the "chat" ingress attests
-  { ingress = "operator" },                 # the stdio operator of the gateway
+  { ingress = "chat", subject = "U555" },   # a person the "chat" ingress attests
 ]
 people = [
-  # One person across ingresses: these identities are one decider.
-  { subjects = ["owner@example.org"], ingress_subjects = [{ ingress = "chat", subject = "U123" }] },
+  # One person: the stdio operator of the gateway and the chat identity U123.
+  { ingress_subjects = [{ ingress = "operator" }, { ingress = "chat", subject = "U123" }] },
 ]
 ```
 
 - `ingress_subjects` lists holders as a declared decision ingress attests them. An ingress must be declared in the launch's `runtime_options.decisions` (see [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); a configuration that names another ingress is refused at load (`unknown_ingress`), and so is a later edit from the Console. The built-in ingress `operator`, the operating-system user that started the stdio gateway, names no subject and decides only the decisions of the approver ids that list it.
-- `people` holds one entry per person whose identities span ingresses. The person holds the approver id through any identity the entry lists, and a decision one of those identities requested is the person's own: its approval by any of them is refused as self approval. Identities that no entry links cannot be recognised as one person.
+- `people` holds one entry per person, within this binding. An entry links the stdio operator and the declared-ingress identities it lists as one person: the person holds the approver id through any of them, and a decision one of them requested is the person's own, so its approval by any of them is refused as self approval. Linking is per binding, so link a person in every binding they hold. An identity appears in at most one entry of a binding; a configuration that lists one in two entries is refused at load and on a Console edit (`duplicate_person_identity`). Identities that no entry links cannot be recognised as one person.
+- An entry's `subjects` name the person's Console subjects. They hold the approver id for the Console's decision reads and the gating decide, but a decision requested from the Console is not matched to the person, since the Console decides no durable decision.
 - A Console caller who holds a decision's approver id reads the decision whole; see [On the Console](/api/rpc#on-the-console) for who else sees what.
+- `meta_gateway` keeps no durable decisions and declares no ingress, so it does not check the ingress names of the approver map. Edit an access file shared with an `rpc_gateway` through that `rpc_gateway`: it declares the ingresses and refuses an edit that names another.
 
 ## Live administration from the console
 
@@ -331,8 +332,9 @@ for example `"reason": "unknown_group"` with
 `padded_approver_id`, `approver_without_holders`, `unknown_approver_group`,
 `unknown_rule`, `invalid_ingress_name`, `operator_ingress_with_subject`,
 `invalid_ingress_subject`, `approver_person_without_identity`,
-`unknown_ingress` and `invalid_toml` (a configuration the owner could not write
-as TOML), and the list can grow. Map the reasons you know to your own words.
+`unknown_ingress`, `duplicate_person_identity` and `invalid_toml` (a
+configuration the owner could not write as TOML), and the list can grow. Map
+the reasons you know to your own words.
 Only an administrator receives this refusal, and `detail` names only entries
 of the configuration that was saved, so an access editor may show it, also
 for a reason it does not know.

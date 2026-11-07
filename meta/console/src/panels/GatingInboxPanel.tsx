@@ -90,6 +90,13 @@ interface GatingInboxPanelProps {
   /** The durable decisions the caller may see, listed on Pending after the
    *  approvals. Read only: a decision is decided where it was presented. */
   decisions?: readonly DecisionCardView[];
+  /** The cursor of the decisions' last page, while more may follow: the
+   *  list then offers "Load more", which asks for the page after it. */
+  decisionsNextAfter?: string;
+  /** Read the page of decisions after `after`. */
+  onLoadMoreDecisions?: (after: string) => void;
+  /** Whether a further page of decisions is being read. */
+  decisionsLoadingMore?: boolean;
   /** Whether a person is signed in to the console. The decision cards offer
    *  no decision either way. */
   signedIn?: boolean;
@@ -433,6 +440,9 @@ export function GatingInboxPanel({
   hostDecideSources,
   showPending,
   decisions: durableDecisions,
+  decisionsNextAfter,
+  onLoadMoreDecisions,
+  decisionsLoadingMore = false,
   signedIn = false,
 }: GatingInboxPanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<Tab>("pending");
@@ -493,12 +503,22 @@ export function GatingInboxPanel({
   const hostItems = tab === "pending" ? hostAttention?.items ?? [] : [];
   const hostFailedSources = tab === "pending" ? hostAttention?.failedSources ?? [] : [];
   // Durable decisions follow the approvals too, read only: each one is
-  // decided where it was presented.
+  // decided where it was presented. "Load more" follows the list's cursor.
   const decisionCards = tab === "pending" ? durableDecisions ?? [] : [];
-  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0;
+  const decisionCursor = tab === "pending" && onLoadMoreDecisions ? decisionsNextAfter : undefined;
+  const hostShown = hostItems.length > 0 || hostFailedSources.length > 0 || decisionCards.length > 0
+    || decisionCursor !== undefined;
   const hostList = hostShown ? (
     <>
-      {decisionCards.length ? <DecisionCardList cards={decisionCards} signedIn={signedIn} /> : null}
+      {decisionCards.length || decisionCursor !== undefined ? (
+        <DecisionCardList
+          cards={decisionCards}
+          signedIn={signedIn}
+          nextAfter={decisionCursor}
+          onLoadMore={onLoadMoreDecisions}
+          loadingMore={decisionsLoadingMore}
+        />
+      ) : null}
       {hostItems.length > 0 || hostFailedSources.length > 0 ? (
         <div className="gating-inbox__cards gating-inbox__host" data-testid="host-attention-list">
           {hostItems.map((item) => <HostAttentionCard key={`${item.sourceId}:${item.id}`} item={item} />)}

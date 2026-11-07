@@ -1557,7 +1557,7 @@ decisions and refuses every write (`data.kind = "candidate_launch"`).
 | `meta/decisions/get` | Whole | Read access, as the caller may see it |
 | `meta/decisions/rendering` | Whole | Read access, for a caller that reads the decision whole |
 | `meta/decisions/present` | The host records a presentation it made | Not served |
-| `meta/decisions/withdraw` | The host withdraws | `decisions.admin`, on a writable Console |
+| `meta/decisions/withdraw` | The host withdraws | An administrator (`decisions.admin` while access control is enforced), on a writable Console; with access control off, not served (`-32601`) |
 | `meta/decisions/decide` | The operator, or a person a declared ingress attests | Not served (`-32601`) |
 
 `list`, `get`, `rendering`, `present` and `withdraw` take Core's
@@ -1568,7 +1568,11 @@ the status of only, `unreadable` the rows the server cannot read. A get
 answers `{"decision": {...}}` or `{"status": {...}}`. A status is
 `{decision_id, kind, phase, deadline_at_ms, decided_at_ms?, ended_at_ms?}` and
 never holds what the decision is about. On the stdio gateway every row reads
-whole and `statuses` is empty.
+whole and `statuses` is empty. `next_after` names the decision id to read the
+next page after, and never a decision the caller was not given: on the stdio
+gateway and for a Console administrator it is the store's own cursor; for any
+other Console caller it is the last row of the page, present only while more
+of what the caller may see may follow.
 
 ### Notices on the stdio gateway
 
@@ -1639,10 +1643,16 @@ again when the decision commits. An attestation the launch does not accept (an
 undeclared ingress, the `operator` ingress, an event used for another decision,
 a time beyond the clock skew) is refused invalid params (`-32602`) with no
 `data`; the message names the cause. A decision that refuses the decider is
-Core's typed refusal (`-32602`, `data.kind = "decision_refused"`). A person an
-approver's `people` entry lists decides as one person across its identities:
-a decision one of those identities requested is the person's own, and its
-approval by any of them is refused as self approval.
+Core's typed refusal (`-32602`, `data.kind = "decision_refused"`). A `people`
+entry links, within its approver binding, the stdio operator and the
+declared-ingress identities of one person: a decision one of those identities
+requested is the person's own, and its approval by any of them is refused as
+self approval; when the map links them after the decide was read and before
+it commits, the decide is refused as not eligible. Link a person in every
+binding they hold. The entry's Console `subjects` make the person a holder for
+the Console's reads and the gating decide; a decision requested from the
+Console is not matched to the person, since the Console decides no durable
+decision.
 
 Each event an ingress attests is recorded in the runtime's metadata store
 before the decision is decided, and the record survives a restart.
@@ -1664,7 +1674,13 @@ control is enforced, and no access rule widens it:
 
 While access control is enforced, the reads need `decisions.view` and the
 withdraw `decisions.admin`; a caller without them is refused `-32030`
-(`data.kind = "access_denied"`). `meta/decisions/rendering` for a caller that
+(`data.kind = "access_denied"`), the withdraw before any decision is read and
+alike for every id. With access control off, or without an access controller,
+nobody administers decisions on the Console: it serves no withdraw (`-32601`),
+and the stdio gateway's host withdraws. A list pages over what the caller may
+see: an administrator reads the store's own pages, and any other caller reads
+the decisions of the approver ids it holds and its own requests, and learns
+of no other decision. `meta/decisions/rendering` for a caller that
 may see only the status is refused `-32030`
 (`data.kind = "content_not_visible"`). Unreadable rows are listed only to a
 caller allowed `decisions.admin`. While the runtime keeps decisions,

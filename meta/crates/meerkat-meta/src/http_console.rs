@@ -1421,12 +1421,10 @@ fn console_decision_rpc(
     request: &JsonRpcRequest,
 ) -> Option<Value> {
     let id = request.id.clone().unwrap_or(Value::Null);
-    if read_only && request.method == "meta/decisions/withdraw" {
-        return Some(console_read_only_rpc_error(id));
-    }
     crate::durable_decisions::console::handle_console_decision_rpc(
         &state.durable_decisions,
         &console_decision_caller(auth_context),
+        read_only,
         &request.method,
         &id,
         request.params.clone(),
@@ -3991,7 +3989,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
     )
 }
 
-fn console_read_only_rpc_error(response_id: Value) -> Value {
+pub(crate) fn console_read_only_rpc_error(response_id: Value) -> Value {
     response_value(
         response_id,
         None,
@@ -6763,6 +6761,7 @@ fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> Str
         | AccessConfigError::OperatorIngressWithSubject { .. }
         | AccessConfigError::InvalidIngressSubject { .. }
         | AccessConfigError::ApproverPersonWithoutIdentity { .. }
+        | AccessConfigError::DuplicatePersonIdentity { .. }
         | AccessConfigError::UnknownIngress { .. }
         | AccessConfigError::RevisionExhausted => error.to_string(),
         AccessConfigError::Parse(_) => {

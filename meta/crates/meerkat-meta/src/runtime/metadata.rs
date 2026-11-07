@@ -1041,7 +1041,9 @@ fn decision_event_key(ingress: &str, event_ref: &str) -> String {
 /// is configured. The structural-events subscription falls back to "start
 /// at latest" on restart in this case, which is the right behaviour:
 /// in-memory deployments don't have a persistent ledger to replay against
-/// either.
+/// either. It keeps no attested decision events (`bind_decision_event`
+/// refuses): a record a restart forgets cannot keep an event to one
+/// decision, so a runtime built with it refuses the attested decide.
 #[derive(Debug, Default)]
 pub struct InMemoryMetadataStore {
     cursors: RwLock<BTreeMap<String, u64>>,
@@ -1051,7 +1053,6 @@ pub struct InMemoryMetadataStore {
     lifecycle_cursors: RwLock<BTreeMap<String, LifecycleProjectionCursor>>,
     lifecycle_intents: RwLock<BTreeMap<(String, LifecycleIntentKey), LifecycleEffectIntent>>,
     lifecycle_failures: RwLock<BTreeMap<(String, String), LifecycleEffectFailure>>,
-    decision_events: RwLock<BTreeMap<(String, String), String>>,
 }
 
 impl InMemoryMetadataStore {
@@ -1062,22 +1063,6 @@ impl InMemoryMetadataStore {
 
 #[async_trait]
 impl PersistentMetadataStore for InMemoryMetadataStore {
-    async fn bind_decision_event(
-        &self,
-        mob_id: &str,
-        ingress: &str,
-        event_ref: &str,
-        decision_id: &str,
-    ) -> Result<String, MetadataStoreError> {
-        Ok(self
-            .decision_events
-            .write()
-            .await
-            .entry((mob_id.to_string(), decision_event_key(ingress, event_ref)))
-            .or_insert_with(|| decision_id.to_string())
-            .clone())
-    }
-
     async fn get_subscription_cursor(
         &self,
         mob_id: &str,

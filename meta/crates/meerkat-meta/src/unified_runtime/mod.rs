@@ -2236,15 +2236,17 @@ impl UnifiedRuntime {
     /// Meta's answer to whether the party that decided a decision may still
     /// do so, for a host's decision executor: `Eligible` while the live
     /// approver map (the access controller's `approvers`) lists the identity
-    /// that decided (the stdio operator, or a person a declared ingress
-    /// attests) for the decision's approver id, re-read when the execution
-    /// commits; `Refused` once it no longer does. A runtime without an
-    /// access controller has no map and refuses.
+    /// that decided (this runtime's stdio operator, or a person a declared
+    /// ingress attests) for the decision's approver id, re-read when the
+    /// execution commits; `Refused` once it no longer does, and for operator
+    /// evidence whose decider is not this runtime's operator. A runtime
+    /// without an access controller has no map and refuses.
     pub fn decision_approver_currentness(
         &self,
     ) -> Arc<dyn meerkat_runtime::decision::DecisionApproverCurrentness> {
         Arc::new(crate::durable_decisions::MapApproverCurrentness::new(
             self.access_controller.clone(),
+            self.durable_decisions.realm(),
         ))
     }
 

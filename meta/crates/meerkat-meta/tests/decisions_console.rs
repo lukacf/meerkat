@@ -682,6 +682,26 @@ enabled = false
 subjects = ["alice@example.test"]
 "#;
 
+/// Carol reads decisions and holds two approver ids.
+const SEVERAL_STREAMS: &str = r#"
+enabled = true
+admins = ["admin@example.test"]
+
+[[rules]]
+id = "decision-readers"
+subjects = ["carol@example.test"]
+actions = ["decisions.view"]
+
+[approvers."team:owners"]
+subjects = ["carol@example.test"]
+
+[approvers."team:ops"]
+subjects = ["carol@example.test"]
+
+[approvers."team:other"]
+subjects = ["alice@example.test"]
+"#;
+
 fn now_ms() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
@@ -720,10 +740,21 @@ struct Listed {
 /// `subject`. Each cursor must name the last row of its page, a row the
 /// caller was given.
 async fn walk(app: &axum::Router, subject: Option<&str>, limit: u64) -> Listed {
+    walk_filtered(app, subject, limit, json!({})).await
+}
+
+/// [`walk`] with the list filters `filters`.
+async fn walk_filtered(
+    app: &axum::Router,
+    subject: Option<&str>,
+    limit: u64,
+    filters: Value,
+) -> Listed {
     let mut listed = Listed::default();
     let mut after: Option<String> = None;
     for _ in 0..64 {
-        let mut params = json!({ "limit": limit });
+        let mut params = filters.clone();
+        params["limit"] = json!(limit);
         if let Some(after) = &after {
             params["after"] = json!(after);
         }
@@ -852,6 +883,101 @@ async fn the_console_list_cursor_never_names_a_decision_the_caller_cannot_see() 
         assert_eq!(carol.statuses, sorted(&[&carol_release]), "limit {limit}");
         assert!(carol.unreadable.is_empty(), "limit {limit}: {carol:?}");
     }
+    drop(app);
+    runtime.shutdown().await;
+
+    // A reader who holds two approver ids and asked for decisions of its
+    // own: its holder and request streams merge in decision id order, a row
+    // in two streams is given once, its own filters apply inside each
+    // stream, and every cursor names a row it was given.
+    let several = dir.path().join("several");
+    let (runtime, app) = console(&several, Some(SEVERAL_STREAMS), true).await;
+    let owner = decisions_of(&several);
+    let mut owners_rows = Vec::new();
+    let mut ops_rows = Vec::new();
+    for n in 0..3 {
+        owners_rows.push(hold(
+            &owner,
+            "release",
+            &format!("owners-{n}"),
+            "team:owners",
+            agent_requester(),
+        ));
+        ops_rows.push(hold(
+            &owner,
+            "release",
+            &format!("ops-{n}"),
+            "team:ops",
+            agent_requester(),
+        ));
+    }
+    // Held for an approver id Carol holds, and asked by Carol: one whole row.
+    let own_held = hold(
+        &owner,
+        "release",
+        "own-owners",
+        "team:owners",
+        console_requester(CAROL),
+    );
+    let asked: Vec<StoredDecision> = (0..2)
+        .map(|n| {
+            hold(
+                &owner,
+                "route.release",
+                &format!("asked-{n}"),
+                "team:other",
+                console_requester(CAROL),
+            )
+        })
+        .collect();
+    hold(
+        &owner,
+        "release",
+        "other-0",
+        "team:other",
+        agent_requester(),
+    );
+    let broken = hold(
+        &owner,
+        "release",
+        "ops-broken",
+        "team:ops",
+        agent_requester(),
+    );
+    make_unreadable(&several, &broken);
+    let whole_rows: Vec<&StoredDecision> = owners_rows
+        .iter()
+        .chain(&ops_rows)
+        .chain([&own_held])
+        .collect();
+    let asked_rows: Vec<&StoredDecision> = asked.iter().collect();
+    for limit in [1, 2, 3, 100] {
+        let carol = walk(&app, Some(CAROL), limit).await;
+        assert_eq!(carol.whole, sorted(&whole_rows), "limit {limit}");
+        assert_eq!(carol.statuses, sorted(&asked_rows), "limit {limit}");
+        assert!(carol.unreadable.is_empty(), "limit {limit}: {carol:?}");
+    }
+    let ops_only = walk_filtered(&app, Some(CAROL), 2, json!({"approver_id": "team:ops"})).await;
+    let ops_refs: Vec<&StoredDecision> = ops_rows.iter().collect();
+    assert_eq!(ops_only.whole, sorted(&ops_refs));
+    assert!(ops_only.statuses.is_empty(), "{ops_only:?}");
+    let not_held = walk_filtered(&app, Some(CAROL), 2, json!({"approver_id": "team:nobody"})).await;
+    assert!(
+        not_held.whole.is_empty() && not_held.statuses.is_empty(),
+        "an approver id the caller does not hold opens no stream: {not_held:?}"
+    );
+    let own_requests = walk_filtered(
+        &app,
+        Some(CAROL),
+        1,
+        json!({"requester": console_requester(CAROL).to_string()}),
+    )
+    .await;
+    assert_eq!(own_requests.whole, sorted(&[&own_held]));
+    assert_eq!(own_requests.statuses, sorted(&asked_rows));
+    let releases = walk_filtered(&app, Some(CAROL), 1, json!({"kind": "route.release"})).await;
+    assert!(releases.whole.is_empty(), "{releases:?}");
+    assert_eq!(releases.statuses, sorted(&asked_rows));
     drop(app);
     runtime.shutdown().await;
 

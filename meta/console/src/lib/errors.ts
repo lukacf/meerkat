@@ -68,6 +68,7 @@ const INVALID_ACCESS_REASONS = {
   invalid_ingress_subject: { words: "An approver's ingress identity needs a subject without surrounding spaces", showDetail: true },
   approver_person_without_identity: { words: "An approver's person entry names no identity", showDetail: true },
   unknown_ingress: { words: "An approver names an ingress this runtime does not declare", showDetail: true },
+  duplicate_person_identity: { words: "An approver lists one identity in two person entries", showDetail: true },
   invalid_toml: { words: "The access configuration file cannot hold this configuration", showDetail: false },
 } as const satisfies Record<string, { words: string; showDetail: boolean }>;
 

@@ -15,7 +15,7 @@ use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
 use serde_json::json;
 
 use super::approvers::{
-    DeciderIdentity, LiveHolderEligibility, decider_principal, holding, ingress_person,
+    DecideInput, DeciderIdentity, LiveHolderEligibility, decider_principal, holding, ingress_person,
 };
 use super::ingress::{
     DecisionIngressDeclaration, DecisionIngressDeclarations, check_approver_ingresses,
@@ -456,11 +456,10 @@ fn operator_eligibility(
     row: &StoredDecision,
     operator: &PrincipalRef,
 ) -> LiveHolderEligibility {
-    // This version's eligibility reads the holder only.
-    let _ = (row, operator);
     LiveHolderEligibility::operator(
         Some(controller.clone()),
         "team:owners".to_string(),
+        DecideInput::new(row, operator, Some(operator)),
         true,
         Arc::new(AtomicBool::new(true)),
     )
@@ -474,12 +473,11 @@ fn attested_eligibility(
     row: &StoredDecision,
     decides_as: &PrincipalRef,
 ) -> LiveHolderEligibility {
-    // This version's eligibility reads the holder only.
-    let _ = (row, decides_as);
     LiveHolderEligibility::attested(
         Some(controller.clone()),
         "team:owners".to_string(),
         identity,
+        DecideInput::new(row, decides_as, None),
     )
 }
 

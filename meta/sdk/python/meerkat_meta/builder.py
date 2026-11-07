@@ -485,9 +485,10 @@ class MetaBuilder:
         Each entry names its ``ingress`` (1 to 64 of ``a-z``, ``0-9``,
         ``.``, ``_`` and ``-``; never ``operator``, the built-in stdio
         operator), ``attests`` (``"person"``) and ``max_clock_skew_ms``, how
-        far ahead of the gateway's clock an attested event's time may be.
-        The gateway refuses the init when an entry is malformed or the access
-        configuration's approver map names an ingress not declared here.
+        far ahead of the gateway's clock an attested event's time may be, at
+        most one hour (``3_600_000``). The gateway refuses the init when an
+        entry is malformed or the access configuration's approver map names
+        an ingress not declared here.
         """
         self._config.decision_ingresses = [dict(entry) for entry in ingresses]
         return self

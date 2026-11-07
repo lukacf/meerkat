@@ -211,7 +211,7 @@ import {
 import { TimelinePanel } from "./panels/TimelinePanel";
 import { OperatorPanel } from "./panels/OperatorPanel";
 import { GatingInboxPanel } from "./panels/GatingInboxPanel";
-import { decisionCardsOf, renderingOf, wholeDecisionIds, type DecisionCardView } from "./panels/decision-cards";
+import { decisionCardsOf, decisionPageCursor, decisionPageParams, mergeDecisionCards, renderingOf, wholeDecisionIds, type DecisionCardView } from "./panels/decision-cards";
 import { AccessPanel, type AccessPreviewResult } from "./panels/AccessPanel";
 import {
   MemoryPanel,
@@ -304,8 +304,8 @@ type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
 type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
 /** The recorded approvals the Approvals panel reads: the newest 50. */
 const GATING_AUDIT_LIMIT = 50;
-/** How many open durable decisions the Approvals panel reads: one page,
- *  of which it shows the ones the caller may see. */
+/** How many open durable decisions the Approvals panel reads a page, of
+ *  what the caller may see; "Load more" reads the next. */
 const DECISION_PAGE_LIMIT = 100;
 type RoutingReadState = {
   scope: string;
@@ -3676,26 +3676,37 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   }), [baseUrl, panelRefreshFlight]);
 
   // The durable decisions the caller may see, on the Approvals panel's
-  // Pending tab, read only: the open ones, with the rendering of each one the
-  // caller may read whole. They belong to the scope (principal and runtime)
+  // Pending tab, read only: the open ones, a page at a time, with the
+  // rendering of each one the caller may read whole. "Load more" follows the
+  // list's cursor; no further page is read by itself, and a refresh reads
+  // the first page again. They belong to the scope (principal and runtime)
   // that read them. A gateway that lists no decision methods shows none.
-  const [decisionRead, setDecisionRead] = React.useState<{ scope: string; cards: DecisionCardView[] }>({ scope: "", cards: [] });
+  const [decisionRead, setDecisionRead] = React.useState<{
+    scope: string;
+    cards: DecisionCardView[];
+    nextAfter?: string;
+    loadingMore?: boolean;
+  }>({ scope: "", cards: [] });
+  async function readDecisionPage(after?: string): Promise<{ cards: DecisionCardView[]; nextAfter?: string }> {
+    const target = controlWorkbenchTarget("gating");
+    const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDecisions, target, decisionPageParams(DECISION_PAGE_LIMIT, after));
+    const renderings = new Map<string, string>();
+    await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
+      try {
+        const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.getDecisionRendering, target, { decision_id: decisionId }));
+        if (rendering !== undefined) renderings.set(decisionId, rendering);
+      } catch {
+        // A rendering that cannot be read leaves its card without one.
+      }
+    }));
+    return { cards: decisionCardsOf(page, renderings), nextAfter: decisionPageCursor(page) };
+  }
   const refreshDecisions = React.useCallback(() => panelRefreshFlight("decisions", async () => {
     const scope = accessScopeRef.current;
-    const target = controlWorkbenchTarget("gating");
     try {
-      const page = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listDecisions, target, { phase: "open", limit: DECISION_PAGE_LIMIT });
-      const renderings = new Map<string, string>();
-      await Promise.all(wholeDecisionIds(page).map(async (decisionId) => {
-        try {
-          const rendering = renderingOf(await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.getDecisionRendering, target, { decision_id: decisionId }));
-          if (rendering !== undefined) renderings.set(decisionId, rendering);
-        } catch {
-          // A rendering that cannot be read leaves its card without one.
-        }
-      }));
+      const first = await readDecisionPage();
       if (scope !== accessScopeRef.current) return;
-      setDecisionRead({ scope, cards: decisionCardsOf(page, renderings) });
+      setDecisionRead({ scope, cards: first.cards, nextAfter: first.nextAfter });
     } catch (error) {
       if (scope !== accessScopeRef.current) return;
       setDecisionRead({ scope, cards: [] });
@@ -3705,7 +3716,26 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       throw error;
     }
   }), [baseUrl, panelRefreshFlight]);
+  const loadMoreDecisions = React.useCallback((after: string) => {
+    const scope = accessScopeRef.current;
+    setDecisionRead((current) => (current.scope === scope ? { ...current, loadingMore: true } : current));
+    void (async () => {
+      try {
+        const more = await readDecisionPage(after);
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => (current.scope === scope && current.nextAfter === after
+          ? { scope, cards: mergeDecisionCards(current.cards, more.cards), nextAfter: more.nextAfter }
+          : current));
+      } catch {
+        // The cursor stays: the control asks for the same page again.
+        if (scope !== accessScopeRef.current) return;
+        setDecisionRead((current) => (current.scope === scope ? { ...current, loadingMore: false } : current));
+      }
+    })();
+  }, [baseUrl]);
   const decisionCards = decisionRead.scope === accessScope ? decisionRead.cards : [];
+  const decisionNextAfter = decisionRead.scope === accessScope ? decisionRead.nextAfter : undefined;
+  const decisionLoadingMore = decisionRead.scope === accessScope && decisionRead.loadingMore === true;
 
   // Routing reads need routing access (runtime.admin): a refusal shows the
   // no-access state, never "no routes". The data belongs to the principal
@@ -6052,6 +6082,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
           decisions={decisionCards}
+          decisionsNextAfter={decisionNextAfter}
+          onLoadMoreDecisions={loadMoreDecisions}
+          decisionsLoadingMore={decisionLoadingMore}
           signedIn={Boolean(experience?.access?.subject)}
         />
       );
@@ -6166,6 +6199,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           hostDecideSources={hostAttentionSources}
           showPending={approvalOpens}
           decisions={decisionCards}
+          decisionsNextAfter={decisionNextAfter}
+          onLoadMoreDecisions={loadMoreDecisions}
+          decisionsLoadingMore={decisionLoadingMore}
           signedIn={Boolean(experience?.access?.subject)}
         />
       );

@@ -33,10 +33,10 @@ each package is accepted only on evidence for that exact package, and the
   `people`, so a struct literal of it needs them (or
   `..Default::default()`). The TOML and JSON forms are unchanged when they
   are empty.
-- `AccessConfigError` has five new variants, `InvalidIngressName`,
+- `AccessConfigError` has six new variants, `InvalidIngressName`,
   `OperatorIngressWithSubject`, `InvalidIngressSubject`,
-  `ApproverPersonWithoutIdentity` and `UnknownIngress`; an exhaustive match
-  over it needs arms for them.
+  `ApproverPersonWithoutIdentity`, `UnknownIngress` and
+  `DuplicatePersonIdentity`; an exhaustive match over it needs arms for them.
 
 ### Upgrade
 
@@ -99,31 +99,45 @@ each package is accepted only on evidence for that exact package, and the
     map lists it;
   - a decide with an `attestation` is the decision of the person a declared
     ingress authenticated (`runtime_options.decisions`, with each ingress's
-    clock skew). Each attested event decides one decision, recorded in the
-    runtime's metadata store before the decide; an undeclared ingress, a
-    reused event or a time beyond the skew is refused `-32602`.
+    clock skew, at most one hour: a larger one is refused at launch). Each
+    attested event decides one decision, recorded in the runtime's metadata
+    store before the decide; an undeclared ingress, a reused event or a time
+    beyond the skew is refused `-32602`.
   The approver map lists the people an ingress attests
   (`ingress_subjects`), the stdio operator (`{ ingress = "operator" }`) and,
-  in `people`, one person across ingresses, whose own requests none of their
-  identities may approve. It is read again when a decision commits. A map
-  that names an undeclared ingress is refused at load and on a Console edit
+  in `people`, one person per entry within a binding: the stdio operator and
+  the declared-ingress identities an entry links are one person, whose own
+  requests none of those identities may approve, also when the map links
+  them while a decide is in flight. An identity in two entries of one binding
+  is refused (`duplicate_person_identity`). An entry's Console `subjects`
+  now hold the approver id for the Console's decision reads and the gating
+  decide. The map is read again when a decision commits. A map that names an
+  undeclared ingress is refused at load and on a Console edit
   (`unknown_ingress`).
 - The Console's refusal of an invalid access configuration
-  (`invalid_access_config`) has five new `reason` values for the approver
+  (`invalid_access_config`) has six new `reason` values for the approver
   map's ingress identities: `invalid_ingress_name`,
   `operator_ingress_with_subject`, `invalid_ingress_subject`,
-  `approver_person_without_identity` and `unknown_ingress`. The reasons are
+  `approver_person_without_identity`, `unknown_ingress` and
+  `duplicate_person_identity`. The reasons are
   an open list: the Console names each in its own words and shows the
   owner's `detail` for a reason it does not know, and the SDKs pass the
   refusal's `data` through unchanged.
 - The Console lists the open durable decisions on the Approvals panel's
-  Pending tab, read only: a holder of the approver id (or, while access
-  control is enforced, a caller with `decisions.admin`) sees the whole
-  rendering and where it was presented, the requester of most kinds sees only
-  the status, and anyone else sees nothing. `meta/decisions/list`, `get` and
-  `rendering` on `POST /console/rpc` need `decisions.view` while access
-  control is enforced, and `meta/decisions/withdraw` needs `decisions.admin`.
-  The Console decides no durable decision.
+  Pending tab, read only, a page at a time with Load more: a holder of the
+  approver id (or, while access control is enforced, a caller with
+  `decisions.admin`) sees the whole rendering and where it was presented,
+  the requester of most kinds sees only the status, and anyone else sees
+  nothing. A list pages over what the caller may see: a caller that does not
+  administer decisions learns of no other decision, and its cursor names
+  only rows it was given. `meta/decisions/list`, `get` and `rendering` on
+  `POST /console/rpc` need `decisions.view` while access control is
+  enforced; a caller that may see only a decision's status is refused its
+  rendering with `-32030` and `data.kind = "content_not_visible"`.
+  `meta/decisions/withdraw` needs `decisions.admin` while access control is
+  enforced, and with access control off, or without an access controller,
+  the Console serves no withdraw (`-32601`). The Console decides no durable
+  decision.
 - The SDKs call the decision methods (Python `MobHandle.decisions_list`,
   `decisions_get`, `decisions_rendering`, `decisions_present`,
   `decisions_withdraw` and `decisions_decide` with a `DecisionAttestation`;
@@ -133,8 +147,17 @@ each package is accepted only on evidence for that exact package, and the
   decide called from inside a tool callback raises
   `DecideInsideToolCallbackError` and sends nothing.
 - `PersistentMetadataStore::bind_decision_event`, a provided method that
-  records which decision an attested event decided; the in-memory and SQLite
-  stores implement it, and a store that does not refuses attested decides.
+  records which decision an attested event decided. The SQLite store
+  implements it; the in-memory store keeps the refusing default, so a
+  persistent runtime built with in-memory metadata refuses attested decides.
+- For Rust hosts, `meerkat_meta::durable_decisions`: `RuntimeDecisions`,
+  `StdioDecisionConnection`, `DecisionNoticeSink`,
+  `DecisionIngressDeclarations` and `check_approver_ingresses`, with the
+  decision wire types (`MetaDecisionNoticeEvent` decodes an event it does
+  not know as `Unknown`); `UnifiedRuntime::durable_decisions`,
+  `decision_owner`, `set_durable_decisions` and
+  `decision_approver_currentness`; `UnifiedRuntimeBuilder::decision_ingresses`;
+  and the approver map's `AccessIngressSubject` and `AccessApproverPerson`.
 
 ### Changed
 

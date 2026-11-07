@@ -49,8 +49,8 @@ pub const ACTION_GATING_VIEW: &str = "gating.view";
 pub const ACTION_GATING_DECIDE: &str = "gating.decide";
 /// Read durable decisions on the console: the list, one decision and its
 /// rendering. It never widens what a caller sees of a decision: that is the
-/// decision kind's rule ([`crate::decisions`]), applied whatever the rules
-/// say.
+/// decision kind's rule ([`crate::durable_decisions`]), applied whatever the
+/// rules say.
 pub const ACTION_DECISIONS_VIEW: &str = "decisions.view";
 /// Decide durable decisions on the console. Reserved: no console route
 /// decides yet.
@@ -184,10 +184,15 @@ pub struct AccessApprover {
     /// the built-in ingress `operator` with no subject.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress_subjects: Vec<AccessIngressSubject>,
-    /// One entry per person whose identities span ingresses. The person
-    /// holds the approver id through any identity it lists, and a decision
-    /// one of them requested is that person's own: the others cannot
-    /// approve it.
+    /// One entry per person, within this binding. The entry links the stdio
+    /// operator and the declared-ingress identities it lists as one person:
+    /// a decision one of them requested is that person's own, and none of
+    /// them may approve it. Its Console `subjects` make the person a holder
+    /// for Console reads and the gating decide; a request made from the
+    /// Console is not matched to the person, since the Console decides no
+    /// durable decision. Linking is per binding: a person is linked only in
+    /// the bindings whose entries list it, so link a person in every binding
+    /// it holds. An identity appears in at most one entry of a binding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<AccessApproverPerson>,
 }
@@ -207,8 +212,9 @@ pub struct AccessIngressSubject {
     pub subject: Option<String>,
 }
 
-/// One person in an approver's `people`: the console subjects and the
-/// ingress identities that are this one person.
+/// One person in an approver's `people`: the Console subjects and the
+/// ingress identities, the stdio operator among them, that are this one
+/// person within the binding.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessApproverPerson {
@@ -393,6 +399,13 @@ pub enum AccessConfigError {
         approver: String,
         ingress: String,
     },
+    /// One identity (a Console subject, the stdio operator or an ingress
+    /// subject) is listed in two `people` entries of one approver: each
+    /// entry is one person.
+    DuplicatePersonIdentity {
+        approver: String,
+        identity: String,
+    },
 }
 
 impl AccessConfigError {
@@ -420,6 +433,7 @@ impl AccessConfigError {
             Self::InvalidIngressSubject { .. } => "invalid_ingress_subject",
             Self::ApproverPersonWithoutIdentity { .. } => "approver_person_without_identity",
             Self::UnknownIngress { .. } => "unknown_ingress",
+            Self::DuplicatePersonIdentity { .. } => "duplicate_person_identity",
         }
     }
 }
@@ -480,6 +494,11 @@ impl std::fmt::Display for AccessConfigError {
                 f,
                 "approver {approver:?}: unknown ingress {ingress:?} (declare it in \
                  runtime_options.decisions)"
+            ),
+            Self::DuplicatePersonIdentity { approver, identity } => write!(
+                f,
+                "approver {approver:?}: {identity} is listed in two people entries (each entry \
+                 is one person)"
             ),
         }
     }
@@ -643,6 +662,42 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
         }
         for identity in holders.all_ingress_subjects() {
             validate_ingress_subject(approver, identity)?;
+        }
+        validate_people_identities(approver, holders)?;
+    }
+    Ok(())
+}
+
+/// Each identity of `approver`'s `people` (a Console subject, the stdio
+/// operator or an ingress subject) appears in at most one entry: an entry
+/// is one person. One entry may repeat its own identity.
+fn validate_people_identities(
+    approver: &str,
+    holders: &AccessApprover,
+) -> Result<(), AccessConfigError> {
+    let mut listed = std::collections::BTreeSet::new();
+    for person in &holders.people {
+        let identities: std::collections::BTreeSet<String> = person
+            .subjects
+            .iter()
+            .map(|subject| format!("subject {subject:?}"))
+            .chain(person.ingress_subjects.iter().map(
+                |identity| match identity.subject.as_deref() {
+                    None => "the operator".to_string(),
+                    Some(subject) => {
+                        format!("ingress {:?} subject {subject:?}", identity.ingress)
+                    }
+                },
+            ))
+            .collect();
+        for identity in identities {
+            if listed.contains(&identity) {
+                return Err(AccessConfigError::DuplicatePersonIdentity {
+                    approver: approver.to_string(),
+                    identity,
+                });
+            }
+            listed.insert(identity);
         }
     }
     Ok(())

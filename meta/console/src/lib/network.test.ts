@@ -1046,6 +1046,7 @@ test("an invalid access save names the owner's reason in the Console's words, wi
     ["invalid_ingress_subject", "An approver's ingress identity needs a subject without surrounding spaces", 'approver "lead": ingress "chat" needs a subject that is not empty and has no leading or trailing whitespace', true],
     ["approver_person_without_identity", "An approver's person entry names no identity", 'approver "lead": a people entry names no identity', true],
     ["unknown_ingress", "An approver names an ingress this runtime does not declare", 'approver "lead": unknown ingress "sms" (declare it in runtime_options.decisions)', true],
+    ["duplicate_person_identity", "An approver lists one identity in two person entries", 'approver "lead": ingress "chat" subject "U123" is listed in two people entries (each entry is one person)', true],
     ["invalid_toml", "The access configuration file cannot hold this configuration", "access configuration could not be written as TOML", false],
   ];
   const futureDetail = "access rule ops: a check this Console does not know";

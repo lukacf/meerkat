@@ -1144,6 +1144,10 @@ impl MetaConsoleAggregator {
             sender.remove("requester");
             sender.remove("model_label");
         }
+        // Nor the same requester on the run's transcript identities: a
+        // committed message's (the session history's frames), a run event's
+        // own and the lineage a console event inherits.
+        crate::mob_handle_runtime::strip_transcript_requesters(&mut frame.payload);
         frame
     }
 

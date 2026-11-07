@@ -1206,7 +1206,9 @@ the caller), `assurance` when the Console established one, `display_name`
 `meta/console/whoami` reports, so a client can tell its own messages from
 another caller's). On a console that requires sign-in, a person's send also
 carries the person's qualified principal to the agent's run as its original
-requester; the frame keeps it in storage and no view returns it. A
+requester; the frame keeps it in storage and no view returns it, neither on
+the frame nor on the run's transcript identities (the `identity` of the
+session history's messages and of the run's events). A
 service's, a token principal's and an anonymous caller's sends carry none,
 and on an Open console no ungoverned send does. The agent's model reads a
 person's message on a console that requires sign-in with a sender label, an
@@ -2912,7 +2914,12 @@ policy at that time, an addressable agent, and governance. The send is
 deduplicated under its occurrence's delivery key in the sender's send scope,
 as a live send by the sender is, so a redelivered occurrence sends once. It
 reaches the agent with origin `console:schedule` and the scheduler turn
-origin.
+origin. Its `user_input` frame names the sender as the sender's live sends
+are named at the fire: on a console that requires sign-in, a person's fire
+carries the person to the agent's run as its requester. A person whose
+issuer's tokens are classified as shared accounts by then
+(`shared_account_tokens`) is named as the token principal a live token of
+theirs would be, and the fire names no requester.
 
 **Changes made meanwhile.** An update and a resume write at the revision
 they read: one that raced another change answers `-32009`

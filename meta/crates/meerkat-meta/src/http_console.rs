@@ -3328,8 +3328,9 @@ async fn console_send_identity_first_governed(
     )?;
     // What the send carries for its person: the original requester of the
     // agent's run (a governed send's requester is its association's) and the
-    // sender label its model reads.
-    let attribution =
+    // sender label its model reads. A redispatch carries what the send's own
+    // frame recorded instead (below).
+    let mut attribution =
         crate::console_aggregator::ConsoleHumanAttribution::of_sender(governance.sender.as_ref());
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
@@ -3406,6 +3407,14 @@ async fn console_send_identity_first_governed(
                             .await =>
                 {
                     aggregator.begin_send_redispatch(&frame, &claim)?;
+                    // The requester and the label the send's frame recorded
+                    // when it was accepted, as the member lane's redispatch
+                    // reads them: never the live caller's, whose console may
+                    // name a requester the send never had, or none.
+                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
+                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
+                            .as_ref(),
+                    );
                     (accepted, Some(claim))
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {

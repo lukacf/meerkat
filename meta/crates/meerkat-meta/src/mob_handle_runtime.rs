@@ -12500,6 +12500,10 @@ pub async fn resolved_tools_for_member(
 ///   stable `reason_type` here, once; the report stays beside them.
 ///   `InteractionFailed` mirrors its typed reason's `Display` into `error`
 ///   the same way.
+/// - the requester a run serves (the person's qualified principal, on the
+///   transcript identity of the run's lifecycle events) is left out
+///   (`strip_transcript_requesters`): no view, stream or event log of an
+///   agent's events returns it.
 pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     use meerkat_core::AgentEvent;
     use meerkat_core::event::agent_event_type;
@@ -12557,7 +12561,37 @@ pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     {
         record.insert("error".to_string(), Value::String(reason.to_string()));
     }
+    strip_transcript_requesters(&mut payload);
     payload
+}
+
+/// Leave the requester out of every transcript identity in `value`: the
+/// `requester` of each `identity` object, at any depth (a run lifecycle
+/// event's own identity, a committed message's, the lineage a console event
+/// inherits, a nested frame's).
+///
+/// The requester is the person's qualified principal, which Core carries on
+/// a run's transcript identity (`TranscriptMessageIdentity::requester`). It
+/// stays privileged: a console send keeps it with its stored frame for a
+/// redispatch, and no view, stream or event log returns it. Every viewer
+/// reads the person's display name on the send's frame instead.
+pub(crate) fn strip_transcript_requesters(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(identity)) = map.get_mut("identity") {
+                identity.remove("requester");
+            }
+            for item in map.values_mut() {
+                strip_transcript_requesters(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_transcript_requesters(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn content_input_has_images(content: &meerkat_core::ContentInput) -> bool {

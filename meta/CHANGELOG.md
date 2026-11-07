@@ -161,11 +161,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   schedule's fire for a person, carries the person's qualified principal
   (the verified `sub` in its issuer's trust domain) to the agent's run as
   its original requester, which Meerkat stores with the admitted input and
-  hands to tool dispatch. The stored frame keeps it; no view returns it. A
-  service's, a token principal's and an anonymous caller's sends carry none,
-  no ungoverned send on an Open console does (a governed send carries its
-  host-bound association's requester, which may be a person who volunteered
-  a verified token), and neither does a send to an external member.
+  hands to tool dispatch. The stored frame keeps it, and a send replayed
+  after a restart carries the requester and the label its frame recorded.
+  No view returns it: Meta leaves it out of every transcript identity it
+  shows too, on the frames of the session history and of the run's events,
+  on `/agents/{id}/events`, the mob-wide stream, `meta/events/subscribe` and
+  the event log (`console_agent_event_payload` drops it). A schedule's fire
+  names its sender as that sender's live sends are named at the fire: a
+  person whose issuer's tokens are classified as shared accounts by then
+  (`shared_account_tokens`) is named as a token principal, and the fire
+  names no requester. A service's, a token principal's and an anonymous
+  caller's sends carry none, no ungoverned send on an Open console does (a
+  governed send carries its host-bound association's requester, which may
+  be a person who volunteered a verified token), and neither does a send to
+  an external member.
 - On a console that requires sign-in, the agent's model reads each person's
   message with a sender label, "Message from" and the person's display name,
   on an injected-context row of its own right before the message, a steer

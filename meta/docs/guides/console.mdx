@@ -1011,7 +1011,10 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     console that requires sign-in, a person's send carries the person's
     qualified principal to the agent's run as the run's original requester
     (Meerkat's `ToolDispatchContext::requester`); the stored frame keeps it
-    and no view returns it. Other callers' sends carry none, and so does
+    and no view returns it, neither on the send's frame nor on the run's
+    transcript identities that the session history's frames, the run's
+    event frames and the agent and mob event streams show. Other callers'
+    sends carry none, and so does
     every ungoverned send on an Open console (see
     [Access control](/concepts/access-control#requesters-on-an-open-console)).
 

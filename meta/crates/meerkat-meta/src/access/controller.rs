@@ -404,7 +404,7 @@ impl AccessController {
             )
         };
         if !self
-            .view_from_config(Arc::clone(&config), subject)
+            .view_from_config(Arc::clone(&config), subject, None)
             .can_administer()
         {
             return Err(AccessEditError::Denied);

@@ -7912,7 +7912,7 @@ mod tests {
                 .remember_authored(
                     &identity_scope(identity),
                     new_record(title, body),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await
                 .expect("seed identity record");

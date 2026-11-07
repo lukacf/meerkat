@@ -4012,3 +4012,7 @@ mod open_listing;
 
 /// A listing waits for its slowest scope kind, not for the sum of the kinds.
 mod concurrent_listing;
+
+/// One conflicted scope is contained: quarantined, refused typed, never
+/// left out of a listing, and kept through a re-acquire.
+mod containment;

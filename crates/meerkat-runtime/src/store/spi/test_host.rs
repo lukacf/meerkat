@@ -58,6 +58,23 @@ struct HostState {
     deleted: HashSet<(ScopeKind, String)>,
     landed: HashSet<String>,
     commits: u64,
+    /// Scopes the host loads as a typed conflict.
+    conflicts: BTreeMap<(ScopeKind, String), ConflictedScope>,
+}
+
+/// A scope the host loads as a typed conflict: two batches hold one of its
+/// versions (a superseded writer's late batch, folded at that version), so
+/// every load of it answers `Conflict` naming that version, as a store that
+/// meets obligation 4 at load does. A listing whose page would show it fails
+/// the whole page, as a store that does not report a conflict per scope
+/// does.
+#[derive(Debug, Clone)]
+pub(crate) struct ConflictedScope {
+    pub(crate) version: ScopeVersion,
+    pub(crate) commit_ids: Vec<CommitId>,
+    /// The conflict arose after the listing the rows make: listings still
+    /// show the scope's head, and only its loads answer the conflict.
+    pub(crate) after_listing: bool,
 }
 
 /// Faults the next calls meet.
@@ -281,6 +298,86 @@ impl TestHost {
         self.state().lease_until = None;
     }
 
+    /// Make the only visible scope of `kind` whose name starts with `prefix`
+    /// load as a typed conflict at its version: a superseded writer's late
+    /// batch was folded at that version beside the batch that wrote it. Its
+    /// conflicting batches are the one the scope shows and `late-<name>`.
+    /// Answers the scope's name, or `None` unless exactly one scope matches.
+    pub(crate) fn conflict_scope(&self, kind: ScopeKind, prefix: &str) -> Option<String> {
+        self.mark_conflicted(kind, prefix, false)
+    }
+
+    /// [`Self::conflict_scope`] for a conflict that arises after the listing
+    /// the row makes next: that listing shows the scope's head, and its loads
+    /// answer the conflict.
+    pub(crate) fn conflict_scope_after_listing(
+        &self,
+        kind: ScopeKind,
+        prefix: &str,
+    ) -> Option<String> {
+        self.mark_conflicted(kind, prefix, true)
+    }
+
+    fn mark_conflicted(
+        &self,
+        kind: ScopeKind,
+        prefix: &str,
+        after_listing: bool,
+    ) -> Option<String> {
+        let mut state = self.state();
+        let mut matching = state
+            .scopes
+            .iter()
+            .filter(|((scope_kind, name), _)| *scope_kind == kind && name.starts_with(prefix));
+        let ((_, name), stored) = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        let name = name.clone();
+        let mut commit_ids = vec![
+            stored.commit_id.clone(),
+            CommitId::try_new(format!("late-{name}")).ok()?,
+        ];
+        commit_ids.sort();
+        let version = stored.version;
+        state.conflicts.insert(
+            (kind, name.clone()),
+            ConflictedScope {
+                version,
+                commit_ids,
+                after_listing,
+            },
+        );
+        Some(name)
+    }
+
+    /// Make the deleted incarnation `name` of `kind` load as a typed conflict
+    /// at `version`: a superseded writer's late batch landed on it after the
+    /// batch that deleted it, at the version that batch deleted.
+    pub(crate) fn conflict_deleted(&self, kind: ScopeKind, name: &str, version: ScopeVersion) {
+        let late = CommitId::try_new(format!("late-{name}")).ok();
+        self.state().conflicts.insert(
+            (kind, name.to_string()),
+            ConflictedScope {
+                version,
+                commit_ids: late.into_iter().collect(),
+                after_listing: false,
+            },
+        );
+    }
+
+    /// The typed conflict a load of `scope` answers, when the host holds it
+    /// conflicted.
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.state()
+            .conflicts
+            .get(&(scope.kind, scope.name.as_str().to_string()))
+            .map(|conflicted| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(conflicted.version),
+            })
+    }
+
     /// Every visible scope of a kind, by name.
     pub(crate) fn scopes_of(&self, kind: ScopeKind) -> BTreeMap<String, StoredScope> {
         self.state()
@@ -479,6 +576,9 @@ impl HostStore for TestHost {
                 return Err(HostStoreError::Unavailable("injected".into()));
             }
         }
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         Ok(self
             .state()
             .scopes
@@ -542,6 +642,26 @@ impl HostStore for TestHost {
         } else {
             None
         };
+        // A conflicted scope in this page's range fails the whole page, as a
+        // store that does not report a conflict per scope does.
+        if let Some(((_, name), conflicted)) =
+            state
+                .conflicts
+                .iter()
+                .find(|((scope_kind, name), conflicted)| {
+                    *scope_kind == kind
+                        && !conflicted.after_listing
+                        && after.is_none_or(|after| name.as_str() > after.as_str())
+                        && next
+                            .as_ref()
+                            .is_none_or(|end| name.as_str() <= end.as_str())
+                })
+        {
+            return Err(HostStoreError::Conflict {
+                scope: ScopeRef::new(kind, ScopeName::try_new(name.clone())?),
+                current: Some(conflicted.version),
+            });
+        }
         Ok(HeadPage { heads, next })
     }
 
@@ -556,6 +676,9 @@ impl HostStore for TestHost {
             kind: scope.kind,
             name: scope.name.as_str().to_string(),
         });
+        if let Some(conflict) = self.conflict_of(scope) {
+            return Err(conflict);
+        }
         if scope.kind == ScopeKind::Session {
             let (delay, failing) = {
                 let faults = self.faults();

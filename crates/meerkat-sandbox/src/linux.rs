@@ -1441,8 +1441,13 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
     ]);
     // Only IP sockets from this process can exist. No AF_UNIX, netlink, packet
     // or alternate-family connection can bypass IP/Unix separation. A Unix
-    // datagram pair can be retargeted, so pairs are supported only when every
-    // address-bearing operation below is denied. No pair is allowed with IP.
+    // datagram pair can be retargeted (its sendto/sendmsg honour an address),
+    // so datagram pairs are supported only when every address-bearing
+    // operation below is denied. A Unix stream or seqpacket pair cannot be
+    // retargeted (the kernel refuses or ignores an address on a connected
+    // one), so those are allowed with IP too: std's fork-and-exec spawn path
+    // opens its error channel with socketpair(AF_UNIX, SOCK_SEQPACKET), and
+    // without it no Rust program (cargo, rustc's linker call) can spawn.
     code.extend([
         jump(equal, libc::SYS_socket as u32, 0, 6),
         statement(load, 16),
@@ -1452,13 +1457,35 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         statement(ret, if ip { allow } else { refuse }),
         statement(ret, refuse),
     ]);
-    code.extend([
-        jump(equal, libc::SYS_socketpair as u32, 0, 4),
-        statement(load, 16),
-        jump(equal, libc::AF_UNIX as u32, 1, 0),
-        statement(ret, refuse),
-        statement(ret, if ip { refuse } else { allow }),
-    ]);
+    if ip {
+        // The type is the low four bits of the second argument
+        // (SOCK_NONBLOCK and SOCK_CLOEXEC sit above them). SOCK_STREAM is 1
+        // and SOCK_SEQPACKET 5: bit 0 set, bits 1 and 3 clear; every other
+        // type (datagram 2, raw 3, rdm 4, dccp 6, packet 10) fails one of
+        // the three tests.
+        code.extend([
+            jump(equal, libc::SYS_socketpair as u32, 0, 11),
+            statement(load, 16),
+            jump(equal, libc::AF_UNIX as u32, 1, 0),
+            statement(ret, refuse),
+            statement(load, 24),
+            jump(bits, 0x2, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x8, 0, 1),
+            statement(ret, refuse),
+            jump(bits, 0x1, 0, 1),
+            statement(ret, allow),
+            statement(ret, refuse),
+        ]);
+    } else {
+        code.extend([
+            jump(equal, libc::SYS_socketpair as u32, 0, 4),
+            statement(load, 16),
+            jump(equal, libc::AF_UNIX as u32, 1, 0),
+            statement(ret, refuse),
+            statement(ret, allow),
+        ]);
+    }
     if !ip {
         for syscall in [
             libc::SYS_connect,
@@ -2820,6 +2847,71 @@ mod tests {
             assert_eq!(status.signal(), Some(libc::SIGKILL));
             assert_eq!(status.code(), None);
         });
+    }
+
+    /// With IP, a Unix stream or seqpacket pair (std's spawn error channel)
+    /// is allowed and a datagram pair, which an address can retarget, is
+    /// refused; without IP every Unix pair is allowed (no address-bearing
+    /// operation is), and no other family ever gets a pair.
+    #[test]
+    fn seccomp_admits_unix_stream_and_seqpacket_pairs_with_ip() {
+        let Some(architecture) = native_audit_arch() else {
+            return;
+        };
+        let refuse = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+        let flags = u64::from((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32);
+        let pair = |ip: bool, domain: libc::c_int, kind: libc::c_int| {
+            run_filter(
+                &filter(architecture, ip),
+                architecture,
+                libc::SYS_socketpair as u32,
+                [
+                    u64::from(domain as u32),
+                    u64::from(kind as u32) | flags,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+        };
+        assert_eq!(
+            pair(true, libc::AF_UNIX, libc::SOCK_STREAM),
+            libc::SECCOMP_RET_ALLOW
+        );
+        assert_eq!(
+            pair(true, libc::AF_UNIX, libc::SOCK_SEQPACKET),
+            libc::SECCOMP_RET_ALLOW
+        );
+        // 10 is the obsolete SOCK_PACKET.
+        for kind in [
+            libc::SOCK_DGRAM,
+            libc::SOCK_RAW,
+            libc::SOCK_RDM,
+            libc::SOCK_DCCP,
+            10,
+        ] {
+            assert_eq!(pair(true, libc::AF_UNIX, kind), refuse, "type {kind}");
+        }
+        assert_eq!(pair(true, libc::AF_INET, libc::SOCK_STREAM), refuse);
+        for kind in [libc::SOCK_STREAM, libc::SOCK_SEQPACKET, libc::SOCK_DGRAM] {
+            assert_eq!(
+                pair(false, libc::AF_UNIX, kind),
+                libc::SECCOMP_RET_ALLOW,
+                "type {kind}"
+            );
+        }
+        assert_eq!(pair(false, libc::AF_INET, libc::SOCK_DGRAM), refuse);
+        // The rules after the pair rule are still reached.
+        assert_eq!(
+            run_filter(
+                &filter(architecture, true),
+                architecture,
+                libc::SYS_getpid as u32,
+                [0; 6]
+            ),
+            libc::SECCOMP_RET_ALLOW
+        );
     }
 
     /// ioctl admits only FIONBIO, the ioctl form of O_NONBLOCK that std uses

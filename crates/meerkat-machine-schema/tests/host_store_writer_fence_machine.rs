@@ -767,16 +767,16 @@ fn every_input_in_every_phase_is_total_and_only_mutates_where_intended() {
             let mut authority = authority_in(phase);
             let before = authority.state().clone();
             let transition = apply(&mut authority, input());
-            let mutates = match (phase, name) {
+            let mutates = matches!(
+                (phase, name),
                 (Phase::Unopened, "Open")
-                | (Phase::Live, "WindowClosed" | "RenewFailed" | "Poison")
-                | (Phase::Stopped, "BeginReacquire" | "Poison")
-                | (Phase::Acquiring, "Granted" | "TimedOut" | "Poison")
-                | (Phase::Proving, "ListingClean" | "ListingFailed" | "Poison")
-                | (Phase::Resuming, "Renewed" | "RenewFailed" | "Poison")
-                | (Phase::WaitingOut, "LeaseEnded" | "Poison") => true,
-                _ => false,
-            };
+                    | (Phase::Live, "WindowClosed" | "RenewFailed" | "Poison")
+                    | (Phase::Stopped, "BeginReacquire" | "Poison")
+                    | (Phase::Acquiring, "Granted" | "TimedOut" | "Poison")
+                    | (Phase::Proving, "ListingClean" | "ListingFailed" | "Poison")
+                    | (Phase::Resuming, "Renewed" | "RenewFailed" | "Poison")
+                    | (Phase::WaitingOut, "LeaseEnded" | "Poison")
+            );
             if mutates {
                 assert_ne!(
                     authority.state(),

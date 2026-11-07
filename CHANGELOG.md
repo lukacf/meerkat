@@ -141,6 +141,12 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-core`: `model_profile::capabilities::BetaFeature` gains
+  `ThinkingBindingControls` (wire label `thinking_binding_controls`),
+  appended last, so no existing variant's implicit discriminant moves. The
+  enum is exhaustive, so a downstream exhaustive match needs the new arm, or
+  a wildcard arm.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -304,6 +310,19 @@ them.
   GPT-6 Responses prompt-cache defaults (implicit mode with the `30m` TTL,
   `12h` on request). The OpenAI default stays `gpt-6-astra`.
 
+- `meerkat-anthropic`: `AnthropicClientBuilder::thinking_binding_controls_supported`
+  declares whether the client's backend documents Anthropic's thinking-block
+  binding controls. It defaults to `true`, as on the Claude API; the
+  provider runtime sets it from the backend: on for the Claude API, Google
+  Cloud and Microsoft Foundry, off for Amazon Bedrock, which Anthropic's
+  preserved-thinking documentation does not list, and for the GitHub Copilot
+  route.
+
+- `meerkat-models`: the Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5
+  rows list the `thinking-binding-controls-2026-08-01` beta (feature
+  `thinking_binding_controls`), so their model profiles' `beta_headers`
+  show it.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -321,6 +340,17 @@ them.
   and asks for its claim again, and the loop takes the kind over once that
   executor ends. `DecisionExecutorLoop::start` refuses a candidate launch
   whatever kinds it registers. See Breaking for the change to `start`.
+
+- `meerkat-anthropic`: on an Anthropic account created before 2026-08-31,
+  which Anthropic does not hold to thinking-block binding, a replayed
+  thinking block whose system prompt, tools or earlier messages changed is
+  now dropped by the API (and logged) instead of reaching the model, since
+  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
+  the `drop_block` control on every account (see Fixed). A request that
+  forces a tool call with thinking omitted keeps its previous shape, with no
+  thinking and no control: the client refuses a forced tool call beside
+  explicit thinking, and a forced call skips thinking on the models that
+  accept one.
 
 ### Deprecated
 
@@ -407,6 +437,37 @@ them.
   finishes in a stopped or retired session as well. Affects 0.6.0 through
   0.9.10.
 
+- `meerkat-anthropic`: the default Anthropic configuration (Claude Opus 5.5
+  with no thinking configured) no longer fails after a mid-session tool
+  change on accounts that enforce thinking-block binding (Anthropic accounts
+  created on or after 2026-08-31). Claude Fable 5.1, Opus 5.5, Sonnet 5.5
+  and Haiku 5.5 check every replayed thinking block against the system
+  prompt, the tools and the earlier messages it was produced under, and
+  such an account answers 400 ("The block is bound to a different
+  conversation") once any of them changed. Meerkat changes the tools
+  mid-session as MCP servers connect, so every later turn of a thinking
+  session failed. Requests to those models now set
+  `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` with the
+  `thinking-binding-controls-2026-08-01` beta header, and the API drops the
+  stale blocks instead: beside configured `adaptive` thinking, and, with
+  thinking omitted, beside `{"type": "adaptive"}`, the model's own default,
+  which turns nothing on since each of these models thinks by default. The
+  control is never sent beside `between_tools` or `disabled`, nor for a
+  model whose default is no thinking or an uncatalogued model id. A
+  non-empty `input_transformations` report (the blocks the API dropped or
+  let through) is logged as a warning that names each block and its reason:
+  the model answered without that reasoning, and the prompt cache restarts
+  at the first dropped block.
+
+- `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
+  claims forced tool choice support. Anthropic answers 400 to `tool_choice`
+  `any` or a named tool on Claude Fable 5.1, as on Opus 5.5 and Sonnet 5.5
+  ("Forced tool use not supported" in Anthropic's API errors reference). A
+  forced tool choice on Fable 5.1 is now refused locally with the typed
+  `ToolChoiceUnsupported` refusal (`ModelDoesNotSupportForcedToolChoice`)
+  before any request is sent, instead of being sent and answered with that
+  400, which mapped to the same typed refusal.
+
 ### Upgrade notes
 
 - A host binder of in-process deliveries from governed work binds them
@@ -446,6 +507,11 @@ them.
   receiver whose composition installs another ingress domain, such as a
   peer under another composition or realm in the same process, refuses the
   work at admission.
+
+- `meerkat-anthropic`: the thinking-block binding control is not sent on the
+  Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
+  thinking-block binding a thinking session there still fails after a
+  mid-session tool change.
 
 ## [0.9.10] - 2026-11-04
 

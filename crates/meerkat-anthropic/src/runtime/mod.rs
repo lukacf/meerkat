@@ -94,6 +94,26 @@ fn backend_supports_automatic_cache_control(backend: AnthropicBackendKind) -> bo
     }
 }
 
+/// Whether a backend documents Anthropic's thinking-block binding controls
+/// (`thinking.block_binding` with the `thinking-binding-controls-2026-08-01`
+/// beta).
+///
+/// Exhaustive on purpose, like the cache capability: a new
+/// `AnthropicBackendKind` is classified here explicitly. The preserved-thinking
+/// page lists the Claude API, Claude Platform on AWS, Claude Models on Google
+/// Cloud (Anthropic managed and Google managed) and Microsoft Foundry; it does
+/// not list Amazon Bedrock, and the GitHub Copilot route is an unverified
+/// gateway, so neither sends the control.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+fn backend_supports_thinking_binding_controls(backend: AnthropicBackendKind) -> bool {
+    match backend {
+        AnthropicBackendKind::AnthropicApi
+        | AnthropicBackendKind::Vertex
+        | AnthropicBackendKind::Foundry => true,
+        AnthropicBackendKind::Bedrock | AnthropicBackendKind::Copilot => false,
+    }
+}
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 struct ManagedClaudeAiCredential {
     access_token: Arc<str>,
@@ -926,6 +946,11 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .automatic_cache_control_supported(
                             backend_supports_automatic_cache_control(AnthropicBackendKind::Copilot),
                         )
+                        .thinking_binding_controls_supported(
+                            backend_supports_thinking_binding_controls(
+                                AnthropicBackendKind::Copilot,
+                            ),
+                        )
                         .build()
                         .map_err(ProviderClientError::from)?;
                     Ok(Arc::new(client) as Arc<dyn LlmClient>)
@@ -1016,6 +1041,9 @@ fn build_anthropic_client(
             .automatic_cache_control_supported(backend_supports_automatic_cache_control(
                 backend_kind,
             ))
+            .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
+                backend_kind,
+            ))
             .build()
             .map_err(ProviderClientError::from)?;
         return Ok(client);
@@ -1039,6 +1067,9 @@ fn build_anthropic_client(
             let mut builder = crate::AnthropicClient::builder(secret)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ));
             if let Some(url) = &connection.backend_profile.base_url {
@@ -1072,6 +1103,9 @@ fn build_anthropic_client(
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ))
                 .build()
@@ -1108,6 +1142,9 @@ fn build_anthropic_client(
                 .base_url(base_url)
                 .default_cache_control(default_cache_control_for_backend(backend_kind))
                 .automatic_cache_control_supported(backend_supports_automatic_cache_control(
+                    backend_kind,
+                ))
+                .thinking_binding_controls_supported(backend_supports_thinking_binding_controls(
                     backend_kind,
                 ))
                 .build()
@@ -1534,6 +1571,22 @@ mod tests {
         );
     }
 
+    /// Every backend is classified for the thinking-binding controls: the
+    /// backends the preserved-thinking page lists send them; Amazon Bedrock
+    /// (not listed) and the GitHub Copilot route (no live probe yet) do not.
+    #[test]
+    fn thinking_binding_controls_follow_the_documented_platforms() {
+        let unsupported: Vec<AnthropicBackendKind> = AnthropicBackendKind::ALL
+            .iter()
+            .copied()
+            .filter(|backend| !backend_supports_thinking_binding_controls(*backend))
+            .collect();
+        assert_eq!(
+            unsupported,
+            vec![AnthropicBackendKind::Bedrock, AnthropicBackendKind::Copilot]
+        );
+    }
+
     /// A resolved connection whose lease is an inline secret, which is what the
     /// API-key and Bedrock static-bearer paths receive from `resolve_binding`.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1614,6 +1667,60 @@ mod tests {
             bedrock_body.get("cache_control").is_none(),
             "Bedrock stays disabled by default: {bedrock_body}"
         );
+    }
+
+    /// The thinking-block binding control reaches the wire only through
+    /// backends whose documentation lists Anthropic's preserved thinking: the
+    /// Claude API, Claude Models on Google Cloud and Microsoft Foundry. The
+    /// preserved-thinking page does not list Amazon Bedrock, so a Bedrock
+    /// client sends no control and leaves omitted thinking omitted.
+    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn thinking_binding_control_follows_the_documented_backends() {
+        use meerkat_core::{Message, UserMessage};
+        use meerkat_llm_core::LlmRequest;
+
+        let request = LlmRequest::new(
+            "claude-opus-5-5",
+            vec![Message::User(UserMessage::text("hello"))],
+        );
+        for (backend, base_url, documented) in [
+            (AnthropicBackendKind::AnthropicApi, None, true),
+            (
+                AnthropicBackendKind::Vertex,
+                Some("https://us-east5-aiplatform.googleapis.com"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Foundry,
+                Some("https://example.services.ai.azure.com/anthropic"),
+                true,
+            ),
+            (
+                AnthropicBackendKind::Bedrock,
+                Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+                false,
+            ),
+        ] {
+            let client = build_anthropic_client(inline_secret_connection(backend, base_url))
+                .unwrap_or_else(|error| panic!("{backend:?} client: {error}"));
+            let body = client
+                .build_request_body(&request)
+                .unwrap_or_else(|error| panic!("{backend:?} request body: {error}"));
+            if documented {
+                assert_eq!(
+                    body["thinking"],
+                    serde_json::json!({
+                        "type": "adaptive",
+                        "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+                    }),
+                    "{backend:?}: {body}"
+                );
+            } else {
+                assert!(body.get("thinking").is_none(), "{backend:?}: {body}");
+            }
+        }
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]

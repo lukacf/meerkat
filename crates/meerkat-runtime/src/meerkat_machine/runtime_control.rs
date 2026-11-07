@@ -11096,7 +11096,7 @@ impl MeerkatMachine {
     }
 
     /// Retire a transport-free context fixture through generated close.
-    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[cfg(all(any(test, feature = "test-support"), feature = "live"))]
     #[doc(hidden)]
     pub async fn __test_close_live_context_channel(
         &self,

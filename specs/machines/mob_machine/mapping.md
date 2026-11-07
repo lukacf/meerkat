@@ -4863,7 +4863,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdoptLegacyIdentityEntryAdopted`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryAdoptedUnlisted`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
 - `AdoptLegacyIdentityEntryNameHeldByWorker`
+  - anchors: `mob_identity_entry_authority`
+  - scenarios: (unclaimed)
+- `AdoptLegacyIdentityEntryRetireUnadopted`
   - anchors: `mob_identity_entry_authority`
   - scenarios: (unclaimed)
 - `AdoptLegacyIdentityEntryNotAdoptable`

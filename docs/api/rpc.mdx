@@ -162,6 +162,11 @@ of this full catalog.
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
 | `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
 | `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
+| `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
+| `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
+| `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
+| `decision/present` | Decisions | `DecisionPresentParams` | `DecisionResult` | Record a host presenter's presentation of a durable decision's rendering |
+| `decision/withdraw` | Decisions | `DecisionWithdrawParams` | `DecisionResult` | Withdraw an open durable decision as the host |
 | `events/latest_cursor` | Events | `EventsLatestCursorParams` | `EventsLatestCursorResult` | Read the latest replay cursor for a typed event scope |
 | `events/list_since` | Events | `EventsListSinceParams` | `EventsListSinceResult` | List replayable events after a typed cursor |
 | `events/snapshot` | Events | `EventsSnapshotParams` | `EventsSnapshotResult` | Read a point-in-time snapshot with its replay cursor |
@@ -2264,6 +2269,224 @@ as an unsupported parameter.
 is recorded as an operator without a caller. Authorize grant administration in
 the trusted host or an authenticated proxy before forwarding the call.
 </Warning>
+
+## Durable decisions
+
+A durable decision holds one operation until an attested party decides it, its
+requester or the host withdraws it, or its deadline passes (see
+[durable decisions](/concepts/authorization)). The `decision/*` methods read
+and act on the decisions of the runtime's persistence, one row or one index
+page per call: `decision/list`, `decision/get`, `decision/rendering`,
+`decision/present` and `decision/withdraw`. They are served since 0.9.11; an
+older server answers them method not found (`-32601`). A runtime whose
+persistence keeps no durable decisions answers them capability unavailable,
+with `data.kind = "no_decision_store"`.
+
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "decision/list",
+  "params": {"phase": "open", "approver_id": "team:owners", "limit": 50}
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "result": {
+    "decisions": [
+      {
+        "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+        "kind": "release",
+        "subject_key": "build-7",
+        "operation_id": "release:build-7",
+        "request_digest": "sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5",
+        "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+        "approver_id": "team:owners",
+        "phase": "open",
+        "stage": "human",
+        "notice": "not_due",
+        "deadline_at_ms": 1761739200000,
+        "created_at_ms": 1761735600000,
+        "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+        "renderer": "render.v1",
+        "permit_issued": false,
+        "revision": 1
+      }
+    ],
+    "unreadable": []
+  }
+}
+```
+
+- **`decision/list`** reads one page, in decision id order, of the decisions
+  every set filter matches: `kind`, `phase`, `approver_id` and `requester` (a
+  principal key). `limit` is 100 when absent; a larger limit reads as 500, and
+  a limit of 0 is invalid params. `next_after`
+  names the decision id to read the next page `after`. A decision past its
+  deadline reads as expired. A row this server cannot read is listed under
+  `unreadable` and nothing executes it. A phase this version does not know is
+  refused, never read as no filter.
+- **`decision/get`** reads one decision, and records its expiry when its
+  deadline passed. `include_request: true` adds the held request. A row this
+  server cannot read answers `decision_unreadable`.
+- **`decision/rendering`** returns the one canonical rendering of the held
+  request, its renderer and subject digest, and its canonical parts for
+  `max_part_bytes` (one part when absent): consecutive byte ranges on character
+  boundaries, each with its own digest. Like `decision/get`, it records the
+  decision's expiry when its deadline passed, and a row this server cannot
+  read answers `decision_unreadable`.
+- **`decision/present`** records what a host presenter showed: the
+  `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
+  "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
+  size and the parts shown, the channel and message references, and the host
+  clock reading `at_ms`. It counts only when it shows every canonical part of
+  the held rendering to the party that decides now; a presentation at 0 is no
+  reading of when it was shown and is refused.
+- **`decision/withdraw`** withdraws an open decision as the host.
+
+A failed call is a JSON-RPC error. The answers the decision methods type
+carry a closed `data.kind`:
+
+| `data.kind` | Code | Answer |
+| --- | --- | --- |
+| `no_decision_store` | `-32020` | The runtime's persistence keeps no durable decisions. |
+| `candidate_launch` | `-32020` | The runtime serves a candidate launch: it reads decisions and refuses every write. |
+| `decision_not_found` | `-32602` | No decision has the id. |
+| `decision_refused` | `-32602` | The decision refused the call; `data.decision_refusal.kind` names why. |
+| `decision_unreadable` | `-32603` | The decision's stored row cannot be read (undecodable, or torn); nothing executes it. |
+
+Store faults carry no `data` and use the approval store codes: `-32033`
+store unavailable (nothing was written), `-32034` conflict (another owner
+changed the decision) and `-32035` commit unknown (the write may have
+committed). A request value this version cannot read is invalid params
+(`-32602`) with no `data`.
+
+The refusal kinds are closed, because they bear authority: a client can
+match on every kind, and this version sends no other.
+
+| `decision_refusal.kind` | The decision refused because |
+| --- | --- |
+| `invalid_window` | the hold's deadline is not after the hold's clock reading |
+| `self_review` | the hold names the requester as its own reviewer |
+| `hold_conflict` | the decision is held with another binding |
+| `not_open` | the decision is no longer open: the first valid decision won |
+| `expired` | the deadline passed; the call recorded the expiry |
+| `subject_changed` | the presented digest is not the held subject digest |
+| `presentation_incomplete` | the presentation did not cover the whole held subject, none reached the deciding party, or it was shown at 0 |
+| `wrong_audience` | the presentation was shown to a party that does not decide now |
+| `review_stage` | a human decision came while the review stage is open |
+| `human_stage` | a review verdict came while the human stage is open |
+| `evidence_required` | the decision carries no attested evidence |
+| `not_eligible` | the decider does not act for the approver id, or is not currently eligible |
+| `self_approval` | the requester tried to decide its own request |
+| `wrong_reviewer` | the verdict is not the named reviewer's |
+| `not_requester` | only the requester or the host may withdraw |
+| `not_approved` | the decision is not approved |
+| `binding_mismatch` | the execution names another operation or request |
+| `not_authorized` | no execution permit is outstanding |
+| `settlement_owed` | the deadline passed while a permit is outstanding: the permit must be settled first |
+| `not_owed` | no notice is owed, or the receipt contradicts the settled one |
+| `decided_before_presentation` | the human decision was observed before the decision's first presentation to the approver |
+
+The vocabularies a result carries (`phase`, `stage`, `notice` and the
+others) may gain values in a later version; a client keeps a value it does
+not know as the server wrote it.
+
+No request body names who decides a decision. A host's trusted transport adapter
+decides one by dispatching `decision/decide` through
+`MethodRouter::dispatch_with_decision_event` with the
+`AuthenticatedDecisionEvent` it built from the human's authenticated event: the
+attested decision (who decided, how they were authenticated, the ingress and
+event reference, the time the ingress observed the event and the digest of the
+rendering they saw) and the evidence that they may act for the decision's
+approver id. The request names only `decision_id`, `approve`,
+`presented_digest` and an optional `reason`, and must equal what the event
+binds; a request that names an approver, actor, assurance or scope is invalid
+params. Plain dispatch answers `decision/decide` method not found, except on a
+stdio connection whose operator decides (below).
+
+### The operator of a stdio connection
+
+On a Unix build with local authorization, an `rkat-rpc` stdio connection has
+an operator who decides durable decisions on it: the operating-system user who
+started it, device trusted, in an authentication scope of the connection's
+own. The operator acts for the approver ids the realm's configuration lists
+for it, `["operator"]` unless
+[`[governance.decisions] operator_approver_ids`](/concepts/configuration#governance-settings)
+says otherwise.
+
+The connection presents decisions to its operator only when its client lists
+them. Before it answers a `decision/list`, it presents each decision of the
+returned page that is open, waits for a human, is addressed to an approver id
+the operator acts for and was not presented on this connection yet, in page
+order. Starting the connection presents nothing, and the client's own paging
+(`after`, `limit`) reaches every decision, each presented once. For each, the
+connection reads its clock, writes a `decision/notice` notification carrying
+the whole rendering as one canonical part, waits until the notice is on the
+pipe, and only then records the presentation: to the approver, on the
+connection's own channel (a `channel_ref` that starts with `rkat-rpc:stdio:`),
+under the notice's id (`message_ref` equals `notice_id`), at that clock
+reading. The notices precede the list's answer, and the answered page carries
+each presented decision as recorded. A notice that could not be written
+records nothing. The `channel_ref` is an opaque string; nothing parses it.
+
+```json Notification
+{
+  "jsonrpc": "2.0",
+  "method": "decision/notice",
+  "params": {
+    "notice_id": "472e7eeb-5768-494e-9e4b-4193c676f0a3",
+    "decision_id": "decision:fe421f09ffb8179a56bfdb0a37f36ac99a6d307226aa144440e95686bafeaa23",
+    "kind": "release",
+    "event": "presented",
+    "phase": "open",
+    "approver_id": "team:owners",
+    "requester": "principal:[\"personal_agent\",\"example.org\",\"builder\"]",
+    "presentation": {
+      "rendering": "Release build 7 to production.",
+      "renderer": "render.v1",
+      "subject_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3",
+      "parts": [
+        {
+          "index": 0,
+          "count": 1,
+          "part_digest": "sha256:55c206817f2780cd717c90168bca1e020ca01528c7d38e27baefd111aafda6a3"
+        }
+      ]
+    }
+  }
+}
+```
+
+`event` is `presented`; a client reads an event it does not know as unknown
+and ignores it.
+
+The operator decides with `decision/decide`. The request names only
+`decision_id`, `approve`, `presented_digest` and an optional `reason`; the
+connection builds the authenticated event itself: the operator as the decider
+(`device_trusted`, in the connection's scope), ingress `rkat-rpc-stdio`, an
+event reference from the request id, the server's clock as the observed time,
+and the approver id of the stored decision. A decide is eligible only for a
+decision this connection presented, while the configuration still lists its
+approver id when the decide arrives and while the connection is open; a decide
+waits for a presentation in flight on the connection. Any other decide is
+refused as invalid params with `data.kind = "decision_refused"` and
+`data.decision_refusal.kind = "not_eligible"`. A client's own
+`decision/present` records a host presenter's showing; it never makes a
+decision decidable on the connection.
+
+A connection without an operator presents nothing on `decision/list` and
+answers `decision/decide` method not found (`-32601`, no `data.kind`): a TCP
+connection, a build for another platform or without local authorization, and
+a router an embedder dispatches to directly.
+
+The stock governed stdio pipe serves the same two methods for its operator, in
+its consent surface's scope, and lists them in its `initialize` answer. Its
+approver ids are the host's configuration as the pipe started; a change
+reaches the pipe at its next start.
 
 ## Schedules, WorkGraph, and multi-host mobs
 

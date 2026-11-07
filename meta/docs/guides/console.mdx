@@ -1215,8 +1215,15 @@ a frontend-only affordance for per-user UX; direct RPC calls are still governed
 by the server-side `ConsolePolicy.read_only` setting.
 
 Console mutation endpoints assume non-ambient credentials: pass bearer tokens
-explicitly in the `Authorization` header or `auth_token` query parameter for
-SSE/browser bootstrap cases. If a host proxy converts console auth into cookies
+explicitly in the `Authorization` header (a `GET` may carry the token as the
+`auth_token` query parameter, since an `EventSource` stream or an image load
+cannot set headers; a write whose only token is in the query string is refused
+401). An open console
+(no sign-in) answers only requests addressed to a host it serves: a loopback
+name, its listen address, or the host of the gateway's public base URL
+(`http_public_base_url`). Any other `Host` gets 403 `host_not_served`, so a
+page that rebinds its own name to the console's address cannot drive it. If a
+host proxy converts console auth into cookies
 or another browser-ambient credential, that host must add origin and CSRF
 protection before exposing mutation routes such as `/console/rpc`,
 `/console/rpc/multipart`, or `/console/send`.

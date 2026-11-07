@@ -151,6 +151,7 @@ fn build_state(
             jwks_json: jwks_json.to_string(),
             audience: AUDIENCE.to_string(),
             require_verified_email: false,
+            shared_account_tokens: false,
         },
         console: ConsolePolicy {
             require_app_auth: true,

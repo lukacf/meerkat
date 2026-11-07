@@ -2153,13 +2153,17 @@ macro_rules! mob_catalog_machine_dsl {
             // or none): a scope that is not the current incarnation on its
             // current session answers Stale.
             ClassifyMemberRelease { agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId> },
-            // The adoption of one legacy member as an identity entry, once,
-            // in the first declaration after an upgrade. legacy_roster_member
-            // is the shell's raw observation that the spawn row of the
-            // member's incarnation at `generation` carries the
-            // DurableIdentity continuity marker or the legacy identity label
-            // naming its own id; the machine decides the verdict.
-            AdoptLegacyIdentityEntry { agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: bool },
+            // The adoption of one legacy member as an identity entry, once:
+            // in the first declaration after an upgrade that lists the
+            // identity, or at the seal of a complete roster that does not
+            // list it. The shell's raw observations: whether the spawn row
+            // of the member's incarnation at `generation` carries the
+            // DurableIdentity continuity marker (durable_identity_marker) and
+            // the legacy identity label naming its own id
+            // (own_identity_label), whether the roster lists the identity
+            // (listed), and whether a host's identity intent row names it
+            // (intent_row). The machine decides the verdict.
+            AdoptLegacyIdentityEntry { agent_identity: AgentIdentity, generation: Generation, durable_identity_marker: bool, own_identity_label: bool, listed: bool, intent_row: bool },
             // The agent lane's admission of a member command addressed to
             // one member: refused for an identity entry. A pure verdict in
             // every lifecycle phase; the command's own arms decide the rest.
@@ -30847,16 +30851,24 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
-        // The adoption of a legacy member as an identity entry, once, in the
-        // first declaration after an upgrade. Adopted: the member at
-        // `generation` is the identity's current incarnation, seated, local,
-        // bound to a session, not retiring and not an entry yet, and the
-        // shell observed the legacy marker on its spawn row. Every other case
-        // answers its own verdict and changes nothing. One arm per verdict
-        // and per lifecycle phase; Running only, and an authoritative
+        // The adoption of a legacy member as an identity entry, once: in the
+        // first declaration after an upgrade that lists the identity, or at
+        // the seal of a complete roster that does not list it. The member at
+        // `generation` is the identity's current incarnation, seated and not
+        // an entry yet. A listed member is adopted with either legacy mark
+        // its spawn row carries. An unlisted one is a legacy member only
+        // with both marks and no host's intent row naming it: a local one
+        // bound to a session is adopted so that the seal retires it as an
+        // unlisted entry's member, and one placed on a member host or bound
+        // to no session is retired without its adoption
+        // (RetireUnadopted); a member with one mark, or one an intent row
+        // names (a host's adoption), is left as it is. An adopted member is
+        // local, bound to a session and not retiring. Every other case
+        // answers its own verdict and changes nothing. One arm per case and
+        // per lifecycle phase; Running only, and an authoritative
         // composition only.
         transition AdoptLegacyIdentityEntryAdopted {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
@@ -30871,7 +30883,10 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_session_bindings.contains_key(agent_identity) == true
                 && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
             }
-            guard "legacy_roster_member_observed" { legacy_roster_member == true }
+            guard "listed_legacy_member" {
+                listed == true
+                && (durable_identity_marker == true || own_identity_label == true)
+            }
             update {
                 self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
                 self.members_to_spawn.remove(agent_identity);
@@ -30881,10 +30896,9 @@ macro_rules! mob_catalog_machine_dsl {
             emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::Adopted }
         }
 
-        // The member holds the name as a worker: its spawn row carries no
-        // legacy marker.
-        transition AdoptLegacyIdentityEntryNameHeldByWorker {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+        // An unlisted legacy member: both marks, and no intent row names it.
+        transition AdoptLegacyIdentityEntryAdoptedUnlisted {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
@@ -30899,16 +30913,89 @@ macro_rules! mob_catalog_machine_dsl {
                 && self.member_session_bindings.contains_key(agent_identity) == true
                 && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
             }
-            guard "legacy_roster_member_not_observed" { legacy_roster_member == false }
+            guard "unlisted_legacy_member" {
+                listed == false
+                && durable_identity_marker == true
+                && own_identity_label == true
+                && intent_row == false
+            }
+            update {
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Declared);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
+            }
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::Adopted }
+        }
+
+        // The member's marks make it no legacy member: a listed one carries
+        // neither mark, so it holds the name as a worker; an unlisted one
+        // carries one mark at most, or an intent row names it, and it is
+        // left as it is.
+        transition AdoptLegacyIdentityEntryNameHeldByWorker {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "legacy_marks_not_observed" {
+                (listed == true
+                    && durable_identity_marker == false
+                    && own_identity_label == false
+                    && self.member_placement.contains_key(agent_identity) == false
+                    && self.member_session_bindings.contains_key(agent_identity) == true
+                    && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring))
+                || (listed == false
+                    && (durable_identity_marker == false
+                        || own_identity_label == false
+                        || intent_row == true))
+            }
             update {}
             to Running
             emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::NameHeldByWorker }
         }
 
-        // A placed member, a member bound to no session, or a retiring one is
-        // never adopted.
+        // An unlisted legacy member placed on a member host, or bound to no
+        // session, and not retiring: never an entry (a placed member, or one
+        // bound to no session, is not adopted), it is retired without its
+        // adoption, at the incarnation the shell observed.
+        transition AdoptLegacyIdentityEntryRetireUnadopted {
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
+            guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_not_reserved" {
+                self.identity_entry_tombstones.contains(agent_identity) == false
+                && self.identity_entry_unreadable.contains(agent_identity) == false
+            }
+            guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
+            guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
+            guard "unlisted_legacy_member" {
+                listed == false
+                && durable_identity_marker == true
+                && own_identity_label == true
+                && intent_row == false
+            }
+            guard "member_hosted_or_bound_to_no_session" {
+                (self.member_placement.contains_key(agent_identity) == true
+                    || self.member_session_bindings.contains_key(agent_identity) == false)
+                && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) != Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+            emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::RetireUnadopted }
+        }
+
+        // A listed member that is placed, bound to no session, or retiring
+        // is never adopted; nor is a retiring unlisted legacy member, whose
+        // own retirement ends it.
         transition AdoptLegacyIdentityEntryNotAdoptable {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
@@ -30919,9 +31006,15 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_seated" { self.identity_to_runtime.contains_key(agent_identity) == true }
             guard "observed_incarnation_current" { self.identity_runtime_generations.get_copied(agent_identity) == Some(generation) }
             guard "member_not_adoptable" {
-                self.member_placement.contains_key(agent_identity) == true
-                || self.member_session_bindings.contains_key(agent_identity) == false
-                || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)
+                (listed == true
+                    && (self.member_placement.contains_key(agent_identity) == true
+                        || self.member_session_bindings.contains_key(agent_identity) == false
+                        || self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring)))
+                || (listed == false
+                    && durable_identity_marker == true
+                    && own_identity_label == true
+                    && intent_row == false
+                    && self.member_state_markers.get_cloned(self.identity_to_runtime.get_cloned(agent_identity).get("value")) == Some(MobMemberState::Retiring))
             }
             update {}
             to Running
@@ -30931,7 +31024,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The observation names another incarnation than the current one:
         // the shell observes again.
         transition AdoptLegacyIdentityEntryStaleObservation {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
@@ -30947,7 +31040,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AdoptLegacyIdentityEntryNotSeated {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "not_an_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
@@ -30964,7 +31057,7 @@ macro_rules! mob_catalog_machine_dsl {
         // The adoption ran once: the identity is an entry already, and its
         // spawn row is not read again.
         transition AdoptLegacyIdentityEntryAlreadyAnEntry {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
@@ -30982,7 +31075,7 @@ macro_rules! mob_catalog_machine_dsl {
         // entry's, or one whose created entry row this build cannot read):
         // not adoptable as a Declared entry.
         transition AdoptLegacyIdentityEntryOtherCustody {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_authoritative" { self.composition_authority == CompositionAuthorityKind::Authoritative }
             guard "created_or_reserved_name" {
@@ -30998,7 +31091,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         // A candidate composition adopts nothing.
         transition AdoptLegacyIdentityEntryNonAuthoritative {
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             guard { self.lifecycle_phase == Phase::Running }
             guard "composition_non_authoritative" { self.composition_authority == CompositionAuthorityKind::NonAuthoritative }
             update {}
@@ -31008,7 +31101,7 @@ macro_rules! mob_catalog_machine_dsl {
 
         transition AdoptLegacyIdentityEntryMobNotRunning {
             per_phase [Stopped, Completed, Destroyed]
-            on input AdoptLegacyIdentityEntry { agent_identity, generation, legacy_roster_member }
+            on input AdoptLegacyIdentityEntry { agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row }
             update {}
             to Running
             emit LegacyIdentityEntryAdoptionResolved { agent_identity: agent_identity, verdict: LegacyIdentityEntryAdoptionKind::MobNotRunning }
@@ -38265,9 +38358,12 @@ pub enum LegacyIdentityEntryAdoptionKind {
     Adopted,
     /// The identity is an entry already: nothing changes.
     AlreadyAnEntry,
-    /// A worker holds the name: its spawn row carries no legacy marker.
+    /// The member's marks make it no legacy member: a listed one carries
+    /// neither legacy mark (a worker holds the name), an unlisted one
+    /// carries one at most or a host's intent row names it.
     NameHeldByWorker,
-    /// The member is placed, bound to no session, or retiring.
+    /// A listed member that is placed, bound to no session or retiring, or
+    /// an unlisted legacy member that is retiring.
     NotAdoptable,
     /// The observation names another incarnation than the current one.
     StaleObservation,
@@ -38277,6 +38373,10 @@ pub enum LegacyIdentityEntryAdoptionKind {
     NonAuthoritative,
     /// The mob is not running.
     MobNotRunning,
+    /// An unlisted legacy member placed on a member host, or bound to no
+    /// session: never an entry, the complete roster's apply retires it at
+    /// the observed incarnation.
+    RetireUnadopted,
 }
 
 /// The agent lane's admission of a member command

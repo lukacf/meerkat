@@ -48378,13 +48378,16 @@ control_mob_RecoverIdentityEntrySeatedStopped(arg_agent_identity, arg_agent_runt
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48393,7 +48396,7 @@ control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, 
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
        /\ ((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-       /\ (packet.payload.legacy_roster_member = TRUE)
+       /\ ((packet.payload.listed = TRUE) /\ (IF (packet.payload.durable_identity_marker = TRUE) THEN TRUE ELSE (packet.payload.own_identity_label = TRUE)))
        /\ control_mob_phase' = "Running"
        /\ control_mob_members_to_spawn' = (control_mob_members_to_spawn \ {packet.payload.agent_identity})
        /\ control_mob_members_to_retire' = (control_mob_members_to_retire \ {packet.payload.agent_identity})
@@ -48409,13 +48412,16 @@ control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, 
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryAdoptedUnlisted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48424,7 +48430,40 @@ control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_gen
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
        /\ ((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-       /\ (packet.payload.legacy_roster_member = FALSE)
+       /\ ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))
+       /\ control_mob_phase' = "Running"
+       /\ control_mob_members_to_spawn' = (control_mob_members_to_spawn \ {packet.payload.agent_identity})
+       /\ control_mob_members_to_retire' = (control_mob_members_to_retire \ {packet.payload.agent_identity})
+       /\ control_mob_identity_entry_origins' = MapSet(control_mob_identity_entry_origins, packet.payload.agent_identity, "Declared")
+       /\ UnchangedFrame_d9952ace8fc9694a
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "LegacyIdentityEntryAdoptionResolved", payload |-> [agent_identity |-> packet.payload.agent_identity, verdict |-> "Adopted"], effect_id |-> (model_step_count + 1), source_transition |-> "AdoptLegacyIdentityEntryAdoptedUnlisted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "AdoptLegacyIdentityEntryAdoptedUnlisted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "AdoptLegacyIdentityEntry"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.generation = arg_generation
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (control_mob_composition_authority = "Authoritative")
+       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)
+       /\ (((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))
+       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
+       /\ ((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)))))) /\ (IF ((packet.payload.listed = TRUE) /\ (packet.payload.durable_identity_marker = FALSE) /\ (packet.payload.own_identity_label = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (IF (packet.payload.durable_identity_marker = FALSE) THEN TRUE ELSE (IF (packet.payload.own_identity_label = FALSE) THEN TRUE ELSE (packet.payload.intent_row = TRUE))))))
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -48437,13 +48476,16 @@ control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_gen
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryRetireUnadopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48451,7 +48493,38 @@ control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generat
        /\ (((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))
        /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
-       /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
+       /\ ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))
+       /\ ((IF ~((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE))) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_a364531b7feab712
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "LegacyIdentityEntryAdoptionResolved", payload |-> [agent_identity |-> packet.payload.agent_identity, verdict |-> "RetireUnadopted"], effect_id |-> (model_step_count + 1), source_transition |-> "AdoptLegacyIdentityEntryRetireUnadopted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "AdoptLegacyIdentityEntryRetireUnadopted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "AdoptLegacyIdentityEntry"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.generation = arg_generation
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (control_mob_composition_authority = "Authoritative")
+       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)
+       /\ (((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))
+       /\ ((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
+       /\ (((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE (IF ~((packet.payload.listed = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.intent_row = FALSE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))))))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
        /\ control_mob_phase' = "Running"
        /\ UnchangedFrame_a364531b7feab712
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -48464,13 +48537,16 @@ control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generat
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48490,13 +48566,16 @@ control_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_gen
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48515,13 +48594,16 @@ control_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48540,13 +48622,16 @@ control_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_gener
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "Authoritative")
@@ -48563,13 +48648,16 @@ control_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generat
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Running"
        /\ (control_mob_composition_authority = "NonAuthoritative")
@@ -48585,13 +48673,16 @@ control_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_gen
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Stopped"
        /\ control_mob_phase' = "Stopped"
@@ -48606,13 +48697,16 @@ control_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Completed"
        /\ control_mob_phase' = "Completed"
@@ -48627,13 +48721,16 @@ control_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, a
        /\ model_step_count' = model_step_count + 1
 
 
-control_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+control_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "control_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("control_mob_authority")
        /\ control_mob_phase = "Destroyed"
        /\ control_mob_phase' = "Destroyed"
@@ -102515,13 +102612,16 @@ layer_mob_RecoverIdentityEntrySeatedStopped(arg_agent_identity, arg_agent_runtim
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102530,7 +102630,7 @@ layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, ar
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
        /\ ((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-       /\ (packet.payload.legacy_roster_member = TRUE)
+       /\ ((packet.payload.listed = TRUE) /\ (IF (packet.payload.durable_identity_marker = TRUE) THEN TRUE ELSE (packet.payload.own_identity_label = TRUE)))
        /\ layer_mob_phase' = "Running"
        /\ layer_mob_members_to_spawn' = (layer_mob_members_to_spawn \ {packet.payload.agent_identity})
        /\ layer_mob_members_to_retire' = (layer_mob_members_to_retire \ {packet.payload.agent_identity})
@@ -102546,13 +102646,16 @@ layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, ar
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryAdoptedUnlisted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102561,7 +102664,40 @@ layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_gener
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
        /\ ((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
-       /\ (packet.payload.legacy_roster_member = FALSE)
+       /\ ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))
+       /\ layer_mob_phase' = "Running"
+       /\ layer_mob_members_to_spawn' = (layer_mob_members_to_spawn \ {packet.payload.agent_identity})
+       /\ layer_mob_members_to_retire' = (layer_mob_members_to_retire \ {packet.payload.agent_identity})
+       /\ layer_mob_identity_entry_origins' = MapSet(layer_mob_identity_entry_origins, packet.payload.agent_identity, "Declared")
+       /\ UnchangedFrame_6534f3d10888bb86
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "LegacyIdentityEntryAdoptionResolved", payload |-> [agent_identity |-> packet.payload.agent_identity, verdict |-> "Adopted"], effect_id |-> (model_step_count + 1), source_transition |-> "AdoptLegacyIdentityEntryAdoptedUnlisted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "AdoptLegacyIdentityEntryAdoptedUnlisted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "AdoptLegacyIdentityEntry"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.generation = arg_generation
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (layer_mob_composition_authority = "Authoritative")
+       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)
+       /\ (((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))
+       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
+       /\ ((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)))))) /\ (IF ((packet.payload.listed = TRUE) /\ (packet.payload.durable_identity_marker = FALSE) /\ (packet.payload.own_identity_label = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (IF (packet.payload.durable_identity_marker = FALSE) THEN TRUE ELSE (IF (packet.payload.own_identity_label = FALSE) THEN TRUE ELSE (packet.payload.intent_row = TRUE))))))
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -102574,13 +102710,16 @@ layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_gener
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryRetireUnadopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102588,7 +102727,38 @@ layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generatio
        /\ (((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))
        /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)
        /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
-       /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
+       /\ ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))
+       /\ ((IF ~((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE))) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_ef0e3da3d045825e
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "LegacyIdentityEntryAdoptionResolved", payload |-> [agent_identity |-> packet.payload.agent_identity, verdict |-> "RetireUnadopted"], effect_id |-> (model_step_count + 1), source_transition |-> "AdoptLegacyIdentityEntryRetireUnadopted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "AdoptLegacyIdentityEntryRetireUnadopted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "AdoptLegacyIdentityEntry"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ packet.payload.generation = arg_generation
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (layer_mob_composition_authority = "Authoritative")
+       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)
+       /\ (((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))
+       /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)
+       /\ ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))
+       /\ (((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE (IF ~((packet.payload.listed = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.intent_row = FALSE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))))))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring")))))
        /\ layer_mob_phase' = "Running"
        /\ UnchangedFrame_ef0e3da3d045825e
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -102601,13 +102771,16 @@ layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generatio
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102627,13 +102800,16 @@ layer_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_gener
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102652,13 +102828,16 @@ layer_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, 
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102677,13 +102856,16 @@ layer_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generat
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "Authoritative")
@@ -102700,13 +102882,16 @@ layer_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generatio
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Running"
        /\ (layer_mob_composition_authority = "NonAuthoritative")
@@ -102722,13 +102907,16 @@ layer_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_gener
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Stopped"
        /\ layer_mob_phase' = "Stopped"
@@ -102743,13 +102931,16 @@ layer_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_g
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Completed"
        /\ layer_mob_phase' = "Completed"
@@ -102764,13 +102955,16 @@ layer_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg
        /\ model_step_count' = model_step_count + 1
 
 
-layer_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_legacy_roster_member) ==
+layer_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row) ==
     /\ \E packet \in SeqElements(pending_inputs) :
        /\ packet.machine = "layer_mob"
        /\ packet.variant = "AdoptLegacyIdentityEntry"
        /\ packet.payload.agent_identity = arg_agent_identity
        /\ packet.payload.generation = arg_generation
-       /\ packet.payload.legacy_roster_member = arg_legacy_roster_member
+       /\ packet.payload.durable_identity_marker = arg_durable_identity_marker
+       /\ packet.payload.own_identity_label = arg_own_identity_label
+       /\ packet.payload.listed = arg_listed
+       /\ packet.payload.intent_row = arg_intent_row
        /\ ~HigherPriorityReady("layer_mob_authority")
        /\ layer_mob_phase = "Destroyed"
        /\ layer_mob_phase' = "Destroyed"
@@ -111807,9 +112001,11 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ExemptMemberFromDefinitionWiring") /\ (control_mob_phase = "Stopped") /\ ((control_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE))
     \/ /\ (packet.variant = "RecoverIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((IF ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins THEN control_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (packet.payload.origin = "Created")))
     \/ /\ (packet.variant = "RecoverIdentityEntry") /\ (control_mob_phase = "Stopped") /\ ((control_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((IF ((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins THEN control_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (packet.payload.origin = "Created")))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ ((packet.payload.legacy_roster_member = TRUE))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ ((packet.payload.legacy_roster_member = FALSE))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ (((packet.payload.listed = TRUE) /\ (IF (packet.payload.durable_identity_marker = TRUE) THEN TRUE ELSE (packet.payload.own_identity_label = TRUE))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ (((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE)))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)))))) /\ (IF ((packet.payload.listed = TRUE) /\ (packet.payload.durable_identity_marker = FALSE) /\ (packet.payload.own_identity_label = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = TRUE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (IF (packet.payload.durable_identity_marker = FALSE) THEN TRUE ELSE (IF (packet.payload.own_identity_label = FALSE) THEN TRUE ELSE (packet.payload.intent_row = TRUE)))))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))) /\ (((IF ~((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE))) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE)) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ ((((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime)))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE (IF ~((packet.payload.listed = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.intent_row = FALSE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime))))))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE) /\ ((IF ((control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers) THEN Some((IF (control_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[(control_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some(packet.payload.generation)))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) = FALSE))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (control_mob_phase = "Running") /\ ((control_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_entry_origins THEN control_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) /\ ((((packet.payload.agent_identity \in control_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in control_mob_identity_entry_unreadable) = FALSE)))
@@ -114063,9 +114259,11 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ExemptMemberFromDefinitionWiring") /\ (layer_mob_phase = "Stopped") /\ ((layer_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE))
     \/ /\ (packet.variant = "RecoverIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((IF ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins THEN layer_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (packet.payload.origin = "Created")))
     \/ /\ (packet.variant = "RecoverIdentityEntry") /\ (layer_mob_phase = "Stopped") /\ ((layer_mob_boot_plan_sealed = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ ((IF ((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins THEN layer_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some("Created")) THEN TRUE ELSE (packet.payload.origin = "Created")))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ ((packet.payload.legacy_roster_member = TRUE))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ ((packet.payload.legacy_roster_member = FALSE))
-    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ (((packet.payload.listed = TRUE) /\ (IF (packet.payload.durable_identity_marker = TRUE) THEN TRUE ELSE (packet.payload.own_identity_label = TRUE))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))))) /\ (((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE)))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) THEN TRUE ELSE (IF ~(((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)))))) /\ (IF ((packet.payload.listed = TRUE) /\ (packet.payload.durable_identity_marker = FALSE) /\ (packet.payload.own_identity_label = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE) /\ ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = TRUE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring"))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (IF (packet.payload.durable_identity_marker = FALSE) THEN TRUE ELSE (IF (packet.payload.own_identity_label = FALSE) THEN TRUE ELSE (packet.payload.intent_row = TRUE)))))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE))) /\ (((IF ~((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE))) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)) /\ ((IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE)) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) # Some("Retiring")))))
+    \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ ((((IF ~((packet.payload.listed = TRUE)) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime)))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE (IF ~((packet.payload.listed = FALSE)) THEN TRUE ELSE (IF ~((packet.payload.durable_identity_marker = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.own_identity_label = TRUE)) THEN TRUE ELSE (IF ~((packet.payload.intent_row = FALSE)) THEN TRUE ELSE (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime))))))) /\ (IF ((packet.payload.listed = TRUE) /\ (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = TRUE) THEN TRUE ELSE (IF ((packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) = FALSE) THEN TRUE ELSE ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))) THEN TRUE ELSE ((packet.payload.listed = FALSE) /\ (packet.payload.durable_identity_marker = TRUE) /\ (packet.payload.own_identity_label = TRUE) /\ (packet.payload.intent_row = FALSE) /\ ((IF ((layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers) THEN Some((IF (layer_mob_identity_to_runtime)[packet.payload.agent_identity] \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[(layer_mob_identity_to_runtime)[packet.payload.agent_identity]] ELSE "None")) ELSE None) = Some("Retiring"))))))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) # Some(packet.payload.generation)))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = FALSE)) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE))) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) = FALSE))
     \/ /\ (packet.variant = "AdoptLegacyIdentityEntry") /\ (layer_mob_phase = "Running") /\ ((layer_mob_composition_authority = "Authoritative")) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) = TRUE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_entry_origins THEN layer_mob_identity_entry_origins[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some("Declared"))) /\ ((((packet.payload.agent_identity \in layer_mob_identity_entry_tombstones) = FALSE) /\ ((packet.payload.agent_identity \in layer_mob_identity_entry_unreadable) = FALSE)))
@@ -116034,17 +116232,19 @@ CoreNext ==
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : control_mob_ExemptMemberFromDefinitionWiringSeatedStopped(arg_agent_identity, arg_agent_runtime_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_origin \in IdentityEntryOriginValues : control_mob_RecoverIdentityEntrySeatedRunning(arg_agent_identity, arg_agent_runtime_id, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_origin \in IdentityEntryOriginValues : control_mob_RecoverIdentityEntrySeatedStopped(arg_agent_identity, arg_agent_runtime_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, TRUE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_legacy_roster_member)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, TRUE, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : control_mob_AdoptLegacyIdentityEntryAdoptedUnlisted(arg_agent_identity, arg_generation, TRUE, TRUE, FALSE, FALSE)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : control_mob_AdoptLegacyIdentityEntryRetireUnadopted(arg_agent_identity, arg_generation, TRUE, TRUE, FALSE, FALSE)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : control_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveAgentLaneMemberAdmissionAdmittedRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveAgentLaneMemberAdmissionAdmittedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : control_mob_ResolveAgentLaneMemberAdmissionAdmittedCompleted(arg_agent_identity)
@@ -117935,17 +118135,19 @@ CoreNext ==
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : layer_mob_ExemptMemberFromDefinitionWiringSeatedStopped(arg_agent_identity, arg_agent_runtime_id)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_origin \in IdentityEntryOriginValues : layer_mob_RecoverIdentityEntrySeatedRunning(arg_agent_identity, arg_agent_runtime_id, arg_origin)
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_origin \in IdentityEntryOriginValues : layer_mob_RecoverIdentityEntrySeatedStopped(arg_agent_identity, arg_agent_runtime_id, arg_origin)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, TRUE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, FALSE)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_legacy_roster_member)
-    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_legacy_roster_member \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_legacy_roster_member)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryAdopted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, TRUE, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : layer_mob_AdoptLegacyIdentityEntryAdoptedUnlisted(arg_agent_identity, arg_generation, TRUE, TRUE, FALSE, FALSE)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNameHeldByWorker(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : layer_mob_AdoptLegacyIdentityEntryRetireUnadopted(arg_agent_identity, arg_generation, TRUE, TRUE, FALSE, FALSE)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNotAdoptable(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryStaleObservation(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNotSeated(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryAlreadyAnEntry(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryOtherCustody(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryNonAuthoritative(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningStopped(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningCompleted(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
+    \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_generation \in GenerationValues : \E arg_durable_identity_marker \in BOOLEAN : \E arg_own_identity_label \in BOOLEAN : \E arg_listed \in BOOLEAN : \E arg_intent_row \in BOOLEAN : layer_mob_AdoptLegacyIdentityEntryMobNotRunningDestroyed(arg_agent_identity, arg_generation, arg_durable_identity_marker, arg_own_identity_label, arg_listed, arg_intent_row)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveAgentLaneMemberAdmissionAdmittedRunning(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveAgentLaneMemberAdmissionAdmittedStopped(arg_agent_identity)
     \/ \E arg_agent_identity \in AgentIdentityValues : layer_mob_ResolveAgentLaneMemberAdmissionAdmittedCompleted(arg_agent_identity)

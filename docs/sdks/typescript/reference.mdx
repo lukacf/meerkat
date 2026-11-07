@@ -95,6 +95,9 @@ The package exports more than the core session lifecycle. The `MeerkatClient` al
   `setMobInstruction`, `revokeMobInstruction` and `mobInstructionStatus`, and
   on `Session` and `Mob` `setInstruction`, `revokeInstruction` and
   `instructionStatus`
+- durable decisions: `listDecisions`, `getDecision`, `decisionRendering`,
+  `presentDecision`, `withdrawDecision` (a 0.9.11 or newer server; an older
+  one's method not found, `-32601`, is raised naming the method)
 - projected event recovery: `latestEventCursor`, `listEventsSince`,
   `eventSnapshot` when host event projection is enabled
 - live-channel helpers: `liveOpen`, `liveStatus`, `liveClose`, `liveSendInput`,

@@ -46,6 +46,11 @@ class TestAuthConfigToDict:
         assert d["provider"] == "jwt"
         assert d["shared_secret"] == "my-secret"
 
+    def test_jwt_config_states_accounts_only_when_set(self):
+        assert "accounts" not in _auth_config_to_dict(auth.jwt("my-secret"))
+        d = _auth_config_to_dict(auth.jwt("my-secret", accounts="personal"))
+        assert d["accounts"] == "personal"
+
     def test_google_config_object(self):
         cfg = auth.google("my-client-id")
         d = _auth_config_to_dict(cfg)

@@ -581,7 +581,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `BeginMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: SessionId, peer_endpoint: Option<MemberPeerEndpoint>, session_archived: Bool, target: RotationTarget, profile_name: String)
 - `CommitMemberRotation`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, session_id: Option<SessionId>, disposal: MemberSessionDisposal, next_agent_runtime_id: AgentRuntimeId, next_fence_token: FenceToken, next_generation: Generation, runtime_mode: SpawnPolicyRuntimeMode, external_addressable: Bool, kickoff_owed: Bool, kickoff_objective_id: String, definition_wiring_exempt: Bool)
 - `ClassifyMemberRelease`(agent_identity: AgentIdentity, scope_agent_runtime_id: Option<AgentRuntimeId>, scope_fence_token: Option<FenceToken>, scope_session_id: Option<SessionId>)
-- `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, legacy_roster_member: Bool)
+- `AdoptLegacyIdentityEntry`(agent_identity: AgentIdentity, generation: Generation, durable_identity_marker: Bool, own_identity_label: Bool, listed: Bool, intent_row: Bool)
 - `ResolveAgentLaneMemberAdmission`(agent_identity: AgentIdentity)
 - `DeclareIdentityEntry`(agent_identity: AgentIdentity, profile_name: String, runtime_mode: SpawnPolicyRuntimeMode, placement: EntryPlacementKind, held_creation: Bool, declared_migration_from: Option<String>, intent_managed: Bool, session_memory_only: Bool, resume_session_role: Option<String>, first_boot: FirstBootRequestKind, created_custody: Bool, preparation_required: Bool)
 - `SealDeclaredRoster`(desired: Set<AgentIdentity>)
@@ -17568,7 +17568,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryAdopted`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `not_an_entry`
@@ -17576,27 +17576,54 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_seated`
   - `observed_incarnation_current`
   - `member_adoptable`
-  - `legacy_roster_member_observed`
+  - `listed_legacy_member`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryAdoptedUnlisted`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `name_not_reserved`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `member_adoptable`
+  - `unlisted_legacy_member`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
 ### `AdoptLegacyIdentityEntryNameHeldByWorker`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `not_an_entry`
   - `name_not_reserved`
   - `member_seated`
   - `observed_incarnation_current`
-  - `member_adoptable`
-  - `legacy_roster_member_not_observed`
+  - `legacy_marks_not_observed`
+- Emits: `LegacyIdentityEntryAdoptionResolved`
+- To: `Running`
+
+### `AdoptLegacyIdentityEntryRetireUnadopted`
+- From: `Running`
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
+- Guards:
+  - `composition_authoritative`
+  - `not_an_entry`
+  - `name_not_reserved`
+  - `member_seated`
+  - `observed_incarnation_current`
+  - `unlisted_legacy_member`
+  - `member_hosted_or_bound_to_no_session`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Running`
 
 ### `AdoptLegacyIdentityEntryNotAdoptable`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `not_an_entry`
@@ -17609,7 +17636,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryStaleObservation`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `not_an_entry`
@@ -17621,7 +17648,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryNotSeated`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `not_an_entry`
@@ -17632,7 +17659,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryAlreadyAnEntry`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `identity_entry`
@@ -17643,7 +17670,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryOtherCustody`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_authoritative`
   - `created_or_reserved_name`
@@ -17652,7 +17679,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryNonAuthoritative`
 - From: `Running`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Guards:
   - `composition_non_authoritative`
 - Emits: `LegacyIdentityEntryAdoptionResolved`
@@ -17660,19 +17687,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AdoptLegacyIdentityEntryMobNotRunningStopped`
 - From: `Stopped`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Stopped`
 
 ### `AdoptLegacyIdentityEntryMobNotRunningCompleted`
 - From: `Completed`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Completed`
 
 ### `AdoptLegacyIdentityEntryMobNotRunningDestroyed`
 - From: `Destroyed`
-- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, legacy_roster_member)
+- On: `AdoptLegacyIdentityEntry`(agent_identity, generation, durable_identity_marker, own_identity_label, listed, intent_row)
 - Emits: `LegacyIdentityEntryAdoptionResolved`
 - To: `Destroyed`
 

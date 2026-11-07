@@ -32,7 +32,7 @@ name: CI
 #                     when machine authority or a dogma document changed
 #   governance-docs-gate - the machine-authority docs gate, on the same
 #                     changes, in parallel with governance-gates
-#   tlc-audits      - (x21) the hand-written TLC audit shards on a
+#   tlc-audits      - (x24) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -626,6 +626,14 @@ jobs:
           make published-crates-standalone-selftest
           make check-published-crates-standalone-guard
 
+      # The test-feature canary (each Core crate's lib.rs) must stop a test
+      # binary built without the crate's test features and nothing else: a
+      # fixture crate with the same canary, on the pinned toolchain, fails
+      # here if a toolchain evaluates it in check builds or stops evaluating
+      # it in code generation. A few seconds.
+      - name: Test-feature canary trips test code generation only
+        run: make test-feature-canary-selftest
+
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 
@@ -1032,15 +1040,17 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: twenty-one shards, which took 146-751 s each on the
+  # fits the PR budget: twenty-four shards, which took 146-751 s each on the
   # hosted runners of the 0.9.9 release pushes and up to 776 s on its pull
   # requests, audits-f aside (1020 s, then its 20-minute timeout, before
   # two of its audits moved out). machine_verify_all_tlc_test.sh lists
   # every audit's and shard's hosted seconds; its assignment keeps each
-  # shard within about 720 s, 60 percent of the job timeout, except the
-  # three shards that each run one part of the identity entry audit
-  # (audits-l, audits-m and audits-n, 741-776 s), which get shorter only
-  # when their parts split.
+  # shard within about 720 s, 60 percent of the job timeout, except
+  # audits-n, one part of the identity entry audit (741-776 s), which gets
+  # shorter only when its part splits. The identity entry audit's entry and
+  # lifecycle runs take three shards (audits-l, audits-w and audits-x) since
+  # its single entry run reached the 900 s per-run cap, and its legacy run
+  # two (audits-m and audits-y) since one shard of it took 1182 s.
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -1057,7 +1067,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v]
+        part: [audits-a, audits-b, audits-c, audits-d, audits-e, audits-f, audits-g, audits-h, audits-i, audits-j, audits-k, audits-l, audits-m, audits-n, audits-o, audits-q, audits-r, audits-s, audits-t, audits-u, audits-v, audits-w, audits-x, audits-y]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.
@@ -1436,9 +1446,11 @@ jobs:
               "governed_jsonl::tests::ordinary_rpc_host_materializes_a_scheduled_fire_past_the_mandate_gate",
               "governed_jsonl::tests::rpc_runtimes_compose_the_realms_own_schedule_service",
           ])
+          # workspace-tests: meerkat-rpc's test feature, which every test
+          # build of it passes (scripts/core-workspace-args.mjs --tests).
           command = [
               "./scripts/repo-cargo", "test", "--locked", "-p", "meerkat-rpc", "--lib",
-              "--no-default-features", "--features", "local-authorization",
+              "--no-default-features", "--features", "local-authorization,workspace-tests",
               "governed_jsonl::tests::", "--",
           ]
 
@@ -3088,7 +3100,7 @@ jobs:
     # branch (release/meta-*, release/connect-*) and in its release workflow.
     if: ${{ needs.changes.outputs.floor_check_count != '0' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.floor_check_matrix) }}
@@ -3861,7 +3873,7 @@ jobs:
               jobs = [
                   job
                   for page in api(
-                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+                      f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30"
                   )
                   for job in page["jobs"]
               ]

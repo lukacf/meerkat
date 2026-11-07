@@ -96,12 +96,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 security-framework = { version = "3", optional = true }
 
 [dev-dependencies]
-# Enables `workspace-tests` for this crate's own tests; path-only, so the
-# published package does not carry it. It adds nothing else: with default
-# features on, every test build would turn them back on, and a
-# `--no-default-features` test build would not check the feature set it
-# names.
-meerkat-auth-core = { path = ".", default-features = false, features = ["workspace-tests"] }
 meerkat-runtime = { path = "../meerkat-runtime", default-features = false, features = ["sqlite-store"] } # path-only (no version): breaks packaging dev-dep cycle; SQLite exercises the actual durable flow owner
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = { workspace = true }
@@ -129,9 +123,10 @@ gcp-auth = ["dep:jsonwebtoken", "dep:urlencoding"]
 azure-ad = ["dep:urlencoding"]
 # Internal, not for consumers: compiles the unit tests that need the
 # workspace (a crate this one cannot depend on once published). Only the
-# path-only self dev-dependency enables it, and `cargo package` strips that
-# dev-dependency, so the published package compiles those tests out
-# (ci/standalone-workspace-only.toml names them).
+# workspace's own test builds turn it on (they pass every crate's test
+# features: scripts/core-workspace-args.mjs --tests), so the published
+# package compiles those tests out (ci/standalone-workspace-only.toml
+# names them).
 workspace-tests = []
 
 [package.metadata.cargo-machete]

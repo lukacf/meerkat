@@ -22,13 +22,15 @@ const GPT6_ASTRA_EFFORT: &[EffortLevel] = &[
     EffortLevel::Max,
 ];
 
-/// GPT-6 Sol and Luna accept the full ladder including `none`; the documented
-/// default is `medium`. Chat Completions supports function calling for these
-/// two only with `reasoning_effort: none`; meerkat drives them through the
-/// Responses API, where function calling is unrestricted.
+/// GPT-6 Sol, GPT-6 Luna and GPT-6.1 Terra accept the full ladder including
+/// `none`; the documented default is `medium`. Chat Completions supports
+/// function calling for Sol and Luna only with `reasoning_effort: none`, and
+/// Terra's tool calling requires the Responses API; meerkat drives all three
+/// through the Responses API, where function calling is unrestricted.
 /// Sources:
 ///   - https://developers.openai.com/api/docs/models/gpt-6-sol
 ///   - https://developers.openai.com/api/docs/models/gpt-6-luna
+///   - https://developers.openai.com/api/docs/models/gpt-6.1-terra
 const GPT6_SOL_LUNA_EFFORT: &[EffortLevel] = &[
     EffortLevel::None,
     EffortLevel::Low,
@@ -298,6 +300,65 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
         supports_reasoning: true,
         effort_levels: GPT6_ASTRA_EFFORT,
+        openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
+        supports_web_search: true,
+        supports_mid_conversation_system_messages: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        call_timeout_secs: Some(600),
+        stream_inactivity_timeout_secs: None,
+        supports_forced_tool_choice: true,
+    },
+    // Sources:
+    //   - https://developers.openai.com/api/docs/models/gpt-6.1-terra
+    //   - https://developers.openai.com/api/docs/pricing
+    //   - https://developers.openai.com/api/docs/guides/prompt-caching
+    //
+    // A fast, efficient model for visual reasoning, precise computer use and
+    // clear, natural writing (matching product photos to catalog entries,
+    // interpreting technical drawings, acting on application screens).
+    // 1,050,000 context window with a separate 922,000 input ceiling, 128,000
+    // max output, text/image input, text output, knowledge cutoff 2026-06-01.
+    // Pricing at catalog time: $1 input / $0.05 cached input / $5 output per
+    // MTok, cache writes $1.25 (`30m`) or $2.50 (`12h`); above 272K input
+    // tokens the input and cache rates double and output is 1.5x. The
+    // prompt-caching guide prices its cache reads at 0.05x input under the
+    // GPT-5.6-and-later rules. Responses, Chat Completions (tool calling
+    // requires Responses) and Batch; no Realtime/Live. Effort ladder matches
+    // Sol and Luna: `none` through `max`, default `medium`.
+    ModelCapabilities {
+        id: "gpt-6.1-terra",
+        provider: Provider::OpenAI,
+        display_name: "GPT-6.1 Terra",
+        tier: ModelTier::Supported,
+        release_stage: ModelReleaseStage::Stable,
+        model_family: "gpt-6",
+        context_window: Some(1_050_000),
+        max_input_tokens: Some(922_000),
+        max_output_tokens: Some(128_000),
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: true,
+        image_tool_results: true,
+        inline_video: false,
+        realtime: false,
+        realtime_supports_provider_managed_turns: false,
+        realtime_supports_explicit_commit: false,
+        realtime_interrupt_supported: false,
+        realtime_transcript_supported: false,
+        transcription_companion_model: None,
+        image_generation: false,
+        supports_temperature: false,
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        anthropic_disabled_thinking: AnthropicDisabledThinking::Refused,
+        supports_reasoning: true,
+        effort_levels: GPT6_SOL_LUNA_EFFORT,
         openai_responses_params: Some(GPT6_RESPONSES_PARAMS),
         supports_web_search: true,
         supports_mid_conversation_system_messages: true,

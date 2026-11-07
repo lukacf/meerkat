@@ -1247,7 +1247,10 @@ WireMobInstructionDisposition = Literal['committed', 'duplicate']
 # Which members of a mob an operator instruction targets: every member, the
 # members of one profile, or one member. A target is a predicate over the
 # roster: a profile or member that does not exist yet selects nobody until
-# it does.
+# it does. A target refuses a field its kind does not have (`Mob` is a
+# struct variant for that: serde lets a unit variant ignore extra fields),
+# so a member or profile name sent with the wrong kind never widens a
+# write to every member.
 class WireInstructionTargetMob(TypedDict, total=False):
     kind: Required[Literal['mob']]
 

@@ -195,6 +195,19 @@ them.
   normally to `None`; an exhaustive match of `MaterializeServeError` needs
   the new arm.
 
+- `meerkat-core`: `CompactionProjectionIntent` gains the public field
+  `instruction_snapshot` (`Option<InstructionEntryIdentity>`, serde default):
+  the operator-instruction snapshot a staged compaction's fold inserted,
+  published as `OperatorInstructionsApplied` when the runtime commits the
+  compaction. A struct literal needs the field (`instruction_snapshot:
+  None`). It takes no part in the intent's equality, which is now
+  implemented by hand over the other fields. Downgrade: 0.9.10 ignores the
+  field (the intent has no `deny_unknown_fields`; `Session::compaction_projection_intents`
+  and the runtime store's outbox decode it with serde's default), so a 0.9.10
+  process that commits a compaction a 0.9.11 process staged reports its
+  `CompactionCompleted` without the snapshot observation, and the two
+  versions' copies of an intent compare equal.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -410,8 +423,11 @@ them.
 - `meerkat-core`: `AgentEvent::OperatorInstructionsApplied` (wire
   `operator_instructions_applied`), appended last. A session publishes it
   for each operator-instruction entry it applies: a delta once the run whose
-  start appended it starts, a snapshot once the rewrite of the compaction
-  that folded it is in the session. It reports the instructions now in
+  start appended it starts, a snapshot once the compaction that folded it
+  commits (a staged memory projection's when the runtime commits it, right
+  after its `CompactionCompleted`; a compaction rolled back before its
+  commit is never observed, and its entry sequence goes to the next entry).
+  It reports the instructions now in
   effect for the live session, not durability: a restart before the entry is
   durable applies the changes again and publishes the event again. It
   carries the session, the entry sequence, the kind, the applying run, the
@@ -484,11 +500,11 @@ them.
   explicit thinking, and a forced call skips thinking on the models that
   accept one.
 
+### Deprecated
+
 - Docs: instruction activations (`session/activate_instruction`) are
   deprecated in favour of operator instructions (`session/set_instruction`).
   The method keeps working.
-
-### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
   `DurableDecisionService::claim_executor`, the whole-store executor claim of

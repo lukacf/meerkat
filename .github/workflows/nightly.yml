@@ -8,8 +8,7 @@ name: Nightly
 #
 # Coverage rationale:
 #   workspace-unit    - `make test-unit`: every workspace unit test (PR CI
-#                       runs only the directly changed packages), plus
-#                       meerkat-rpc unit tests with all features
+#                       runs only the directly changed packages)
 #   workspace-int     - `make test-int`: every integration-fast test
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
@@ -105,10 +104,16 @@ jobs:
     needs: machine-verify
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Measured ~91 min on 4 vCPU: make test-unit ~58 (38 compile + 20 run) + rpc all-features ~31.
-    timeout-minutes: 150
+    # At four Cargo jobs `make test-unit` took 60-79 minutes to compile and
+    # 27-31 to run its tests (2026-11-02 to 11-05). Two jobs compile for an
+    # estimated 1.5-1.8 times as long: 117-173 minutes in all.
+    timeout-minutes: 180
     env:
       RUSTC_WRAPPER: sccache
+      # At four Cargo jobs the 16 GB runner lost this job mid-compile (exit
+      # 143 after the log went silent, 2026-11-06 and 11-07), as it lost
+      # workspace-int below. Two jobs keep at most two rustc alive.
+      CARGO_BUILD_JOBS: "2"
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -148,17 +153,13 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
+      # meerkat-rpc's WebRTC router tests, which `live-webrtc` gates and this
+      # lane compiles out, run on every Rust-changing main push instead:
+      # ci.yml's "Main unit tests (rpc[openai-live])" row turns on every
+      # meerkat-rpc feature (experimental-gpt-live implies openai-live, which
+      # implies live-webrtc and mob).
       - name: Workspace unit tests
         run: make test-unit
-
-      # meerkat-rpc gates its WebRTC router tests on `live-webrtc`, which no
-      # default feature set enables, so `make test-unit` compiles them out.
-      - name: meerkat-rpc unit tests (all features)
-        run: |
-          # meerkat-rpc's MCP boundary tests spawn this exact fixture and fail without it.
-          MEERKAT_MCP_TEST_SERVER="$(scripts/mcp-test-server-fixture)"
-          export MEERKAT_MCP_TEST_SERVER
-          ./scripts/repo-cargo nextest run -p meerkat-rpc --all-features --lib --no-fail-fast --show-progress none --status-level none --final-status-level fail
 
   workspace-int:
     name: Workspace integration-fast tests

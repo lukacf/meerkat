@@ -552,10 +552,15 @@ machine-codegen: xtask-build
 # documented over-budget composition skips (meerkat_mob_seam,
 # adaptive_mob_bundle full ci.cfg sweeps) plus the bounded adaptive witness
 # proof; a bare `machine-verify --all` runs the full mob-seam sweep, which
-# does not fit any local or CI budget.
+# does not fit any local or CI budget. MACHINE_VERIFY_PART runs one part of
+# the lane: machine-verify (the bounded adaptive witness, then
+# `machine-verify --all` with those skips) or one audit shard
+# (audits-a..audits-o, audits-q..audits-y); without it every part runs.
+# Nightly runs the machine-verify part, and ci.yml's tlc-audits job runs the
+# audit shards on every machine-authority change.
 machine-verify: xtask-build
 	@echo "$(GREEN)Running machine-verify (canonical TLC lane)...$(NC)"
-	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN)
+	./crates/xtask/tests/machine_verify_all_tlc_test.sh $(XTASK_BIN) $(if $(MACHINE_VERIFY_PART),--part $(MACHINE_VERIFY_PART))
 
 # Deep-profile TLC (deep.cfg, -coverage 1, every witness with its completion
 # proof, and the zero-hit route/scheduler audit) over the compositions whose

@@ -13,7 +13,10 @@ name: Nightly
 #   e2e-fast          - deterministic real-binary end-to-end lane
 #   dense-topology    - the exact 300-member/150-peer Mob stress on hosted
 #                       Linux (17-22 minutes; does not fit PR CI)
-#   machine-verify    - bounded TLC verification of the canonical machines
+#   machine-verify    - the canonical TLC lane's machine-verify part: the
+#                       bounded adaptive witness and the `machine-verify
+#                       --all` sweep (ci.yml runs the lane's audit shards on
+#                       every machine-authority change)
 #   machine-verify-deep - Deep-profile TLC (deep.cfg, witnesses, coverage
 #                       audit) over the compositions that fit the 900 s
 #                       per-run cap; a capped run fails as TLC INCOMPLETE
@@ -334,8 +337,15 @@ jobs:
         with:
           setup-java: "false"
 
-      - name: Canonical bounded machine verification
-        run: make machine-verify
+      # Only the lane's machine-verify part, which no per-change lane runs:
+      # the bounded adaptive witness, then `machine-verify --all`, an
+      # estimated 30-43 minutes with setup and the xtask build. The lane's
+      # twenty-four audit shards run in ci.yml's tlc-audits job on every
+      # change scripts/machine-authority-changed matches. The whole lane in
+      # one 4-vCPU job needs an estimated 218-260 minutes, and it hit this
+      # job's 90-minute limit every night from 2026-11-04.
+      - name: Adaptive witness and machine-verify --all sweep
+        run: make machine-verify MACHINE_VERIFY_PART=machine-verify
 
   machine-verify-deep:
     name: Deep TLC composition verification

@@ -276,7 +276,10 @@ inherited by workspace realms via the chain tail. Secret tokens are separate:
 the stock CLI's file-backed TokenStore uses
 `<platform-config>/meerkat/credentials/global/<credential-stem>.json`,
 where `<platform-config>` is `dirs::config_dir()`. Files are created with mode
-0600 on Unix. `--user-config-root` relocates the config doc, not this token
+0600 on Unix, and the directories created under
+`<platform-config>/meerkat/credentials` (`global/` here, and
+`refresh-locks` for the cross-process refresh locks) with mode 0700.
+`--user-config-root` relocates the config doc, not this token
 root; custom hosts may choose a keyring or another TokenStore.
 
 To use a binding owned by another realm (for example `prod:openai`), declare that

@@ -644,6 +644,16 @@ them.
   and its `effective_read` is `unreadable`, with the member host named in
   the reason.
 
+- `meerkat-mob`: a placed member on a governed member host (its runtime has
+  a native work authorization host) is blocked `member_host_unsupported`:
+  the host refuses the record `prepared_authorization_required` before
+  anything is written, since this release provides no prepared
+  authorization for instruction writes. A snapshot whose record would not
+  fit the supervisor bridge's frame (about 1 MiB with its envelope; the
+  mob's 1 MiB active budget can reach it) is not sent, and the placed
+  member is blocked `member_host_unsupported` until a write changes its
+  snapshot.
+
 ## [0.9.10] - 2026-11-04
 
 ### Highlights

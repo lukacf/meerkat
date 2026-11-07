@@ -280,6 +280,28 @@ impl MobHostActor {
             .await;
             return;
         };
+        // A governed member host admits an operator-instruction record only
+        // with prepared authorization, which nothing mints for one yet: the
+        // record is refused, final, before anything is written, as the
+        // controlling mob refuses its own writes on a governed runtime. The
+        // release stays served: it only empties a mob's target.
+        if materializer
+            .substrate()
+            .runtime_adapter
+            .has_native_work_authorization_host()
+        {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::InstructionTargetRefused {
+                    code: meerkat_core::InstructionSetErrorCode::PreparedAuthorizationRequired,
+                },
+                "the member host's runtime is governed: recording an operator instruction \
+                 there needs prepared authorization, which this release does not provide",
+                Some(reply_address.as_str()),
+            )
+            .await;
+            return;
+        }
         let host_id = self.host_comms.peer_id().map(|peer| peer.to_string());
         if !incarnation_held(self.binding_authority.state(), host_id.as_deref(), &payload) {
             self.send_failure(

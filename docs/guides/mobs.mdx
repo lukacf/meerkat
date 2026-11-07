@@ -1608,7 +1608,15 @@ hosts run different releases, a placed member whose member host runs a
 release before 0.9.11 is reported blocked (`member_host_unsupported`): its
 host refuses the record before any effect, nothing is recorded, and the
 member stays blocked until its host runs 0.9.11 and a write selects it
-again (or it is seated again). The status read reports a placed member's
+again (or it is seated again). A placed member on a governed member host
+(its runtime has a native work authorization host) is blocked
+`member_host_unsupported` too: the host refuses the record
+`prepared_authorization_required` before anything is written, since this
+release provides no prepared authorization for instruction writes. A
+snapshot whose record would not fit the supervisor bridge's frame (about
+1 MiB with its envelope, which the mob's 1 MiB active budget can reach) is
+not sent: the placed member is blocked `member_host_unsupported` until a
+write changes its snapshot. The status read reports a placed member's
 delivery but does not read its session on the member host
 (`effective_read` is `unreadable`). A mob that recorded operator
 instructions journals

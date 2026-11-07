@@ -36,6 +36,13 @@ use crate::operator_instruction::MemberInstructionDelivery;
 /// so a write the host gave up on has ended before the next one is sent.
 pub(crate) const PLACED_INSTRUCTION_BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most bytes an operator-instruction bridge command's JSON may take:
+/// the comms frame cap, less a margin for the signed envelope around it
+/// (about a kilobyte measured). A larger command can never reach a member
+/// host, so it is not sent.
+pub(crate) const PLACED_COMMAND_FRAME_BUDGET: usize =
+    meerkat_comms::transport::MAX_PAYLOAD_SIZE as usize - 64 * 1024;
+
 /// A placed member's member host: where its session lives.
 #[derive(Debug, Clone)]
 pub(crate) struct PlacedMemberHost {
@@ -157,6 +164,9 @@ pub(crate) enum PlacedInstructionFailure {
     /// The member host does not serve the command (before protocol 7, or a
     /// protocol 7 host from before it).
     HostUnsupported,
+    /// The command would not fit the comms frame, so it was not sent: the
+    /// member host can never receive it.
+    Oversized { bytes: usize },
     /// The incarnation the command named is not the one the host holds
     /// (record), or a member holds the session again (release).
     Stale,
@@ -191,6 +201,19 @@ async fn send<R: super::bridge_protocol::FromBridgeReply>(
         .await
         .map_err(PlacedInstructionFailure::Failed)?;
     let command = command(supervisor.into(), authority.epoch);
+    // A command past the frame budget can never reach the host (the frame
+    // codec refuses it): it is not sent. Its JSON bounds the frame's CBOR
+    // body, which carries no string escapes.
+    let bytes = serde_json::to_vec(&command)
+        .map_err(|error| {
+            PlacedInstructionFailure::Failed(MobError::Internal(format!(
+                "failed to encode the {context} command: {error}"
+            )))
+        })?
+        .len();
+    if bytes > PLACED_COMMAND_FRAME_BUDGET {
+        return Err(PlacedInstructionFailure::Oversized { bytes });
+    }
     let value = bridge
         .send_bridge_command_as_authority(
             &authority,
@@ -280,6 +303,10 @@ pub(crate) async fn release_placed_member_instruction_target(
         Err(PlacedInstructionFailure::Refused(code)) => Err(MobError::Internal(format!(
             "the retiring placed member's operator instruction target could not be released: \
              refused {code:?}"
+        ))),
+        Err(PlacedInstructionFailure::Oversized { bytes }) => Err(MobError::Internal(format!(
+            "the release command of a retiring placed member is {bytes} bytes, past the \
+             bridge frame budget"
         ))),
         Err(PlacedInstructionFailure::Failed(error)) => Err(error),
     }

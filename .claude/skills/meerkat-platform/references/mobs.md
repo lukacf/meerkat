@@ -577,7 +577,10 @@ at a time, 16 by default), and a member born on a new session carries the
 snapshot from its first build. A placed member gets its snapshot on its
 member host over the supervisor bridge; one whose host runs a release
 before 0.9.11 is blocked `member_host_unsupported` until the host runs
-0.9.11 and a write selects it again. A
+0.9.11 and a write selects it again; so is one on a governed member host
+(the host refuses the record `prepared_authorization_required`), and one
+whose snapshot record would not fit the bridge frame (about 1 MiB; nothing
+is sent). A
 governed runtime refuses every write `prepared_authorization_required`. A mob
 that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
 refuse (`rkat storage doctor`: `operator-instruction-mob-events`).

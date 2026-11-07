@@ -521,7 +521,25 @@ fn classify_placed_delivery_result(
         Err(PlacedInstructionFailure::HostUnsupported) => {
             blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
         }
+        // A record that cannot fit the comms frame can never reach the
+        // member host: the member is blocked until a write changes its
+        // snapshot, not retried.
+        Err(PlacedInstructionFailure::Oversized { bytes }) => {
+            tracing::warn!(
+                member = %agent_identity,
+                bytes,
+                "a placed member's operator-instruction record is past the bridge frame budget; \
+                 the member is blocked member_host_unsupported until a write changes its snapshot"
+            );
+            blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
+        }
         Err(PlacedInstructionFailure::Refused(code)) => match code {
+            // A governed member host takes no operator-instruction record
+            // without prepared authorization, which nothing mints for one
+            // yet: final, not retried.
+            InstructionSetErrorCode::PreparedAuthorizationRequired => {
+                blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
+            }
             InstructionSetErrorCode::DurabilityUnavailable => {
                 blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
             }
@@ -1556,9 +1574,11 @@ mod tests {
 
     /// A placed member's host answer reads like a local session's: a record
     /// settles it, and so does a refusal no retry changes; a member host that
-    /// does not serve the record blocks the member `member_host_unsupported`;
-    /// another incarnation on the host, any other refusal and a round trip
-    /// that did not land leave it owed and are retried.
+    /// does not serve the record, a governed one (the record needs prepared
+    /// authorization) and a record too large for the comms frame block the
+    /// member `member_host_unsupported`; another incarnation on the host, any
+    /// other refusal and a round trip that did not land leave it owed and
+    /// are retried.
     #[test]
     fn a_placed_members_host_answer_settles_blocks_or_retries() {
         let identity = AgentIdentity::from("placed");
@@ -1577,6 +1597,16 @@ mod tests {
         for (failure, expected) in [
             (
                 PlacedInstructionFailure::HostUnsupported,
+                mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
+            ),
+            (
+                PlacedInstructionFailure::Refused(
+                    InstructionSetErrorCode::PreparedAuthorizationRequired,
+                ),
+                mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
+            ),
+            (
+                PlacedInstructionFailure::Oversized { bytes: 1_100_000 },
                 mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
             ),
             (

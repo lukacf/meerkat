@@ -1483,6 +1483,140 @@ async fn settled_close_releases_the_bound_grant_owner_while_a_reference_is_held(
     drop(straggler);
 }
 
+/// RED stand-in for the store binding this change adds: before it, the
+/// host's close leaves the store's custody as it is.
+trait BindStoreCustodyAtBase {
+    fn bind_native_store_custody(&mut self, store: &Arc<toolkit_store::SqliteStore>) -> Result<()>;
+}
+impl BindStoreCustodyAtBase for NativeHostLifetime {
+    fn bind_native_store_custody(
+        &mut self,
+        _store: &Arc<toolkit_store::SqliteStore>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+mod store_custody {
+    use toolkit_store::{
+        AdmissionRequest, RecordChangeGuard, RecordChangePublication, RecordData, SqliteStore,
+        StoreKey, StoreResult, ToolkitStore,
+    };
+
+    struct Publication;
+    struct Guard;
+    impl RecordChangeGuard for Guard {}
+    impl RecordChangePublication for Publication {
+        fn begin_record_change(&self) -> StoreResult<Box<dyn RecordChangeGuard + '_>> {
+            Ok(Box::new(Guard))
+        }
+    }
+
+    pub(super) fn key() -> StoreKey {
+        StoreKey {
+            realm: "realm".into(),
+            owner: "owner".into(),
+            id: "record".into(),
+        }
+    }
+
+    /// A store with one record, opened as an installed host opens its
+    /// published store: with exclusive physical custody.
+    pub(super) async fn published(path: &std::path::Path) -> SqliteStore {
+        let initial = SqliteStore::open(path).unwrap();
+        initial
+            .admit(AdmissionRequest {
+                key: key(),
+                admission_key: "record".into(),
+                data: RecordData {
+                    schema: "test.close".into(),
+                    version: 1,
+                    body: serde_json::json!({ "value": 1 }),
+                },
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap();
+        drop(initial);
+        SqliteStore::open_existing_published(path, std::sync::Arc::new(Publication)).unwrap()
+    }
+}
+
+/// The settled activation close ends the bound native store's custody while
+/// a task of the closed host still holds the store: that reference can no
+/// longer read or change it, and the same database opens again at once, with
+/// every committed record.
+#[tokio::test]
+async fn settled_close_releases_the_bound_store_while_a_reference_is_held() {
+    use toolkit_store::{SqliteStore, StoreError, ToolkitStore};
+
+    let mut f = Fixture::new();
+    let path = f._directory.path().join("close-release-originals.sqlite3");
+    let store = Arc::new(store_custody::published(&path).await);
+    Arc::get_mut(&mut f.owner)
+        .unwrap()
+        .bind_native_store_custody(&store)
+        .unwrap();
+    f.open();
+    // Stands in for a task of the host that outlives its close; the host's
+    // own reference is gone.
+    let straggler = Arc::clone(&store);
+    drop(store);
+
+    let closing = f.owner.host_lost().unwrap();
+    assert!(
+        straggler
+            .get(&store_custody::key())
+            .await
+            .unwrap()
+            .is_some(),
+        "custody holds until the close settles"
+    );
+    assert!(
+        matches!(
+            SqliteStore::open_existing(&path),
+            Err(StoreError::OwnerUnavailable)
+        ),
+        "the store stays held until the close settles"
+    );
+    assert_eq!(
+        f.owner.join_close(&closing.handle).await.unwrap().state,
+        HostCloseState::Settled
+    );
+
+    assert!(matches!(
+        straggler.get(&store_custody::key()).await,
+        Err(StoreError::OwnerUnavailable)
+    ));
+    let successor =
+        SqliteStore::open_existing(&path).expect("the settled close handed the store back");
+    assert!(
+        successor
+            .get(&store_custody::key())
+            .await
+            .unwrap()
+            .is_some(),
+        "the successor reads every committed record"
+    );
+    drop(straggler);
+}
+
+#[tokio::test]
+async fn bound_store_custody_is_never_replaced() {
+    let mut f = Fixture::new();
+    let first =
+        Arc::new(store_custody::published(&f._directory.path().join("first.sqlite3")).await);
+    let second =
+        Arc::new(store_custody::published(&f._directory.path().join("second.sqlite3")).await);
+    let owner = Arc::get_mut(&mut f.owner).unwrap();
+    owner.bind_native_store_custody(&first).unwrap();
+    assert_eq!(
+        owner.bind_native_store_custody(&second),
+        Err(HostLifetimeError::Denied)
+    );
+}
+
 #[test]
 fn schema7_operator_is_explicit_and_cannot_be_inferred_from_application() {
     let fixture = Fixture::new();

@@ -247,8 +247,11 @@ impl MeerkatMachine {
     ///   ends the run's inputs `Abandoned { Stopped }`, whatever each
     ///   input's state; one that stops ends them `Abandoned { Cancelled }`.
     ///
-    /// A registration that replaced the one that accepted the settle (a
-    /// reload) and keeps the run again is settled again within the call.
+    /// A registration that still keeps the run once the waits end is settled
+    /// again within the call: one that replaced the registration that
+    /// accepted the settle (a reload) keeps the run again, and a runtime loop
+    /// that met a lost store fence answers the run's waiters before it tears
+    /// the session down, without settling the run.
     ///
     /// A run that is current (the marked run resumed, or another run
     /// started) is never stopped here: the answer is
@@ -405,8 +408,11 @@ impl MeerkatMachine {
                 });
             }
             if self.marked_resumable_run_id(session_id).await?.as_ref() == Some(&run_id) {
-                // A registration that replaced the one that accepted the
-                // settle (a reload) keeps the run again: settle it again.
+                // The registration still keeps the run: one that replaced
+                // the registration that accepted the settle (a reload) keeps
+                // it again, or the loop answered the waiters without settling
+                // it (a lost store fence, before its teardown). Settle it
+                // again, under the registration as it is now.
                 continue;
             }
             let mut inputs = Vec::with_capacity(bound_input_ids.len());

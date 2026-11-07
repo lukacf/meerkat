@@ -256,9 +256,7 @@ impl super::MobHandle {
             for (identity, observation) in rows {
                 match observation {
                     CreatedIdentityObservation::Created(record) => {
-                        // RED: no session reference.
-                        let session =
-                            session_reference(&state, &identity, &record)?.filter(|_| false);
+                        let session = session_reference(&state, &identity, &record)?;
                         identities.push(ExportedIdentity::new(record, session));
                     }
                     CreatedIdentityObservation::Unreadable {

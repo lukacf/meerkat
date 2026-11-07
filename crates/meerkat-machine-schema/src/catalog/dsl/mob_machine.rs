@@ -36271,7 +36271,7 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_changes_held) == IdentityRowsPurgeVerdict::Purged
             }
             update {
-                // RED: the purge records nothing.
+                self.identity_rows_purged = true;
             }
             to Running
             emit IdentityRowsPurgeResolved { verdict: IdentityRowsPurgeVerdict::Purged }
@@ -36398,7 +36398,10 @@ macro_rules! mob_catalog_machine_dsl {
             guard "created_entry" { self.identity_entry_origins.get_cloned(agent_identity) == Some(IdentityEntryOrigin::Created) }
             guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             update {
-                // RED: the reservation records nothing.
+                self.identity_entry_unreadable.insert(agent_identity);
+                self.identity_entry_rowless.insert(agent_identity);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
             }
             to Running
         }
@@ -36693,7 +36696,9 @@ macro_rules! mob_catalog_machine_dsl {
                     self.identity_entry_unseated.get_cloned(agent_identity) == Some(UnseatedEntryCause::SeatOwed)) == IdentityImportVerdict::RestoredByAdoption
             }
             update {
-                // RED: the adoption's restore records nothing.
+                self.identity_entry_origins.insert(agent_identity, IdentityEntryOrigin::Created);
+                self.members_to_spawn.remove(agent_identity);
+                self.members_to_retire.remove(agent_identity);
             }
             to Running
             emit IdentityRecordImportResolved { agent_identity: agent_identity, verdict: IdentityImportVerdict::RestoredByAdoption }

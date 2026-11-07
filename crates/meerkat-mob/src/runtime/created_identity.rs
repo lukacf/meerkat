@@ -200,8 +200,7 @@ pub(super) async fn recover_created_identity_entries(
         }
         match page.next {
             None => {
-                // RED: no name without a row is passed.
-                let _ = (&scanned, reserve_rowless_created_entries);
+                reserve_rowless_created_entries(authority, &scanned)?;
                 recover_owned_edges(authority, &owned_edges)?;
                 return Ok(recovered);
             }

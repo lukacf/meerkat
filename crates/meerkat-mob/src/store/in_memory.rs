@@ -2142,8 +2142,7 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
             return Ok(refusal);
         }
         let state = &mut aggregate.identity;
-        // RED: the purge removes no row.
-        for identity in rows.keys().filter(|_| false) {
+        for identity in rows.keys() {
             state.created.remove(&(mob_id.clone(), identity.clone()));
         }
         state

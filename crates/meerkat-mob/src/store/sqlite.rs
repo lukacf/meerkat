@@ -7183,8 +7183,7 @@ impl MobIdentityMemberStore for SqliteMobIdentityStore {
             }
             // The rows the created identity scan reads, and only those: a
             // host-adopted intent's row (schema version 1) stays.
-            // RED: the purge removes no row.
-            for identity in rows.keys().filter(|_| false) {
+            for identity in rows.keys() {
                 tx.execute(
                     "DELETE FROM mob_identity_intents WHERE mob_id = ?1 AND agent_identity = ?2",
                     params![write.receipt.mob_id.as_str(), identity.as_str()],

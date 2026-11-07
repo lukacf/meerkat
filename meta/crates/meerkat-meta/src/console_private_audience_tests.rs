@@ -1748,3 +1748,62 @@ async fn the_audit_read_leaves_out_rows_naming_a_hidden_member() -> TestResult {
     }
     Ok(())
 }
+
+/// A private side chat's stored session names its private owner, which is
+/// what keeps the memory distiller out of its transcript: the distiller reads
+/// the session's stored member labels (`TranscriptSource::private_to_a_person`)
+/// and distills no session private to a person, whatever asks for it (a run's
+/// end, a retire or reset boundary, a compaction harvest;
+/// `distiller_skips_private_side_chats`), so nothing said in it reaches any
+/// identity's memory, the agent's it was forked from included. The agent's own
+/// session is distilled as before.
+#[tokio::test]
+async fn a_private_side_chats_stored_session_keeps_the_distiller_out() -> TestResult {
+    use crate::memory::distiller::TranscriptSource as _;
+
+    let (temp_dir, runtime) = runtime("private-side-chat-distiller").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    runtime
+        .handle()
+        .member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .start_turn(
+            meerkat_core::types::ContentInput::Text("My salary is private.".to_string()),
+            meerkat_core::types::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await?
+        .wait()
+        .await?;
+    let mut sessions = Vec::new();
+    for member in ["alpha", "alpha-side"] {
+        let session = runtime
+            .handle()
+            .get_member(&AgentIdentity::from(member))
+            .await?
+            .and_then(|entry| entry.bridge_session_id().cloned())
+            .ok_or_else(|| format!("{member} has a session"))?;
+        sessions.push(session.to_string());
+    }
+    let layout = crate::storage_layout::MetaStorageLayout::with_injected_roots(
+        temp_dir.path().join("state"),
+        None,
+    );
+    let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat_store::SqliteSessionStore::open(
+        layout.session_db()?.path,
+    )?);
+    let transcripts = crate::memory::distiller::SessionStoreTranscriptSource::new(store);
+    assert!(
+        !transcripts.private_to_a_person(&sessions[0]).await?,
+        "the agent's own session is distilled as before"
+    );
+    assert!(
+        transcripts.private_to_a_person(&sessions[1]).await?,
+        "the side chat's stored session names its private owner"
+    );
+    Ok(())
+}

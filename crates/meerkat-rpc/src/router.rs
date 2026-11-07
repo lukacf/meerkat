@@ -8080,7 +8080,7 @@ mod tests {
 
         /// A person acting for the decision's approver id approves it
         /// through the host's decision owner, after its presentation.
-        fn approve_as_a_person(
+        pub(super) fn approve_as_a_person(
             runtime: &SessionRuntime,
             decision_id: &meerkat_core::approval::decision::DecisionId,
         ) {
@@ -8487,6 +8487,23 @@ mod tests {
         }
 
         async fn rig() -> Rig {
+            let (results, probes) = mpsc::unbounded_channel();
+            rig_with(
+                Arc::new(ShellProbeClient {
+                    next_call: AtomicUsize::new(0),
+                    results,
+                }),
+                probes,
+            )
+            .await
+        }
+
+        /// A router whose members run `client`; `probes` is the channel
+        /// its probed calls report on.
+        async fn rig_with(
+            client: Arc<dyn LlmClient>,
+            probes: mpsc::UnboundedReceiver<Probed>,
+        ) -> Rig {
             let temp = tempfile::tempdir().unwrap();
             let factory = AgentFactory::new(temp.path().join("sessions"));
             let config = anthropic_test_config();
@@ -8503,11 +8520,7 @@ mod tests {
             let runtime =
                 SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
                     .expect("compose the RPC session runtime");
-            let (results, probes) = mpsc::unbounded_channel();
-            runtime.set_default_llm_client(Some(Arc::new(ShellProbeClient {
-                next_call: AtomicUsize::new(0),
-                results,
-            })));
+            runtime.set_default_llm_client(Some(client));
             runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
                 Arc::clone(&config_store),
                 temp.path().join("config_state.json"),
@@ -8523,6 +8536,76 @@ mod tests {
                 _notifications: notif_rx,
                 _temp: temp,
             }
+        }
+
+        /// A router over a realm whose persistence keeps durable decisions,
+        /// its members answered by the mock model: the router runs the
+        /// executor of tool grant requests.
+        async fn decision_rig() -> Rig {
+            let temp = tempfile::tempdir().unwrap();
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                temp.path(),
+                "grants",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("open the realm");
+            let store = bundle.runtime_store();
+            let config = anthropic_test_config();
+            let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                config.clone(),
+                meerkat_models::canonical(),
+            ));
+            let runtime = SessionRuntime::new(
+                AgentFactory::new(temp.path().join("sessions")),
+                config,
+                10,
+                bundle,
+                NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime");
+            runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                Arc::clone(&config_store),
+                temp.path().join("config_state.json"),
+            )));
+            runtime.set_realm_context(
+                Some(meerkat_core::connection::RealmId::parse("grants").expect("realm id")),
+                None,
+                None,
+            );
+            let runtime = Arc::new(runtime);
+            let (notif_tx, notif_rx) = mpsc::channel(100);
+            let router = MethodRouter::new(runtime, config_store, NotificationSink::new(notif_tx))
+                .expect("construct the router");
+            let (_, probes) = mpsc::unbounded_channel();
+            Rig {
+                router,
+                probes,
+                store,
+                _notifications: notif_rx,
+                _temp: temp,
+            }
+        }
+
+        /// Poll `found` until it answers, failing the row with `what` past
+        /// [`PROBE_BOUND`].
+        async fn until<T, F, Fut>(what: &str, mut found: F) -> T
+        where
+            F: FnMut() -> Fut,
+            Fut: std::future::Future<Output = Option<T>>,
+        {
+            tokio::time::timeout(PROBE_BOUND, async {
+                loop {
+                    if let Some(value) = found().await {
+                        return value;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{what} within the bound"))
         }
 
         async fn call(rig: &Rig, method: &str, params: serde_json::Value) -> RpcResponse {
@@ -9598,6 +9681,225 @@ mod tests {
                 admitted.grant_refusal(),
                 None,
                 "an identity grant opens it: {admitted:?}"
+            );
+        }
+
+        /// A `current_run` grant to an identity takes the run of the session
+        /// its member holds here, names it, and ends when that run ends: the
+        /// member's end of the run ends the run-scoped grants of its identity
+        /// too. An identity whose member runs no turn refuses it as
+        /// `run_not_active`.
+        #[tokio::test]
+        async fn a_current_run_grant_to_an_identity_ends_with_its_members_run() {
+            let calls = Arc::new(tokio::sync::watch::channel(0usize).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            let (_results, probes) = mpsc::unbounded_channel();
+            let rig = rig_with(
+                Arc::new(GatedLlmClient {
+                    calls: Arc::clone(&calls),
+                    release: Arc::clone(&release),
+                    requests: Arc::new(StdMutex::new(Vec::new())),
+                }),
+                probes,
+            )
+            .await;
+            create_mob(&rig, "run-scope", shell_gated_role()).await;
+            spawn(&rig, "run-scope", "worker-1", None).await;
+            let current_run_grant = serde_json::json!({
+                "subject": identity_subject("run-scope", "worker-1"),
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 600_000,
+                "scope": {"kind": "current_run"},
+            });
+
+            let idle = call(&rig, "tool_grants/grant", current_run_grant.clone()).await;
+            assert_eq!(
+                idle.error
+                    .as_ref()
+                    .and_then(|failure| failure.data.as_ref())
+                    .map(|data| data["kind"].clone()),
+                Some(serde_json::json!("run_not_active")),
+                "a member that runs no turn has no current run: {idle:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": "run-scope",
+                    "agent_identity": "worker-1",
+                    "content": "work",
+                }),
+                "the member takes a turn",
+            )
+            .await;
+            let mut seen = calls.subscribe();
+            tokio::time::timeout(PROBE_BOUND, seen.wait_for(|calls| *calls >= 1))
+                .await
+                .expect("the member's turn reaches the provider")
+                .expect("the call counter stays open");
+            let session_id = member_session(&rig, "run-scope", "worker-1").await;
+            let run_id = rig
+                .router
+                .runtime
+                .runtime_adapter()
+                .current_run(&session_id)
+                .await
+                .expect("the member's session runs its turn");
+
+            let grant = ok(
+                &rig,
+                "tool_grants/grant",
+                current_run_grant,
+                "an identity takes the run its member runs",
+            )
+            .await["grant"]
+                .clone();
+            assert_eq!(grant["status"], "active", "{grant}");
+            assert_eq!(
+                grant["scope"],
+                serde_json::json!({"kind": "current_run", "run_id": run_id.to_string()}),
+                "the grant names the member's run: {grant}"
+            );
+
+            release.add_permits(64);
+            let ended = until(
+                "the identity's grant ends with its member's run",
+                || async {
+                    list_identity(&rig, "run-scope", "worker-1", true)
+                        .await
+                        .into_iter()
+                        .find(|listed| {
+                            listed["grant_id"] == grant["grant_id"]
+                                && listed["status"] == "run_ended"
+                        })
+                },
+            )
+            .await;
+            assert_eq!(ended["scope"], grant["scope"], "{ended}");
+            assert!(
+                list_identity(&rig, "run-scope", "worker-1", false)
+                    .await
+                    .is_empty(),
+                "no live grant is left"
+            );
+        }
+
+        /// A grant request to a member identity: a person's approval issues
+        /// the identity's grant, and the request's notice reaches the
+        /// session the member holds through the mob's member input. A
+        /// request approved after its identity ended issues nothing, and its
+        /// notice, with no member left to take it, ends failed.
+        #[tokio::test]
+        async fn an_identity_grant_request_is_noticed_through_its_member() {
+            use meerkat_core::approval::ApprovalConsentDeliveryState;
+            use meerkat_core::approval::decision::DecisionId;
+
+            let rig = decision_rig().await;
+            let runtime = Arc::clone(&rig.router.runtime);
+            create_mob(&rig, "asks", shell_gated_role()).await;
+            spawn(&rig, "asks", "worker-1", None).await;
+            let request = serde_json::json!({
+                "subject": identity_subject("asks", "worker-1"),
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 600_000,
+            });
+            let decision_of = |requested: &serde_json::Value| {
+                DecisionId::new(
+                    requested["decision"]["decision_id"]
+                        .as_str()
+                        .expect("the decision id"),
+                )
+                .expect("decision id")
+            };
+
+            let requested = ok(
+                &rig,
+                "tool_grants/request",
+                request.clone(),
+                "an identity's grant is requested",
+            )
+            .await;
+            assert_eq!(requested["grant"]["status"], "requested", "{requested}");
+            let grant_id = requested["grant"]["grant_id"].clone();
+            let decision_id = decision_of(&requested);
+            super::tool_grant_rpc::approve_as_a_person(&runtime, &decision_id);
+            runtime.nudge_tool_grant_request_executor();
+
+            let issued = until("the approved request is issued", || async {
+                list_identity(&rig, "asks", "worker-1", false)
+                    .await
+                    .into_iter()
+                    .find(|grant| grant["status"] == "active")
+            })
+            .await;
+            assert_eq!(issued["grant_id"], grant_id, "{issued}");
+            let member = member_session(&rig, "asks", "worker-1").await;
+            let receipt = until("the request's notice settles", || async {
+                runtime.nudge_tool_grant_request_executor();
+                runtime
+                    .decision_service()
+                    .get(&decision_id)
+                    .ok()
+                    .and_then(|row| row.notice_receipt)
+            })
+            .await;
+            assert!(
+                matches!(
+                    &receipt,
+                    ApprovalConsentDeliveryState::Admitted { session_id, .. } if *session_id == member
+                ),
+                "the notice is an input of the session the member holds: {receipt:?}"
+            );
+
+            let orphaned = ok(
+                &rig,
+                "tool_grants/request",
+                request,
+                "a second request is held",
+            )
+            .await;
+            let orphaned_id = decision_of(&orphaned);
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "asks", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            super::tool_grant_rpc::approve_as_a_person(&runtime, &orphaned_id);
+            let ended = until("the second request's notice settles", || async {
+                runtime.nudge_tool_grant_request_executor();
+                runtime
+                    .decision_service()
+                    .get(&orphaned_id)
+                    .ok()
+                    .and_then(|row| row.notice_receipt)
+            })
+            .await;
+            assert!(
+                matches!(ended, ApprovalConsentDeliveryState::Failed { .. }),
+                "an identity with no member left ends the notice failed: {ended:?}"
+            );
+            let refused = runtime
+                .decision_service()
+                .get(&orphaned_id)
+                .expect("the second decision");
+            assert_eq!(
+                refused
+                    .execution_refusal
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                Some("subject_ended"),
+                "an approval of an ended identity's request issues nothing: {refused:?}"
+            );
+            assert!(
+                list_identity(&rig, "asks", "worker-1", false)
+                    .await
+                    .iter()
+                    .all(|grant| grant["status"] != "active"),
+                "the ended identity holds no live grant"
             );
         }
     }

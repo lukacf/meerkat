@@ -1582,24 +1582,44 @@ impl ToolGrantRequestNotices for RecordedNotices {
     }
 }
 
-/// The run each session runs now, as the host sees it.
+/// The run each subject runs now, as the host sees it: a session's own, or
+/// the run of the session a member identity's member holds; and the member
+/// identities that ended.
 #[derive(Default)]
-struct HostRuns(std::sync::Mutex<BTreeMap<String, RunId>>);
+struct HostRuns {
+    runs: std::sync::Mutex<BTreeMap<String, RunId>>,
+    ended: std::sync::Mutex<BTreeSet<String>>,
+}
 
 impl HostRuns {
     fn set(&self, session_id: &SessionId, run_id: Option<RunId>) {
-        let mut runs = self.0.lock().unwrap();
+        self.set_subject(&ToolGrantSubject::session(session_id.clone()), run_id);
+    }
+
+    fn set_subject(&self, subject: &ToolGrantSubject, run_id: Option<RunId>) {
+        let key = subject.key().as_str().to_owned();
+        let mut runs = self.runs.lock().unwrap();
         match run_id {
-            Some(run_id) => runs.insert(session_id.to_string(), run_id),
-            None => runs.remove(&session_id.to_string()),
+            Some(run_id) => runs.insert(key, run_id),
+            None => runs.remove(&key),
         };
+    }
+
+    /// `subject`'s identity ended: its member retired, its entry ended, or
+    /// its mob was reset or replaced.
+    fn end_subject(&self, subject: &ToolGrantSubject) {
+        self.ended
+            .lock()
+            .unwrap()
+            .insert(subject.key().as_str().to_owned());
     }
 }
 
 #[async_trait::async_trait]
 impl ToolGrantRunObserver for HostRuns {
     async fn current_run(&self, session_id: &SessionId) -> Option<RunId> {
-        self.0.lock().unwrap().get(&session_id.to_string()).cloned()
+        let key = ToolGrantSubject::session(session_id.clone()).key();
+        self.runs.lock().unwrap().get(key.as_str()).cloned()
     }
 }
 
@@ -1653,13 +1673,27 @@ impl RequestRig {
         request_id: &str,
         run_scope: Option<RunId>,
     ) -> StoredDecision {
+        self.request_for(
+            ToolGrantSubject::session(session_id.clone()),
+            request_id,
+            run_scope,
+        )
+    }
+
+    /// A host's request for `subject`'s `deploy`, for ten minutes.
+    fn request_for(
+        &self,
+        subject: ToolGrantSubject,
+        request_id: &str,
+        run_scope: Option<RunId>,
+    ) -> StoredDecision {
         hold_tool_grant_request(
             &self.decisions,
             &ToolGrantRequestPolicy::default(),
             self.grants.policy().max_lifetime_ms(),
             self.clock.0.load(Ordering::SeqCst),
             ToolGrantIssueRequest {
-                subject: ToolGrantSubject::session(session_id.clone()),
+                subject,
                 target: ToolGrantTarget::Tool {
                     name: ToolName::from("deploy"),
                 },
@@ -2146,6 +2180,119 @@ async fn a_current_run_request_approved_after_its_run_ended_is_closed_run_ended(
             .unwrap()
             .expect("the run-scoped grant");
         assert_eq!(grant.run_scope, Some(second_run));
+    }
+}
+
+/// A `current_run` request to a member identity names the run of the
+/// session its member holds. A person's approval issues it while the member
+/// still runs that run, scoped to it, and the member's end of the run ends
+/// it; a request approved after its member's run ended is closed
+/// `run_ended`.
+#[tokio::test]
+async fn an_identity_current_run_request_issues_for_its_members_run() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let first_run = RunId::new();
+        let second_run = RunId::new();
+        rig.runs.set_subject(&member, Some(first_run.clone()));
+        let timely = rig.request_for(member.clone(), "ask-1", Some(first_run.clone()));
+        rig.decide(&timely, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &timely.decision_id),
+            vec![DecisionPassOutcome::Executed],
+            "{backend:?}: {pass:?}"
+        );
+        let grant = rig
+            .grants
+            .issued_for(&timely.decision_id)
+            .await
+            .unwrap()
+            .expect("the identity's run-scoped grant");
+        assert_eq!(grant.record.subject, member, "{backend:?}");
+        assert_eq!(grant.run_scope, Some(first_run.clone()), "{backend:?}");
+
+        // The member's build ends the run for both its subjects.
+        rig.grants
+            .end_run(
+                &[
+                    member.key(),
+                    ToolGrantSubject::session(member_session).key(),
+                ],
+                &first_run,
+                ToolGrantExpiryDriver::Run,
+            )
+            .await
+            .expect("end the member's run");
+        let listed = rig.grants.list(&member).await.unwrap().grants;
+        assert_eq!(listed.len(), 1, "{backend:?}: {listed:?}");
+        assert_eq!(listed[0].status, ToolGrantStatus::RunEnded, "{backend:?}");
+
+        // The member runs another run before a later approval executes.
+        rig.runs.set_subject(&member, Some(second_run));
+        let late = rig.request_for(member.clone(), "ask-2", Some(first_run));
+        rig.decide(&late, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &late.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(
+            rig.decisions
+                .get(&late.decision_id)
+                .unwrap()
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("run_ended"),
+            "{backend:?}"
+        );
+    }
+}
+
+/// An approved request to a member identity that ended before its approval
+/// executed (its member retired, its entry ended, or its mob was reset or
+/// replaced) issues nothing: the execution is refused `subject_ended`, so a
+/// later member of the name never holds a grant asked for an earlier one.
+#[tokio::test]
+async fn an_approved_request_to_an_ended_identity_issues_nothing() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let rig = RequestRig::new(&durable);
+        let member = member_subject();
+        let held = rig.request_for(member.clone(), "ask-1", None);
+        rig.runs.end_subject(&member);
+        rig.decide(&held, true);
+        let pass = rig.pass().await;
+        assert_eq!(
+            outcome_of(&pass, &held.decision_id),
+            vec![DecisionPassOutcome::ExecutionRefused],
+            "{backend:?}: {pass:?}"
+        );
+        assert_eq!(
+            rig.decisions
+                .get(&held.decision_id)
+                .unwrap()
+                .execution_refusal
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("subject_ended"),
+            "{backend:?}"
+        );
+        assert!(
+            rig.grants
+                .issued_for(&held.decision_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend:?}: nothing is issued to an ended identity"
+        );
     }
 }
 

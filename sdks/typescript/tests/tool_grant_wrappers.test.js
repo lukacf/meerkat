@@ -190,6 +190,31 @@ describe("scoped tool grant wrappers", () => {
     assert.deepEqual(result, requested);
   });
 
+  it("requestToolGrant names a member identity", async () => {
+    const requested = { grant: GRANT, decision: { decision_id: "decision:1" } };
+    const { client, calls } = fakeClient({ "tool_grants/request": requested });
+
+    const result = await client.requestToolGrant(
+      { mobId: "mob-1", identity: "worker-1" },
+      { family: "shell" },
+      600000,
+      { scope: "current_run" },
+    );
+
+    assert.deepEqual(calls, [
+      {
+        method: "tool_grants/request",
+        params: {
+          subject: { kind: "identity", mob_id: "mob-1", identity: "worker-1" },
+          target: { kind: "family", family: "shell" },
+          duration_ms: 600000,
+          scope: { kind: "current_run" },
+        },
+      },
+    ]);
+    assert.deepEqual(result, requested);
+  });
+
   it("requestToolGrant refuses both or neither target", async () => {
     const { client, calls } = fakeClient({});
     for (const target of [{ tool: "deploy", family: "shell" }, {}]) {

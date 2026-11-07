@@ -372,3 +372,36 @@ async def test_a_grant_subject_is_a_session_or_a_member_never_both() -> None:
             SESSION_ID, mob_id="mob-1", identity="worker-1"
         )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_tool_grant_names_a_member_identity() -> None:
+    requested = {"grant": GRANT, "decision": {"decision_id": "decision:1"}}
+    client, calls = fake_client({"tool_grants/request": requested})
+
+    result = await client.request_tool_grant(
+        mob_id="mob-1",
+        identity="worker-1",
+        family="shell",
+        duration_ms=600_000,
+        scope="current_run",
+    )
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.request_tool_grant(
+            SESSION_ID, mob_id="mob-1", identity="worker-1", family="shell", duration_ms=1
+        )
+
+    assert calls == [
+        (
+            "tool_grants/request",
+            {
+                "subject": MEMBER,
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 600_000,
+                "scope": {"kind": "current_run"},
+            },
+        ),
+    ]
+    assert result == requested

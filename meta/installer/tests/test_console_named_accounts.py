@@ -284,6 +284,41 @@ def test_setup_keeps_named_accounts_as_hashes_only(generated_setup, monkeypatch,
     assert remaining == {BOB: accounts[BOB]}
 
 
+def test_a_later_save_removes_the_temporary_file_a_killed_setup_left(tmp_path):
+    """Setup saves the named accounts through a private temporary file and a
+    rename. Killed before the rename, it leaves that file, with the accounts'
+    hashes, in .mobkit: a later save leaves a young one to the setup that may
+    still be writing it and removes an old one.
+    """
+    import signal
+    import subprocess
+    from pathlib import Path
+    root = tmp_path / "application"
+    root.mkdir()
+    script = tmp_path / "killed_save.py"
+    script.write_text(
+        "import os, signal, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+        "from launchkit.templates_v2 import console_auth\n"
+        "def killed(*args, **kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "os.replace = killed\n"
+        f"console_auth.save_console_accounts({str(root)!r}, {named_accounts(ALICE)!r}, None, {OPERATOR!r})\n")
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    assert result.returncode == -signal.SIGKILL, result.stderr
+    state = root / ".mobkit"
+    left, = state.glob(".console-accounts.*.pending")
+    assert b"scrypt:" in left.read_bytes() and not (state / console_auth.ACCOUNTS_FILE).exists()
+    console_auth.save_console_accounts(root, named_accounts(BOB), None, OPERATOR)
+    assert left.exists()
+    hour_ago = time.time() - 3600
+    os.utime(left, (hour_ago, hour_ago))
+    accounts, original = console_auth.console_accounts_for_change(root, OPERATOR)
+    console_auth.save_console_accounts(root, accounts, original, OPERATOR)
+    assert sorted(path.name for path in state.iterdir()) == [console_auth.ACCOUNTS_FILE]
+    assert set(console_auth.load_console_accounts(root, OPERATOR)) == {BOB}
+
+
 @pytest.fixture
 def generated_setup(tmp_path, monkeypatch):
     import importlib.util

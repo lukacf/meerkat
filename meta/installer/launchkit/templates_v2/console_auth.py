@@ -137,6 +137,15 @@ OIDC_EXCHANGES = 8
 OIDC_ISSUER_FILE = "console-oidc-issuer"
 OIDC_KEY_FILE = "console-oidc-signing.pem"
 _FRONT_ISSUER = re.compile(r"urn:forge-console:[a-f0-9]{32}")
+# The front's private state is written through private temporary files: the
+# live access copy and the OIDC records by an exclusive link, the named
+# accounts by a rename. A start or a setup killed before it removed its
+# temporary file leaves it behind; a later one removes it (see
+# _clear_stale_pending).
+STALE_PENDING_SECONDS = 60
+_PENDING_FILE = re.compile(
+    r"\.(?:console-access|console-oidc-issuer|console-oidc-signing\.pem)\.[a-f0-9]{16}\.pending"
+    r"|\.console-accounts\.[a-z0-9_]+\.pending")
 
 
 def _console_assets(value):
@@ -310,6 +319,29 @@ def _private_state_directory(root, *, create=False):
     return directory
 
 
+def _clear_stale_pending(directory):
+    """Remove the temporary files killed starts or setups left in private state.
+
+    One that is a second link to the file it published goes at once: its
+    writer had only its removal left, which tolerates a missing file. Any
+    other goes once older than STALE_PENDING_SECONDS, longer than a write
+    takes; a younger one may be another start's or setup's, and is left to it.
+    """
+    stale = time.time() - STALE_PENDING_SECONDS
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if not _PENDING_FILE.fullmatch(entry.name):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                        and (info.st_nlink > 1 or info.st_mtime < stale)):
+                    os.unlink(entry.path)
+            except FileNotFoundError:
+                # Another start or setup removed it first.
+                pass
+
+
 def _private_key(root, *, create=False):
     directory = _private_state_directory(root, create=create)
     path = directory / "console-signing.key"
@@ -349,7 +381,8 @@ def console_access_file(root):
     written to a private temporary file, synced, then linked into place. An
     empty live copy can only be a seed a crash cut short (the console's own
     saves always write), and it would load as access control off, so it is
-    seeded again.
+    seeded again. A temporary copy a killed start left is removed by a later
+    start.
     """
     root = Path(root)
     source = root / "config/access.toml"
@@ -361,6 +394,7 @@ def console_access_file(root):
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o022):
         raise ValueError("The console's state directory must be owned by this user and writable by no one else.")
+    _clear_stale_pending(directory)
     live = root / CONSOLE_ACCESS_FILE
     try:
         info = live.lstat()
@@ -507,6 +541,7 @@ def save_console_accounts(root, accounts, original, installation_account):
     """Replace the named accounts, unless someone changed them meanwhile."""
     checked = _console_accounts(accounts, installation_account)
     directory = _private_state_directory(root, create=True)
+    _clear_stale_pending(directory)
     changed = ("The named Console accounts changed during setup. Run setup again; "
                "the newer accounts were kept.")
     if _read_accounts_file(root) != original:
@@ -682,6 +717,7 @@ def _front_identity(root):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     directory = _private_state_directory(root, create=True)
+    _clear_stale_pending(directory)
     recorded = _record_once(directory, OIDC_ISSUER_FILE,
         lambda: ("urn:forge-console:" + secrets.token_hex(16) + "\n").encode("ascii"))
     try:

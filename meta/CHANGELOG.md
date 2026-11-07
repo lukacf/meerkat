@@ -197,7 +197,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the package's exact bytes and may list further admins after the
   installation's own account. The copy is published only once complete,
   and an empty copy, which only a start stopped while copying can leave, is
-  copied again with a warning, so access control stays on.
+  copied again with a warning, so access control stays on. A temporary file
+  that a start or setup stopped while writing leaves in `.mobkit` is removed
+  by a later one.
 
 ### Known limitations
 

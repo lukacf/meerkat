@@ -1115,6 +1115,56 @@ def test_a_start_killed_while_seeding_never_publishes_a_half_written_live_access
     assert console_auth.console_access_file(root) == live and live.read_bytes() == packaged
 
 
+@pytest.mark.parametrize("killed_in", ["copy", "removal"])
+def test_a_later_start_removes_the_temporary_copy_a_killed_seed_left(tmp_path, killed_in):
+    """A start killed while seeding leaves its private temporary copy in .mobkit.
+
+    Killed while copying, the temporary copy was never published: a later
+    start leaves a young one to the start that may still be writing it and
+    removes an old one. Killed after publishing, the temporary copy is a
+    second link to the live copy, and the next start removes it at once.
+    """
+    import signal
+    import time
+    from launchkit.templates_v2 import console_auth
+    packaged = b'enabled = true\nadmins = ["operator"]\nrules = []\n\n[groups]\n'
+    root = tmp_path / "application"
+    (root / "config").mkdir(parents=True)
+    (root / "config/access.toml").write_bytes(packaged)
+    stopped = "os.fdopen" if killed_in == "copy" else "pathlib.Path.unlink"
+    script = tmp_path / "killed_seed.py"
+    script.write_text(
+        "import os, pathlib, signal, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+        "from launchkit.templates_v2 import console_auth\n"
+        "def killed(*args, **kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        f"{stopped} = killed\n"
+        f"console_auth.console_access_file({str(root)!r})\n")
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    assert result.returncode == -signal.SIGKILL, result.stderr
+    state = root / ".mobkit"
+    live = state / "console-access.toml"
+    left, = state.glob(".console-access.*.pending")
+    hour_ago = time.time() - 3600
+    # Another old file in private state is not the front's to remove.
+    other = state / ".notes.pending"
+    other.write_bytes(b"kept")
+    os.utime(other, (hour_ago, hour_ago))
+    if killed_in == "copy":
+        assert not live.exists() and not live.is_symlink()
+        # The next start seeds the live copy and leaves the young temporary
+        # copy, which could be another start's.
+        assert console_auth.console_access_file(root) == live and live.read_bytes() == packaged
+        assert left.exists()
+        os.utime(left, (hour_ago, hour_ago))
+    else:
+        assert live.read_bytes() == packaged and left.stat().st_nlink == 2
+    assert console_auth.console_access_file(root) == live
+    assert sorted(path.name for path in state.iterdir()) == [".notes.pending", "console-access.toml"]
+    assert live.read_bytes() == packaged and live.stat().st_nlink == 1
+
+
 DYNAMIC_APPLICATION = '''import copy
 import json
 class Integration:

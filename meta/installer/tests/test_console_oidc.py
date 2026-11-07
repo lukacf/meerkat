@@ -293,6 +293,50 @@ def test_oidc_front_declares_its_own_issuer_and_key_to_the_console(tmp_path):
         oidc_front(tmp_path, OidcNative(), issuer)
 
 
+@pytest.mark.parametrize("killed_in", ["key", "removal"])
+def test_oidc_front_starts_after_a_start_killed_while_recording_its_identity(tmp_path, killed_in):
+    """The front records its issuer and key through private temporary files.
+
+    Killed while writing the key, a start leaves an unpublished temporary
+    key: a later start leaves a young one to the start that may still be
+    writing it and removes an old one. Killed after publishing the issuer,
+    the temporary file is a second link to the record; the next start
+    removes it, so the record is again the one private file it must be.
+    """
+    import signal
+    import subprocess
+    from pathlib import Path
+    root = tmp_path / "application"
+    root.mkdir()
+    stopped = "console_auth._new_signing_key" if killed_in == "key" else "pathlib.Path.unlink"
+    script = tmp_path / "killed_record.py"
+    script.write_text(
+        "import os, pathlib, signal, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+        "from launchkit.templates_v2 import console_auth\n"
+        "def killed(*args, **kwargs):\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        f"{stopped} = killed\n"
+        f"console_auth._front_identity({str(root)!r})\n")
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, timeout=60)
+    assert result.returncode == -signal.SIGKILL, result.stderr
+    state = root / ".mobkit"
+    recorded = (state / console_auth.OIDC_ISSUER_FILE).read_text()
+    left, = state.glob(".console-oidc-*.pending")
+    if killed_in == "key":
+        assert not (state / console_auth.OIDC_KEY_FILE).exists()
+        assert console_auth._front_identity(root)[0] + "\n" == recorded
+        assert left.exists()
+        hour_ago = time.time() - 3600
+        os.utime(left, (hour_ago, hour_ago))
+    else:
+        assert left.stat().st_nlink == 2
+    assert console_auth._front_identity(root)[0] + "\n" == recorded
+    assert sorted(path.name for path in state.iterdir()) == sorted(
+        [console_auth.OIDC_ISSUER_FILE, console_auth.OIDC_KEY_FILE])
+    assert (state / console_auth.OIDC_ISSUER_FILE).stat().st_nlink == 1
+
+
 # Row 3: the console accepts the front's own tokens and nothing else: not
 # another key, not another issuer (the provider's included), not the
 # provider's own ID token, not an unverified or missing email, and only

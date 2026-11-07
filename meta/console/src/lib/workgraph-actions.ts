@@ -52,14 +52,31 @@ export function workGraphConflictRefreshRequest(
   return null;
 }
 
-/// Owner id stamped on console-issued claims. The authenticated operator
-/// (the experience `access.subject`, same identity the console ABAC layer
-/// authorizes against) wins; the static ops-lead id is only a fallback for
-/// runtimes without console auth.
-export function workGraphClaimOwnerId(
-  subject: string | null | undefined,
-  fallback: string,
-): string {
-  const trimmed = typeof subject === "string" ? subject.trim() : "";
-  return trimmed || fallback;
+/// The part of a work item `workGraphClaimOwnedBy` reads.
+export interface WorkGraphClaimedItem {
+  claim?: { owner?: { key?: { kind?: string | null; id?: string | null } | null } | null } | null;
+}
+
+/// Whether `principal` owns the claim on `item`. The gateway owns a console
+/// claim by its caller's principal; no principal owns nothing.
+export function workGraphClaimOwnedBy(
+  item: WorkGraphClaimedItem,
+  principal: string | undefined,
+): boolean {
+  const key = item.claim?.owner?.key;
+  return Boolean(principal) && key?.kind === "principal" && key.id === principal;
+}
+
+/// Whether the caller may release the claim on `item` from the console: the
+/// claim's owner may, and so may an access admin (a caller with a principal
+/// whom `whoami` reports as able to administer access), whose release the
+/// gateway records with the claim it released. Nobody releases an item
+/// without a claim.
+export function workGraphMayRelease(
+  item: WorkGraphClaimedItem,
+  caller: { principal?: string; canAdminister?: boolean },
+): boolean {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal)
+    || (Boolean(caller.principal) && caller.canAdminister === true);
 }

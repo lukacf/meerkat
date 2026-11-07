@@ -43,10 +43,12 @@ restart_policy = "always"
     .to_string()
 }
 
+/// A development issuer: the console verifies HS256 tokens (see
+/// `person_token`) only from one.
 fn trusted_oidc() -> TrustedOidcRuntimeConfig {
     TrustedOidcRuntimeConfig {
         discovery_json:
-            r#"{"issuer":"https://trusted.meta.local","jwks_uri":"https://trusted.meta.local/.well-known/jwks.json"}"#
+            r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
                 .to_string(),
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
             .to_string(),
@@ -764,6 +766,53 @@ comms = true
             .expect("spawn member");
     }
     (temp_dir, runtime)
+}
+
+/// A signed-in person's console token for `subject` (its `sub` and email).
+fn person_token(subject: &str) -> String {
+    let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jwt_header.kid = Some("kid-current".to_string());
+    jsonwebtoken::encode(
+        &jwt_header,
+        &json!({
+            "iss": "https://trusted.meta.localhost",
+            "aud": "meerkat-console",
+            "sub": subject,
+            "email": subject,
+            "provider": "google_oauth",
+            "exp": chrono::Utc::now().timestamp() + 300,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+    )
+    .expect("signed fixture token")
+}
+
+/// [`rpc`] with `bearer` as the request's token.
+async fn rpc_as(app: &axum::Router, bearer: &str, method: &str, params: Value) -> Value {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": "test",
+        "method": method,
+        "params": params,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/rpc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::from(payload.to_string()))
+                .expect("rpc request"),
+        )
+        .await
+        .expect("rpc response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("rpc body");
+    serde_json::from_slice(&body).expect("rpc json")
 }
 
 async fn rpc(app: &axum::Router, method: &str, params: Value) -> Value {
@@ -4810,6 +4859,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     .expect("controller");
     runtime.set_access_controller(controller.clone());
     let app = runtime.build_reference_app_router(decision_state(false));
+    // Only a signed-in person reviews quarantined memory; the grants below
+    // apply to every caller, this person included.
+    let reviewer = person_token("alice@example.test");
     let advertised = |capabilities: &Value| {
         capabilities["result"]["methods"]
             .as_array()
@@ -4817,8 +4869,10 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             .iter()
             .any(|method| method == "meta/memory/quarantine/decide")
     };
+    // The decide is listed only to a signed-in person, and to one only once
+    // the reviewer grant exists.
     assert!(
-        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        !advertised(&rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await),
         "decide needs the reviewer grant before it is advertised"
     );
 
@@ -4829,7 +4883,13 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("reviewer grant");
-    assert!(advertised(&rpc(&app, "meta/capabilities", json!({})).await));
+    assert!(advertised(
+        &rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await
+    ));
+    assert!(
+        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        "a caller without a token reviews nothing, so it is never offered the decide"
+    );
 
     let decide = |verdict: &str, identity: &str, memory_id: &str, hash: &str| {
         json!({
@@ -4846,8 +4906,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     );
 
     // Reviewer grant alone: denied at the identity's view grant.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4873,8 +4934,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     .await;
     assert_eq!(detail["error"], Value::Null, "{detail:#?}");
     assert_eq!(detail["result"]["record"]["content_hash"], json!(hash));
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4894,8 +4956,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("router write grant");
-    let stale = rpc(
+    let stale = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, "0000"),
     )
@@ -4904,8 +4967,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     assert_eq!(stale["error"]["data"]["reason"], json!("content_mismatch"));
     // The refusal never reveals the stored hash to bind against.
     assert!(!stale.to_string().contains(&hash), "{stale:#?}");
-    let released = rpc(
+    let released = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4914,11 +4978,10 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     let result = &released["result"];
     assert_eq!(result["outcome"], json!("released"));
     assert_eq!(result["realm"], json!("default"));
-    // The console runs without app auth here: the decision says no
-    // principal was known instead of naming anyone.
+    // The reviewer is the signed-in person the request's token names.
     assert_eq!(
         result["decision"]["review"]["reviewer"],
-        json!({ "kind": "operator", "principal": null })
+        json!({ "kind": "operator", "principal": "alice@example.test" })
     );
     assert_eq!(result["origin"]["memory_id"], json!(reviewable_id));
     assert_eq!(result["origin"]["status"]["status"], json!("tombstoned"));
@@ -4967,8 +5030,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     );
 
     // Replays are idempotent; a cross-verdict replay names the successor.
-    let replay = rpc(
+    let replay = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4985,8 +5049,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // Tombstone needs the identity's delete grant on top of the reviewer
     // and read grants; with it, a still-gated record is refused typed.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &gated_id, &hash),
     )
@@ -5057,8 +5122,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
         "Router gated claim",
         "Pages go to the mob channel.",
     );
-    let gated = rpc(
+    let gated = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &live_gated, &live_hash),
     )
@@ -5071,8 +5137,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             .as_u64()
             .is_some_and(|expires| expires > now_ms)
     );
-    let invalidated = rpc(
+    let invalidated = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &live_gated, &live_hash),
     )
@@ -5098,8 +5165,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // The seeded promotions are long past the shared expiry: a decision
     // expires them (no steward needed) and records which ones it expired.
-    let expired = rpc(
+    let expired = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &gated_id, &gated_hash),
     )
@@ -5116,8 +5184,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // Another identity's scope never reaches a router record: denied while
     // ungranted, and reads as not_found once the grants exist.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "delivery", &gated_id, &gated_hash),
     )
@@ -5135,8 +5204,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("delivery grants");
-    let foreign = rpc(
+    let foreign = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "delivery", &gated_id, &gated_hash),
     )
@@ -5320,10 +5390,12 @@ async fn memory_quarantine_decide_denies_an_anonymous_caller_under_enforced_acce
     let _ = runtime.mob_handle().stop().await;
 }
 
-/// A trusted host without app auth and without access control decides with
-/// no principal, and the decision says so rather than naming anyone.
+/// A console without sign-in reviews no quarantined record, even on a
+/// trusted host without access control: its caller sent no token, so it is
+/// not a signed-in person (`approver_unauthenticated`), and the record stays
+/// quarantined.
 #[tokio::test]
-async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
+async fn memory_quarantine_decide_without_a_signed_in_person_is_refused() {
     let (_temp_dir, runtime) = build_access_runtime_fixture().await;
     let memory_dir = tempfile::tempdir().expect("memory dir");
     let (store, _tip_id, _gated_id, _delivery_id, _mob_id, _operator_id) =
@@ -5332,7 +5404,7 @@ async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
     let record = quarantined_router_record(&store, title, body).await;
     runtime.set_memory_panel_store(Arc::new(store.clone()));
     let app = runtime.build_reference_app_router(decision_state(false));
-    let released = rpc(
+    let refused = rpc(
         &app,
         "meta/memory/quarantine/decide",
         json!({
@@ -5343,14 +5415,24 @@ async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
         }),
     )
     .await;
-    assert_eq!(released["error"], Value::Null, "{released:#?}");
-    assert_eq!(released["result"]["outcome"], json!("released"));
-    assert_eq!(
-        released["result"]["decision"]["review"]["reviewer"],
-        json!({ "kind": "operator", "principal": null })
-    );
+    let detail = rpc(
+        &app,
+        "meta/memory/panel/record",
+        json!({ "memory_id": record }),
+    )
+    .await;
 
     let _ = runtime.mob_handle().stop().await;
+    assert_eq!(refused["error"]["code"], json!(-32057), "{refused:#?}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("approver_unauthenticated")
+    );
+    assert_eq!(
+        detail["result"]["record"]["status"]["status"],
+        json!("quarantined"),
+        "{detail:#?}"
+    );
 }
 
 /// Quarantined content stays reviewer-only after a review or forget
@@ -5937,7 +6019,8 @@ mod checked_v1_acceptance {
         assert_eq!(before.audit[0].event_type, "pending_created");
 
         // Carol is authenticated and may invoke gating.decide, but does not
-        // hold this role. Caller fields cannot lend her Alice's authority.
+        // hold this role. Caller fields cannot lend her Alice's authority,
+        // and no request field names an approver.
         let refused = authenticated_rpc(
             &app,
             NEW_ADMIN,
@@ -5945,7 +6028,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": ROLE,
                 "deciding_principal": ADMIN_B,
                 "held_approver_ids": [ROLE],
             }),
@@ -5961,7 +6043,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": NEW_ADMIN,
                 "deciding_principal": NEW_ADMIN,
                 "held_approver_ids": ["role:forged"],
             }),

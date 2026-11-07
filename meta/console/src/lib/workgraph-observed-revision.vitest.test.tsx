@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConsoleApp } from "../ConsoleApp";
 import { CONSOLE_RPC_METHODS } from "./contract";
-import { CONSOLE_COMMAND_NAMES, type ConsoleCommandRequest, type MetaConsoleTransport } from "./headless";
+import { CONSOLE_COMMAND_NAMES, type ConsoleCommandRequest, type ConsoleWhoami, type MetaConsoleTransport } from "./headless";
 
 // DOM assertions compare booleans and strings, never elements.
 
@@ -68,6 +68,8 @@ function gateway() {
     queryTimeline: async () => ({ frames: [], available: true }),
     subscribeTimeline: () => () => {},
     send: vi.fn(),
+    // A signed-in person: the console offers Claim only to a caller whoami names.
+    whoami: async () => ({ actorKind: "person", principal: "ops@example.test", approverIds: [], canAdminister: false }) as ConsoleWhoami,
     executeCommand: executeCommand as never,
     upload: async () => ({ blob_id: "blob" }) as never,
     blobUrl: (id) => `/blobs/${id}`,

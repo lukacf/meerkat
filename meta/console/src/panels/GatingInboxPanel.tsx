@@ -532,6 +532,7 @@ export function GatingInboxPanel({
                   resourceStatus={resource.status}
                   decision={resource.decisions[request.pendingId]}
                   readOnly={readOnly || resource.readOnly}
+                  readOnlyReason={readOnly ? undefined : resource.readOnlyReason}
                   decideLinks={readOnly || resource.readOnly ? hostDecideLinks(hostDecideSources, request.pendingId) : undefined}
                   onDecide={onDecide}
                 />

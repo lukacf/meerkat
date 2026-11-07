@@ -107,7 +107,7 @@ import {
 import {
   WORKGRAPH_CONFLICT_CODE,
   WORKGRAPH_UNOBSERVED_REVISION_MESSAGE,
-  workGraphClaimOwnerId,
+  workGraphMayRelease,
   workGraphConflictRefreshRequest,
 } from "./lib/workgraph-actions";
 import { createConsoleId } from "./lib/id";
@@ -532,8 +532,6 @@ function agentWorkItems(
     }));
 }
 
-const DEFAULT_APPROVER_ID = "console-ops-lead";
-
 /// Live signals that should freshen a docked WorkGraph panel: dedicated
 /// workgraph.* timeline frames or workgraph_* tool completions in any turn.
 function isWorkGraphSignalFrame(frame: ConsoleFrame): boolean {
@@ -957,6 +955,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         loadExperience: () => call(() => source.loadExperience()),
         loadModules: source.loadModules ? () => call(() => source.loadModules!()) : undefined,
         capabilities: () => call(() => source.capabilities()),
+        whoami: source.whoami ? () => call(() => source.whoami!()) : undefined,
         queryTimeline: input => call(() => source.queryTimeline(input)),
         send: input => call(() => source.send(input)),
         executeCommand: source.executeCommand ? input => call(() => source.executeCommand!(input)) : undefined,
@@ -2849,20 +2848,69 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [approvalOpens, setApprovalOpens] = React.useState(0);
   const approvalResourceRef = React.useRef<PendingApprovalResource | null>(null);
   const approvalScope = `${sendScope}:${experience?.runtime_id || "loading"}`;
+  // The gateway decides approvals only as the signed-in person the
+  // connection names (anyone else is refused as approver_unauthenticated),
+  // so the inbox offers decisions only when whoami reports a person, and
+  // tells any other caller whoami names to sign in as themselves. A
+  // transport without whoami, an older gateway or a failed read leaves the
+  // approvals read-only.
+  // The same read names the principal the caller's WorkGraph claims are
+  // owned by: an identified caller claims as itself, and an open console's
+  // caller without a token claims nothing. The claim's owner releases it,
+  // and so does an access admin, whose release the gateway records.
+  const [approvalDecider, setApprovalDecider] = React.useState<{
+    scope: string;
+    person: boolean;
+    answered?: boolean;
+    claimant?: string;
+    canAdminister?: boolean;
+  }>();
+  React.useEffect(() => {
+    let active = true;
+    const scope = sendScope;
+    void Promise.resolve()
+      .then(() => consoleTransport.whoami ? consoleTransport.whoami() : null)
+      .then((whoami) => {
+        if (!active) return;
+        const claimant = whoami && whoami.actorKind !== "anonymous" ? whoami.principal : undefined;
+        setApprovalDecider({
+          scope,
+          person: whoami?.actorKind === "person",
+          answered: Boolean(whoami),
+          ...(claimant ? { claimant } : {}),
+          canAdminister: whoami?.canAdminister === true,
+        });
+      })
+      .catch(() => {
+        if (active) setApprovalDecider({ scope, person: false });
+      });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, sendScope]);
+  const currentDecider = approvalDecider?.scope === sendScope ? approvalDecider : undefined;
+  const approvalsDecidable = currentDecider?.person;
+  // whoami named a caller who is no signed-in person: only signing in as
+  // themselves lets them decide.
+  const signInToDecide = currentDecider?.answered === true && !currentDecider.person;
+  const workGraphClaimant = currentDecider?.claimant;
+  const workGraphAdmin = currentDecider?.canAdminister === true;
   React.useEffect(() => {
     setApprovalSnapshot(undefined);
     setSelectedApprovalId(undefined);
-    if (!experience || !hasMobControlSurface) return;
+    if (!experience || !hasMobControlSurface || approvalsDecidable === undefined) return;
     const target = controlWorkbenchTarget("gating");
     const resource = createPendingApprovalResource({
       scopeKey: approvalScope,
-      readOnly: consoleReadOnly,
+      readOnly: consoleReadOnly || !approvalsDecidable,
+      ...(!consoleReadOnly && signInToDecide ? { readOnlyReason: "sign_in" as const } : {}),
       load: async signal => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.listGatingPending, target, signal,
       })).result,
+      // No approver in the request: the gateway decides as the signed-in person.
       decide: async (pendingId, decision, signal) => (await consoleController.commands.execute({
         command: CONSOLE_COMMAND_NAMES.decideGating, target, signal,
-        params: { pending_id: pendingId, approver_id: DEFAULT_APPROVER_ID, decision, reason: `console_${decision}` },
+        params: { pending_id: pendingId, decision, reason: `console_${decision}` },
       })).result,
     });
     approvalResourceRef.current = resource;
@@ -2873,7 +2921,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       unsubscribe(); resource.dispose();
       if (approvalResourceRef.current === resource) approvalResourceRef.current = null;
     };
-  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, consoleController]);
+  }, [approvalScope, Boolean(experience), hasMobControlSurface, consoleReadOnly, approvalsDecidable, signInToDecide, consoleController]);
   // Scope changes hide the previous principal's snapshot before effects run.
   const activeApprovals = approvalSnapshot?.owner === consoleController && approvalSnapshot.snapshot.scopeKey === approvalScope
     ? approvalSnapshot.snapshot : undefined;
@@ -5130,7 +5178,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           : send(revision));
       };
       return {
-        onClaim: ({ itemId, revision }: { itemId: string; revision?: number }) =>
+        // The gateway owns a claim by the connection's caller, so the
+        // request names no owner. A caller who can own nothing is offered
+        // no claim, and only a signed-in person confirms a goal.
+        onClaim: workGraphClaimant === undefined ? undefined : ({ itemId, revision }: { itemId: string; revision?: number }) =>
           dispatch(
             revision,
             { id: itemId },
@@ -5138,10 +5189,6 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
               runWorkGraphCommand(CONSOLE_COMMAND_NAMES.workgraphClaim, {
                 id: itemId,
                 expected_revision: expectedRevision,
-                owner: {
-                  kind: "principal",
-                  id: workGraphClaimOwnerId(experience?.access?.subject, DEFAULT_APPROVER_ID),
-                },
               }, cardIdentity),
           ),
         onClose: ({ itemId, revision }: { itemId: string; revision?: number }) =>
@@ -5154,7 +5201,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
                 expected_revision: expectedRevision,
               }, cardIdentity),
           ),
-        onGoalConfirm: ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
+        onGoalConfirm: approvalsDecidable !== true ? undefined : ({ bindingId, revision }: { bindingId: string; revision?: number }) =>
           dispatch(
             revision,
             { binding_id: bindingId },
@@ -5208,7 +5255,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runWorkGraphCommand, holdUnobservedWorkGraphAction, experience?.access?.subject],
+    [runWorkGraphCommand, holdUnobservedWorkGraphAction, workGraphClaimant, approvalsDecidable],
   );
 
   // Inline-card affordances: undefined when the caller lacks the manage
@@ -6235,6 +6282,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onLoadEvidence={loadMemoryEvidence}
           onDecideQuarantine={
             memoryData.canDecideQuarantine &&
+            approvalsDecidable === true &&
             !frontendReadOnly &&
             experience?.console_policy?.read_only !== true
               ? decideMemoryQuarantine
@@ -6260,6 +6308,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           onRefresh={() => void refreshWorkGraphData()}
           onClaim={workGraphPanelHandlers.onClaim}
           onClose={workGraphPanelHandlers.onClose}
+          canRelease={(item) => workGraphMayRelease(item, { principal: workGraphClaimant, canAdminister: workGraphAdmin })}
           onRelease={({ itemId, revision }) => {
             // The same rule as the other item actions: the revision the row
             // showed, never one read at the click.

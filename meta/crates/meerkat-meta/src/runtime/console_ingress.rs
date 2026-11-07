@@ -1883,6 +1883,21 @@ impl AuthenticatedConsoleHuman {
         self.login_scope.as_deref()
     }
 
+    /// What a record keeps of the login this human authenticated in:
+    /// `sha256:` and the lowercase hex SHA-256 of the signed login
+    /// association ([`Self::login_scope`]), or, for a token that carries
+    /// none, of its unpadded base64url digest (one login per token). It
+    /// names neither the login nor the token.
+    pub(crate) fn login_scope_digest(&self) -> String {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+        let scope = match &self.login_scope {
+            Some(scope) => scope.clone(),
+            None => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.token_digest),
+        };
+        format!("sha256:{:x}", Sha256::digest(scope.as_bytes()))
+    }
+
     /// The human's qualified principal: a `Human` whose id is the verified
     /// `sub`, in the trust domain of the verified issuer
     /// ([`CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX`] + issuer). This is the one

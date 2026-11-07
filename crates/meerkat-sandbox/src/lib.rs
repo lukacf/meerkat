@@ -7,14 +7,16 @@
 //! immutable system aliases `/etc`, `/tmp` and `/var`), with one Linux
 //! exception: a read-only literal file grant may name a symbolic link as its
 //! final component (`/etc/resolv.conf` on a systemd-resolved host) when the
-//! link names its regular-file target directly, through no other link, and
-//! only root or the effective user can change the link or a directory above
-//! it. Linux binds that target read-only at the link's path. A target replaced
-//! under its own name (a new file renamed into place, as systemd-resolved
-//! rewrites its stub file) is checked again by the same rules at the next
-//! launch, which binds the new file; any other change to the link or its
-//! target refuses the launch. macOS (Seatbelt) refuses such a grant, as it
-//! refuses every mutable symbolic link.
+//! link's own text alone names its regular-file target, outside `/proc`,
+//! `/sys` and `/dev`, and only root or the effective user can replace the
+//! link or a directory above it, by the owners and modes the filesystem
+//! reports (on a FUSE or network filesystem, its server's word). Linux binds
+//! that target read-only at the link's path. A target replaced under its own
+//! name (a new file renamed into place, as systemd-resolved rewrites its stub
+//! file) is checked again by the same rules at the next launch, which binds
+//! the new file; a link replaced with other text, or a target replaced by
+//! anything those rules refuse, refuses the launch. macOS (Seatbelt) refuses
+//! such a grant, as it refuses every mutable symbolic link.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};

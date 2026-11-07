@@ -234,10 +234,12 @@ them.
   renamed into place, as systemd-resolved rewrites its stub file when its DNS
   settings change) is checked again by the same rules at the next launch and
   pinned in its place, so confined launches keep resolving names after the
-  change; any other change to the link or the file refuses the launch.
-  The link must name its target itself, through no other link, and the link
-  and every directory above it must be owned by root or the effective user
-  and writable by neither group nor others unless sticky; any other link is
+  change; a link replaced with other text, or a file replaced by anything
+  those rules refuse, refuses the launch. The link's own text alone must
+  name its target (a link to a link is refused), the target must not be in
+  `/proc`, `/sys` or `/dev`, and the link and every directory above it must
+  be owned by root or the effective user, as their filesystem reports, and
+  writable by neither group nor others unless sticky; any other link is
   still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
   through 0.9.10.
 

@@ -7,16 +7,17 @@
 //!
 //! Every granted path is canonical, with one exception: a read-only literal
 //! file grant may name a symbolic link as its final component
-//! (`/etc/resolv.conf` on a systemd-resolved host), when the link names its
-//! regular-file target in one hop and only root or the effective uid can
-//! retarget it (`grantable_link_text`). The target is pinned at compile time
-//! and bound read-only at the link's own path. Every launch checks that the
-//! link keeps its text and still resolves to the pinned target. A target
-//! replaced under its own name (a new file renamed into place, as
-//! systemd-resolved rewrites its stub file) is captured again by the same
-//! rules and pinned in its place (`Mount::bind`); any other change refuses
-//! the launch. Setup reopens the target only while it is the object the
-//! launch validated.
+//! (`/etc/resolv.conf` on a systemd-resolved host), when the link's own text
+//! alone names its regular-file target, in one hop, outside `/proc`, `/sys`
+//! and `/dev`, and only root or the effective uid can replace the link
+//! (`grantable_link_text`). The target is pinned at compile time and bound
+//! read-only at the link's own path. Every launch checks that the link keeps
+//! its text and still resolves to the pinned target. A target replaced under
+//! its own name (a new file renamed into place, as systemd-resolved rewrites
+//! its stub file) is captured again by the same rules and pinned in its place
+//! (`Mount::bind`); a link replaced with other text, or a target replaced by
+//! anything those rules refuse, refuses the launch. Setup reopens the target
+//! only while it is the object the launch validated.
 //!
 //! Every granted path, the baseline included, is opened by its canonical name
 //! with no symbolic link in any component (`open_no_symlinks`): when the
@@ -203,11 +204,7 @@ impl LinuxPolicy {
                 }
                 for access in read {
                     let path = access.path();
-                    if path == Path::new("/")
-                        || ["/proc", "/sys", "/dev"]
-                            .iter()
-                            .any(|root| path.starts_with(root))
-                    {
+                    if reserved_read_root(path) {
                         return Err(ConfinementRefusal::UnsupportedRequirement);
                     }
                     let mount = Mount::capture(path, false, write.contains(access))?;
@@ -500,6 +497,17 @@ fn push_disjoint(mounts: &mut Vec<Mount>, mount: Mount) -> Result<(), Confinemen
     Ok(())
 }
 
+/// Whether a read grant of `path` is refused whatever it holds: `/` itself,
+/// and `/proc`, `/sys`, `/dev` and anything in them. A granted path is held
+/// to it when the requirement compiles, and a final link's target when the
+/// link is captured.
+fn reserved_read_root(path: &Path) -> bool {
+    path == Path::new("/")
+        || ["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|root| path.starts_with(root))
+}
+
 fn validate_baseline_kind(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -535,15 +543,19 @@ fn validate_baseline_kind(
 /// resolves to:
 ///
 /// - One hop: the link's own text, resolved lexically from the link's
-///   directory, is `canonical` itself. No other link takes part in the
-///   resolution, so nobody outside the next rule chooses the target. A link
-///   reaching its target through another link (a link to a link, a target
-///   under a linked directory) is refused, whoever can change that link.
+///   directory, is `canonical` itself, so the text alone names the target.
+///   A text the kernel resolves elsewhere through another link (a link to a
+///   link, a target under a linked directory) is refused, whoever can
+///   replace that link.
 /// - Only root or the effective uid can retarget the link: the link and
 ///   every directory from `/` down to its own are owned by one of them, and
 ///   none of those directories is writable by group or others unless it is
 ///   sticky (in a sticky directory only an entry's owner, the directory's
 ///   owner or root can rename or remove the entry).
+///
+/// Both rules read owners, modes and link text as the filesystem reports
+/// them. On a FUSE or network filesystem those are whatever its server
+/// says, so a link there is trusted as far as that server is.
 ///
 /// `None` when the link may not, and on any metadata error.
 fn grantable_link_text(path: &Path, canonical: &Path) -> Option<PathBuf> {
@@ -597,14 +609,15 @@ impl Mount {
     /// Captures one granted path. Every granted path is canonical, except
     /// that a read-only file grant may name a symbolic link as its final
     /// component (`/etc/resolv.conf` on a systemd-resolved host): its
-    /// regular-file target is pinned here and bound read-only at the link's
-    /// own path, when [`grantable_link_text`] accepts the link, whose text is
-    /// kept.
+    /// regular-file target, outside the reserved roots a granted path is
+    /// held to ([`reserved_read_root`]), is pinned here and bound read-only
+    /// at the link's own path, when [`grantable_link_text`] accepts the link,
+    /// whose text is kept.
     fn capture(path: &Path, baseline: bool, writable: bool) -> Result<Self, ConfinementRefusal> {
         let canonical =
             std::fs::canonicalize(path).map_err(|_| ConfinementRefusal::UnsupportedRequirement)?;
         let link = if !baseline && canonical != path {
-            if writable {
+            if writable || reserved_read_root(&canonical) {
                 return Err(ConfinementRefusal::UnsupportedRequirement);
             }
             Some(
@@ -731,10 +744,10 @@ impl Mount {
     /// renamed into place, as systemd-resolved rewrites its stub file) is
     /// captured again by the capture-time rules, unchanged, and the new
     /// target is pinned in its place, for this launch and every later one.
-    /// Every other change refuses the launch: a changed link text, a link that
-    /// no longer reaches the same canonical path in one hop, a target that is
-    /// not a regular file, a failed trust check, and any change to another
-    /// grant.
+    /// Every other failed check refuses the launch: a link replaced with
+    /// other text, a link that no longer reaches the same canonical path in
+    /// one hop, a target replaced by anything the capture-time rules refuse,
+    /// and any other grant whose object or directories were replaced.
     fn bind(&self) -> Result<Bound, ConfinementRefusal> {
         let mut pin = self.pin.lock().unwrap_or_else(PoisonError::into_inner);
         if let Err(refusal) = self.check(&pin) {
@@ -789,8 +802,8 @@ impl Mount {
     /// A new pin for a final link whose canonical path no longer names the
     /// pinned object: the link captured again by the capture-time rules,
     /// unchanged, accepted only while the link keeps its captured text and
-    /// reaches the same canonical path. `None` for every other mount or
-    /// change.
+    /// reaches the same canonical path. `None` for every other mount, and
+    /// while the canonical path still names the pinned object.
     fn recapture(&self, pin: &Pin) -> Option<Pin> {
         let link = self.link.as_ref()?;
         let named = std::fs::symlink_metadata(&self.canonical).ok()?;
@@ -1524,9 +1537,9 @@ mod tests {
 
     /// A read-only file grant may name a symbolic link as its final
     /// component (`/etc/resolv.conf` on a systemd-resolved host) when the
-    /// link itself names its regular-file target: the target is pinned and
-    /// bound read-only at the link's own path. A link that reaches its
-    /// target through a second link is refused, whoever can change that
+    /// link's own text alone names its regular-file target: the target is
+    /// pinned and bound read-only at the link's own path. A link whose text
+    /// a second link resolves elsewhere is refused, whoever can replace that
     /// second link. No namespace is entered.
     #[test]
     fn a_final_link_is_granted_only_when_it_names_its_target_in_one_hop() {
@@ -1592,8 +1605,8 @@ mod tests {
         let chained = etc.join("chained.conf");
         std::os::unix::fs::symlink("../shared/hop", &chained).unwrap();
         assert_eq!(Mount::capture(&chained, false, false).err(), refused);
-        // Refused when every link of the chain is trusted, too: only the
-        // grant's own link may take part in the resolution.
+        // Refused when every link of the chain is trusted, too: the grant's
+        // own text alone must name the target.
         set_mode(&shared, 0o755);
         assert_eq!(Mount::capture(&chained, false, false).err(), refused);
     }
@@ -1652,6 +1665,74 @@ mod tests {
         }
     }
 
+    /// A path in `directory` that no other test run uses: `prefix`, this
+    /// process's id and the time.
+    fn unique_path(directory: &Path, prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        directory.join(format!("{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    /// Removes a file or link made outside a temporary directory when the
+    /// test ends, passed or failed.
+    struct RemoveOnDrop(PathBuf);
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// The link-owner rule on its own: a link directly in `/tmp`, root's
+    /// sticky directory under root's `/`, has every directory above it
+    /// trusted, so its own owner decides. It is granted while its owner is
+    /// trusted and refused while only root and another uid are, as a link
+    /// another user planted there is. No namespace is entered.
+    #[test]
+    fn a_final_link_in_tmp_is_granted_only_when_its_owner_is_trusted() {
+        let trusted_directory = |path: &str, sticky: bool| {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && (metadata.mode() & 0o022 == 0 || (sticky && metadata.mode() & 0o1000 != 0))
+        };
+        assert!(
+            trusted_directory("/", false) && trusted_directory("/tmp", true),
+            "this row needs root's /, and root's sticky /tmp"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().canonicalize().unwrap().join("app.conf");
+        std::fs::write(&target, b"granted").unwrap();
+        let link = RemoveOnDrop(unique_path(Path::new("/tmp"), "meerkat-final-link-owner"));
+        std::os::unix::fs::symlink(&target, &link.0).unwrap();
+        let euid = unsafe { libc::geteuid() };
+        // The link's owner, and a uid that is neither root nor that owner.
+        // Root's own link is trusted whoever else is, so as root the link
+        // goes to another uid.
+        let (owner, other) = if euid == 0 {
+            let name = CString::new(link.0.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::lchown(name.as_ptr(), 65534, 65534) }, 0);
+            (65534, 0)
+        } else {
+            (euid, euid.wrapping_add(1))
+        };
+        assert_eq!(
+            grantable_link_text_for(&link.0, &target, owner),
+            Some(target.clone()),
+            "a link whose owner is trusted is granted"
+        );
+        assert_eq!(
+            grantable_link_text_for(&link.0, &target, other),
+            None,
+            "a link another user owns is refused, though every directory above it is trusted"
+        );
+        if euid != 0 {
+            assert!(Mount::capture(&link.0, false, false).is_ok());
+        }
+    }
+
     /// Only a read-only grant of a final link to a regular file with one
     /// name is captured: a writable grant, a link to a directory, a dangling
     /// link, a link under a linked directory and a link to a hard-linked
@@ -1685,6 +1766,54 @@ mod tests {
         );
         std::fs::hard_link(&target, run.join("second-name")).unwrap();
         assert_eq!(Mount::capture(&link, false, false).err(), refused);
+    }
+
+    /// A final link's target is held to the granted path's own rule: never
+    /// `/`, and nothing in `/proc`, `/sys` or `/dev`. A trusted one-hop link
+    /// to a regular file in `/dev/shm` (tmpfs, which the filesystem-type
+    /// check lets through) is refused, as a grant of that file itself is,
+    /// before any namespace is probed.
+    #[test]
+    fn a_final_link_to_a_file_under_dev_is_refused() {
+        use meerkat_core::confinement::{ConfinementSpec, PlatformBaseline};
+        let target = RemoveOnDrop(unique_path(
+            Path::new("/dev/shm"),
+            "meerkat-final-link-target",
+        ));
+        std::fs::write(&target.0, b"nameserver 192.0.2.1\n").unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&target.0).unwrap(),
+            target.0,
+            "this row needs a /dev/shm that is no symbolic link"
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        set_mode(&root, 0o700);
+        let etc = directory(&root, "etc", 0o755);
+        let link = etc.join("resolv.conf");
+        std::os::unix::fs::symlink(&target.0, &link).unwrap();
+        assert_eq!(
+            grantable_link_text(&link, &target.0),
+            Some(target.0.clone()),
+            "the link itself passes the one-hop and owner rules"
+        );
+        let refused = Some(ConfinementRefusal::UnsupportedRequirement);
+        assert_eq!(Mount::capture(&link, false, false).err(), refused);
+        let compile = |path: &Path| {
+            let spec = ConfinementSpec {
+                baseline: PlatformBaseline::CommandRuntimeV1,
+                read: FilesystemAccess::Paths(vec![PathAccess::Literal(path.to_path_buf())]),
+                write: FilesystemAccess::Paths(Vec::new()),
+                deny_read: Vec::new(),
+                deny_write: Vec::new(),
+                unix_connect: Vec::new(),
+                network: IpNetworkAccess::Unrestricted,
+                require_descendant_termination: false,
+            };
+            LinuxPolicy::compile(&ExecutionConfinement::try_from(spec).unwrap()).err()
+        };
+        assert_eq!(compile(&target.0), refused, "a grant of the file itself");
+        assert_eq!(compile(&link), refused, "a grant of the link to it");
     }
 
     /// A launch binds the target it validated: once a final link's replaced
@@ -1828,7 +1957,7 @@ mod tests {
     }
 
     /// R3: a retargeted final link is refused at launch, and so is a link
-    /// whose text changed while it still names the same file, with its
+    /// replaced with other text that still names the same file, with its
     /// target replaced or not: only the target file may be replaced, under
     /// the link as captured.
     #[test]
@@ -1844,7 +1973,7 @@ mod tests {
         assert_eq!(
             fixture.validate_launch(),
             refused,
-            "the link's text changed, though it names the same file"
+            "the link was replaced with other text, though it names the same file"
         );
 
         let fixture = ResolverFixture::new();
@@ -1855,7 +1984,7 @@ mod tests {
 
     /// R4: only a target that is no longer the pinned file is captured
     /// again. The pinned file moved into a replacement of its directory keeps
-    /// its identity, and the changed directory refuses the launch as before.
+    /// its identity, and the replaced directory refuses the launch as before.
     #[test]
     fn a_final_link_target_directory_replaced_around_the_pinned_file_is_refused_at_launch() {
         let fixture = ResolverFixture::new();

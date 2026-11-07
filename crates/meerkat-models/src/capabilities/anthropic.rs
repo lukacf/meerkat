@@ -36,7 +36,7 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
 /// `input_transformations` report. The catalog rows that list the beta carry
 /// this header; a client sends the same one for a model id with no catalog
 /// row, so the value is defined here once.
-/// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
 pub const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: BetaHeader = BetaHeader {
     feature: BetaFeature::ThinkingBindingControls,
     header_name: "anthropic-beta",

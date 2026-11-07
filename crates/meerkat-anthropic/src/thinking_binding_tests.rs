@@ -83,6 +83,11 @@ impl EnforcingAccount {
             .cloned()
             .expect("a request reached the endpoint")
     }
+
+    /// Every request the endpoint received, in order.
+    fn all(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
 }
 
 async fn messages(
@@ -472,23 +477,31 @@ async fn default_config_survives_a_tools_change_on_an_enforcing_account() {
 
 /// A prefix-checked model served under an id the catalog does not carry
 /// (Claude Mythos 5.1 here; a proxy alias or a custom `[models.<id>]` entry
-/// alike) with thinking configured gets the control and the beta once its
-/// history replays a signed thinking block, so the session survives a tools
-/// change.
+/// alike) with thinking configured gets the control and the beta on every
+/// request, the session's first included, so the request shape never changes
+/// and the session survives a tools change.
 #[tokio::test]
 async fn an_uncatalogued_prefix_checked_id_survives_a_tools_change() {
     let model = "claude-mythos-5-1";
     assert!(!CATALOGUED_PREFIX_CHECKED.contains(&model));
     let (account, client, server) = spawn_account().await;
     let (_, second) = session_across_a_tools_change(&client, model, adaptive).await;
-    let sent = account.last();
+    let sent = account.all();
     server.abort();
     assert!(
         second.succeeded(),
         "the turn after the tools change completes: {second:?}"
     );
-    assert_eq!(sent.body["thinking"], expected_binding(), "{}", sent.body);
-    assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for request in &sent {
+        assert_eq!(
+            request.body["thinking"],
+            expected_binding(),
+            "{}",
+            request.body
+        );
+        assert!(request.carries_binding_beta(), "{:?}", request.betas);
+    }
 }
 
 /// The documented limit: the same uncatalogued id with thinking omitted gets

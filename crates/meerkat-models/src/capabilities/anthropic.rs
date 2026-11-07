@@ -33,9 +33,11 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
 };
 
 /// Thinking-block binding controls: `thinking.block_binding` and the
-/// `input_transformations` report.
+/// `input_transformations` report. The catalog rows that list the beta carry
+/// this header; a client sends the same one for a model id with no catalog
+/// row, so the value is defined here once.
 /// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
-const BETA_THINKING_BINDING_CONTROLS: BetaHeader = BetaHeader {
+pub const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: BetaHeader = BetaHeader {
     feature: BetaFeature::ThinkingBindingControls,
     header_name: "anthropic-beta",
     header_value: "thinking-binding-controls-2026-08-01",
@@ -67,7 +69,7 @@ const PRESERVED_THINKING_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
     BETA_INTERLEAVED_THINKING,
-    BETA_THINKING_BINDING_CONTROLS,
+    ANTHROPIC_THINKING_BINDING_CONTROLS_BETA,
 ];
 
 /// Headers advertised for models with interleaved thinking but no compaction

@@ -470,6 +470,15 @@ them.
   Added), visible and ungated, beside its tools. A host whose runtime takes
   no grant requests answers its calls with a tool error.
 
+- `meerkat-store`: the calls of one process take turns on a SQLite decision
+  file, from a connection's open to its close, so they never refuse each
+  other as held by another owner (`ApprovalStoreError::Contended`): with
+  the zero busy timeout, a connection that opened while another closed (and
+  checkpointed the write-ahead log), or two of the process's writers, could
+  refuse each other at once, which a decision executor running beside a
+  host's own decision calls made visible. A database another process holds
+  is still refused at once, never waited for.
+
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the
   router holds no control that covers it, or because it was signed out

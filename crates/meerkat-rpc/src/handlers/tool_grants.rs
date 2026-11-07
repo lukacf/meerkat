@@ -13,7 +13,7 @@
 //! requester) instead of issuing anything: the runtime's executor of the kind
 //! issues the grant once a person approved it. `tool_grants/list` lists the
 //! subject's open and approved requests beside its grants, as `requested`,
-//! and with `include_ended` its declined ones too.
+//! and with `include_ended` its recently declined ones too.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ use meerkat_runtime::tool_grant::wire::{
 use meerkat_runtime::tool_grant::{
     ToolGrantIssueRequest, ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestOrigin,
     ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantServiceError, ToolGrantStatus,
-    ToolGrantWindow, tool_grant_requests_of,
+    ToolGrantWindow,
 };
 
 use crate::error;
@@ -372,8 +372,9 @@ pub async fn handle_revoke(
 /// when the request asks for them. On a runtime that keeps durable
 /// decisions the subject's grant requests follow its grants: the open and
 /// approved ones as `requested` and, when ended ones are asked for, the
-/// rejected, expired, withdrawn and refused ones as `declined`. A request
-/// whose grant was issued is listed as that grant only.
+/// rejected, expired, withdrawn and refused ones whose deadline is within
+/// the grant policy's maximum lifetime of now as `declined`. A request whose
+/// grant was issued is listed as that grant only.
 pub async fn handle_list(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -400,9 +401,18 @@ pub async fn handle_list(
         .collect();
     let decisions = runtime.decision_service();
     if decisions.is_available() {
-        let requests = match tool_grant_requests_of(&decisions, &subject, params.include_ended) {
+        let requests = match runtime.runtime_adapter().list_tool_grant_requests(
+            &decisions,
+            &subject,
+            params.include_ended,
+        ) {
             Ok(requests) => requests,
-            Err(error_value) => return decision_error_to_response(id, error_value),
+            Err(ToolGrantRequestError::Decision(error_value)) => {
+                return decision_error_to_response(id, error_value);
+            }
+            Err(error_value) => {
+                return RpcResponse::error(id, error::INTERNAL_ERROR, error_value.to_string());
+            }
         };
         let issued: HashSet<&ToolGrantId> = listing
             .grants

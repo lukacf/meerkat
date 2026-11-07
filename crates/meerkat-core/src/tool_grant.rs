@@ -15,6 +15,11 @@
 //! seam for the open names at each model-request boundary of a run, for one
 //! call's admission immediately before the dispatcher hands the call on, and
 //! tells it when a run ends.
+//!
+//! A gated build also mounts [`REQUEST_TOOL_GRANT_TOOL`]
+//! ([`ToolGrantRequestDispatcher`]): the agent asks its session's host for a
+//! grant a person approves ([`SessionToolGrants::request_grant`]), and the
+//! host holds a durable decision for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -25,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::types::{SessionId, ToolName, ToolNameSet};
 
 mod request_tool;
+
+pub use request_tool::ToolGrantRequestDispatcher;
 
 /// Refusal code: no live grant covers the gated name.
 pub const TOOL_GRANT_REQUIRED_CODE: &str = "tool_grant_required";
@@ -463,6 +470,51 @@ pub struct ToolGrantCall<'a> {
     pub run_id: Option<&'a crate::RunId>,
 }
 
+/// The name of the tool an agent asks for a grant with: every grant-gated
+/// build mounts it ([`ToolGrantRequestDispatcher`]).
+pub const REQUEST_TOOL_GRANT_TOOL: &str = "request_tool_grant";
+
+/// One grant request an agent asks for through [`REQUEST_TOOL_GRANT_TOOL`]:
+/// a target its build gates, how long the grant lasts from its issuance,
+/// why, and the run and tool call that ask (a replay of the call answers the
+/// same request). It names neither its subject (the agent's own session) nor
+/// its approver (the host's policy).
+#[derive(Debug, Clone, Copy)]
+pub struct ToolGrantAgentRequest<'a> {
+    pub target: &'a ToolGrantTarget,
+    pub duration: std::time::Duration,
+    pub reason: Option<&'a str>,
+    pub run_id: &'a crate::RunId,
+    pub call_id: &'a str,
+}
+
+/// An agent's grant request as its host holds it: the decision a person
+/// approves, the id the grant gets when it is issued, the decision's phase
+/// now (a replayed call answers the request as it stands) and its deadline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGrantRequestReceipt {
+    pub decision_id: crate::approval::decision::DecisionId,
+    pub grant_id: ToolGrantId,
+    pub phase: crate::approval::decision::DecisionPhase,
+    pub deadline_at_ms: u64,
+}
+
+/// Why an agent's grant request was not held.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ToolGrantAgentRequestRefusal {
+    /// The session's host takes no grant requests.
+    #[error("this host takes no tool grant requests")]
+    NotTaken,
+    /// The host refuses the request as asked: a duration outside its bounds,
+    /// or a request it cannot hold.
+    #[error("{0}")]
+    Invalid(String),
+    /// The request could not be held now.
+    #[error("the tool grant request could not be held now: {0}")]
+    Unavailable(String),
+}
+
 /// A session's scoped tool grants, as the agent's boundary and dispatch gate
 /// read them.
 ///
@@ -499,6 +551,22 @@ pub trait SessionToolGrants: Send + Sync {
     /// run's grants then admit no use of a later run either: the first such
     /// use ends them.
     async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal>;
+
+    /// Hold `request` for a person to approve: the host holds a durable
+    /// decision for a grant of the target to this seam's session and issues
+    /// nothing now. A replay of the same run and call answers the decision
+    /// it held, as it stands.
+    ///
+    /// # Errors
+    /// [`ToolGrantAgentRequestRefusal::NotTaken`] when the host takes no
+    /// requests, as the default does; the host's refusal otherwise.
+    async fn request_grant(
+        &self,
+        request: ToolGrantAgentRequest<'_>,
+    ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
+        let _ = request;
+        Err(ToolGrantAgentRequestRefusal::NotTaken)
+    }
 }
 
 /// A build's grant gate: the session's grants and what the build gated.
@@ -559,6 +627,45 @@ impl ToolGrantGate {
     /// The seam's refusal when the grants cannot be read or written.
     pub async fn end_run(&self, run_id: &crate::RunId) -> Result<(), ToolGrantRefusal> {
         self.grants.end_run(run_id).await
+    }
+
+    /// The target an agent's request names, when the build gates it: one
+    /// tool name the build gates (by name, or through a gated family), or a
+    /// gated family with the names the build gated for it. `None` otherwise,
+    /// and for a request naming both or neither.
+    #[must_use]
+    pub fn requested_target(
+        &self,
+        tool: Option<&str>,
+        family: Option<&str>,
+    ) -> Option<ToolGrantTarget> {
+        match (tool, family) {
+            (Some(name), None) if self.table.is_gated(name) => Some(ToolGrantTarget::Tool {
+                name: ToolName::from(name),
+            }),
+            (None, Some(family)) => {
+                self.table
+                    .families()
+                    .get(family)
+                    .map(|names| ToolGrantTarget::Family {
+                        family: family.to_owned(),
+                        names: names.clone(),
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Ask the session's host to hold an agent's grant request
+    /// ([`SessionToolGrants::request_grant`]).
+    ///
+    /// # Errors
+    /// The host's refusal.
+    pub async fn request_grant(
+        &self,
+        request: ToolGrantAgentRequest<'_>,
+    ) -> Result<ToolGrantRequestReceipt, ToolGrantAgentRequestRefusal> {
+        self.grants.request_grant(request).await
     }
 }
 

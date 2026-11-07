@@ -223,11 +223,18 @@ and confinement still applies to a call it opens.
   `request_tool_grant`, TypeScript `requestToolGrant`; `subject`, `target`,
   `duration_ms`, optional `scope` and `reason`), holds a durable decision of
   kind `tool_grant.issue` for the approver id `operator` and issues nothing.
+  Every gated build also mounts the ungated tool `request_tool_grant`
+  (`tool`/`family`, `duration_ms`, `reason`): the agent asks the same way,
+  never naming its session or the approver, and a replayed call answers the
+  same request; the host holds it with what it takes requests with
+  (`MeerkatMachine::set_tool_grant_request_host`; `rkat-rpc` names the
+  realm's agent `rkat-agent`), or the call fails when the host takes none.
   Once a person approved it, the kind's executor (`ToolGrantIssueExecutor`,
   run by `rkat-rpc`) issues the grant under `ToolGrantId::approved(decision
   id)` with issuer `approval`; the session receives a `tool_grant_request`
   input when the request ends. `tool_grants/list` shows open requests as
-  `requested` and, with `include_ended`, ended ones as `declined`.
+  `requested` and, with `include_ended`, those ended within the grant
+  policy's maximum lifetime as `declined`.
 - `ToolGrantLifecycleMachine` owns each grant (issued, then expired, revoked
   or ended with its run, all terminal). Grants and their audit rows live in the runtime
   store: on SQLite the `runtime-tool-grants` schema domain, created by the

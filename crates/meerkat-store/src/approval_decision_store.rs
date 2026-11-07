@@ -205,8 +205,9 @@ fn decode(decision_id: String, bytes: &[u8]) -> DecisionRow {
     }
 }
 
-/// The `column = ?n` clauses of `filter`, numbered after `bound` earlier
-/// parameters, with their values.
+/// The `column = ?n` clauses of `filter`, and `deadline_at_ms >= ?n` for its
+/// deadline bound, numbered after `bound` earlier parameters, with their
+/// values.
 fn filter_clauses(filter: &DecisionListFilter, bound: usize) -> (Vec<String>, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -225,6 +226,12 @@ fn filter_clauses(filter: &DecisionListFilter, bound: usize) -> (Vec<String>, Ve
     }
     if let Some(requester) = &filter.requester {
         push("requester_key", requester.as_str());
+    }
+    if let Some(deadline_from_ms) = filter.deadline_from_ms {
+        values.push(Value::Integer(
+            i64::try_from(deadline_from_ms).unwrap_or(i64::MAX),
+        ));
+        clauses.push(format!("deadline_at_ms >= ?{}", bound + values.len()));
     }
     (clauses, values)
 }

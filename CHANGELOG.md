@@ -415,8 +415,32 @@ them.
   and hands each ended request's notice (`ToolGrantRequestNotice`) to the
   host's `ToolGrantRequestNotices`; the host's `ToolGrantRunObserver`
   answers a session's current run. `tool_grant_requests_of` reads a
-  subject's requests, and `wire::wire_tool_grant_request` shows one as a
-  `requested` or `declined` grant.
+  subject's requests (the ended ones from a deadline bound on), and
+  `MeerkatMachine::list_tool_grant_requests` lists them with the ended ones
+  whose deadline is within the grant policy's maximum lifetime of now;
+  `wire::wire_tool_grant_request` shows one as a `requested` or `declined`
+  grant.
+
+- `meerkat-core`, `meerkat`, `meerkat-runtime`: an agent asks for a grant a
+  person approves. Every grant-gated build mounts the tool
+  `request_tool_grant` (`tool_grant::REQUEST_TOOL_GRANT_TOOL`,
+  `ToolGrantRequestDispatcher`), itself ungated: the agent names one gated
+  `tool` or `family`, `duration_ms` and a `reason`, never its session or the
+  approver, and the call returns at once with the pending request. The
+  session's grant seam holds it (`SessionToolGrants::request_grant`, a
+  provided method that answers `ToolGrantAgentRequestRefusal::NotTaken`;
+  `ToolGrantAgentRequest`, `ToolGrantRequestReceipt`;
+  `ToolGrantGate::requested_target` and `ToolGrantGate::request_grant`),
+  keyed by the call's run and id, so a replayed call answers the request it
+  held. A runtime takes its agents' requests through `ToolGrantRequestHost`
+  (`MeerkatMachine::set_tool_grant_request_host`,
+  `ToolGrantService::set_request_host` and `request_host`): the decision
+  owner, the request policy and the requester its agents are named by.
+
+- `meerkat-core`, `meerkat-store`: `DecisionListFilter` gains
+  `deadline_from_ms` (`with_deadline_from`): only decisions due at or after
+  it. The SQLite decision store's list and count read it through the phase
+  and deadline index.
 
 - `meerkat-rpc`, `meerkat-contracts`, Python and TypeScript SDKs:
   `tool_grants/request` (`RequestToolGrantParams`, closed, and
@@ -431,13 +455,20 @@ them.
   (`[governance.decisions] operator_approver_ids`). Each ended request's
   session receives a `tool_grant_request` external event, like any input,
   with the decision, the outcome (`granted` with the grant id, `rejected`,
-  `expired`, `withdrawn`, or `refused` with a reason) and the target.
-  `tool_grants/list` lists open and approved requests as `requested` and,
-  with `include_ended`, rejected, expired, withdrawn and refused ones as
-  `declined`, the wire statuses reserved since 0.9.9. Python
-  `request_tool_grant`, TypeScript `requestToolGrant`.
+  `expired`, `withdrawn`, or `refused` with a reason) and the target. While
+  the executor runs, `rkat-rpc` takes its agents' requests, naming the
+  realm's agent `rkat-agent` as their requester. `tool_grants/list` lists
+  open and approved requests as `requested` and, with `include_ended`, the
+  rejected, expired, withdrawn and refused ones whose deadline is within the
+  grant policy's maximum lifetime of now as `declined`, the wire statuses
+  reserved since 0.9.9. Python `request_tool_grant`, TypeScript
+  `requestToolGrant`.
 
 ### Changed
+
+- `meerkat`: a grant-gated build's tool list gains `request_tool_grant` (see
+  Added), visible and ungated, beside its tools. A host whose runtime takes
+  no grant requests answers its calls with a tool error.
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the

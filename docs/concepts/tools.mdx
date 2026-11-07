@@ -263,13 +263,22 @@ confinement all still apply to every call it opens.
   `tool_grants/request` over JSON-RPC (Python `request_tool_grant`,
   TypeScript `requestToolGrant`), holds a durable decision of kind
   `tool_grant.issue` (see [durable decisions](/api/rpc#durable-decisions))
-  and issues nothing. Once a person approved the decision, the executor of
-  the kind (`ToolGrantIssueExecutor`, which `rkat-rpc` runs) issues the grant
-  under an id derived from the decision, with the decision as its issuer and
-  its window starting then; a review stage's allow never issues one. A list
-  shows an open request as `requested` and, with ended grants, a rejected,
-  expired, withdrawn or refused one as `declined`; the session receives an
-  input when its request ends.
+  and issues nothing. Every gated build also mounts the tool
+  `request_tool_grant`, itself ungated, through which the agent asks for one
+  of its gated names or families: it names the target, `duration_ms` and a
+  `reason`, never the session or the approver, and the call returns at once
+  with the pending request (a replayed call answers the same request). The
+  session's host holds it with what it takes requests with
+  (`MeerkatMachine::set_tool_grant_request_host`: the decision owner, the
+  approver policy and the requester its agents are named by; `rkat-rpc`
+  takes them while it runs the executor), or the call answers that the host
+  takes none. Once a person approved the decision, the executor of the kind
+  (`ToolGrantIssueExecutor`, which `rkat-rpc` runs) issues the grant under an
+  id derived from the decision, with the decision as its issuer and its
+  window starting then; a review stage's allow never issues one. A list
+  shows an open request as `requested` and, with ended grants, a recently
+  rejected, expired, withdrawn or refused one as `declined`; the session
+  receives an input when its request ends.
 - **Adjudication.** Every model-request boundary opens the gated names a live
   grant admits at that moment, in the boundary's run, and every gated call is
   adjudicated again immediately before it is handed to its tool, so a call at

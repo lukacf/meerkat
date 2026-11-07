@@ -18,9 +18,9 @@ use crate::tool_grant::{
     RevokedToolGrant, RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditPage,
     ToolGrantClock, ToolGrantDeadlines, ToolGrantExpiryDriver, ToolGrantIssueBody,
     ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantListing, ToolGrantPolicy,
-    ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestNotices, ToolGrantRequestPolicy,
-    ToolGrantRevocation, ToolGrantRunObserver, ToolGrantService, ToolGrantServiceError,
-    hold_tool_grant_request,
+    ToolGrantRequest, ToolGrantRequestError, ToolGrantRequestHost, ToolGrantRequestNotices,
+    ToolGrantRequestPolicy, ToolGrantRevocation, ToolGrantRunObserver, ToolGrantService,
+    ToolGrantServiceError, hold_tool_grant_request, tool_grant_requests_of,
 };
 
 impl MeerkatMachine {
@@ -143,6 +143,40 @@ impl MeerkatMachine {
         )?;
         let body = ToolGrantIssueBody::of(&decision)?;
         Ok((decision, body))
+    }
+
+    /// The grant requests held for `subject` over `decisions`
+    /// ([`tool_grant_requests_of`]): the open and approved ones and, with
+    /// `include_ended`, the ended ones whose deadline is within the grant
+    /// policy's maximum lifetime of this runtime's grant clock, so a list
+    /// reads recent requests only.
+    ///
+    /// # Errors
+    /// The clock's failure, or the decision owner's read failure.
+    pub fn list_tool_grant_requests(
+        &self,
+        decisions: &DurableDecisionService,
+        subject: &ToolGrantSubject,
+        include_ended: bool,
+    ) -> Result<Vec<(StoredDecision, ToolGrantIssueBody)>, ToolGrantRequestError> {
+        let ended_since_ms = if include_ended {
+            let now_ms = self
+                .tool_grant_service
+                .now_ms()
+                .map_err(|error| ToolGrantRequestError::Clock(error.to_string()))?;
+            Some(now_ms.saturating_sub(self.tool_grant_service.policy().max_lifetime_ms()))
+        } else {
+            None
+        };
+        Ok(tool_grant_requests_of(decisions, subject, ended_since_ms)?)
+    }
+
+    /// Take this runtime's agents' grant requests through `host` (`None`:
+    /// take none): a gated session's `request_tool_grant` holds its request
+    /// there. A host sets it while it runs the executor of the decisions
+    /// the requests hold.
+    pub fn set_tool_grant_request_host(&self, host: Option<ToolGrantRequestHost>) {
+        self.tool_grant_service.set_request_host(host);
     }
 
     /// The executor of `tool_grant.issue` decisions over this runtime's grant

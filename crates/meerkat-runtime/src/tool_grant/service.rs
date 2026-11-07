@@ -41,7 +41,7 @@ use super::dsl::{
     ToolGrantLifecycleMachineAuthority, ToolGrantLifecycleMachineMutator,
     ToolGrantLifecycleMachineState, ToolGrantPhase, ToolGrantRunId, ToolGrantUseRefusal,
 };
-use super::request::ToolGrantIssueBody;
+use super::request::{ToolGrantIssueBody, ToolGrantRequestHost};
 use super::{HostToolGrantClock, ToolGrantClock, ToolGrantPolicy};
 use crate::store::{RuntimeStore, RuntimeStoreError};
 
@@ -522,6 +522,9 @@ pub struct ToolGrantService {
     store: Arc<dyn RuntimeStore>,
     clock: StdRwLock<Arc<dyn ToolGrantClock>>,
     policy: StdRwLock<ToolGrantPolicy>,
+    /// What the runtime takes its agents' grant requests with, while it
+    /// takes them.
+    request_host: StdRwLock<Option<ToolGrantRequestHost>>,
 }
 
 impl std::fmt::Debug for ToolGrantService {
@@ -534,14 +537,33 @@ impl std::fmt::Debug for ToolGrantService {
 
 impl ToolGrantService {
     /// The grant service over `store`, on the host clock and the default
-    /// policy.
+    /// policy, taking no grant requests.
     #[must_use]
     pub fn new(store: Arc<dyn RuntimeStore>) -> Self {
         Self {
             store,
             clock: StdRwLock::new(Arc::new(HostToolGrantClock)),
             policy: StdRwLock::new(ToolGrantPolicy::default()),
+            request_host: StdRwLock::new(None),
         }
+    }
+
+    /// Take the agents' grant requests through `host` (`None`: take none).
+    pub fn set_request_host(&self, host: Option<ToolGrantRequestHost>) {
+        *self
+            .request_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = host;
+    }
+
+    /// What the agents' grant requests are held with, while the runtime
+    /// takes them.
+    #[must_use]
+    pub fn request_host(&self) -> Option<ToolGrantRequestHost> {
+        self.request_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Read `clock` instead of the host clock.

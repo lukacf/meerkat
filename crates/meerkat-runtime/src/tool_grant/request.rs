@@ -23,8 +23,10 @@
 //!   to the host's [`ToolGrantRequestNotices`]: the subject's session reads
 //!   that its request was approved or declined.
 //! - [`tool_grant_requests_of`] reads a subject's requests, which a list
-//!   projects: open and approved ones as `requested`, rejected, expired,
-//!   withdrawn and refused ones as `declined`.
+//!   projects: open and approved ones as `requested`, and the rejected,
+//!   expired, withdrawn and refused ones due from a bound on as `declined`.
+//! - An agent asks through its session's grant seam, which holds the request
+//!   with what its host takes requests with ([`ToolGrantRequestHost`]).
 //!
 //! The decision's machine owns a request's lifecycle, and the grant's own
 //! machine owns the grant from its issuance: no grant machine state stands
@@ -170,6 +172,21 @@ impl Default for ToolGrantRequestPolicy {
             request_ttl: Self::DEFAULT_REQUEST_TTL,
         }
     }
+}
+
+/// What a host takes its agents' grant requests with: the decision owner
+/// that holds them, its request policy, and the principal an agent's request
+/// names as its requester. A host sets it on its runtime
+/// ([`crate::MeerkatMachine::set_tool_grant_request_host`]) while it runs the
+/// executor of the decisions they hold.
+#[derive(Debug, Clone)]
+pub struct ToolGrantRequestHost {
+    /// The decision owner the requests are held in.
+    pub decisions: DurableDecisionService,
+    /// Who approves them and how long they wait.
+    pub policy: ToolGrantRequestPolicy,
+    /// The principal an agent's request names as its requester.
+    pub requester: DecisionPrincipalKey,
 }
 
 /// One grant request, as a host or an agent asks for it.
@@ -353,35 +370,46 @@ pub fn hold_tool_grant_request(
     Ok(decisions.hold(hold, true)?)
 }
 
-/// The tool grant requests held for `subject`, newest last per phase: the
-/// open and approved ones, and with `include_ended` also the rejected,
-/// expired, withdrawn and refused ones. An executed request is its grant,
-/// which the grant store lists. The decision store files decisions by kind
-/// and phase, not by subject, so this pages the kind's decisions of each
-/// phase and keeps the subject's.
+/// The tool grant requests held for `subject`, in decision id order per
+/// phase: the open and approved ones and, with `ended_since_ms`, the
+/// rejected, expired, withdrawn and refused ones whose deadline is at or
+/// after it. An executed request is its grant, which the grant store lists.
+/// The decision store files decisions by kind, phase and deadline, not by
+/// subject: this pages the kind's decisions of each phase (an ended phase
+/// from `ended_since_ms` on, through the store's phase and deadline index)
+/// and keeps the subject's.
 ///
 /// # Errors
 /// The decision owner's read failures.
 pub fn tool_grant_requests_of(
     decisions: &DurableDecisionService,
     subject: &ToolGrantSubject,
-    include_ended: bool,
+    ended_since_ms: Option<u64>,
 ) -> Result<Vec<(StoredDecision, ToolGrantIssueBody)>, DecisionError> {
-    let mut phases = vec![DecisionPhase::Open, DecisionPhase::Approved];
-    if include_ended {
-        phases.extend([
-            DecisionPhase::Rejected,
-            DecisionPhase::Expired,
-            DecisionPhase::Withdrawn,
-            DecisionPhase::ExecutionRefused,
-        ]);
-    }
     let kind = tool_grant_issue_kind()?;
-    let mut requests = Vec::new();
-    for phase in phases {
-        let filter = DecisionListFilter::default()
+    let of_phase = |phase| {
+        DecisionListFilter::default()
             .with_kind(kind.clone())
-            .with_phase(phase);
+            .with_phase(phase)
+    };
+    let mut filters = vec![
+        of_phase(DecisionPhase::Open),
+        of_phase(DecisionPhase::Approved),
+    ];
+    if let Some(since) = ended_since_ms {
+        filters.extend(
+            [
+                DecisionPhase::Rejected,
+                DecisionPhase::Expired,
+                DecisionPhase::Withdrawn,
+                DecisionPhase::ExecutionRefused,
+            ]
+            .into_iter()
+            .map(|phase| of_phase(phase).with_deadline_from(since)),
+        );
+    }
+    let mut requests = Vec::new();
+    for filter in filters {
         let mut after: Option<String> = None;
         loop {
             let listing = decisions.list(&filter, after.as_deref(), DECISION_PAGE_MAX)?;

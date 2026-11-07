@@ -18,7 +18,9 @@
 //!   effects alone.
 //! - [`gate`]: [`RuntimeSessionToolGrants`], the core
 //!   [`SessionToolGrants`](meerkat_core::tool_grant::SessionToolGrants) seam
-//!   of one served session, carried on its runtime bindings.
+//!   of one served session, carried on its runtime bindings; the session's
+//!   agent asks for a grant through it while the runtime takes requests
+//!   ([`ToolGrantRequestHost`]).
 //! - [`request`]: grant requests a person approves: a request holds a
 //!   durable decision of kind `tool_grant.issue`
 //!   ([`hold_tool_grant_request`]), and [`ToolGrantIssueExecutor`] issues
@@ -60,10 +62,10 @@ pub use deadlines::ToolGrantDeadlines;
 pub use gate::RuntimeSessionToolGrants;
 pub use request::{
     TOOL_GRANT_ISSUE_BODY, TOOL_GRANT_ISSUE_KIND, TOOL_GRANT_ISSUE_RENDERER, ToolGrantIssueBody,
-    ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestNotice,
-    ToolGrantRequestNotices, ToolGrantRequestOrigin, ToolGrantRequestOutcome,
-    ToolGrantRequestPolicy, ToolGrantRunObserver, hold_tool_grant_request, tool_grant_issue_kind,
-    tool_grant_requests_of,
+    ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestHost,
+    ToolGrantRequestNotice, ToolGrantRequestNotices, ToolGrantRequestOrigin,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRunObserver, hold_tool_grant_request,
+    tool_grant_issue_kind, tool_grant_requests_of,
 };
 pub use service::{
     RevokedToolGrant, StoredToolGrant, ToolGrantListing, ToolGrantRequest, ToolGrantRevocation,

@@ -2131,9 +2131,11 @@ its decision) only: no method loads, registers or wakes the session.
   cannot read (written by a newer version, or damaged), which opens nothing.
   On a server that keeps durable decisions the session's grant requests follow
   its grants: each open or approved one as `requested`, and with
-  `include_ended` each rejected, expired, withdrawn or refused one as
-  `declined` (its `ended_at_ms` when it ended). A request whose grant was
-  issued is listed as that grant only.
+  `include_ended` each rejected, expired, withdrawn or refused one whose
+  deadline is within the grant policy's maximum lifetime of now as `declined`
+  (its `ended_at_ms` when it ended; an older one stays readable through
+  `decision/list`). A request whose grant was issued is listed as that grant
+  only.
 - **`tool_grants/audit`** answers a page of the session's audit log, `granted`
   (with the grant's `scope`), `expired` (with the `driver` that observed it:
   `timer`, `boundary`, `dispatch`, `read`, `revoke`, or `run` and `recovery`
@@ -2167,7 +2169,11 @@ its decision) only: no method loads, registers or wakes the session.
   the `decision_id`, the `outcome` (`granted` with the `grant_id`,
   `rejected`, `expired`, `withdrawn`, or `refused` with a `reason`) and the
   `target`. A server whose persistence keeps no durable decisions answers
-  capability unavailable (`data.kind = "no_decision_store"`).
+  capability unavailable (`data.kind = "no_decision_store"`). A gated
+  session's agent asks the same way through its `request_tool_grant` tool
+  (see [scoped tool grants](/concepts/tools#scoped-tool-grants)); while the
+  server runs the executor of the kind, its agents' requests name the
+  realm's agent `rkat-agent` as their requester.
 
 List and audit read the session's grant rows without checking that the
 session exists: an archived session's grants stay listable and auditable, and

@@ -10457,7 +10457,10 @@ impl AgentFactory {
 
         // 12i-gate. The scoped tool grant gate over the final dispatcher: the
         // agent opens the gated names a live grant admits at each boundary,
-        // and the outermost dispatch gate adjudicates every gated call.
+        // and the outermost dispatch gate adjudicates every gated call. A
+        // gated build also mounts the agent's `request_tool_grant` beside its
+        // tools, itself ungated; the session's host holds each request, or
+        // answers that it takes none.
         let session_grants = match resolved_mode {
             RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
             RuntimeBuildMode::StandaloneEphemeral => None,
@@ -10472,6 +10475,13 @@ impl AgentFactory {
         .map_err(BuildAgentError::GrantGate)?;
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
+            let request_tool = Arc::new(meerkat_core::tool_grant::ToolGrantRequestDispatcher::new(
+                gate.clone(),
+            )) as Arc<dyn AgentToolDispatcher>;
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                request_tool,
+            ]));
         }
 
         let visibility_filters = capability_base_filter_override

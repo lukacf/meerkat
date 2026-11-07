@@ -14,6 +14,9 @@
 //! grants (grant rows only: an issued grant wakes nothing) and delivers each
 //! ended request's notice to its session as an input, like any input. The
 //! runtime's shutdown stops the loop before its registrations are torn down.
+//! While the loop runs, the runtime takes its agents' grant requests
+//! (`request_tool_grant`), naming the realm's agent `rkat-agent` as their
+//! requester.
 //!
 //! The party that decided is current while the realm's configuration still
 //! lists the decision's approver id for the operator
@@ -38,8 +41,8 @@ use meerkat_runtime::decision::{
 };
 use meerkat_runtime::tool_grant::wire::wire_tool_grant_target;
 use meerkat_runtime::tool_grant::{
-    TOOL_GRANT_ISSUE_KIND, ToolGrantRequestNotice, ToolGrantRequestNotices,
-    ToolGrantRequestOutcome, ToolGrantRunObserver,
+    TOOL_GRANT_ISSUE_KIND, ToolGrantRequestHost, ToolGrantRequestNotice, ToolGrantRequestNotices,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantRunObserver,
 };
 use tokio::sync::{Notify, oneshot};
 
@@ -185,6 +188,23 @@ async fn run_tool_grant_executor(
 }
 
 impl SessionRuntime {
+    /// The principal `id` of `kind` in the realm's stock trust domain
+    /// (`rkat-realm-<realm>`), as a decision names it.
+    fn realm_principal_key(
+        &self,
+        kind: PrincipalKind,
+        id: &str,
+    ) -> Result<DecisionPrincipalKey, String> {
+        let realm = self
+            .realm_id()
+            .ok_or_else(|| "tool grant requests need the runtime's realm".to_owned())?;
+        let domain = TrustDomainId::new(format!("rkat-realm-{}", realm.as_str()))
+            .map_err(|error| error.to_string())?;
+        let principal =
+            PrincipalRef::in_domain(kind, id, domain).map_err(|error| error.to_string())?;
+        DecisionPrincipalKey::of(&principal).map_err(|error| error.to_string())
+    }
+
     /// The principal a host's grant request on this runtime names as its
     /// requester: the runtime host `rkat-rpc` in the realm's stock trust
     /// domain.
@@ -192,14 +212,17 @@ impl SessionRuntime {
     /// # Errors
     /// A runtime without a realm, or a realm id no principal can name.
     pub(crate) fn tool_grant_host_requester(&self) -> Result<DecisionPrincipalKey, String> {
-        let realm = self
-            .realm_id()
-            .ok_or_else(|| "tool grant requests need the runtime's realm".to_owned())?;
-        let domain = TrustDomainId::new(format!("rkat-realm-{}", realm.as_str()))
-            .map_err(|error| error.to_string())?;
-        let host = PrincipalRef::in_domain(PrincipalKind::RuntimeHost, "rkat-rpc", domain)
-            .map_err(|error| error.to_string())?;
-        DecisionPrincipalKey::of(&host).map_err(|error| error.to_string())
+        self.realm_principal_key(PrincipalKind::RuntimeHost, "rkat-rpc")
+    }
+
+    /// The principal an agent's grant request on this runtime names as its
+    /// requester: the realm's agent executor `rkat-agent`, as the stock
+    /// composition names it.
+    ///
+    /// # Errors
+    /// A runtime without a realm, or a realm id no principal can name.
+    fn tool_grant_agent_requester(&self) -> Result<DecisionPrincipalKey, String> {
+        self.realm_principal_key(PrincipalKind::PersonalAgent, "rkat-agent")
     }
 
     /// Start the executor of the `tool_grant.issue` decisions of this
@@ -263,6 +286,22 @@ impl SessionRuntime {
             stopped,
         ));
         *running = Some(RunningExecutor { stop, task });
+        drop(running);
+        // While the executor runs, the runtime takes its agents' requests,
+        // naming the realm's agent as their requester.
+        match self.tool_grant_agent_requester() {
+            Ok(requester) => {
+                self.runtime_adapter()
+                    .set_tool_grant_request_host(Some(ToolGrantRequestHost {
+                        decisions: self.decision_service(),
+                        policy: ToolGrantRequestPolicy::default(),
+                        requester,
+                    }))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the runtime's agents cannot be named; they take no grant requests");
+            }
+        }
         Ok(())
     }
 
@@ -291,6 +330,7 @@ impl SessionRuntime {
         let Some(RunningExecutor { stop, mut task }) = running else {
             return;
         };
+        self.runtime_adapter().set_tool_grant_request_host(None);
         let _ = stop.send(());
         if tokio::time::timeout(TOOL_GRANT_EXECUTOR_STOP_GRACE, &mut task)
             .await

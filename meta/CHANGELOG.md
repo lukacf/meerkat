@@ -88,6 +88,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
 
+### Fixed
+
+- `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
+  tool's advertised page: at most `limit` rows (default 50, at most 200) of
+  bounded schedule summaries, with `page.has_more` and `page.next_cursor`.
+  The console gate that leaves console schedules out of the listing answered
+  the call itself: it ignored `limit` and `cursor` and returned every
+  non-console schedule whole (machine state, superseded acknowledgements and
+  the full action), so one list call could return hundreds of kilobytes. The
+  gate now lists through Core's page builder with console schedules filtered
+  out before the order, the cursor and the page cut, so pages stay full and a
+  cursor never lands on a console schedule. `meerkat_schedule_get` is
+  unchanged and still returns the whole schedule.
+
+- The event log no longer asks a failing store again for every event that
+  arrives. After a refused append it waits before it asks again: the flush
+  interval, doubled for each further refusal in a row, up to 30 seconds (or
+  the flush interval when that is longer). While events are being dropped
+  at the 4096-event limit, the wait is one flush interval, so a store that
+  recovers is asked again before many more are lost. The flush at shutdown
+  still runs at once. While it waits, events stay buffered in order, and the
+  oldest are dropped only past the 4096-event limit, as before.
+- The event log sends at most `batch_size` events per append, retries
+  included, oldest first. It used to send its whole retry buffer as one
+  append, so once an outage grew the buffer past what the store takes in one
+  request, the store refused every later flush and took no event again. A
+  refused append and every later event stay buffered in order for the next
+  flush.
+- The console no longer reads a member's status again on every change of
+  its team when it cannot follow that member's events (the member's session
+  has no live actor, for example after its store scope was refused). It
+  reads it again once the member's own state changes, and its periodic sweep
+  still covers it. Before, every change of any member, an answered status
+  read of another member included, read such a member's status again, so a
+  few such members kept the console reading their status without pause.
+- After a status read that does not answer, the console waits before it
+  reads that member's status again: 1 second, doubled for each further such
+  read in a row, up to 30 seconds, for its re-check and its periodic sweep
+  alike. An answered read ends the wait. Before, the re-check read the
+  status again on the next change of any member.
+
+- The event log and console status fixes above lift the two matching 0.9.10
+  Known limitations.
+
+- The console forwarder no longer attaches a member's event stream that
+  would attach only at the member's wake. A member released between the
+  forwarder's reconcile pass and its subscription, as a mob's teardown
+  releases its members, came back as a deferred stream that yielded nothing
+  until the member woke, or closed when the mob ended, and the pass tracked
+  it as attached. The pass now skips such a subscription, as it skips a
+  member it finds dormant, and the member's wake runs the pass again.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

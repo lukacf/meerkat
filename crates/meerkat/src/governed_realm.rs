@@ -316,38 +316,45 @@ async fn governed_machine(
             configuration,
             installed,
             per_agent,
-        } => match installed {
-            Ok(installed) => match per_agent {
-                Some((agent_grant, policy)) => {
-                    MeerkatMachine::persistent_with_local_grant_authorization_and_agent_mcp(
+        } => {
+            // The realm's open restored this grant owner, so the realm's
+            // terminal close ends its custody.
+            let grants = Arc::clone(&configuration.grants);
+            let machine = match installed {
+                Ok(installed) => match per_agent {
+                    Some((agent_grant, policy)) => {
+                        MeerkatMachine::persistent_with_local_grant_authorization_and_agent_mcp(
+                            runtime_store,
+                            Some(blob_store),
+                            configuration,
+                            installed,
+                            agent_grant,
+                            policy,
+                        )
+                    }
+                    None => {
+                        MeerkatMachine::persistent_with_local_grant_authorization_and_configured_mcp(
+                            runtime_store,
+                            Some(blob_store),
+                            configuration,
+                            installed,
+                        )
+                    }
+                },
+                Err(error) => {
+                    // The governed machine still opens; its configured servers are
+                    // all refused as unavailable (the governed host's default).
+                    warn_installations_unreadable(&error);
+                    MeerkatMachine::persistent_with_local_grant_authorization(
                         runtime_store,
                         Some(blob_store),
                         configuration,
-                        installed,
-                        agent_grant,
-                        policy,
                     )
                 }
-                None => {
-                    MeerkatMachine::persistent_with_local_grant_authorization_and_configured_mcp(
-                        runtime_store,
-                        Some(blob_store),
-                        configuration,
-                        installed,
-                    )
-                }
-            },
-            Err(error) => {
-                // The governed machine still opens; its configured servers are
-                // all refused as unavailable (the governed host's default).
-                warn_installations_unreadable(&error);
-                MeerkatMachine::persistent_with_local_grant_authorization(
-                    runtime_store,
-                    Some(blob_store),
-                    configuration,
-                )
-            }
-        },
+            }?;
+            machine.install_realm_grant_custody(grants)?;
+            Ok(machine)
+        }
     }
 }
 
@@ -366,23 +373,32 @@ pub(crate) fn install_governed_composition(
             configuration,
             installed,
             per_agent,
-        } => match installed {
-            Ok(installed) => match per_agent {
-                Some((agent_grant, policy)) => staged
-                    .install_local_grant_authorization_and_agent_mcp(
+        } => {
+            // As for a fresh open: the realm's terminal close ends the
+            // custody of the grant owner its open restored.
+            let grants = Arc::clone(&configuration.grants);
+            let machine = match installed {
+                Ok(installed) => match per_agent {
+                    Some((agent_grant, policy)) => staged
+                        .install_local_grant_authorization_and_agent_mcp(
+                            configuration,
+                            installed,
+                            agent_grant,
+                            policy,
+                        ),
+                    None => staged.install_local_grant_authorization_and_configured_mcp(
                         configuration,
                         installed,
-                        agent_grant,
-                        policy,
                     ),
-                None => staged
-                    .install_local_grant_authorization_and_configured_mcp(configuration, installed),
-            },
-            Err(error) => {
-                warn_installations_unreadable(&error);
-                staged.install_local_grant_authorization(configuration)
-            }
-        },
+                },
+                Err(error) => {
+                    warn_installations_unreadable(&error);
+                    staged.install_local_grant_authorization(configuration)
+                }
+            }?;
+            machine.install_realm_grant_custody(grants)?;
+            Ok(machine)
+        }
     }
 }
 

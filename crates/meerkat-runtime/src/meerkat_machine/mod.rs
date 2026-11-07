@@ -3526,6 +3526,26 @@ impl MeerkatMachine {
         self.native_work_authorization_host.get().is_some()
     }
 
+    /// The realm's terminal close: end the custody of the grant owner this
+    /// machine's realm open restored, after the realm's last legitimate
+    /// change (its session service's terminal shutdown calls it). From then
+    /// on that owner refuses every change and use, whoever still holds this
+    /// machine, and its store's lease is handed back, so a same-process
+    /// successor restores the realm's grant owner at once. Without such an
+    /// owner (an ordinary realm, or a grant owner a host supplied, whose own
+    /// close ends its custody) nothing changes. A second call changes
+    /// nothing.
+    pub fn release_realm_custody(&self) {
+        #[cfg(feature = "local-authorization")]
+        if let Some(grants) = self.realm_grant_custody.get()
+            && grants.release_custody().is_err()
+        {
+            tracing::warn!(
+                "the realm's grant owner is poisoned: its lease ends when its last reference drops"
+            );
+        }
+    }
+
     /// Install the trusted host's binder of governed peer deliveries
     /// ([`crate::input_authority::PeerIngressBinder`]): from now on a peer
     /// delivery whose sender the transport established is offered to it
@@ -11428,6 +11448,14 @@ impl Drop for RunStartHoldInFlightForTest<'_> {
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
     native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
+    /// The grant owner this machine's realm open restored, installed by that
+    /// composition before any session is registered. The realm's terminal
+    /// close ends its custody ([`MeerkatMachine::release_realm_custody`]).
+    /// Empty for a grant owner a host supplied: that host's own close ends
+    /// its custody.
+    #[cfg(feature = "local-authorization")]
+    realm_grant_custody:
+        std::sync::OnceLock<Arc<meerkat_authorization::grants::LocalGrantAuthority>>,
     /// Source of [`RuntimeSessionRegistrationUse`] stamps: one machine-wide
     /// sequence, so no two stamps this machine hands out are equal.
     registration_use_sequence: std::sync::atomic::AtomicU64,
@@ -13654,6 +13682,8 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -13920,6 +13950,8 @@ impl MeerkatMachine {
         Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),

@@ -21246,7 +21246,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return;
         }
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
-        self.inner.shutdown().await;
+        match self.inner.try_shutdown().await {
+            Ok(()) => self.release_realm_custody(),
+            Err(error) => {
+                tracing::error!(%error, "best-effort session service shutdown was incomplete");
+            }
+        }
     }
 
     /// Wait until every actor removed for `id` has exited, so its hosting
@@ -21270,10 +21275,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     /// Shut down all sessions, returning the first typed authorization failure.
+    ///
+    /// The shutdown is terminal: once every removed actor finished its last
+    /// durable write, it ends the custody the realm's open took of the
+    /// realm's grant owner ([`MeerkatMachine::release_realm_custody`]), so a
+    /// same-process successor restores that owner at once.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
         self.inner.drain_tool_applications_for_shutdown().await?;
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
-        self.inner.try_shutdown().await
+        self.inner.try_shutdown().await?;
+        self.release_realm_custody();
+        Ok(())
+    }
+
+    /// The realm's terminal close on the machine this service is bound to.
+    /// A service with no bound machine ends nothing.
+    fn release_realm_custody(&self) {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(adapter) = adapter {
+            adapter.release_realm_custody();
+        }
     }
 
     /// Cancel all active checkpointer gates.

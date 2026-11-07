@@ -438,9 +438,15 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   `MobError::MemberSessionNotLive` when the session leaves the process
   (another writer took its store fence, or an unregister ended the run
   first: its inputs then stopped when it keeps queued work, a mob
-  Shutdown's default, and cancelled when it stops). A member not live
-  in this process is refused `MobError::MemberSessionNotLive` and never
-  woken. `MeerkatMachine::session_work_state` reads cold whether one session
+  Shutdown's default, and cancelled when it stops), and
+  `MobError::MemberInputTerminalNotYetReadable` when the run is no longer
+  kept but an input of it reads no committed terminal yet (settle again). A
+  member not live in this process is refused
+  `MobError::MemberSessionNotLive` and never woken. `MemberNotFound` (a
+  member the mob no longer holds; a release answers it too) and
+  `UnsupportedForMode` (a placed or session-less member, never held) answer
+  the same on every round: that member is done.
+  `MeerkatMachine::session_work_state` reads cold whether one session
   holds the work a start wakes a member for, without loading or registering
   it: `Registered`, `Idle`,
   `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })` or

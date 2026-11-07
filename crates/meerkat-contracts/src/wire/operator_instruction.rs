@@ -884,6 +884,39 @@ mod tests {
             }))
             .is_err()
         );
+        // A target refuses a field its kind does not have, the mob kind's
+        // too: a member or profile name sent with the wrong kind must not
+        // widen the write to every member.
+        for target in [
+            json!({ "kind": "mob", "agent_identity": "worker-1" }),
+            json!({ "kind": "mob", "profile": "worker" }),
+            json!({ "kind": "profile", "profile": "worker", "agent_identity": "worker-1" }),
+            json!({ "kind": "member", "agent_identity": "worker-1", "profile": "worker" }),
+        ] {
+            assert!(
+                serde_json::from_value::<WireInstructionTarget>(target.clone()).is_err(),
+                "a target with a field its kind does not have is refused: {target}"
+            );
+        }
+        let widened = json!({
+            "mob_id": "team",
+            "namespace": "app.example",
+            "key": "tone",
+            "revision": 1,
+            "body": "Answer formally.",
+            "target": { "kind": "mob", "agent_identity": "worker-1" }
+        });
+        assert!(
+            serde_json::from_value::<MobSetInstructionParams>(widened).is_err(),
+            "a write whose mob target names a member is refused, not widened"
+        );
+        let mob: WireInstructionTarget = serde_json::from_value(json!({ "kind": "mob" })).unwrap();
+        assert_eq!(mob, WireInstructionTarget::Mob {});
+        assert_eq!(
+            serde_json::to_value(&mob).unwrap(),
+            json!({ "kind": "mob" }),
+            "the mob target's wire form is its kind alone"
+        );
         let revoke: RevokeSessionInstructionParams = serde_json::from_value(json!({
             "session_id": "019a2b3c-0000-7000-8000-000000000001",
             "namespace": "app.example",

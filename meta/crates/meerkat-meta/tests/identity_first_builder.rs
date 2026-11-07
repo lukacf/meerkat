@@ -2252,7 +2252,10 @@ async fn wait_until_warmed(runtime: &meerkat_meta::UnifiedRuntime, identities: &
 /// with all 20 identities seated and active, before any warm build is
 /// released, and the warm changes no bootstrap state. A warm build the host
 /// refuses leaves that identity's customizer tools pending with the host's
-/// reason, and the bootstrap stays ready.
+/// reason, and the bootstrap stays ready. The host is asked once more for
+/// that identity: Core refuses the warm's wake for the build preparation
+/// the host asked to retry, and the door retries the preparation once, as
+/// it does on every lane.
 async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usize, instance: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let names = (0..20)
@@ -2314,7 +2317,11 @@ async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usiz
     assert_eq!(warming.counts.active, 20, "{warming:?}");
     assert_eq!(warming.counts.warming, 0, "{warming:?}");
 
-    permits.add_permits(names.len());
+    // One permit more than identities: the refused identity's build is
+    // asked for twice, by design (the door's one retry of the build
+    // preparation Core refused the warm's wake for), so the host is asked
+    // 21 times for 20 identities.
+    permits.add_permits(names.len() + 1);
     tokio::time::timeout(Duration::from_secs(10), async {
         while customizer.entered.load(Ordering::SeqCst) < names.len() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2345,6 +2352,21 @@ async fn warm_twenty_identities(mode_concurrency: Option<usize>, in_flight: usiz
     assert!(
         pending.reason.contains("injected warm failure"),
         "{pending:?}"
+    );
+    // The host was asked once per identity and once more for the refused
+    // one, never again.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while customizer.entered.load(Ordering::SeqCst) < names.len() + 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the door retries the refused identity's build preparation once");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        customizer.entered.load(Ordering::SeqCst),
+        names.len() + 1,
+        "the host is asked once more for the refused identity, never again"
     );
     let after = identity_runtime.identity_bootstrap_status();
     assert!(after.complete && after.ready, "{after:?}");

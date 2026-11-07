@@ -435,6 +435,23 @@ fn classify_reload_mob_error(
                 stage: stage.to_string(),
             }
         }
+        // Core's machine refused to materialize the member for this wake,
+        // typed with Core's own verdict, as a delivery's wake is
+        // (`classify_submit_mob_error`): the door takes its one step for a
+        // refusal the host ends, and a final refusal stays final.
+        error @ meerkat_mob::MobError::MemberWakeRefused { .. } => {
+            let meerkat_mob::MobError::MemberWakeRefused {
+                member_id, refusal, ..
+            } = &error
+            else {
+                unreachable!("matched above")
+            };
+            BridgeError::MemberWakeRefused {
+                identity: member_id.clone(),
+                refusal: *refusal,
+                detail: error.to_string(),
+            }
+        }
         // Core holds the member Broken: its restore failed, or its host
         // refused the restored registration. Final (or held, by Core's
         // hold) for the reload and the wake alike, never a retryable text.

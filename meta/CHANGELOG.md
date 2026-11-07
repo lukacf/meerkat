@@ -243,6 +243,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   restart is refused (its thread is unknown), never delivered twice, and
   the attention list starts empty.
 
+- No route delivers a private reply yet. A console send records its
+  thread, and the attention list (`meta/console/attention` and its
+  dismissal), the `private_reply` frame and the Console's reply cards are
+  in place, but nothing in this release answers a console request
+  privately: every person's attention list stays empty, and no
+  `private_reply` frame is appended to any conversation.
+
 ## [0.9.10] - 2026-11-04
 
 Meta 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10 and Connect

@@ -203,13 +203,24 @@ mod sonnet_5_5_request_shaping {
         }
     }
 
+    /// The model's own default, adaptive, named beside the thinking-block
+    /// binding control (Sonnet 5.5 and Haiku 5.5 think by default and check
+    /// replayed thinking blocks against their request prefix).
+    fn adaptive_with_binding() -> Value {
+        serde_json::json!({
+            "type": "adaptive",
+            "block_binding": {"prefix_mismatch_behavior": "drop_block"}
+        })
+    }
+
     #[test]
     fn default_config_sends_no_thinking_override_and_no_sampling() {
         let body = body(MODEL, None, None).unwrap();
         assert_clean(&body);
-        assert!(
-            body.get("thinking").is_none(),
-            "the provider default (adaptive) applies"
+        assert_eq!(
+            body["thinking"],
+            adaptive_with_binding(),
+            "the provider default (adaptive) is named beside the binding control"
         );
     }
 
@@ -231,10 +242,7 @@ mod sonnet_5_5_request_shaping {
         )
         .unwrap();
         assert_clean(&adaptive);
-        assert_eq!(
-            adaptive["thinking"],
-            serde_json::json!({"type": "adaptive"})
-        );
+        assert_eq!(adaptive["thinking"], adaptive_with_binding());
 
         for effort in [
             None,
@@ -371,9 +379,10 @@ mod sonnet_5_5_request_shaping {
         let model = "claude-haiku-5-5";
         let default = body(model, Some(0.7), None).unwrap();
         assert_clean(&default);
-        assert!(
-            default.get("thinking").is_none(),
-            "the provider default (adaptive) applies"
+        assert_eq!(
+            default["thinking"],
+            adaptive_with_binding(),
+            "the provider default (adaptive) is named beside the binding control"
         );
 
         let message = refusal(body(

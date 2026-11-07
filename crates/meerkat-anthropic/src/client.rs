@@ -68,6 +68,11 @@ pub struct AnthropicClient {
     /// Whether this backend accepts Anthropic's request-wide automatic cache
     /// policy. Amazon Bedrock supports manual breakpoints but not this mode.
     automatic_cache_control_supported: bool,
+    /// Whether this backend documents Anthropic's thinking-block binding
+    /// controls (the Claude API, Google Cloud and Microsoft Foundry; not
+    /// Amazon Bedrock or the Copilot route). See
+    /// [`AnthropicClientBuilder::thinking_binding_controls_supported`].
+    thinking_binding_controls_supported: bool,
     /// Dynamic authorizer — when set, replaces the `x-api-key` header
     /// path with `HttpAuthorizer::authorize` invocation (used for
     /// OAuth and cloud backends where the Bearer token is acquired at
@@ -84,6 +89,7 @@ pub struct AnthropicClientBuilder {
     pool_idle_timeout: Duration,
     default_cache_control: AnthropicCacheControlPolicy,
     automatic_cache_control_supported: bool,
+    thinking_binding_controls_supported: bool,
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
@@ -97,6 +103,7 @@ impl AnthropicClientBuilder {
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
             default_cache_control: AnthropicCacheControlPolicy::Automatic,
             automatic_cache_control_supported: true,
+            thinking_binding_controls_supported: true,
             authorizer: None,
         }
     }
@@ -140,6 +147,25 @@ impl AnthropicClientBuilder {
     /// backend does not support it.
     pub fn automatic_cache_control_supported(mut self, supported: bool) -> Self {
         self.automatic_cache_control_supported = supported;
+        self
+    }
+
+    /// Declare whether the selected backend documents Anthropic's
+    /// thinking-block binding controls (`thinking.block_binding` with the
+    /// `thinking-binding-controls-2026-08-01` beta).
+    ///
+    /// The builder starts from `true`, the Claude API's answer. Provider
+    /// runtimes set `false` for Amazon Bedrock and the Copilot route. Where it
+    /// is supported, a request to a model whose catalog row lists the beta
+    /// asks Anthropic to drop, rather than refuse, a replayed thinking block
+    /// whose system prompt, tools or earlier messages changed: beside
+    /// `adaptive` or `enabled` thinking, and beside the model's own default
+    /// (adaptive) when thinking is omitted; never beside `between_tools` or
+    /// `disabled`. A direct builder user targeting another backend that does
+    /// not document the beta sets `false`.
+    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    pub fn thinking_binding_controls_supported(mut self, supported: bool) -> Self {
+        self.thinking_binding_controls_supported = supported;
         self
     }
 
@@ -189,6 +215,7 @@ impl AnthropicClientBuilder {
             pool_idle_timeout,
             default_cache_control: self.default_cache_control,
             automatic_cache_control_supported: self.automatic_cache_control_supported,
+            thinking_binding_controls_supported: self.thinking_binding_controls_supported,
             authorizer: self.authorizer,
         })
     }
@@ -220,6 +247,194 @@ fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
         .context_window_beta?
         .header;
     header.strip_prefix("anthropic-beta: ")
+}
+
+/// Where Anthropic's thinking-block binding control goes in a request to a
+/// model whose catalog row lists the binding beta, on a backend that
+/// documents it.
+///
+/// The control (`thinking.block_binding.prefix_mismatch_behavior:
+/// "drop_block"`) is accepted beside `adaptive` and `enabled` thinking only;
+/// `between_tools` takes no other field, and Claude Haiku 5.5 refuses it
+/// beside `disabled`.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingBlockBinding {
+    /// Beside the configured `adaptive` or `enabled` thinking (a legacy
+    /// budget lowers to `enabled`).
+    BesideConfiguredThinking,
+    /// Thinking omitted: beside the model's own default, adaptive. Every row
+    /// that lists the beta is documented thinking-on by default, so naming
+    /// the default turns nothing on.
+    BesideModelDefault,
+    /// No control: `between_tools` and `disabled` refuse it, and a request
+    /// that forces a tool call with thinking omitted keeps today's shape
+    /// (this client refuses a forced call beside explicit thinking).
+    NotSent,
+}
+
+fn thinking_block_binding(
+    tag: Option<&AnthropicProviderTag>,
+    forces_a_tool_call: bool,
+) -> ThinkingBlockBinding {
+    match tag.and_then(|tag| tag.thinking.as_ref()) {
+        Some(AnthropicThinkingConfig::Adaptive | AnthropicThinkingConfig::Enabled { .. }) => {
+            ThinkingBlockBinding::BesideConfiguredThinking
+        }
+        Some(AnthropicThinkingConfig::BetweenTools | AnthropicThinkingConfig::Disabled) => {
+            ThinkingBlockBinding::NotSent
+        }
+        None if tag.is_some_and(|tag| tag.thinking_budget_tokens.is_some()) => {
+            ThinkingBlockBinding::BesideConfiguredThinking
+        }
+        None if forces_a_tool_call => ThinkingBlockBinding::NotSent,
+        None => ThinkingBlockBinding::BesideModelDefault,
+    }
+}
+
+/// One entry of the `input_transformations` report that Anthropic returns
+/// under the thinking-binding beta: a replayed thinking block the API dropped,
+/// or let through although it failed the prefix check.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputTransformation {
+    kind: InputTransformationKind,
+    /// The block's position in the request, for example
+    /// `messages.1.content.0`.
+    path: Option<String>,
+    reason: Option<InputTransformationReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputTransformationKind {
+    /// `thinking_dropped`: the model answered without the block (not billed),
+    /// and the prompt cache restarts at the first dropped block.
+    ThinkingDropped,
+    /// `thinking_mismatch_allowed`: the block failed the prefix check and
+    /// still reached the model (billed).
+    ThinkingMismatchAllowed,
+    /// A kind this client does not know, kept verbatim.
+    Unrecognized(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputTransformationReason {
+    /// `system`, `tools` or an earlier message changed after the block was
+    /// produced.
+    PrefixBindingMismatch,
+    /// The block came from a model the serving model cannot read.
+    ModelBindingMismatch,
+    /// The block came from another account.
+    OrganizationBindingMismatch,
+    /// A reason this client does not know, kept verbatim.
+    Unrecognized(String),
+}
+
+impl InputTransformation {
+    /// Read the report best-effort: it is evidence about the request, so its
+    /// shape never fails the stream that carries it. An array yields each
+    /// object entry that names its `type`; any other shape reads as no entry.
+    fn list_from_evidence(value: Value) -> Vec<Self> {
+        let Value::Array(entries) = value else {
+            return Vec::new();
+        };
+        entries
+            .into_iter()
+            .filter_map(|entry| {
+                let text = |name: &str| entry.get(name).and_then(Value::as_str).map(str::to_owned);
+                let kind = match text("type")?.as_str() {
+                    "thinking_dropped" => InputTransformationKind::ThinkingDropped,
+                    "thinking_mismatch_allowed" => InputTransformationKind::ThinkingMismatchAllowed,
+                    other => InputTransformationKind::Unrecognized(other.to_owned()),
+                };
+                let reason = text("reason").map(|reason| match reason.as_str() {
+                    "prefix_binding_mismatch" => InputTransformationReason::PrefixBindingMismatch,
+                    "model_binding_mismatch" => InputTransformationReason::ModelBindingMismatch,
+                    "organization_binding_mismatch" => {
+                        InputTransformationReason::OrganizationBindingMismatch
+                    }
+                    _ => InputTransformationReason::Unrecognized(reason),
+                });
+                Some(Self {
+                    kind,
+                    path: text("path"),
+                    reason,
+                })
+            })
+            .collect()
+    }
+}
+
+impl std::fmt::Display for InputTransformationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ThinkingDropped => "thinking_dropped",
+            Self::ThinkingMismatchAllowed => "thinking_mismatch_allowed",
+            Self::Unrecognized(kind) => kind,
+        })
+    }
+}
+
+impl std::fmt::Display for InputTransformationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::PrefixBindingMismatch => "prefix_binding_mismatch",
+            Self::ModelBindingMismatch => "model_binding_mismatch",
+            Self::OrganizationBindingMismatch => "organization_binding_mismatch",
+            Self::Unrecognized(reason) => reason,
+        })
+    }
+}
+
+/// The entries of one report, rendered `path kind (reason)` and separated by
+/// `; `, for a log field.
+struct InputTransformationList<'a>(&'a [InputTransformation]);
+
+impl std::fmt::Display for InputTransformationList<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, entry) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(
+                f,
+                "{} {}",
+                entry.path.as_deref().unwrap_or("(no path)"),
+                entry.kind
+            )?;
+            if let Some(reason) = &entry.reason {
+                write!(f, " ({reason})")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Record the replayed thinking blocks Anthropic reported in
+/// `input_transformations` on the response to a request for `model`.
+///
+/// A dropped block is reasoning the model answered without, and the prompt
+/// cache restarts at the first one; a block let through failed the check and
+/// reached the model anyway. Either is worth a host's attention, so a
+/// non-empty report is a warning that names each block, its kind and its
+/// reason. An empty report (the usual answer under the beta) records nothing.
+fn report_input_transformations(model: &str, event: &'static str, report: Value) {
+    let entries = InputTransformation::list_from_evidence(report);
+    if entries.is_empty() {
+        return;
+    }
+    let count =
+        |kind: &InputTransformationKind| entries.iter().filter(|entry| &entry.kind == kind).count();
+    tracing::warn!(
+        model,
+        event,
+        dropped = count(&InputTransformationKind::ThinkingDropped),
+        reached_model = count(&InputTransformationKind::ThinkingMismatchAllowed),
+        blocks = %InputTransformationList(&entries),
+        "Anthropic reported replayed thinking blocks it dropped or let through: the model \
+         answered without the dropped reasoning, and the prompt cache restarts at the first \
+         dropped block"
+    );
 }
 
 fn invalid_replay(message: impl Into<String>) -> LlmError {
@@ -1179,7 +1394,51 @@ impl AnthropicClient {
             }
         }
 
+        self.apply_thinking_block_binding(request, &mut body);
+
         Ok(body)
+    }
+
+    /// Ask Anthropic to drop, rather than refuse, a replayed thinking block
+    /// whose bound prefix (the system prompt, the tools and the earlier
+    /// messages) changed: Meerkat changes the tools mid-session as MCP
+    /// servers connect, and accounts created on or after 2026-08-31 refuse
+    /// such a request with a 400 unless it sets the control.
+    ///
+    /// Only where it is valid: the backend documents the beta, the model's
+    /// catalog row lists it (the prefix-checked models, each thinking by
+    /// default), and [`thinking_block_binding`] places it. Thinking omitted
+    /// is named as the model's own default, adaptive, so the control has a
+    /// type to sit beside; no thinking is turned on. The stream path sends
+    /// the beta header exactly when the body carries the control.
+    fn apply_thinking_block_binding(&self, request: &LlmRequest, body: &mut Value) {
+        if !self.thinking_binding_controls_supported
+            || catalog_beta_value(
+                request,
+                meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
+            )
+            .is_none()
+        {
+            return;
+        }
+        let control = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
+        match thinking_block_binding(
+            anthropic_tag(request),
+            request.tool_choice.forces_a_tool_call(),
+        ) {
+            ThinkingBlockBinding::BesideConfiguredThinking => {
+                if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
+                    thinking.insert("block_binding".to_string(), control);
+                }
+            }
+            ThinkingBlockBinding::BesideModelDefault => {
+                body["thinking"] = serde_json::json!({
+                    "type": "adaptive",
+                    "block_binding": control,
+                });
+            }
+            ThinkingBlockBinding::NotSent => {}
+        }
     }
 
     fn anthropic_ordered_system_value(
@@ -1809,6 +2068,20 @@ impl AnthropicClient {
                 betas.push(beta.to_string());
             }
 
+            // Thinking-block binding controls (beta), exactly when the body
+            // carries the control (`apply_thinking_block_binding`).
+            if body
+                .get("thinking")
+                .and_then(|thinking| thinking.get("block_binding"))
+                .is_some()
+                && let Some(beta) = catalog_beta_value(
+                    request,
+                    meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
+                )
+            {
+                betas.push(beta.to_string());
+            }
+
             let url = self.messages_endpoint();
             let content = meerkat_core::HttpAuthorizationContent {
                 has_images: request.has_images(),
@@ -2144,7 +2417,17 @@ impl AnthropicClient {
                                         })?,
                                 };
                             }
-                            let delta = $event.delta;
+                            let mut delta = $event.delta;
+                            // After a mid-stream server-side fallback the
+                            // final message_delta carries the report again,
+                            // with the serving model's entries.
+                            if let Some(report) = $event.input_transformations.or_else(|| {
+                                delta
+                                    .as_mut()
+                                    .and_then(|delta| delta.input_transformations.take())
+                            }) {
+                                report_input_transformations(&request.model, "message_delta", report);
+                            }
                             offer_stop_details(
                                 &mut refusal_details,
                                 StopDetailsPosition::InMessageDelta,
@@ -2181,7 +2464,14 @@ impl AnthropicClient {
                             }
                         }
                         "message_start" => {
-                            if let Some(usage_update) = $event.message.and_then(|m| m.usage) {
+                            let mut message = $event.message;
+                            if let Some(report) = message
+                                .as_mut()
+                                .and_then(|message| message.input_transformations.take())
+                            {
+                                report_input_transformations(&request.model, "message_start", report);
+                            }
+                            if let Some(usage_update) = message.and_then(|m| m.usage) {
                                 merge_usage(&mut usage, &usage_update);
                                 attach_normalized_usage(&request.model, &mut usage);
                                 chunk_yielded.set(true);
@@ -2804,6 +3094,9 @@ struct AnthropicEvent {
     /// `stop_details` sent beside the delta rather than inside it, as raw
     /// evidence ([`AnthropicStopDetails::from_evidence`]).
     stop_details: Option<Value>,
+    /// `input_transformations` sent beside a `message_delta`'s delta, as raw
+    /// evidence ([`InputTransformation::list_from_evidence`]).
+    input_transformations: Option<Value>,
 }
 
 /// Anthropic `stop_details`: on a `refusal` stop, the policy category that
@@ -2877,6 +3170,10 @@ struct AnthropicDelta {
     signature: Option<String>,
     /// Content for compaction_delta events
     content: Option<String>,
+    /// `input_transformations` of a `message_delta` (the message's top-level
+    /// fields are updated inside its delta), as raw evidence
+    /// ([`InputTransformation::list_from_evidence`]).
+    input_transformations: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2911,6 +3208,10 @@ fn parse_streamed_tool_args(args: &str, tool_id: &str) -> Result<Value, LlmError
 #[derive(Debug, Deserialize)]
 struct AnthropicMessage {
     usage: Option<AnthropicUsage>,
+    /// The replayed thinking blocks the API dropped or let through, reported
+    /// under the thinking-binding beta, as raw evidence
+    /// ([`InputTransformation::list_from_evidence`]).
+    input_transformations: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7828,5 +8129,188 @@ mod tests {
             serde_json::from_str::<Value>(parts[3]["text"].as_str().unwrap()).unwrap(),
             mcp_structured_payload()
         );
+    }
+}
+
+/// The thinking-binding placement and the `input_transformations` report,
+/// below the request and stream paths `crate::thinking_binding_tests` drives
+/// against the mock account.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod thinking_binding_unit_tests {
+    use super::*;
+    use meerkat_core::UserMessage;
+
+    const BINDING_ROWS: [&str; 4] = [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+
+    fn tag(thinking: Option<AnthropicThinkingConfig>, budget: Option<u32>) -> AnthropicProviderTag {
+        AnthropicProviderTag {
+            thinking,
+            thinking_budget_tokens: budget,
+            ..Default::default()
+        }
+    }
+
+    fn hello(model: &str) -> LlmRequest {
+        LlmRequest::new(model, vec![Message::User(UserMessage::text("hello"))])
+    }
+
+    /// Row (c) for `enabled`: the control sits beside `adaptive` and
+    /// `enabled` (a legacy budget lowers to `enabled`), never beside
+    /// `between_tools` or `disabled`; omitted thinking names the model's
+    /// default unless the request forces a tool call.
+    #[test]
+    fn the_control_sits_beside_adaptive_and_enabled_only() {
+        use ThinkingBlockBinding::{BesideConfiguredThinking, BesideModelDefault, NotSent};
+        for forced in [false, true] {
+            for (thinking, budget, expected) in [
+                (
+                    Some(AnthropicThinkingConfig::Adaptive),
+                    None,
+                    BesideConfiguredThinking,
+                ),
+                (
+                    Some(AnthropicThinkingConfig::Enabled {
+                        budget_tokens: 2048,
+                    }),
+                    None,
+                    BesideConfiguredThinking,
+                ),
+                (None, Some(2048), BesideConfiguredThinking),
+                (Some(AnthropicThinkingConfig::BetweenTools), None, NotSent),
+                (Some(AnthropicThinkingConfig::Disabled), Some(2048), NotSent),
+            ] {
+                assert_eq!(
+                    thinking_block_binding(Some(&tag(thinking.clone(), budget)), forced),
+                    expected,
+                    "{thinking:?} budget {budget:?} forced {forced}"
+                );
+            }
+        }
+        assert_eq!(thinking_block_binding(None, false), BesideModelDefault);
+        assert_eq!(
+            thinking_block_binding(Some(&tag(None, None)), false),
+            BesideModelDefault
+        );
+        assert_eq!(thinking_block_binding(None, true), NotSent);
+    }
+
+    /// No catalogued binding row accepts `enabled` (each refuses it, as
+    /// Anthropic does), so `enabled` never reaches a binding model's wire;
+    /// the placement beside it is pinned by the decision above.
+    #[test]
+    fn enabled_thinking_is_refused_locally_on_every_binding_row() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        for model in BINDING_ROWS {
+            let request = hello(model).with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 2048,
+                });
+            });
+            match client.build_request_body(&request) {
+                Err(LlmError::InvalidRequest { message }) => assert!(
+                    message.contains("thinking type 'enabled'"),
+                    "{model}: {message}"
+                ),
+                other => panic!("{model}: expected the local refusal, got {other:?}"),
+            }
+        }
+    }
+
+    /// A client whose backend does not document the controls sends none, and
+    /// an omitted thinking stays omitted there.
+    #[test]
+    fn a_backend_without_the_controls_sends_none() {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .thinking_binding_controls_supported(false)
+            .build()
+            .unwrap();
+        for model in BINDING_ROWS {
+            let omitted = client.build_request_body(&hello(model)).unwrap();
+            assert!(omitted.get("thinking").is_none(), "{model}: {omitted}");
+            let adaptive = client
+                .build_request_body(&hello(model).with_anthropic_tag_merge(|tag| {
+                    tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+                }))
+                .unwrap();
+            assert_eq!(
+                adaptive["thinking"],
+                serde_json::json!({"type": "adaptive"}),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_transformations_read_every_documented_entry() {
+        let report = serde_json::json!([
+            {"type": "thinking_dropped", "path": "messages.1.content.0",
+             "reason": "prefix_binding_mismatch"},
+            {"type": "thinking_dropped", "path": "messages.3.content.0",
+             "reason": "model_binding_mismatch"},
+            {"type": "thinking_dropped", "path": "messages.5.content.1",
+             "reason": "organization_binding_mismatch"},
+            {"type": "thinking_mismatch_allowed", "path": "messages.7.content.0",
+             "reason": "prefix_binding_mismatch"},
+            {"type": "thinking_reordered", "reason": "a_future_reason"},
+            {"path": "messages.9.content.0", "reason": "prefix_binding_mismatch"},
+            "not an entry"
+        ]);
+        let entries = InputTransformation::list_from_evidence(report);
+        let entry = |kind, path: Option<&str>, reason| InputTransformation {
+            kind,
+            path: path.map(str::to_owned),
+            reason: Some(reason),
+        };
+        assert_eq!(
+            entries,
+            vec![
+                entry(
+                    InputTransformationKind::ThinkingDropped,
+                    Some("messages.1.content.0"),
+                    InputTransformationReason::PrefixBindingMismatch
+                ),
+                entry(
+                    InputTransformationKind::ThinkingDropped,
+                    Some("messages.3.content.0"),
+                    InputTransformationReason::ModelBindingMismatch
+                ),
+                entry(
+                    InputTransformationKind::ThinkingDropped,
+                    Some("messages.5.content.1"),
+                    InputTransformationReason::OrganizationBindingMismatch
+                ),
+                entry(
+                    InputTransformationKind::ThinkingMismatchAllowed,
+                    Some("messages.7.content.0"),
+                    InputTransformationReason::PrefixBindingMismatch
+                ),
+                entry(
+                    InputTransformationKind::Unrecognized("thinking_reordered".into()),
+                    None,
+                    InputTransformationReason::Unrecognized("a_future_reason".into())
+                ),
+            ]
+        );
+        assert_eq!(
+            InputTransformationList(&entries[..2]).to_string(),
+            "messages.1.content.0 thinking_dropped (prefix_binding_mismatch); \
+             messages.3.content.0 thinking_dropped (model_binding_mismatch)"
+        );
+        for shape in [
+            serde_json::json!({"type": "thinking_dropped"}),
+            Value::Null,
+            serde_json::json!("thinking_dropped"),
+        ] {
+            assert!(
+                InputTransformation::list_from_evidence(shape.clone()).is_empty(),
+                "{shape}"
+            );
+        }
     }
 }

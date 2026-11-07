@@ -61214,7 +61214,8 @@ function createConsoleInstanceCaller(whoami) {
     },
     bind(answer) {
       bound ?? (bound = { answer });
-    }
+    },
+    known: () => bound !== void 0
   };
   return caller;
 }
@@ -92162,7 +92163,11 @@ function ConsoleAppAuthority(props) {
       restart(announcement.caller !== lastCallerRef.current);
       return;
     }
-    if (callerRef.current !== void 0 && announcement.caller !== callerRef.current) restart(true);
+    if (callerRef.current === void 0) {
+      restart(announcement.caller !== lastCallerRef.current);
+      return;
+    }
+    if (announcement.caller !== callerRef.current) restart(true);
   }), [forgetSignedOutUser, props.baseUrl, restart]);
   import_react103.default.useEffect(() => {
     if (!signedOut) return void 0;
@@ -92320,6 +92325,9 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [caller, setCaller] = import_react103.default.useState();
   const adoptCaller = import_react103.default.useCallback((whoami) => {
     setCaller(whoami);
+    for (const [key, request] of autoDrainRequestedRef.current) {
+      if (!request.inFlight) autoDrainRequestedRef.current.delete(key);
+    }
     if (whoami?.callerScope) callerHandlersRef.current.onCaller(whoami.callerScope);
   }, []);
   import_react103.default.useEffect(() => {
@@ -95136,6 +95144,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       const request = { inFlight: true, token };
       autoDrainRequestedRef.current.set(key, request);
       const scope = sendScopeRef.current;
+      let keptBack = false;
       void (async () => {
         try {
           await loadExperience();
@@ -95143,11 +95152,18 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           return false;
         }
         if (!lifetimeRef.current.active || scope !== sendScopeRef.current) return false;
+        if (!instanceCaller.known()) {
+          keptBack = true;
+          return false;
+        }
         return dispatchPendingAttempt(identity, head.id, "queue");
       })().finally(() => {
         if (autoDrainRequestedRef.current.get(key) !== request) return;
         const current = getPendingStack(identity).find((item) => item.id === head.id);
-        if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
+        if (keptBack && instanceCaller.known()) {
+          autoDrainRequestedRef.current.delete(key);
+          maybeDrainHead(identity);
+        } else if (current?.state === "draft") autoDrainRequestedRef.current.set(key, { inFlight: false, token: tokenFor() });
         else autoDrainRequestedRef.current.delete(key);
       });
     }

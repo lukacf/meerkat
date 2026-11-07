@@ -685,6 +685,26 @@ function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailur
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
 }
 
+/** The principal kinds the runtime's requester grammar names. */
+const REQUESTER_PRINCIPAL_KINDS = new Set<string>([
+  "human",
+  "personal_agent",
+  "shared_agent",
+  "runtime_host",
+  "service_account",
+]);
+/** A control character, as the runtime's identity check reads one. */
+const REQUESTER_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+/**
+ * Whether `value` is an id the runtime accepts for a qualified principal or a
+ * trust domain: a string that is not blank and holds no control character.
+ */
+function isRequesterIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim() !== "" && !REQUESTER_CONTROL_CHARACTER.test(value)
+  );
+}
+
 interface ResolvedBinary {
   command: string;
   useLegacySubcommand: boolean;
@@ -5221,8 +5241,14 @@ export class MeerkatClient {
 
   /**
    * The `requester` of a `tool/execute` request: the original requester of
-   * the run the call serves. An absent or malformed value is `undefined`, no
-   * requester, which a person-scoped tool refuses.
+   * the run the call serves, read as the runtime's grammar reads it. An
+   * absent or malformed value is `undefined`, no requester, which a
+   * person-scoped tool refuses. Malformed is anything the runtime refuses: a
+   * principal kind outside `human`, `personal_agent`, `shared_agent`,
+   * `runtime_host` and `service_account`; a qualification that is null, has
+   * an unknown kind, or carries a field its kind does not have; a blank trust
+   * domain or one with a control character; and a blank qualified id or one
+   * with a control character.
    */
   static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -5232,30 +5258,35 @@ export class MeerkatClient {
     if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
       return undefined;
     }
-    const { kind, id, qualification } = principal as Record<string, unknown>;
+    const wirePrincipal = principal as Record<string, unknown>;
+    const { kind, id } = wirePrincipal;
     if (
       typeof kind !== "string" ||
-      kind.trim() === "" ||
+      !REQUESTER_PRINCIPAL_KINDS.has(kind) ||
       typeof id !== "string" ||
       id.trim() === ""
     ) {
       return undefined;
     }
     let trustDomainId: string | undefined;
-    if (qualification !== undefined && qualification !== null) {
-      if (typeof qualification !== "object" || Array.isArray(qualification)) {
+    if (Object.prototype.hasOwnProperty.call(wirePrincipal, "qualification")) {
+      const qualification = wirePrincipal.qualification;
+      if (qualification === null || typeof qualification !== "object" || Array.isArray(qualification)) {
         return undefined;
       }
-      const { kind: qualificationKind, trust_domain_id } = qualification as Record<
-        string,
-        unknown
-      >;
-      if (qualificationKind === "qualified") {
-        if (typeof trust_domain_id !== "string" || trust_domain_id.trim() === "") {
+      const fields = qualification as Record<string, unknown>;
+      const keys = Object.keys(fields).sort().join(",");
+      if (fields.kind === "qualified") {
+        const domain = fields.trust_domain_id;
+        if (
+          keys !== "kind,trust_domain_id" ||
+          !isRequesterIdentity(domain) ||
+          !isRequesterIdentity(id)
+        ) {
           return undefined;
         }
-        trustDomainId = trust_domain_id;
-      } else if (qualificationKind !== "unqualified") {
+        trustDomainId = domain;
+      } else if (fields.kind !== "unqualified" || keys !== "kind") {
         return undefined;
       }
     }

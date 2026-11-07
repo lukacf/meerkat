@@ -14,6 +14,7 @@
  * ```ts
  * opts.registerTool("read_mail", async (args, requester) => {
  *   if (requester === undefined || requester.carried ||
+ *       requester.principal.kind !== "human" ||
  *       requester.principal.id !== OWNER_SUB ||
  *       requester.principal.trustDomainId !== OWNER_DOMAIN) {
  *     throw new Error("this mailbox serves its owner only");
@@ -43,9 +44,34 @@ export interface ToolCallRequester {
   readonly carried: boolean;
 }
 
+/** The principal kinds the runtime's requester grammar names. */
+const PRINCIPAL_KINDS = new Set<string>([
+  "human",
+  "personal_agent",
+  "shared_agent",
+  "runtime_host",
+  "service_account",
+]);
+
+/** A control character, as the runtime's identity check reads one. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+
 /**
- * Parse a wire `requester` object. An absent or malformed value is
- * `undefined`: no requester, which a person-scoped tool refuses.
+ * Whether `value` is an id the runtime accepts for a qualified principal or a
+ * trust domain: a string that is not blank and holds no control character.
+ */
+function isIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "" && !CONTROL_CHARACTER.test(value);
+}
+
+/**
+ * Parse a wire `requester` object as the runtime's grammar reads it. An absent
+ * or malformed value is `undefined`: no requester, which a person-scoped tool
+ * refuses. Malformed is anything the runtime refuses: a principal kind outside
+ * `human`, `personal_agent`, `shared_agent`, `runtime_host` and
+ * `service_account`; a qualification that is null, has an unknown kind, or
+ * carries a field its kind does not have; a blank trust domain or one with a
+ * control character; and a blank qualified id or one with a control character.
  */
 export function parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -55,25 +81,31 @@ export function parseToolCallRequester(raw: unknown): ToolCallRequester | undefi
   if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
     return undefined;
   }
-  const { kind, id, qualification } = principal as Record<string, unknown>;
-  if (typeof kind !== "string" || kind.trim() === "" || typeof id !== "string" || id.trim() === "") {
+  const wirePrincipal = principal as Record<string, unknown>;
+  const { kind, id } = wirePrincipal;
+  if (
+    typeof kind !== "string" ||
+    !PRINCIPAL_KINDS.has(kind) ||
+    typeof id !== "string" ||
+    id.trim() === ""
+  ) {
     return undefined;
   }
   let trustDomainId: string | undefined;
-  if (qualification !== undefined && qualification !== null) {
-    if (typeof qualification !== "object" || Array.isArray(qualification)) {
+  if (Object.prototype.hasOwnProperty.call(wirePrincipal, "qualification")) {
+    const qualification = wirePrincipal.qualification;
+    if (qualification === null || typeof qualification !== "object" || Array.isArray(qualification)) {
       return undefined;
     }
-    const { kind: qualificationKind, trust_domain_id: domain } = qualification as Record<
-      string,
-      unknown
-    >;
-    if (qualificationKind === "qualified") {
-      if (typeof domain !== "string" || domain.trim() === "") {
+    const fields = qualification as Record<string, unknown>;
+    const keys = Object.keys(fields).sort().join(",");
+    if (fields.kind === "qualified") {
+      const domain = fields.trust_domain_id;
+      if (keys !== "kind,trust_domain_id" || !isIdentity(domain) || !isIdentity(id)) {
         return undefined;
       }
       trustDomainId = domain;
-    } else if (qualificationKind !== "unqualified") {
+    } else if (fields.kind !== "unqualified" || keys !== "kind") {
       return undefined;
     }
   }

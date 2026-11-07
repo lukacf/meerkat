@@ -514,6 +514,7 @@ them.
   was declared with an exact profile of its own (`profile_override`) then
   takes its role's gate as its own once the role gates something, so a gated
   family its profile leaves off is mounted closed, where it would be ignored.
+  The families its category overrides disable still leave that gate.
 
 - Downgrade: an older binary drops `tools.grant_gated` (a profile's tool
   table refuses no unknown key). Leave a gated family's switch off, as the

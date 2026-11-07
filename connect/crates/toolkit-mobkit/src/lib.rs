@@ -963,6 +963,11 @@ pub mod source_hold_probe {
         /// A control's hold answer here refuses the observation, as a
         /// refused observation does.
         ServiceSetupObservation,
+        /// A tool admission's acquisition original read answered that the
+        /// source's facts are in conflict, just before the admission waits
+        /// it out through Core's owner-change waiter; not keyed. A control's
+        /// hold answer here is ignored.
+        AcquisitionConflict,
     }
     /// A control's answer at a site, given its key.
     pub type Probe = Arc<dyn Fn(Site, &str) -> Option<Hold> + Send + Sync>;

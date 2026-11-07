@@ -555,6 +555,12 @@ mod tests {
             source_admission_error(PrivateOriginalError::Unavailable),
             ToolAdmissionError::Unavailable
         ));
+        // A conflict in the source's facts is contention: retryable, never a
+        // denial.
+        assert!(matches!(
+            source_admission_error(PrivateOriginalError::Conflict),
+            ToolAdmissionError::Unavailable
+        ));
         assert!(matches!(
             source_admission_error(PrivateOriginalError::Denied),
             ToolAdmissionError::Denied

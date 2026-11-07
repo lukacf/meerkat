@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of the generated DurableDecisionMachine: one durable
 # decision's hold and sealed binding, its attested decision, the execution
-# permit and the executed fact, expiry, withdrawal and the requester notice
-# an ended decision owes. An approved decision expires at its deadline unless
-# an execution permit is outstanding: a permit is issued only before the
-# deadline and only for an approver who is still current, the executed fact
-# settles it at any time, and a release at or after the deadline records the
-# expiry.
+# permit and the executed fact, expiry, withdrawal, the requester notice an
+# ended decision owes, and what an executed decision owes after its
+# execution (the cleanup of what it left outside the store, and its one
+# reply). An approved decision expires at its deadline unless an execution
+# permit is outstanding: a permit is issued only before the deadline and
+# only for an approver who is still current, the executed fact settles it at
+# any time, and a release at or after the deadline records the expiry.
 #
 # usage: durable_decision_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds the audit's step
-# bound and its fifteen invariants, and checks them over the whole bounded
+# bound and its eighteen invariants, and checks them over the whole bounded
 # space (safety) with TLC coverage: every wrapper in covered_actions below
 # (one per generated arm, a per-phase arm's phases sharing one, and the
 # owner's commit) must generate a successor state, and the space must keep
@@ -49,7 +50,12 @@
 #     decision ends refused (ApproverRevokedEndsRefused);
 #   - an approver no longer current while a permit is outstanding: no new
 #     permit, and the commit made under it settles as executed
-#     (RevokedPermitSettledExecuted).
+#     (RevokedPermitSettledExecuted);
+#   - a cleanup opened under the permit and settled after the execution
+#     (CleanupSettledAfterExecution), and after the expiry a release at the
+#     deadline records (CleanupSettledAfterExpiry);
+#   - an executed decision's reply settled, then another reply refused
+#     (ReplySettledThenAnotherRefused).
 # With --mutants it seeds one defect into a copy of the generated model per
 # mutant and requires TLC to refuse each with its property. TLC stops at its
 # first violation and reports only the first violated invariant of a state,
@@ -88,7 +94,15 @@
 #   - an authorization that ignores the approver's answer, a refusal for an
 #     approver no longer current that drops the outstanding permit, and one
 #     that keeps the decision approved
-#     (AuditPermitOnlyForCurrentApprover).
+#     (AuditPermitOnlyForCurrentApprover);
+#   - a cleanup opened with no permit outstanding
+#     (AuditCleanupOwedUnderPermit);
+#   - a cleanup settled before the decision ended, an execution record and
+#     an expiry that drop an owed cleanup, and at a bound of 7 or more a
+#     settled cleanup that a second settlement reopens
+#     (AuditCleanupSettledAfterTheEnd);
+#   - another reply that overwrites the settled one, and a reply settled
+#     before the execution (AuditReplySettledOnce).
 # The executor's obligations are assumed, not checked: the machine records
 # that a permit is outstanding, not who holds it or whether a commit landed.
 # The audit models one executor per decision (one owner drives the permit),
@@ -127,7 +141,7 @@ trap 'if declare -F tlc_run_cap_reap >/dev/null; then tlc_run_cap_reap; fi; rm -
 # green run found at the lane's bound; a run at a smaller bound is not held
 # to it.
 default_steps=6
-safety_states=42729
+safety_states=50219
 min_distinct_states=$(( safety_states * 9 / 10 ))
 
 # Every wrapper must fire. TLC names an arm after the audit's wrapper, so
@@ -206,6 +220,17 @@ covered_actions=(
   AuditSettleNoticeReplayed
   AuditSettleNoticeRefused
   AuditSettleNoticeRefusedNotEnded
+  AuditOweCleanup
+  AuditOweCleanupReplayed
+  AuditOweCleanupRefusedNotAuthorized
+  AuditOweCleanupRefusedNotApproved
+  AuditSettleCleanup
+  AuditSettleCleanupRefusedNotOwed
+  AuditSettleCleanupRefusedNotEnded
+  AuditSettleReply
+  AuditSettleReplyReplayed
+  AuditSettleReplyRefusedOther
+  AuditSettleReplyRefusedNotExecuted
   AuditCommit
 )
 
@@ -238,6 +263,9 @@ audit_invariants=(
   AuditPermitOnlyForCurrentApprover
   AuditCommittedIsSettleable
   AuditFirstPresentationIsTheEarliest
+  AuditCleanupOwedUnderPermit
+  AuditCleanupSettledAfterTheEnd
+  AuditReplySettledOnce
 )
 
 # usage: write_cfg <file> <first invariant or ""> <extra invariant lines>
@@ -352,7 +380,8 @@ for witness in HumanApprovalExecutedAndNoticed RetriedAfterRelease ExecutionRefu
   WithdrawnThenDecideRefused SelfApprovalThenAnotherApproves CommitThenRecordReplayed \
   HoldReplayedAndConflicting PermitAcrossDeadlineExecuted ReleaseAfterDeadlineExpires \
   AuthorizeAtDeadlineRefused DecidedBeforePresentationRefused ApprovedAtThePresentation \
-  ApproverRevokedEndsRefused RevokedPermitSettledExecuted; do
+  ApproverRevokedEndsRefused RevokedPermitSettledExecuted CleanupSettledAfterExecution \
+  CleanupSettledAfterExpiry ReplySettledThenAnotherRefused; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "" "
   NotAuditWitness${witness}"
@@ -390,9 +419,10 @@ assert edits, "no edits"
 for edit in edits:
     assert len(edit) == 3, f"an edit is three lines (arm, old, new): {edit}"
     arm, old, new = edit[0], edit[1].replace("\\n", "\n"), edit[2].replace("\\n", "\n")
-    heads = text.count("\n" + arm + "(")
-    assert heads == 1, f"expected one {arm} definition, found {heads}"
-    start = text.index("\n" + arm + "(") + 1
+    # An arm with inputs is defined `Arm(...) ==`, one without `Arm ==`.
+    heads = [head for head in ("\n" + arm + "(", "\n" + arm + " ==") if head in text]
+    assert len(heads) == 1 and text.count(heads[0]) == 1, f"expected one {arm} definition, found {heads}"
+    start = text.index(heads[0]) + 1
     end = text.index("\n\n", start)
     block = text[start:end]
     count = block.count(old)
@@ -425,7 +455,9 @@ PY
 import os, re
 text = open(os.environ["MODEL"]).read()
 arm, variable, value = os.environ["ARM"], os.environ["VARIABLE"], os.environ["VALUE"]
-start = text.index("\n" + arm + "(") + 1
+heads = [head for head in ("\n" + arm + "(", "\n" + arm + " ==") if head in text]
+assert len(heads) == 1 and text.count(heads[0]) == 1, f"expected one {arm} definition, found {heads}"
+start = text.index(heads[0]) + 1
 end = text.index("\n\n", start)
 frames = re.findall(r"UnchangedFrame_[0-9a-f]+", text[start:end])
 assert len(frames) == 1, f"expected one frame in {arm}, found {frames}"
@@ -613,5 +645,40 @@ AuthorizeExecutionRefusedApproverRevoked
 /\ phase' = "Approved"
 EOF
   mutate revoked_keeps_approval AuditPermitOnlyForCurrentApprover "${edits}"
+
+  # A cleanup opened with no permit outstanding.
+  cat > "${edits}" <<'EOF'
+OweCleanup
+/\ permit_issued
+/\ TRUE
+EOF
+  mutate owe_cleanup_without_permit AuditCleanupOwedUnderPermit "${edits}"
+
+  # A cleanup settled before the decision ended, an execution record and an
+  # expiry that drop an owed cleanup, and (from a bound of 7: opening,
+  # ending and settling a cleanup take six steps) a settled cleanup that a
+  # second settlement reopens.
+  frame_update SettleCleanupRefusedNotEndedApproved cleanup '"Settled"' > "${edits}"
+  mutate cleanup_settled_before_the_end AuditCleanupSettledAfterTheEnd "${edits}"
+
+  frame_update RecordExecuted cleanup '"NotOwed"' > "${edits}"
+  mutate execution_drops_cleanup AuditCleanupSettledAfterTheEnd "${edits}"
+
+  frame_update ReleaseExecutionAtDeadline cleanup '"NotOwed"' > "${edits}"
+  mutate expiry_drops_cleanup AuditCleanupSettledAfterTheEnd "${edits}"
+
+  if (( max_steps >= 7 )); then
+    frame_update SettleCleanupRefusedNotOwedExecuted cleanup \
+      '(IF cleanup = "Settled" THEN "Owed" ELSE cleanup)' > "${edits}"
+    mutate settled_cleanup_reopens AuditCleanupSettledAfterTheEnd "${edits}"
+  fi
+
+  # Another reply that overwrites the settled one, and a reply settled
+  # before the execution.
+  frame_update SettleReplyRefusedOther reply_digest 'Some(digest)' > "${edits}"
+  mutate second_reply_overwrites AuditReplySettledOnce "${edits}"
+
+  frame_update SettleReplyRefusedNotExecutedApproved reply_digest 'Some(digest)' > "${edits}"
+  mutate reply_before_execution AuditReplySettledOnce "${edits}"
 fi
 echo "durable decision audit passed at model_step_count <= ${max_steps}"

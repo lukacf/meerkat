@@ -1877,8 +1877,17 @@ async fn a_redelivered_executed_notice_forks_nothing_and_settles() {
     assert!(!flow.branch_seated(&decision.decision_id).await);
 }
 
-/// The refusal a reserved approval branch path answers, by its token.
-fn assert_reserved(error: &impl std::fmt::Display, path: &str) {
+/// The refusal a reserved approval branch path answers: typed, naming the
+/// member it refused, with its token.
+fn assert_reserved(error: &meerkat_mob::MobError, identity: &AgentIdentity, path: &str) {
+    assert!(
+        matches!(
+            error,
+            meerkat_mob::MobError::ApprovalBranchReserved { identity: refused }
+                if refused == identity
+        ),
+        "{path}: {error:?}"
+    );
     assert!(
         error.to_string().contains("approval_branch_reserved"),
         "{path}: {error}"
@@ -1895,7 +1904,7 @@ fn a_decision(subject: &str) -> DecisionId {
 
 /// A member planted as the branch of a decision, by its identity or its
 /// label, is refused on every spawn path but `open_approval_branch`, which
-/// opens the branch itself.
+/// opens the branch itself and records the decision as its creation source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
     let flow = Flow::new().await;
@@ -1912,6 +1921,7 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
             .spawn_spec(planted.clone())
             .await
             .expect_err("a member planted with the branch identity and label is refused"),
+        &identity,
         "spawn",
     );
     assert_reserved(
@@ -1920,17 +1930,17 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
             .spawn_spec(SpawnMemberSpec::new("worker", identity.clone()))
             .await
             .expect_err("the branch identity prefix is reserved"),
+        &identity,
         "spawn (identity)",
     );
+    let ordinary = AgentIdentity::from("ordinary-member");
     assert_reserved(
         &flow
             .handle
-            .spawn_spec(
-                SpawnMemberSpec::new("worker", AgentIdentity::from("ordinary-member"))
-                    .with_labels(label.clone()),
-            )
+            .spawn_spec(SpawnMemberSpec::new("worker", ordinary.clone()).with_labels(label.clone()))
             .await
             .expect_err("the branch label is reserved"),
+        &ordinary,
         "spawn (label)",
     );
     assert_reserved(
@@ -1939,7 +1949,20 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
             .ensure_member(planted.clone())
             .await
             .expect_err("ensure refuses the branch identity"),
+        &identity,
         "ensure",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .reconcile(
+                vec![planted.clone()],
+                meerkat_mob::runtime::ReconcileOptions::default(),
+            )
+            .await
+            .expect_err("a reconcile refuses the branch identity"),
+        &identity,
+        "reconcile",
     );
     assert_reserved(
         &flow
@@ -1947,6 +1970,7 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
             .fork_member(&flow.owner_member, planted, None)
             .await
             .expect_err("a fork refuses the branch identity"),
+        &identity,
         "fork",
     );
     assert!(
@@ -1957,7 +1981,16 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
             .is_none(),
         "nothing was seated under the branch identity"
     );
-    // `open_approval_branch` opens the branch itself: a fork of the grantee.
+    assert!(
+        flow.handle
+            .get_member(&ordinary)
+            .await
+            .expect("roster read")
+            .is_none(),
+        "nor under the label"
+    );
+    // `open_approval_branch` opens the branch itself: a fork of the grantee
+    // that records the decision as its creation source.
     let (member, session) = flow
         .handle
         .open_approval_branch(&flow.owner_member, &decision)
@@ -1965,6 +1998,25 @@ async fn a_member_planted_with_the_branch_identity_or_label_is_refused() {
         .expect("the branch opens");
     assert_eq!(member, identity);
     assert_ne!(session, flow.owner_session);
+    let entry = flow
+        .handle
+        .get_member(&identity)
+        .await
+        .expect("roster read")
+        .expect("the branch is seated");
+    assert_eq!(entry.approval_branch(), Some(&decision));
+    assert_eq!(
+        flow.handle.approval_branches().await,
+        vec![(decision.clone(), identity.clone())]
+    );
+    // Opening it again adopts the branch its own path opened.
+    assert_eq!(
+        flow.handle
+            .open_approval_branch(&flow.owner_member, &decision)
+            .await
+            .expect("the branch is adopted"),
+        (identity, session)
+    );
 }
 
 /// An open approval branch is wired to nobody and cannot be wired, unwired
@@ -1984,6 +2036,7 @@ async fn an_open_approval_branch_cannot_be_wired_unwired_or_respawned() {
             .wire(flow.owner_member.clone(), branch.clone())
             .await
             .expect_err("nothing is wired to an approval branch"),
+        &branch,
         "wire",
     );
     assert_reserved(
@@ -1992,7 +2045,17 @@ async fn an_open_approval_branch_cannot_be_wired_unwired_or_respawned() {
             .wire(branch.clone(), flow.owner_member.clone())
             .await
             .expect_err("an approval branch is wired to nothing"),
+        &branch,
         "wire (from the branch)",
+    );
+    assert_reserved(
+        &flow
+            .handle
+            .wire_members_batch([(flow.owner_member.clone(), branch.clone())])
+            .await
+            .expect_err("nor in a batch"),
+        &branch,
+        "wire batch",
     );
     assert_reserved(
         &flow
@@ -2000,15 +2063,27 @@ async fn an_open_approval_branch_cannot_be_wired_unwired_or_respawned() {
             .unwire(flow.owner_member.clone(), branch.clone())
             .await
             .expect_err("an approval branch's wiring is not the mob's to change"),
+        &branch,
         "unwire",
     );
+    match flow
+        .handle
+        .respawn(branch.clone(), None)
+        .await
+        .expect_err("an approval branch is never re-seeded")
+    {
+        meerkat_mob::MobRespawnError::Mob(error) => assert_reserved(&error, &branch, "respawn"),
+        other => panic!("respawn: expected the reservation's refusal, got {other:?}"),
+    }
+    // Nor is it ensured: an ensure of its identity answers nothing of it.
     assert_reserved(
         &flow
             .handle
-            .respawn(branch.clone(), None)
+            .ensure_member(SpawnMemberSpec::new("worker", branch.clone()))
             .await
-            .expect_err("an approval branch is never re-seeded"),
-        "respawn",
+            .expect_err("an open branch is never ensured"),
+        &branch,
+        "ensure (open)",
     );
     let entry = flow
         .handle
@@ -2017,6 +2092,7 @@ async fn an_open_approval_branch_cannot_be_wired_unwired_or_respawned() {
         .expect("roster read")
         .expect("the branch stays open");
     assert!(entry.wired_to.is_empty(), "{:?}", entry.wired_to);
+    assert_eq!(entry.approval_branch(), Some(&decision));
 }
 
 /// The JSON payload of the result of the call `id` in `messages`.

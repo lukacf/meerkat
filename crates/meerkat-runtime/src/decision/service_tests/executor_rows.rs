@@ -37,6 +37,10 @@ struct ScriptedOwner {
     record_readable: AtomicBool,
     delivers: AtomicBool,
     calls: Mutex<Vec<(&'static str, DecisionId)>>,
+    /// How many times the loop asked this owner to sweep.
+    sweeps: AtomicUsize,
+    /// What the next sweep answers.
+    swept: Mutex<Vec<(DecisionId, DecisionPassOutcome)>>,
 }
 
 impl ScriptedOwner {
@@ -49,7 +53,18 @@ impl ScriptedOwner {
             record_readable: AtomicBool::new(true),
             delivers: AtomicBool::new(true),
             calls: Mutex::default(),
+            sweeps: AtomicUsize::new(0),
+            swept: Mutex::default(),
         })
+    }
+
+    /// The next sweep answers `outcomes`.
+    fn sweep_answers(&self, outcomes: impl IntoIterator<Item = (DecisionId, DecisionPassOutcome)>) {
+        self.swept.lock().expect("swept").extend(outcomes);
+    }
+
+    fn sweeps(&self) -> usize {
+        self.sweeps.load(Ordering::SeqCst)
     }
 
     /// The owner of the rows' `release` decisions.
@@ -187,6 +202,11 @@ impl DecisionExecutor for ScriptedOwner {
                 session_id: SessionId::new(),
                 input_id: format!("notice-{}", decision.decision_id),
             })
+    }
+
+    async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)> {
+        self.sweeps.fetch_add(1, Ordering::SeqCst);
+        std::mem::take(&mut *self.swept.lock().expect("swept"))
     }
 }
 
@@ -1080,6 +1100,105 @@ fn a_store_wrapper_forwards_claim_executor_kind() {
     let _claim = inner
         .claim_executor_kind(&release_kind())
         .expect("nothing was claimed");
+}
+
+/// Core runs the sweep: every pass asks each kind it claims to sweep once,
+/// after the owed decisions, and records what the sweep settled; a kind
+/// whose claim another executor holds is swept there, never here.
+#[tokio::test]
+async fn a_pass_sweeps_each_kind_it_claims_after_its_owed_decisions() {
+    let (store, clock, service) = fixture();
+    let other_owner = service_over(&store, &clock);
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let release = ScriptedOwner::release();
+    let deploy = ScriptedOwner::of_kind("deploy");
+    let holder = ScriptedOwner::of_kind("deploy");
+    let approvers = Approvers::current();
+    let _holder = start(&other_owner, &[&holder], &approvers).expect("the executor of deploys");
+    let mut executor = start(&service, &[&release, &deploy], &approvers).expect("start");
+    let left = DecisionId::derive(
+        &release_kind(),
+        &DecisionSubjectKey::new("artifact:left-by-a-stop").expect("subject key"),
+    );
+    release.sweep_answers([(left.clone(), DecisionPassOutcome::CleanupSettled)]);
+
+    let pass = executor.pass().await;
+    assert_eq!(
+        pass.outcomes,
+        vec![
+            (decision_id.clone(), DecisionPassOutcome::Executed),
+            (left, DecisionPassOutcome::CleanupSettled),
+        ],
+        "the sweep runs after the owed decisions, and its outcomes are the pass's"
+    );
+    assert_eq!(release.sweeps(), 1);
+    assert_eq!(
+        deploy.sweeps(),
+        0,
+        "a kind held elsewhere is not swept here"
+    );
+    assert_eq!(holder.sweeps(), 0, "a loop sweeps only at its own pass");
+
+    let next = executor.pass().await;
+    assert_eq!(
+        next.outcomes,
+        vec![(decision_id, DecisionPassOutcome::NoticeSettled)],
+        "the sweep answers nothing more"
+    );
+    assert_eq!(release.sweeps(), 2, "once per pass");
+}
+
+/// An executed decision settles its work's one reply, by the digest of its
+/// text, before the reply is delivered: not before the execution, the same
+/// reply again is a replay, and another is refused `not_owed`, whatever the
+/// host's route would do with it.
+#[tokio::test]
+async fn an_executed_decision_settles_one_reply() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let answer = Sha256Digest::of(b"the answer");
+    let not_owed = |error: DecisionError| {
+        assert!(
+            matches!(
+                error,
+                DecisionError::Refused {
+                    refusal: DecisionRefusal::NotOwed,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("not_owed"), "{error}");
+    };
+    not_owed(
+        service
+            .settle_reply(&decision_id, &answer)
+            .expect_err("an approved decision's work has not run"),
+    );
+    let owner = ScriptedOwner::release();
+    let mut executor = start(&service, &[&owner], &Approvers::current()).expect("start");
+    let executed = executor.pass().await;
+    assert_eq!(
+        executed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)]
+    );
+    service
+        .settle_reply(&decision_id, &answer)
+        .expect("the first reply settles");
+    service
+        .settle_reply(&decision_id, &answer)
+        .expect("the same reply again is a replay");
+    not_owed(
+        service
+            .settle_reply(&decision_id, &Sha256Digest::of(b"another answer"))
+            .expect_err("another reply"),
+    );
+    assert_eq!(
+        store.stored(&decision_id).state.reply_digest.as_deref(),
+        Some(answer.as_str())
+    );
 }
 
 /// A kind that opens neither fact of an executed decision (a cleanup owed,

@@ -4219,6 +4219,10 @@ mod tests {
             ) -> Result<(), crate::authorization::OperationObservationError> {
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
         struct Publisher;
         impl WorkAuthorization for Publisher {
@@ -4408,6 +4412,10 @@ mod tests {
             if let Some(hook) = hook {
                 hook();
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use meerkat_authorization::grants::{ApprovalUseAnswer, ConsumeUseRefusal, GrantUse};
 use meerkat_core::approval::decision::{
-    DecisionHoldRequest, DecisionKind, DecisionOperationId, DecisionPrincipalKey,
-    DecisionSubjectKey,
+    DecisionContractError, DecisionHoldRequest, DecisionKind, DecisionOperationId,
+    DecisionPrincipalKey, DecisionSubjectKey,
 };
 use meerkat_core::authorization::{
     OperationAuthorizationError, OperationRefusalKind, OperationRefused,
@@ -229,12 +229,104 @@ fn a_person_only_kind_refuses_a_review_stage_at_hold() {
         .hold(hold(GRANT_CHILD_KIND), true)
         .expect_err("a grant.child decision is decided by people only");
     assert!(
+        matches!(
+            &refused,
+            crate::decision::DecisionError::Invalid(DecisionContractError::ReviewStageNotAllowed {
+                kind
+            }) if kind.as_str() == GRANT_CHILD_KIND
+        ),
+        "{refused:?}"
+    );
+    assert!(
         refused.to_string().contains("review_stage_not_allowed"),
         "{refused}"
     );
     assert_eq!(fixture.decision_count(), 1, "nothing more was held");
     // A kind reviewers may decide keeps its review stage.
     assert!(fixture.decisions.hold(hold("release"), true).is_ok());
+}
+
+/// A reviewer's approval of a person-only kind never executes: a row that
+/// names a reviewer (written before the hold refused one, or by another
+/// writer of the store) is approved by the reviewer, and the executor
+/// refuses it `not_a_human_decision` before it opens or issues anything.
+#[tokio::test]
+async fn a_reviewer_approval_of_a_person_only_kind_is_refused_at_execution() {
+    let store = Arc::new(InMemoryDecisionStore::new());
+    let fixture = Fixture::with(Terms {
+        store: Some(store.clone()),
+        ..Terms::default()
+    });
+    let held = fixture.offer(true).expect("held");
+    let reviewer = principal(PrincipalKind::SharedAgent, "reviewer-agent");
+    let reviewer_key = DecisionPrincipalKey::of(&reviewer).expect("the reviewer's key");
+    let mut row = held.clone();
+    row.descriptor.reviewer = Some(reviewer_key.clone());
+    row.state.reviewer = Some(reviewer_key.as_str().to_owned());
+    row.state.stage = meerkat_core::approval::decision::DecisionStage::Review;
+    row.revision = held.revision + 1;
+    store
+        .replace_if_revision(held.revision, &row)
+        .expect("the row names a reviewer");
+    let rendering = &held.descriptor.rendering;
+    fixture
+        .decisions
+        .present(
+            &held.decision_id,
+            &PresentationRecord::complete(
+                PresentationAudience::Reviewer {
+                    reviewer: reviewer_key,
+                },
+                rendering,
+                None,
+                reference("chat"),
+                reference("message-1"),
+                fixture.clock.now(),
+            ),
+        )
+        .expect("presented to the reviewer");
+    let review = meerkat_core::approval::decision::AttributedReview::new(
+        reviewer,
+        meerkat_core::SessionId::new(),
+        reference("verdict-call"),
+        meerkat_core::approval::decision::DecisionReviewVerdict::Allow,
+        rendering.subject_digest(),
+    )
+    .expect("the reviewer's verdict");
+    let approved = fixture
+        .decisions
+        .review(&held.decision_id, &review)
+        .expect("the reviewer approves");
+    assert_eq!(approved.state.phase, DecisionPhase::Approved);
+
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes.contains(&(
+            held.decision_id.clone(),
+            DecisionPassOutcome::ExecutionRefused
+        )),
+        "{pass:?}"
+    );
+    let refused = fixture.stored(&held.decision_id);
+    assert_eq!(refused.state.phase, DecisionPhase::ExecutionRefused);
+    assert_eq!(
+        refused
+            .execution_refusal
+            .as_ref()
+            .map(DecisionReference::as_str),
+        Some("not_a_human_decision")
+    );
+    assert!(fixture.branches.opened().is_empty(), "no branch was opened");
+    assert_eq!(fixture.issued(approval_grant_id(&held.decision_id)), None);
+    assert_eq!(
+        fixture.issued(branch_controller_grant_id(&held.decision_id)),
+        None
+    );
+    assert_eq!(
+        refused.state.cleanup,
+        DecisionCleanup::NotOwed,
+        "nothing was opened that a cleanup would undo"
+    );
 }
 
 /// The host's approvers, answering what the row sets for every decider.

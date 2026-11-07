@@ -6087,8 +6087,8 @@ pub fn dsl_durable_decision_machine_production_schema() -> MachineSchema {
 }
 
 /// Named-type bindings for the durable decision record machine: its two
-/// opaque key types, its stage, notice and review verdict vocabularies, and
-/// the typed refusal its verdict effect carries.
+/// opaque key types, its stage, notice, review verdict and cleanup
+/// vocabularies, and the typed refusal its verdict effect carries.
 pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
@@ -6102,6 +6102,10 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "DurableDecisionReviewVerdict",
                 &["Allow", "Deny", "Escalate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionCleanup",
+                &["NotOwed", "Owed", "Settled"],
             ),
             NamedTypeBinding::string_enum(
                 "DurableDecisionRefusal",
@@ -6143,8 +6147,10 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
 /// later touch, and a presentation before, at and after a decision's
 /// observed time (a carried presentation's time is sampled as `1`). Every
 /// arm is reached within six steps (the deepest: hold, approve, authorize,
-/// record, settle the notice, settle it again), so the CI run requires each
-/// of them to generate a state.
+/// record, settle the notice, settle it again; hold, approve, authorize,
+/// open the cleanup, end, settle it; hold, approve, authorize, record,
+/// settle the reply, settle it again), so the CI run requires each of them
+/// to generate a state.
 #[allow(clippy::expect_used)]
 fn durable_decision_tlc_model() -> crate::MachineTlcModel {
     let two_keys = || crate::MachineTlcProfile {

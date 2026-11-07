@@ -193,6 +193,10 @@ impl PreparedOperationAuthorization for Check {
         }
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// The owners' literal material for the reviewed operation.

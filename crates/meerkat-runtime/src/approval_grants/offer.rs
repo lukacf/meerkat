@@ -15,8 +15,8 @@ use meerkat_authorization::grants::{
     grant_child_terms_digest, mcp_operation_binding,
 };
 use meerkat_authorization_contracts::constraints::{
-    DelegationDepth, ExactRestriction, ExecutionRestrictions, LifetimeBound, LifetimeRestriction,
-    ProcessorRef, ResourceDomain,
+    AudienceRef, BoundMatch, DelegationDepth, ExactRestriction, ExecutionRestrictions,
+    LifetimeBound, LifetimeRestriction, ProcessorRef, ResourceDomain,
 };
 use meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 use meerkat_authorization_contracts::work_association::{
@@ -149,6 +149,12 @@ pub enum AccessOfferRefusalKind {
     UsesOverPolicy,
     /// A longer window than the host's policy allows.
     WindowOverPolicy,
+    /// The offering grant's window ends before the requested window would:
+    /// the grant could never be issued with the presented terms.
+    WindowOverParent,
+    /// The offering grant's bounds exclude the approved work: its processor
+    /// (the approval branch) or its audience (the requester).
+    OutsideParentBounds,
 }
 
 impl AccessOfferRefusalKind {
@@ -161,6 +167,8 @@ impl AccessOfferRefusalKind {
             Self::ApprovalBranchUnavailable => "approval_branch_unavailable",
             Self::UsesOverPolicy => "uses_over_policy",
             Self::WindowOverPolicy => "window_over_policy",
+            Self::WindowOverParent => "window_over_parent",
+            Self::OutsideParentBounds => "outside_parent_bounds",
         }
     }
 }
@@ -185,6 +193,27 @@ pub enum AccessOfferRefusalReason {
     /// agent's controller grant: an approved work has one represented
     /// subject.
     SubjectMismatch,
+    /// The offering grant's processors exclude the approval branch.
+    ProcessorExcluded,
+    /// The offering grant's audiences exclude the requester.
+    AudienceExcluded,
+}
+
+impl AccessOfferRefusalReason {
+    /// The reason's stable token (`no_parent_grant`, ...).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoParentGrant => "no_parent_grant",
+            Self::ParentNotCurrent => "parent_not_current",
+            Self::ParentCannotDelegate => "parent_cannot_delegate",
+            Self::NotBranchable => "not_branchable",
+            Self::ControllerCannotAdmitChild => "controller_cannot_admit_child",
+            Self::SubjectMismatch => "subject_mismatch",
+            Self::ProcessorExcluded => "processor_excluded",
+            Self::AudienceExcluded => "audience_excluded",
+        }
+    }
 }
 
 /// An access offer refused at hold: its kind and, where it has one, its
@@ -212,10 +241,21 @@ impl AccessOfferRefusal {
     }
 }
 
+impl std::fmt::Display for AccessOfferRefusal {
+    /// The kind and, where it has one, the reason:
+    /// `no_child_approval_rule (no_parent_grant)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.reason {
+            Some(reason) => write!(f, "{} ({})", self.refusal.as_str(), reason.as_str()),
+            None => f.write_str(self.refusal.as_str()),
+        }
+    }
+}
+
 /// Why an access offer held nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum AccessOfferError {
-    #[error("access offer refused: {}", .0.refusal.as_str())]
+    #[error("access offer refused: {0}")]
     Refused(AccessOfferRefusal),
     #[error("invalid access offer: {0}")]
     InvalidArguments(String),
@@ -533,6 +573,43 @@ impl ApprovalGrants {
         .map_err(|_| no_rule(AccessOfferRefusalReason::ParentCannotDelegate))?
         .effective()
         .clone();
+        // An offer whose grant could never be issued with its terms, or
+        // whose approved work every use would be denied, is never held: the
+        // offering grant's window must cover the requested one, and its
+        // bounds must admit the approval branch as processor and the
+        // requester as audience.
+        if let LifetimeBound::Window {
+            not_before_ms,
+            expires_at_ms,
+        } = effective.lifetime.bound()
+            && expires_at_ms.saturating_sub(not_before_ms) < duration_ms
+        {
+            return Err(AccessOfferError::Refused(AccessOfferRefusal::of(
+                AccessOfferRefusalKind::WindowOverParent,
+            )));
+        }
+        let outside = |reason| {
+            AccessOfferError::Refused(AccessOfferRefusal::because(
+                AccessOfferRefusalKind::OutsideParentBounds,
+                reason,
+            ))
+        };
+        if matches!(
+            effective.processors.check(&ProcessorRef::Principal {
+                principal: branch.clone(),
+            }),
+            BoundMatch::OutsideBounds
+        ) {
+            return Err(outside(AccessOfferRefusalReason::ProcessorExcluded));
+        }
+        if matches!(
+            effective.audiences.check(&AudienceRef::Principal {
+                principal: calling.requester.clone(),
+            }),
+            BoundMatch::OutsideBounds
+        ) {
+            return Err(outside(AccessOfferRefusalReason::AudienceExcluded));
+        }
         let work = OriginalWorkRef {
             authority: calling.ingress.authority.clone(),
             work: approved_work_id(&decision_id)

@@ -1246,6 +1246,7 @@ mod member_effect_lane_contract_tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
             direct_member_fence: None,
         }
     }

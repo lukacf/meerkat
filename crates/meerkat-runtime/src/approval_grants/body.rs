@@ -55,39 +55,82 @@ pub struct GrantChildRequest {
 }
 
 /// Why a stored decision's held request cannot be read as a `grant.child`
-/// request.
+/// request: each is the body's typed refusal. The executor refuses every one
+/// as `malformed_request`, and no tool reads the body past one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("not a readable grant.child request: {0}")]
-pub struct GrantChildRequestError(pub(crate) String);
+#[non_exhaustive]
+pub enum GrantChildRequestError {
+    /// The decision is of another kind.
+    #[error("not a readable grant.child request: another decision kind")]
+    AnotherKind,
+    /// The body does not decode as a `grant.child.v1` request.
+    #[error("not a readable grant.child request: {0}")]
+    Undecodable(String),
+    /// The body is of another format.
+    #[error("not a readable grant.child request: another request format")]
+    AnotherFormat,
+    /// The terms' digest is not the decision's request digest.
+    #[error("not a readable grant.child request: terms other than the decision's request")]
+    TermsNotTheRequest,
+    /// The decision's operation id is not the one its id derives.
+    #[error("not a readable grant.child request: another operation id")]
+    AnotherOperation,
+    /// The decision's subject key is not the one the body derives.
+    #[error("not a readable grant.child request: another subject")]
+    AnotherSubject,
+    /// The decision's rendering is not the one Core renders of the body.
+    #[error("not a readable grant.child request: a rendering other than Core's")]
+    AnotherRendering,
+    /// The operation's request digest is not the digest of the arguments
+    /// the rendering shows: what the approver saw is not what it binds.
+    #[error(
+        "not a readable grant.child request: the request digest is not the digest of the shown arguments"
+    )]
+    RequestDigestMismatch,
+    /// The reply's origin names another requester than the terms: the
+    /// answer would go to another person than the one the approver saw.
+    #[error(
+        "not a readable grant.child request: the reply origin names another requester than the terms"
+    )]
+    OriginRequesterMismatch,
+    /// The terms name another work than the decision's approved work.
+    #[error(
+        "not a readable grant.child request: the terms name another work than the decision's approved work"
+    )]
+    TermsWorkMismatch,
+}
 
 impl GrantChildRequest {
     /// The held request of `decision`, when it is a `grant.child` decision
     /// held as Core holds one: a `grant.child.v1` body whose terms digest is
     /// the decision's request digest, under the operation id and subject key
     /// the body derives, presented by exactly the rendering Core renders of
-    /// it. So what the approver saw is what executes.
+    /// it, whose operation's digest is the digest of the arguments it shows,
+    /// whose reply goes to the terms' requester, and whose terms name the
+    /// decision's approved work in the origin's ingress domain. So what the
+    /// approver saw is what executes, and the answer goes to the person they
+    /// saw.
     ///
     /// # Errors
-    /// [`GrantChildRequestError`] for another kind, an unreadable body, or a
-    /// body that is not the decision's.
+    /// The typed [`GrantChildRequestError`] of the first check the body
+    /// fails.
     pub fn of(decision: &StoredDecision) -> Result<Self, GrantChildRequestError> {
         let descriptor = &decision.descriptor;
-        let refused = |what: &str| Err(GrantChildRequestError(what.to_owned()));
         if descriptor.kind.as_str() != GRANT_CHILD_KIND {
-            return refused("another decision kind");
+            return Err(GrantChildRequestError::AnotherKind);
         }
         let request: Self = serde_json::from_str(descriptor.request.get())
-            .map_err(|error| GrantChildRequestError(error.to_string()))?;
+            .map_err(|error| GrantChildRequestError::Undecodable(error.to_string()))?;
         if request.format != GRANT_CHILD_REQUEST_FORMAT {
-            return refused("another request format");
+            return Err(GrantChildRequestError::AnotherFormat);
         }
         if grant_child_terms_digest(&request.terms).as_ref() != Some(&descriptor.request_digest) {
-            return refused("terms other than the decision's request");
+            return Err(GrantChildRequestError::TermsNotTheRequest);
         }
         if grant_child_operation_id(&decision.decision_id).as_ref()
             != Some(&descriptor.operation_id)
         {
-            return refused("another operation id");
+            return Err(GrantChildRequestError::AnotherOperation);
         }
         let subject = request.parent_lineage.last().and_then(|parent| {
             grant_child_subject_key(
@@ -98,10 +141,31 @@ impl GrantChildRequest {
             )
         });
         if subject.as_ref() != Some(&descriptor.subject_key) {
-            return refused("another subject");
+            return Err(GrantChildRequestError::AnotherSubject);
         }
         if render(&request, &descriptor.approver_id).as_ref() != Some(&descriptor.rendering) {
-            return refused("a rendering other than Core's");
+            return Err(GrantChildRequestError::AnotherRendering);
+        }
+        let operation = &request.operation;
+        if meerkat_core::mcp_request_digest(
+            &operation.server,
+            &operation.tool,
+            &operation.arguments,
+        )
+        .as_ref()
+            != Some(&operation.request_digest)
+        {
+            return Err(GrantChildRequestError::RequestDigestMismatch);
+        }
+        if request.origin.requester != request.terms.requester {
+            return Err(GrantChildRequestError::OriginRequesterMismatch);
+        }
+        let approved_work = approved_work_id(&decision.decision_id).map(|work| OriginalWorkRef {
+            authority: request.origin.ingress.authority.clone(),
+            work,
+        });
+        if approved_work.as_ref() != Some(&request.terms.work) {
+            return Err(GrantChildRequestError::TermsWorkMismatch);
         }
         Ok(request)
     }
@@ -109,9 +173,9 @@ impl GrantChildRequest {
     /// This request as a held request body.
     pub(crate) fn body(&self) -> Result<DecisionRequestBody, GrantChildRequestError> {
         let value = serde_json::to_value(self)
-            .map_err(|error| GrantChildRequestError(error.to_string()))?;
+            .map_err(|error| GrantChildRequestError::Undecodable(error.to_string()))?;
         DecisionRequestBody::from_value(&value)
-            .map_err(|error| GrantChildRequestError(error.to_string()))
+            .map_err(|error| GrantChildRequestError::Undecodable(error.to_string()))
     }
 }
 
@@ -143,6 +207,14 @@ pub fn approval_grant_id(decision: &DecisionId) -> Option<EvidenceId> {
 #[must_use]
 pub fn branch_controller_grant_id(decision: &DecisionId) -> Option<EvidenceId> {
     derived_id(decision, "branch-controller")
+}
+
+/// The decision whose approval branch's controller grant is `grant`, when
+/// `grant` names one.
+pub(crate) fn decision_of_branch_controller(grant: &EvidenceId) -> Option<DecisionId> {
+    let decision = grant.as_str().strip_suffix("/branch-controller")?;
+    let decision = DecisionId::new(decision).ok()?;
+    (branch_controller_grant_id(&decision).as_ref() == Some(grant)).then_some(decision)
 }
 
 /// The executor principal of the approval branch of `grantee` for

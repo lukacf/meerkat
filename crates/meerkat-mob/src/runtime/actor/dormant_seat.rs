@@ -309,6 +309,18 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
+        // A dormant seat never seats an approval branch: only the branch's
+        // opening takes its identity or label.
+        if spec.approval_branch.is_some()
+            || crate::runtime::approval_branch::takes_approval_branch_reservation(
+                &agent_identity,
+                spec.labels.as_ref(),
+            )
+        {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: agent_identity.clone(),
+            });
+        }
         let launch = match &spec.launch_mode {
             crate::launch::MemberLaunchMode::Fresh if mode != SeatPlanMode::SameSession => {
                 DormantSeatLaunch::Fresh

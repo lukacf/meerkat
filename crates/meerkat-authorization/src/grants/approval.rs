@@ -264,12 +264,15 @@ pub trait ApprovalUseCurrentness: Send + Sync {
 }
 
 /// The immutable facts of one grant this owner retains, as it was issued:
-/// who holds it, for whom, within which bounds, under which child rule and
-/// with which approval. Identity only: it says nothing about whether the
-/// grant is current, which resolving its lineage decides.
+/// who issued it and who holds it, for whom, within which bounds, under
+/// which child rule and with which approval. Identity only: it says nothing
+/// about whether the grant is current, which resolving its lineage decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetainedGrant {
+    /// The principal that issued the grant (the root's for a root grant):
+    /// with the owner's root, the one who may revoke it.
+    pub issuer: PrincipalRef,
     pub grantee: PrincipalRef,
     pub represented_subject: Option<PrincipalRef>,
     /// The grant's own effective bounds.
@@ -665,6 +668,7 @@ impl LocalGrantAuthority {
         }
         let record = exact_record(&owner, reference)?;
         Ok(RetainedGrant {
+            issuer: record.issuer.principal().clone(),
             grantee: record.grantee.principal().clone(),
             represented_subject: record
                 .represented_subject

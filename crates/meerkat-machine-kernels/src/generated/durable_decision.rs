@@ -83,6 +83,60 @@ impl std::fmt::Display for DecisionParty {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum DurableDecisionCleanup {
+    #[default]
+    #[serde(rename = "NotOwed")]
+    NotOwed,
+    #[serde(rename = "Owed")]
+    Owed,
+    #[serde(rename = "Settled")]
+    Settled,
+}
+impl DurableDecisionCleanup {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotOwed => "NotOwed",
+            Self::Owed => "Owed",
+            Self::Settled => "Settled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableDecisionCleanup {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "NotOwed" => Ok(Self::NotOwed),
+            "Owed" => Ok(Self::Owed),
+            "Settled" => Ok(Self::Settled),
+            other => Err(format!("invalid DurableDecisionCleanup value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableDecisionCleanup {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableDecisionCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DurableDecisionNotice {
     #[default]
     #[serde(rename = "NotRequired")]
@@ -401,6 +455,8 @@ pub struct State {
     pub permit_issued: bool,
     pub executed_request_digest: Option<DecisionDigest>,
     pub notice: DurableDecisionNotice,
+    pub cleanup: DurableDecisionCleanup,
+    pub reply_digest: Option<DecisionDigest>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -487,6 +543,14 @@ pub mod inputs {
     pub struct SettleNotice {
         pub delivered: bool,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OweCleanup {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleCleanup {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleReply {
+        pub digest: DecisionDigest,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -502,6 +566,9 @@ pub enum Input {
     RecordExecuted(inputs::RecordExecuted),
     CloseRefused(inputs::CloseRefused),
     SettleNotice(inputs::SettleNotice),
+    OweCleanup(inputs::OweCleanup),
+    SettleCleanup(inputs::SettleCleanup),
+    SettleReply(inputs::SettleReply),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -517,6 +584,9 @@ impl Input {
             Self::RecordExecuted(_) => InputKind::RecordExecuted,
             Self::CloseRefused(_) => InputKind::CloseRefused,
             Self::SettleNotice(_) => InputKind::SettleNotice,
+            Self::OweCleanup(_) => InputKind::OweCleanup,
+            Self::SettleCleanup(_) => InputKind::SettleCleanup,
+            Self::SettleReply(_) => InputKind::SettleReply,
         }
     }
 }
@@ -533,6 +603,9 @@ pub enum InputKind {
     RecordExecuted,
     CloseRefused,
     SettleNotice,
+    OweCleanup,
+    SettleCleanup,
+    SettleReply,
 }
 
 pub mod effects {
@@ -614,6 +687,19 @@ pub mod effects {
         pub decision_id: String,
         pub reason: DurableDecisionRefusal,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CleanupOwed {
+        pub decision_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CleanupSettled {
+        pub decision_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReplySettled {
+        pub decision_id: String,
+        pub digest: DecisionDigest,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -633,6 +719,9 @@ pub enum Effect {
     ExecutionRefused(effects::ExecutionRefused),
     NoticeSettled(effects::NoticeSettled),
     Refused(effects::Refused),
+    CleanupOwed(effects::CleanupOwed),
+    CleanupSettled(effects::CleanupSettled),
+    ReplySettled(effects::ReplySettled),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -651,6 +740,9 @@ pub enum EffectKind {
     ExecutionRefused,
     NoticeSettled,
     Refused,
+    CleanupOwed,
+    CleanupSettled,
+    ReplySettled,
 }
 
 #[allow(non_camel_case_types)]
@@ -801,6 +893,34 @@ pub enum TransitionId {
     SettleNoticeRefusedNotEndedApproved,
     AuthorizeExecutionRefusedApproverRevoked,
     AuthorizeExecutionRefusedRevokedSettlementOwed,
+    OweCleanup,
+    OweCleanupReplayed,
+    OweCleanupRefusedNotAuthorized,
+    OweCleanupRefusedNotApprovedOpen,
+    OweCleanupRefusedNotApprovedRejected,
+    OweCleanupRefusedNotApprovedExpired,
+    OweCleanupRefusedNotApprovedWithdrawn,
+    OweCleanupRefusedNotApprovedExecuted,
+    OweCleanupRefusedNotApprovedExecutionRefused,
+    SettleCleanupExecuted,
+    SettleCleanupExecutionRefused,
+    SettleCleanupExpired,
+    SettleCleanupRefusedNotOwedRejected,
+    SettleCleanupRefusedNotOwedExpired,
+    SettleCleanupRefusedNotOwedWithdrawn,
+    SettleCleanupRefusedNotOwedExecuted,
+    SettleCleanupRefusedNotOwedExecutionRefused,
+    SettleCleanupRefusedNotEndedOpen,
+    SettleCleanupRefusedNotEndedApproved,
+    SettleReply,
+    SettleReplyReplayed,
+    SettleReplyRefusedOther,
+    SettleReplyRefusedNotExecutedOpen,
+    SettleReplyRefusedNotExecutedApproved,
+    SettleReplyRefusedNotExecutedRejected,
+    SettleReplyRefusedNotExecutedExpired,
+    SettleReplyRefusedNotExecutedWithdrawn,
+    SettleReplyRefusedNotExecutedExecutionRefused,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -890,5 +1010,7 @@ pub fn initial_state() -> State {
         permit_issued: false,
         executed_request_digest: None,
         notice: DurableDecisionNotice::NotRequired,
+        cleanup: DurableDecisionCleanup::NotOwed,
+        reply_digest: None,
     }
 }

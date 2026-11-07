@@ -937,6 +937,32 @@ impl LocalGrantAuthority {
             .transpose()
     }
 
+    /// The references of the grants this owner issued and has not revoked
+    /// whose id `select` selects, in id order. The read is of the owner's
+    /// resident state: the owner holds every grant it issued in memory (a
+    /// durable owner restores all of them from its journal when it starts,
+    /// [`Self::restore`]), so it reads no store and wakes nothing. An
+    /// expired grant is listed until it is revoked.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Unavailable`] when the owner cannot say now.
+    pub fn unrevoked_grants(
+        &self,
+        select: impl Fn(&EvidenceId) -> bool,
+    ) -> Result<Vec<GrantLineageRef>, GrantRefusal> {
+        let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        if let Some(durable) = &self.durable {
+            durable.check_available()?;
+        }
+        let state = owner.state();
+        state
+            .records
+            .values()
+            .filter(|record| select(&record.id) && !state.revoked.contains(&record.id))
+            .map(|record| lineage_ref(&owner, record))
+            .collect()
+    }
+
     /// Revocation never deletes or reuses an issued ID. Either the configured
     /// root or the actual issuer can revoke; an expired ancestor cannot revive it.
     /// Native custody vetoes only references in unfinished controller lineages,

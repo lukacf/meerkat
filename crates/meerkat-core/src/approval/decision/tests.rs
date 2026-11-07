@@ -512,6 +512,8 @@ fn stored(
         permit_issued: false,
         executed_request_digest: None,
         notice,
+        cleanup: DecisionCleanup::NotOwed,
+        reply_digest: None,
     };
     StoredDecision::held(descriptor, state)
 }

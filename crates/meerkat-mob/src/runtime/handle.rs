@@ -2974,6 +2974,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::IdentityMember { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
+        // An approval branch's reserved identity or label: refused to every
+        // spawn but the branch's own opening, like an identity entry's name.
+        MobError::ApprovalBranchReserved { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
         // An identity change is not a spawn; its typed refusal is the same
         // family as the machine refusing the requested transition.
         MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
@@ -7376,6 +7381,14 @@ pub struct SpawnMemberSpec {
     /// takes only that entry's name, never another's, and keeps its member a
     /// store-owned entry. An agent-lane request never carries it.
     pub(crate) created_custody: bool,
+    /// The decision whose approval branch this spawn seats: the member's
+    /// typed creation source, recorded on its `MemberSpawned` row and roster
+    /// entry. Set only by [`MobHandle::open_approval_branch`] (and by the
+    /// restore of a member that records it); never taken from
+    /// caller-supplied arguments. Every other spawn, ensure, respawn and
+    /// fork is refused the approval branch identity prefix and label
+    /// ([`crate::MobError::ApprovalBranchReserved`]).
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7435,6 +7448,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                 "inherited_operator_authority_bound",
                 &self.inherited_operator_authority_bound,
             )
+            .field("approval_branch", &self.approval_branch)
             .finish()
     }
 }
@@ -7509,6 +7523,7 @@ impl SpawnMemberSpec {
             history_unavailable: None,
             fresh_life: false,
             created_custody: false,
+            approval_branch: None,
         }
     }
 
@@ -15058,6 +15073,16 @@ impl MobHandle {
         if spec.entry_custody {
             return Err(worker_reconcile_refuses_entry_custody(&identity));
         }
+        // An approval branch is never ensured, open or not: only its opening
+        // takes its identity or label.
+        if spec.approval_branch.is_some()
+            || super::approval_branch::takes_approval_branch_reservation(
+                &identity,
+                spec.labels.as_ref(),
+            )
+        {
+            return Err(MobError::ApprovalBranchReserved { identity });
+        }
         // One ready-wait budget for the whole convergence, decisions included.
         let started = Instant::now();
         loop {
@@ -15206,6 +15231,19 @@ impl MobHandle {
         // identity entry is refused before anything is reconciled.
         if let Some(spec) = desired.iter().find(|spec| spec.entry_custody) {
             return Err(worker_reconcile_refuses_entry_custody(&spec.identity));
+        }
+        // Nor does it reconcile an approval branch: only its opening takes
+        // its identity or label.
+        if let Some(spec) = desired.iter().find(|spec| {
+            spec.approval_branch.is_some()
+                || super::approval_branch::takes_approval_branch_reservation(
+                    &spec.identity,
+                    spec.labels.as_ref(),
+                )
+        }) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: spec.identity.clone(),
+            });
         }
         // MobMachine owns the membership decision: `ReconcileRunning` recomputes
         // `members_to_spawn`/`members_to_retire`/`desired_members` from its own
@@ -18947,6 +18985,12 @@ impl MobHandle {
         if &member.identity == source_identity {
             return Err(MobError::MemberAlreadyExists(member.identity.clone()));
         }
+        // An approval branch's identity and label are its opening's: refused
+        // to every other fork before anything is forked.
+        super::approval_branch::admit_approval_branch_reservation(
+            member,
+            SpawnSource::PersistedForkResume,
+        )?;
         if member.fork_build_inheritance.is_some() {
             return Err(MobError::WiringError(
                 "a durable member fork resolves its own source's build inheritance; the spawn \
@@ -23079,6 +23123,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
             direct_member_fence: None,
         }
     }

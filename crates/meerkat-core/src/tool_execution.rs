@@ -1416,7 +1416,11 @@ impl ToolExecutionResolutionContext {
 }
 
 /// Failure to resolve an exact pre-dispatch tool execution plan.
+///
+/// Non-exhaustive: a later release can add a failure without breaking a
+/// downstream match, which needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ToolExecutionResolutionError {
     NotFound {
         tool_name: String,
@@ -1446,6 +1450,15 @@ pub enum ToolExecutionResolutionError {
     },
     Declaration(ToolExecutionDeclarationError),
     Contract(ToolExecutionContractError),
+    /// The tool's owner refused the call for good when its plan resolved,
+    /// with the typed refusal its dispatch answers: the call fails as
+    /// [`crate::error::ToolError::ExecutionFailedWithData`] with `message`
+    /// and `data`, the same result as a refusal at its effect.
+    RefusedWithData {
+        tool_name: String,
+        message: String,
+        data: serde_json::Value,
+    },
 }
 
 impl std::fmt::Display for ToolExecutionResolutionError {
@@ -1499,6 +1512,9 @@ impl std::fmt::Display for ToolExecutionResolutionError {
             ),
             Self::Declaration(error) => std::fmt::Display::fmt(error, formatter),
             Self::Contract(error) => std::fmt::Display::fmt(error, formatter),
+            Self::RefusedWithData {
+                tool_name, message, ..
+            } => write!(formatter, "tool '{tool_name}' refused the call: {message}"),
         }
     }
 }
@@ -1564,6 +1580,9 @@ impl From<ToolExecutionResolutionError> for crate::error::ToolError {
             ToolExecutionResolutionError::Contract(error) => Self::execution_failed(format!(
                 "tool execution contract resolution failed: {error}"
             )),
+            ToolExecutionResolutionError::RefusedWithData { message, data, .. } => {
+                Self::ExecutionFailedWithData { message, data }
+            }
         }
     }
 }

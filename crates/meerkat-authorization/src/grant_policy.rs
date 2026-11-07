@@ -1380,6 +1380,10 @@ impl meerkat_core::PreparedOperationAuthorization for ToolApplicationDecision {
     ) -> Result<(), meerkat_core::authorization::OperationObservationError> {
         self.inner.observe(binding, observation)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
+    }
 }
 
 /// One exact control; every prepared projection covers both source and audience.

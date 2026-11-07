@@ -459,6 +459,10 @@ impl PreparedOperationAuthorization for RebuildDecision {
     ) -> Result<(), OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -917,6 +921,10 @@ async fn a_delegate_observation_names_its_parent_operation() {
             &self,
             _binding: &PreparedAuthorizationBinding,
         ) -> Result<(), OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }

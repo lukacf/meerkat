@@ -154,19 +154,38 @@ async fn a_controller_grant_whose_custody_refuses_every_try_is_revoked_by_the_ne
     settle_the_notice(&fixture, &decision);
     // The approved work ended: the branch retires, and the runtime's custody
     // refuses every try to revoke its controller grant.
-    fixture.grants.retire_branch(&decision, &data_agent()).await;
+    assert_eq!(
+        fixture.grants.clean_up(&decision).await,
+        executor::Cleanup::Pending,
+        "the revoke is left to the next pass"
+    );
     assert_eq!(fixture.branches.retired(), vec![decision.clone()]);
     assert!(custody.tries() > 0, "the revoke was tried");
     assert!(
         controller_current(&fixture, &decision),
         "the busy custody revoked nothing"
     );
-    // Once the custody frees, Core's next pass revokes it.
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Owed,
+        "the decision still owes its cleanup"
+    );
+    // Once the custody frees, Core's next pass revokes it and settles the
+    // decision's cleanup.
     custody.free();
-    let _ = fixture.executor_loop().pass().await;
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::CleanupSettled)),
+        "{pass:?}"
+    );
     assert!(
         !controller_current(&fixture, &decision),
         "the next pass revoked the retired branch's controller grant"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
     );
 }
 
@@ -201,7 +220,10 @@ async fn an_owner_read_that_answers_unavailable_leaves_the_revoke_to_the_pass_af
     );
     // The approved work ended: the branch retires, and its controller grant
     // cannot be read now.
-    fixture.grants.retire_branch(&decision, &data_agent()).await;
+    assert_eq!(
+        fixture.grants.clean_up(&decision).await,
+        executor::Cleanup::Pending
+    );
     assert_eq!(fixture.branches.retired(), vec![decision.clone()]);
     // The host restarts: the grant owner is restored from its journal.
     journal.uncertain.store(false, Ordering::SeqCst);
@@ -214,6 +236,10 @@ async fn an_owner_read_that_answers_unavailable_leaves_the_revoke_to_the_pass_af
     assert!(
         !controller_current(&fixture, &decision),
         "Core's first pass after the restart revoked it"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
     );
 }
 
@@ -238,10 +264,23 @@ async fn a_restart_between_the_retirement_and_the_revoke_is_revoked_by_the_next_
         controller_current(&fixture, &decision),
         "nothing revoked it before the restart"
     );
-    let _ = fixture.executor_loop().pass().await;
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Owed
+    );
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(decision.clone(), DecisionPassOutcome::CleanupSettled)),
+        "{pass:?}"
+    );
     assert!(
         !controller_current(&fixture, &decision),
         "Core's first pass after the restart revoked it"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
     );
     // Cold: the pass read the open branches and retired, and read neither
     // the asking agent nor a branch's seat.
@@ -251,6 +290,51 @@ async fn a_restart_between_the_retirement_and_the_revoke_is_revoked_by_the_next_
             .iter()
             .all(|call| matches!(*call, "open_branches" | "retire")),
         "{calls:?}"
+    );
+}
+
+/// A crash after every undo step and before the settlement leaves the
+/// decision's cleanup owed. The branch is retired and its controller grant
+/// revoked, so the owed fact carries no authority: no pass finds anything of
+/// it to sweep or lists it as owed work, and the pass runs as before.
+#[tokio::test]
+async fn a_cleanup_left_owed_by_a_crash_after_the_undo_holds_nothing() {
+    let journal = Arc::new(UncertainJournal::default());
+    let fixture = Fixture::with(Terms {
+        grant_store: Some(journal),
+        ..Terms::default()
+    });
+    let decision = executed(&fixture).await;
+    settle_the_notice(&fixture, &decision);
+    // Every undo step ran, and the process stopped before the settlement.
+    assert_eq!(
+        fixture.grants.undo(&decision).await,
+        executor::Cleanup::Done
+    );
+    let fixture = fixture.restarted();
+    assert!(!controller_current(&fixture, &decision));
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes.iter().all(|(id, _)| *id != decision),
+        "nothing of the decision is swept: {pass:?}"
+    );
+    assert!(pass.read_failures.is_empty(), "{pass:?}");
+    let row = fixture.stored(&decision);
+    assert_eq!(row.state.phase, DecisionPhase::Executed);
+    assert_eq!(
+        row.state.cleanup,
+        DecisionCleanup::Owed,
+        "the fact stays as the crash left it"
+    );
+    let owed = fixture.decisions.owed(None, 10).expect("the owed page");
+    assert!(
+        owed.decisions.iter().all(|row| row.decision_id != decision),
+        "an owed cleanup is no owed work"
+    );
+    assert_eq!(
+        fixture.branches.calls(),
+        vec!["open_branches"],
+        "the sweep found no branch and no controller grant of it"
     );
 }
 
@@ -278,9 +362,18 @@ async fn an_unavailable_read_of_the_decision_retires_and_revokes_nothing() {
         "and revokes nothing"
     );
     rows.readable();
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Owed,
+        "and settles nothing"
+    );
     let _ = fixture.grants.sweep_branches().await;
     assert_eq!(fixture.branches.retired(), vec![decision.clone()]);
     assert!(!controller_current(&fixture, &decision));
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
+    );
 }
 
 /// The decision `phase` leaves an offer of the data agent's peer work in,
@@ -402,5 +495,9 @@ async fn an_admission_that_fails_for_good_tells_the_origin_refused_and_never_app
     assert!(
         !controller_current(&fixture, &decision),
         "the branch's controller grant is revoked"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
     );
 }

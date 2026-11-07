@@ -22,21 +22,21 @@ use std::sync::Arc;
 use meerkat_core::approval::consent::{ConsentEligibility, ConsentEligibilityAnswer};
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DECISION_PAGE_MAX,
-    DECISION_PRESENTATIONS_MAX, DecisionContractError, DecisionDescriptor, DecisionExecutorClaim,
-    DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter, DecisionMachineState,
-    DecisionNotice, DecisionOperationId, DecisionOutcome, DecisionPage, DecisionPhase,
-    DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict, DecisionRow, DecisionStage,
-    DecisionStore, PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision,
-    UnreadableDecision,
+    DECISION_PRESENTATIONS_MAX, DecisionCleanup, DecisionContractError, DecisionDescriptor,
+    DecisionExecutorClaim, DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter,
+    DecisionMachineState, DecisionNotice, DecisionOperationId, DecisionOutcome, DecisionPage,
+    DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict, DecisionRow,
+    DecisionStage, DecisionStore, PresentationAudience, PresentationRecord, Sha256Digest,
+    StoredDecision, UnreadableDecision,
 };
 use meerkat_core::approval::{ApprovalConsentDeliveryState, ApprovalStoreError};
 use serde::{Deserialize, Serialize};
 
 use super::dsl::{
-    DecisionDigest, DecisionParty, DurableDecisionEffect, DurableDecisionInput,
-    DurableDecisionMachineAuthority, DurableDecisionMachineMutator, DurableDecisionMachineState,
-    DurableDecisionNotice, DurableDecisionPhase, DurableDecisionRefusal,
-    DurableDecisionReviewVerdict, DurableDecisionStage,
+    DecisionDigest, DecisionParty, DurableDecisionCleanup, DurableDecisionEffect,
+    DurableDecisionInput, DurableDecisionMachineAuthority, DurableDecisionMachineMutator,
+    DurableDecisionMachineState, DurableDecisionNotice, DurableDecisionPhase,
+    DurableDecisionRefusal, DurableDecisionReviewVerdict, DurableDecisionStage,
 };
 use super::permit::DecisionExecutionPermit;
 use super::{DecisionClock, DecisionWriteMode, SystemDecisionClock};
@@ -92,7 +92,8 @@ pub enum DecisionRefusal {
     /// The deadline passed while a permit is outstanding: the permit must be
     /// settled (executed, released or refused) first.
     SettlementOwed,
-    /// No notice is owed, or the receipt contradicts the settled one.
+    /// No notice, cleanup or reply is owed, or the receipt or reply
+    /// contradicts the settled one.
     NotOwed,
     /// The human decision was observed before the decision's first
     /// presentation to the approver.
@@ -330,6 +331,12 @@ pub(super) fn machine_state(state: &DecisionMachineState) -> DurableDecisionMach
             DecisionNotice::Delivered => DurableDecisionNotice::Delivered,
             DecisionNotice::Failed => DurableDecisionNotice::Failed,
         },
+        cleanup: match state.cleanup {
+            DecisionCleanup::NotOwed => DurableDecisionCleanup::NotOwed,
+            DecisionCleanup::Owed => DurableDecisionCleanup::Owed,
+            DecisionCleanup::Settled => DurableDecisionCleanup::Settled,
+        },
+        reply_digest: state.reply_digest.clone().map(DecisionDigest),
     }
 }
 
@@ -383,6 +390,12 @@ fn stored_state(
             DurableDecisionNotice::Delivered => DecisionNotice::Delivered,
             DurableDecisionNotice::Failed => DecisionNotice::Failed,
         },
+        cleanup: match state.cleanup {
+            DurableDecisionCleanup::NotOwed => DecisionCleanup::NotOwed,
+            DurableDecisionCleanup::Owed => DecisionCleanup::Owed,
+            DurableDecisionCleanup::Settled => DecisionCleanup::Settled,
+        },
+        reply_digest: state.reply_digest.as_ref().map(|digest| digest.0.clone()),
     })
 }
 
@@ -1516,6 +1529,66 @@ impl DurableDecisionService {
                 }
             });
             Ok(Step::of(&effects, next))
+        })
+    }
+
+    /// Open the cleanup of the approved decision of `permit`, which the
+    /// caller holds: its execution is about to create work outside the
+    /// store that must be undone once the decision's work is over. Call it
+    /// before creating any of it. Opening it again changes nothing. The
+    /// cleanup is owed across a release, a refusal or an expiry, until
+    /// [`Self::settle_cleanup`].
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotAuthorized` (no permit is
+    /// outstanding) or `NotApproved`; [`DecisionError::CandidateLaunch`];
+    /// store, clock and unreadable-row failures.
+    pub fn owe_cleanup(
+        &self,
+        permit: &DecisionExecutionPermit,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(permit.decision_id(), |loaded, _now_ms| {
+            let (effects, state) = transition(loaded, DurableDecisionInput::OweCleanup {})?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
+        })
+    }
+
+    /// Settle the cleanup an ended decision owes: its owner undid what its
+    /// execution created. The same settlement again changes nothing.
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotOwed` (none is owed, or the
+    /// decision has not ended); [`DecisionError::CandidateLaunch`]; store,
+    /// clock and unreadable-row failures.
+    pub fn settle_cleanup(
+        &self,
+        decision_id: &DecisionId,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(decision_id, |loaded, _now_ms| {
+            let (effects, state) = transition(loaded, DurableDecisionInput::SettleCleanup {})?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
+        })
+    }
+
+    /// Settle the one reply of an executed decision's work, by the digest of
+    /// its exact text, before it is delivered: the first settles it, the
+    /// same one again changes nothing, and another is refused.
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotOwed` (another reply is settled,
+    /// or the decision is not executed); [`DecisionError::CandidateLaunch`];
+    /// store, clock and unreadable-row failures.
+    pub fn settle_reply(
+        &self,
+        decision_id: &DecisionId,
+        reply_digest: &Sha256Digest,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(decision_id, |loaded, _now_ms| {
+            let input = DurableDecisionInput::SettleReply {
+                digest: machine_digest(reply_digest),
+            };
+            let (effects, state) = transition(loaded, input)?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
         })
     }
 }

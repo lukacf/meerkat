@@ -36,8 +36,9 @@ use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
 };
 use meerkat_core::approval::decision::{
-    ApproverId, AttestedDecision, DecisionId, DecisionIngress, DecisionPhase, DecisionReference,
-    DecisionStore, InMemoryDecisionStore, PresentationAudience, PresentationRecord, StoredDecision,
+    ApproverId, AttestedDecision, DecisionCleanup, DecisionId, DecisionIngress, DecisionPhase,
+    DecisionReference, DecisionStore, InMemoryDecisionStore, PresentationAudience,
+    PresentationRecord, StoredDecision,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
 use meerkat_core::connection::RealmId;
@@ -1230,10 +1231,15 @@ async fn the_branch_controller_grant_is_revoked_when_the_branch_retires() {
         .owner
         .resolve_controller_lineage(&lineage, &branch, None)
         .expect("current while the branch runs");
-    fixture
-        .grants
-        .retire_branch(&held.decision_id, &data_agent())
-        .await;
+    assert_eq!(
+        fixture.stored(&held.decision_id).state.cleanup,
+        DecisionCleanup::Owed,
+        "the execution opened the decision's cleanup before the branch"
+    );
+    assert_eq!(
+        fixture.grants.clean_up(&held.decision_id).await,
+        executor::Cleanup::Done
+    );
     assert_eq!(fixture.branches.retired(), vec![held.decision_id.clone()]);
     assert!(
         fixture
@@ -1241,6 +1247,10 @@ async fn the_branch_controller_grant_is_revoked_when_the_branch_retires() {
             .resolve_controller_lineage(&lineage, &branch, None)
             .is_err(),
         "revoked once the branch retired"
+    );
+    assert_eq!(
+        fixture.stored(&held.decision_id).state.cleanup,
+        DecisionCleanup::Settled
     );
 }
 
@@ -1277,11 +1287,20 @@ async fn an_open_branch_past_its_window_is_retired_by_the_sweep() {
     // Within its window the branch stays open: its work may still run.
     assert_eq!(fixture.grants.sweep_branches().await, 0);
     assert!(fixture.branches.retired().is_empty());
+    assert_eq!(
+        fixture.stored(&held.decision_id).state.cleanup,
+        DecisionCleanup::Owed
+    );
     // Past its window (a restart ended its watcher), the sweep retires it and
     // revokes its controller grant.
     fixture.clock.advance(15 * MINUTE_MS + 1);
     assert_eq!(fixture.grants.sweep_branches().await, 1);
     assert_eq!(fixture.branches.retired(), vec![held.decision_id.clone()]);
+    assert_eq!(
+        fixture.stored(&held.decision_id).state.cleanup,
+        DecisionCleanup::Settled,
+        "the sweep settles the decision's cleanup"
+    );
     let branch =
         approval_branch_principal(&data_agent(), &held.decision_id).expect("branch principal");
     let mut lineage = fixture.controller.clone();
@@ -1337,6 +1356,7 @@ fn a_held_request_is_read_only_as_core_held_it() {
     });
     let refused = GrantChildRequest::of(&forged)
         .expect_err("a request digest that is not the shown arguments' is refused");
+    assert_eq!(refused, GrantChildRequestError::RequestDigestMismatch);
     assert!(refused.to_string().contains("request digest"), "{refused}");
     // Its reply goes to another person than the terms' requester.
     let forged = reheld(&held, |request| {
@@ -1344,6 +1364,7 @@ fn a_held_request_is_read_only_as_core_held_it() {
     });
     let refused =
         GrantChildRequest::of(&forged).expect_err("a reply origin of another requester is refused");
+    assert_eq!(refused, GrantChildRequestError::OriginRequesterMismatch);
     assert!(refused.to_string().contains("requester"), "{refused}");
     // Its terms name another work than the decision's approved work.
     let forged = reheld(&held, |request| {
@@ -1354,6 +1375,7 @@ fn a_held_request_is_read_only_as_core_held_it() {
     });
     let refused = GrantChildRequest::of(&forged)
         .expect_err("terms of another work than the approved work are refused");
+    assert_eq!(refused, GrantChildRequestError::TermsWorkMismatch);
     assert!(refused.to_string().contains("approved work"), "{refused}");
 }
 

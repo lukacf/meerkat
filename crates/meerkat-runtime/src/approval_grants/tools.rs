@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use meerkat_core::approval::decision::{DecisionPhase, Sha256Digest};
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{
@@ -12,9 +13,10 @@ use meerkat_core::{
 use serde::Deserialize;
 
 use super::body::{GrantChildRequest, decision_of_approved_work};
-use super::offer::{AccessOfferArguments, AccessOfferError, CallingWork};
+use super::offer::{AccessOfferArguments, AccessOfferError, AccessOfferRefusal, CallingWork};
 use super::seams::ReplyRouteError;
 use super::{ACCESS_OFFER_TOOL, ApprovalGrants, GRANT_CHILD_KIND, REPLY_TO_REQUESTER_TOOL};
+use crate::decision::{DecisionError, DecisionRefusal};
 
 static NEXT_DECISIONS_EXECUTION_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -106,10 +108,104 @@ fn decisions_tool_defs() -> Arc<[Arc<ToolDef>]> {
     ])
 }
 
-fn not_governed(name: &str) -> ToolError {
-    ToolError::ExecutionFailedWithData {
-        message: format!("{name} runs only in governed work"),
+/// A `decisions` tool's typed refusal, the one value a call refused for good
+/// is answered with wherever it is refused: when its plan resolves, when its
+/// resolved plan dispatches, and at its effect. It surfaces as
+/// `execution_failed` with the refusal's data.
+struct Refusal {
+    message: String,
+    data: serde_json::Value,
+}
+
+impl Refusal {
+    /// The refusal as the call's tool error.
+    fn tool_error(self) -> ToolError {
+        ToolError::ExecutionFailedWithData {
+            message: self.message,
+            data: self.data,
+        }
+    }
+
+    /// The refusal as the call's plan resolution error, which becomes the
+    /// same tool error.
+    fn resolution_error(self, tool_name: &str) -> meerkat_core::ToolExecutionResolutionError {
+        meerkat_core::ToolExecutionResolutionError::RefusedWithData {
+            tool_name: tool_name.to_owned(),
+            message: self.message,
+            data: self.data,
+        }
+    }
+}
+
+/// The call is not in governed work of one original.
+fn not_governed(name: &str) -> Refusal {
+    Refusal {
+        message: format!("{name} runs only in governed work of one original"),
         data: serde_json::json!({"refusal": "not_governed_work"}),
+    }
+}
+
+/// An access offer refused at hold, with its kind and reason.
+fn offer_refused(name: &str, refusal: &AccessOfferRefusal) -> Refusal {
+    Refusal {
+        message: format!("{name} refused: {refusal}"),
+        data: serde_json::to_value(refusal).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// The work is not an approved work.
+fn not_approved() -> Refusal {
+    Refusal {
+        message: "reply_to_requester runs only in an approved work".to_owned(),
+        data: serde_json::json!({"refusal": "not_an_approved_work"}),
+    }
+}
+
+/// The approved work already replied with another text.
+fn already_replied() -> Refusal {
+    Refusal {
+        message: "this approved work already replied with another text".to_owned(),
+        data: serde_json::json!({"refusal": "reply_already_delivered"}),
+    }
+}
+
+/// Why the typed operation target of a `decisions` tool call cannot be
+/// resolved.
+enum TargetRefusal {
+    /// The call's arguments do not parse.
+    InvalidArguments(String),
+    /// The call is refused for good, typed.
+    Refused(Refusal),
+    /// The grant owner cannot say now: the call may be made again.
+    Unavailable,
+}
+
+impl TargetRefusal {
+    fn tool_error(self, name: &str) -> ToolError {
+        match self {
+            Self::InvalidArguments(reason) => ToolError::invalid_arguments(name, reason),
+            Self::Refused(refusal) => refusal.tool_error(),
+            Self::Unavailable => ToolError::unavailable(
+                name,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            ),
+        }
+    }
+
+    fn resolution_error(self, name: &str) -> meerkat_core::ToolExecutionResolutionError {
+        match self {
+            Self::InvalidArguments(reason) => {
+                meerkat_core::ToolExecutionResolutionError::InvalidArguments {
+                    tool_name: name.to_owned(),
+                    reason,
+                }
+            }
+            Self::Refused(refusal) => refusal.resolution_error(name),
+            Self::Unavailable => meerkat_core::ToolExecutionResolutionError::Unavailable {
+                tool_name: name.to_owned(),
+                reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            },
+        }
     }
 }
 
@@ -130,26 +226,34 @@ impl DecisionsToolDispatcher {
     /// The typed operation target of `call` in `context`, derived from the
     /// same typed input and calling work its handler acts on: a hold for the
     /// approver id of the offering grant's child rule, or the requester
-    /// reply.
+    /// reply. A refusal is the one the call's effect would answer.
     fn target(
         &self,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
-    ) -> Result<ToolOperationTarget, String> {
+    ) -> Result<ToolOperationTarget, TargetRefusal> {
         match call.name {
             REPLY_TO_REQUESTER_TOOL => Ok(ToolOperationTarget::RequesterReply),
             ACCESS_OFFER_TOOL => {
-                let arguments: AccessOfferArguments =
-                    serde_json::from_str(call.args.get()).map_err(|error| error.to_string())?;
+                let arguments: AccessOfferArguments = serde_json::from_str(call.args.get())
+                    .map_err(|error| TargetRefusal::InvalidArguments(error.to_string()))?;
                 let calling = CallingWork::of_dispatch(context)
-                    .ok_or_else(|| "access_offer runs only in governed work".to_owned())?;
-                let approver_id = self
+                    .ok_or_else(|| TargetRefusal::Refused(not_governed(call.name)))?;
+                match self
                     .grants
                     .offer_approver(&calling, &arguments.operation.server)
-                    .map_err(|refusal| refusal.to_string())?;
-                Ok(ToolOperationTarget::DecisionHold { approver_id })
+                {
+                    Ok(approver_id) => Ok(ToolOperationTarget::DecisionHold { approver_id }),
+                    Err(AccessOfferError::Refused(refusal)) => {
+                        Err(TargetRefusal::Refused(offer_refused(call.name, &refusal)))
+                    }
+                    Err(AccessOfferError::Unavailable(_)) => Err(TargetRefusal::Unavailable),
+                    Err(error) => Err(TargetRefusal::InvalidArguments(error.to_string())),
+                }
             }
-            other => Err(format!("unknown decisions tool {other}")),
+            other => Err(TargetRefusal::InvalidArguments(format!(
+                "unknown decisions tool {other}"
+            ))),
         }
     }
 
@@ -160,7 +264,8 @@ impl DecisionsToolDispatcher {
     ) -> Result<ToolDispatchOutcome, ToolError> {
         let arguments: AccessOfferArguments = serde_json::from_str(call.args.get())
             .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-        let calling = CallingWork::of_dispatch(context).ok_or_else(|| not_governed(call.name))?;
+        let calling = CallingWork::of_dispatch(context)
+            .ok_or_else(|| not_governed(call.name).tool_error())?;
         match self.grants.offer(&calling, arguments) {
             Ok(decision) => {
                 let result = serde_json::json!({
@@ -169,12 +274,14 @@ impl DecisionsToolDispatcher {
                 });
                 Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
             }
-            Err(AccessOfferError::Refused(refusal)) => Err(ToolError::ExecutionFailedWithData {
-                message: format!("access offer refused: {}", refusal.refusal.as_str()),
-                data: serde_json::to_value(refusal).unwrap_or(serde_json::Value::Null),
-            }),
+            Err(AccessOfferError::Refused(refusal)) => {
+                Err(offer_refused(call.name, &refusal).tool_error())
+            }
             Err(AccessOfferError::InvalidArguments(reason)) => {
                 Err(ToolError::invalid_arguments(call.name, reason))
+            }
+            Err(AccessOfferError::Unavailable(_)) => {
+                Err(TargetRefusal::Unavailable.tool_error(call.name))
             }
             Err(error) => Err(ToolError::ExecutionFailed {
                 message: error.to_string(),
@@ -189,13 +296,10 @@ impl DecisionsToolDispatcher {
     ) -> Result<ToolDispatchOutcome, ToolError> {
         let arguments: ReplyArguments = serde_json::from_str(call.args.get())
             .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-        let calling = CallingWork::of_dispatch(context).ok_or_else(|| not_governed(call.name))?;
-        let not_approved = || ToolError::ExecutionFailedWithData {
-            message: "reply_to_requester runs only in an approved work".to_owned(),
-            data: serde_json::json!({"refusal": "not_an_approved_work"}),
-        };
-        let decision_id =
-            decision_of_approved_work(&calling.original_work).ok_or_else(not_approved)?;
+        let calling = CallingWork::of_dispatch(context)
+            .ok_or_else(|| not_governed(call.name).tool_error())?;
+        let decision_id = decision_of_approved_work(&calling.original_work)
+            .ok_or_else(|| not_approved().tool_error())?;
         let inner = &self.grants.0;
         let decision =
             inner
@@ -204,14 +308,32 @@ impl DecisionsToolDispatcher {
                 .map_err(|error| ToolError::ExecutionFailed {
                     message: error.to_string(),
                 })?;
-        let request = GrantChildRequest::of(&decision).map_err(|_| not_approved())?;
+        let request = GrantChildRequest::of(&decision).map_err(|_| not_approved().tool_error())?;
         if decision.descriptor.kind.as_str() != GRANT_CHILD_KIND
+            || decision.state.phase != DecisionPhase::Executed
             || request.terms.work != calling.original_work
             || request.terms.requester != calling.requester
             || request.terms.grantee != calling.executor
             || request.terms.represented_subject != calling.represented_subject
         {
-            return Err(not_approved());
+            return Err(not_approved().tool_error());
+        }
+        // The decision settles its work's one reply before it is handed to
+        // the route: another text is refused here (the decision answers
+        // `not_owed`), whatever the route does; the same text again is
+        // handed to the route, which answers the first delivery.
+        let digest = Sha256Digest::of(arguments.text.as_bytes());
+        match inner.decisions.settle_reply(&decision_id, &digest) {
+            Ok(_) => {}
+            Err(DecisionError::Refused {
+                refusal: DecisionRefusal::NotOwed,
+                ..
+            }) => return Err(already_replied().tool_error()),
+            Err(error) => {
+                return Err(ToolError::ExecutionFailed {
+                    message: error.to_string(),
+                });
+            }
         }
         match inner
             .replies
@@ -229,10 +351,7 @@ impl DecisionsToolDispatcher {
                 });
                 Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
             }
-            Err(ReplyRouteError::AlreadyDelivered) => Err(ToolError::ExecutionFailedWithData {
-                message: "this approved work already replied with another text".to_owned(),
-                data: serde_json::json!({"refusal": "reply_already_delivered"}),
-            }),
+            Err(ReplyRouteError::AlreadyDelivered) => Err(already_replied().tool_error()),
             Err(error) => Err(ToolError::ExecutionFailed {
                 message: error.to_string(),
             }),
@@ -280,12 +399,9 @@ impl AgentToolDispatcher for DecisionsToolDispatcher {
                 tool_name: call.name.to_string(),
             });
         }
-        let target = self.target(call, dispatch_context).map_err(|reason| {
-            meerkat_core::ToolExecutionResolutionError::InvalidArguments {
-                tool_name: call.name.to_string(),
-                reason,
-            }
-        })?;
+        let target = self
+            .target(call, dispatch_context)
+            .map_err(|refusal| refusal.resolution_error(call.name))?;
         let witness = meerkat_core::ToolExecutionOwnerWitness::new(
             self.key.clone(),
             call.name,
@@ -320,7 +436,7 @@ impl AgentToolDispatcher for DecisionsToolDispatcher {
             .map_err(ToolError::from)?;
         let target = self
             .target(call, context)
-            .map_err(|reason| ToolError::invalid_arguments(call.name, reason))?;
+            .map_err(|refusal| refusal.tool_error(call.name))?;
         let resolved_here = plan.owner_witness(&self.key).is_some_and(|witness| {
             witness.owner_key() == call.name
                 && witness.binding_fingerprint() == &binding
@@ -349,7 +465,7 @@ impl AgentToolDispatcher for DecisionsToolDispatcher {
         if !matches!(call.name, ACCESS_OFFER_TOOL | REPLY_TO_REQUESTER_TOOL) {
             return Err(ToolError::not_found(call.name));
         }
-        Err(not_governed(call.name))
+        Err(not_governed(call.name).tool_error())
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {

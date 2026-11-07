@@ -7225,6 +7225,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// The dispatch's own operation is reachable only with its actual
@@ -7328,6 +7332,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7826,6 +7834,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn churn_context(work: &Arc<ChurnWork>) -> ToolDispatchContext {
@@ -8156,6 +8168,10 @@ mod governed_operation_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// What one fenced call through the execution policy gate did under an
@@ -8421,6 +8437,10 @@ mod governed_operation_tests {
                 self.facts.complete_change(false);
                 self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

@@ -92195,6 +92195,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::IdentityMember { .. } => "identity_member".to_string(),
+        MobError::ApprovalBranchReserved { .. } => "approval_branch_reserved".to_string(),
         MobError::IdentityChangeRefused { refusal } => {
             format!("identity_change_refused:{}", refusal.kind())
         }

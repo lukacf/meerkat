@@ -4,17 +4,22 @@
 //! exact operation of a governed source it can reach (`access_offer`, in the
 //! `decisions` tool family): Core holds a `grant.child` durable decision for
 //! the offering grant's child rule. When a person approves it, the
-//! [`GrantDecisionExecutor`] opens a one-time approval branch of the agent
-//! that asked (a member forked from it with an empty transcript, labelled
-//! [`APPROVAL_BRANCH_LABEL`]), issues the branch its controller grant (a
-//! child of the asking agent's controller grant) and the approval-carried
-//! grant (a child of the offering grant carrying the decision), and records
-//! the decision executed. Its notice admits the approved work into the
-//! branch ([`ApprovalCarriedIngress`]): one operation, the approved one,
-//! whose one use is spent at its entry, then one reply to the requester
-//! (`reply_to_requester`), whose authority is Core's rule of the approved
-//! work. The branch is retired when the approved work ends or the grant's
-//! window does, whichever is first, and its controller grant is revoked.
+//! [`GrantDecisionExecutor`] opens the decision's cleanup, then a one-time
+//! approval branch of the agent that asked (a member forked from it with an
+//! empty transcript, which only the mob's own approval branch path seats),
+//! issues the branch its controller grant (a child of the asking agent's
+//! controller grant) and the approval-carried grant (a child of the offering
+//! grant carrying the decision), and records the decision executed. Its
+//! notice admits the approved work into that branch
+//! ([`ApprovalCarriedIngress`]), then tells the origin it was approved: one
+//! operation, the approved one, whose one use is spent at its entry, then one
+//! reply to the requester (`reply_to_requester`), settled by the decision
+//! before it is delivered, whose authority is Core's rule of the approved
+//! work. When the approved work ends or the grant's window does, whichever
+//! is first, the branch is retired, its controller grant revoked and the
+//! decision's cleanup settled; Core's pass sweeps whatever a stop or a busy
+//! custody left, from the grant owner's unrevoked controller grants and the
+//! host's open branches ([`crate::decision::DecisionExecutor::sweep`]).
 //!
 //! The host composes [`ApprovalGrants`] with its decision owner, its grant
 //! owner, its approval branches ([`ApprovalBranchHost`]), its requester reply
@@ -194,6 +199,10 @@ struct Inner {
     clock: Arc<dyn DecisionClock>,
     kind: DecisionKind,
     renderer: DecisionRenderer,
+    /// The decisions whose approved work this process watches: one watcher
+    /// per decision, so a redelivered notice watches nothing twice.
+    watched:
+        std::sync::Mutex<std::collections::BTreeSet<meerkat_core::approval::decision::DecisionId>>,
 }
 
 impl std::fmt::Debug for ApprovalGrants {
@@ -260,6 +269,7 @@ impl ApprovalGrants {
             clock,
             kind,
             renderer,
+            watched: std::sync::Mutex::default(),
         })))
     }
 

@@ -681,6 +681,18 @@ pub enum MobError {
     #[error("mob member already exists: {0}")]
     MemberAlreadyExists(AgentIdentity),
 
+    /// An approval branch's reserved identity or label, taken by any path
+    /// but the branch's own opening ([`crate::MobHandle::open_approval_branch`],
+    /// which records the decision as the member's typed creation source), or
+    /// a wire, unwire or respawn of an open approval branch. Nothing was
+    /// changed.
+    #[error(
+        "approval_branch_reserved: '{identity}' is reserved for an approval branch: only the \
+         branch's own opening takes its identity or label, and nothing wires, unwires or \
+         respawns an open branch"
+    )]
+    ApprovalBranchReserved { identity: AgentIdentity },
+
     /// The member is an identity entry (see
     /// [`crate::runtime::IdentityEntryRead`]): a spawn without entry custody
     /// cannot take its name, and the agent lane does not act on it as a
@@ -2998,6 +3010,11 @@ impl MobError {
             Self::IdentityMember { member_id } => Some(serde_json::json!({
                 "kind": "identity_member",
                 "member_id": member_id.as_str(),
+                "retryable": false,
+            })),
+            Self::ApprovalBranchReserved { identity } => Some(serde_json::json!({
+                "kind": "approval_branch_reserved",
+                "member_id": identity.as_str(),
                 "retryable": false,
             })),
             Self::IdentityChangeRefused { refusal } => Some(serde_json::json!({

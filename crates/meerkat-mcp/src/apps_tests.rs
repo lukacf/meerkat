@@ -288,6 +288,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for ResourceDec
         self.audit.lock().unwrap().push(observation);
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct ResourceLease {

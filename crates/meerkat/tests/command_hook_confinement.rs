@@ -1536,6 +1536,10 @@ mod observe_refusal_locality {
                 assert!(self.0.same_operation(binding));
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         /// Fixture policy data only: it permits every exact operation so the

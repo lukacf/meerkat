@@ -15,11 +15,11 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat_machine_schema::catalog::dsl::durable_decision::{
-    DecisionDigest, DecisionParty, DurableDecisionEffect, DurableDecisionInput,
-    DurableDecisionMachineAuthority, DurableDecisionMachineMutator, DurableDecisionMachineState,
-    DurableDecisionMachineTransition, DurableDecisionMachineTransitionError, DurableDecisionNotice,
-    DurableDecisionPhase, DurableDecisionRefusal, DurableDecisionReviewVerdict,
-    DurableDecisionStage,
+    DecisionDigest, DecisionParty, DurableDecisionCleanup, DurableDecisionEffect,
+    DurableDecisionInput, DurableDecisionMachineAuthority, DurableDecisionMachineMutator,
+    DurableDecisionMachineState, DurableDecisionMachineTransition,
+    DurableDecisionMachineTransitionError, DurableDecisionNotice, DurableDecisionPhase,
+    DurableDecisionRefusal, DurableDecisionReviewVerdict, DurableDecisionStage,
 };
 
 type Authority = DurableDecisionMachineAuthority;
@@ -42,6 +42,8 @@ const OTHER_APPROVER: &str = "approver:other";
 const REVIEWER: &str = "principal:reviewer";
 const DECIDER: &str = "principal:human";
 const EVIDENCE: &str = "sha256:evidence";
+const REPLY: &str = "sha256:reply";
+const OTHER_REPLY: &str = "sha256:other-reply";
 const HELD_AT: u64 = 1_000;
 const DEADLINE: u64 = 61_000;
 
@@ -261,6 +263,20 @@ fn settle(delivered: bool) -> Input {
     Input::SettleNotice { delivered }
 }
 
+fn owe_cleanup() -> Input {
+    Input::OweCleanup {}
+}
+
+fn settle_cleanup() -> Input {
+    Input::SettleCleanup {}
+}
+
+fn settle_reply(reply: &str) -> Input {
+    Input::SettleReply {
+        digest: digest(reply),
+    }
+}
+
 /// An authority parked in `phase` for the routable human-stage test hold.
 fn authority_in(phase: Phase) -> Authority {
     let mut authority = Authority::new();
@@ -337,6 +353,9 @@ fn label(effect: &Effect) -> String {
         Effect::ExecutionReplayed { .. } => "ExecutionReplayed".to_owned(),
         Effect::ExecutionRefused { .. } => "ExecutionRefused".to_owned(),
         Effect::NoticeSettled { .. } => "NoticeSettled".to_owned(),
+        Effect::CleanupOwed { .. } => "CleanupOwed".to_owned(),
+        Effect::CleanupSettled { .. } => "CleanupSettled".to_owned(),
+        Effect::ReplySettled { .. } => "ReplySettled".to_owned(),
         Effect::Refused { reason, .. } => format!("Refused({reason:?})"),
     }
 }
@@ -374,7 +393,7 @@ enum Expected {
 
 #[test]
 fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let commands: [(&str, fn() -> Input); 18] = [
+    let commands: [(&str, fn() -> Input); 21] = [
         ("Hold", hold),
         ("HoldOther", conflicting_hold),
         ("HoldUnnamed", unnamed_hold),
@@ -397,6 +416,9 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
         ("CloseRefused", || close_refused(HELD_AT + 40)),
         ("SettleDelivered", || settle(true)),
         ("SettleFailed", || settle(false)),
+        ("OweCleanup", owe_cleanup),
+        ("SettleCleanup", settle_cleanup),
+        ("SettleReply", || settle_reply(REPLY)),
     ];
 
     let expected = |phase: Phase, command: &str| -> Expected {
@@ -456,6 +478,12 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
                 | "CloseRefused",
             ) if ended => SelfLoop(&["Refused(NotApproved)"]),
             (_, "SettleDelivered" | "SettleFailed") if ended => Advance(phase, &["NoticeSettled"]),
+            // The phase builders hold no permit and open no cleanup.
+            (Phase::Approved, "OweCleanup") => SelfLoop(&["Refused(NotAuthorized)"]),
+            (_, "OweCleanup") => SelfLoop(&["Refused(NotApproved)"]),
+            (_, "SettleCleanup") => SelfLoop(&["Refused(NotOwed)"]),
+            (Phase::Executed, "SettleReply") => Advance(Phase::Executed, &["ReplySettled"]),
+            (_, "SettleReply") => SelfLoop(&["Refused(NotOwed)"]),
             (phase, command) => panic!("no expectation for ({phase:?}, {command})"),
         }
     };
@@ -1600,6 +1628,167 @@ fn notice_is_owed_once_at_the_end_for_routable_decisions() {
 }
 
 // ===========================================================================
+// Cleanup and reply
+// ===========================================================================
+
+/// An approved decision whose owner holds its permit and opened its
+/// cleanup.
+fn cleanup_owed() -> Authority {
+    let mut authority = authority_in(Phase::Approved);
+    apply(&mut authority, authorize(REQUEST, HELD_AT + 20));
+    let opened = apply(&mut authority, owe_cleanup());
+    assert_eq!(
+        opened.effects(),
+        &[Effect::CleanupOwed {
+            decision_id: DECISION.to_owned(),
+        }]
+    );
+    assert_eq!(authority.state().cleanup, DurableDecisionCleanup::Owed);
+    authority
+}
+
+#[test]
+fn a_cleanup_is_opened_under_a_permit_and_settled_after_the_end() {
+    // Only an owner that holds the permit of an approved decision opens it.
+    let mut approved = authority_in(Phase::Approved);
+    let refused = apply(&mut approved, owe_cleanup());
+    assert_eq!(refusal(&refused), DurableDecisionRefusal::NotAuthorized);
+    assert_eq!(approved.state().cleanup, DurableDecisionCleanup::NotOwed);
+    for phase in [
+        Phase::Open,
+        Phase::Rejected,
+        Phase::Expired,
+        Phase::Withdrawn,
+        Phase::Executed,
+        Phase::ExecutionRefused,
+    ] {
+        let mut authority = authority_in(phase);
+        let before = authority.state().clone();
+        let refused = apply(&mut authority, owe_cleanup());
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::NotApproved,
+            "{phase:?}"
+        );
+        assert_eq!(authority.state(), &before);
+    }
+
+    // Opened again, nothing changes; before the end it does not settle.
+    let mut authority = cleanup_owed();
+    let opened = authority.state().clone();
+    assert_eq!(
+        labels(&apply(&mut authority, owe_cleanup())),
+        ["CleanupOwed"]
+    );
+    assert_eq!(authority.state(), &opened);
+    let early = apply(&mut authority, settle_cleanup());
+    assert_eq!(refusal(&early), DurableDecisionRefusal::NotOwed);
+    assert_eq!(authority.state(), &opened);
+    // A release keeps it owed; a decision with no permit opens nothing.
+    apply(&mut authority, release(HELD_AT + 21));
+    assert!(!authority.state().permit_issued);
+    assert_eq!(authority.state().cleanup, DurableDecisionCleanup::Owed);
+    let refused = apply(&mut authority, owe_cleanup());
+    assert_eq!(refusal(&refused), DurableDecisionRefusal::NotAuthorized);
+    let mut open = authority_in(Phase::Open);
+    let refused = apply(&mut open, settle_cleanup());
+    assert_eq!(refusal(&refused), DurableDecisionRefusal::NotOwed);
+
+    // Every end after a permit keeps it owed until the owner settles it,
+    // beside the notice; once settled nothing is owed.
+    let ends: [(Phase, fn() -> Input); 3] = [
+        (Phase::Executed, || record(REQUEST, HELD_AT + 30)),
+        (Phase::ExecutionRefused, || close_refused(HELD_AT + 30)),
+        (Phase::Expired, || release(DEADLINE)),
+    ];
+    for (phase, end) in ends {
+        let mut authority = cleanup_owed();
+        apply(&mut authority, end());
+        assert_eq!(authority.state().lifecycle_phase, phase);
+        assert_eq!(
+            authority.state().cleanup,
+            DurableDecisionCleanup::Owed,
+            "{phase:?}"
+        );
+        let settled = apply(&mut authority, settle_cleanup());
+        assert_eq!(
+            settled.effects(),
+            &[Effect::CleanupSettled {
+                decision_id: DECISION.to_owned(),
+            }],
+            "{phase:?}"
+        );
+        assert_eq!(authority.state().cleanup, DurableDecisionCleanup::Settled);
+        assert_eq!(authority.state().notice, DurableDecisionNotice::Owed);
+        let done = authority.state().clone();
+        let again = apply(&mut authority, settle_cleanup());
+        assert_eq!(
+            refusal(&again),
+            DurableDecisionRefusal::NotOwed,
+            "{phase:?}"
+        );
+        assert_eq!(authority.state(), &done);
+    }
+
+    // A decision whose owner never opened one owes none, at any end.
+    for phase in ENDED_PHASES {
+        let mut authority = authority_in(phase);
+        let before = authority.state().clone();
+        let refused = apply(&mut authority, settle_cleanup());
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::NotOwed,
+            "{phase:?}"
+        );
+        assert_eq!(authority.state(), &before);
+    }
+}
+
+#[test]
+fn one_reply_settles_for_an_executed_decision() {
+    let mut authority = authority_in(Phase::Executed);
+    let settled = apply(&mut authority, settle_reply(REPLY));
+    assert_eq!(
+        settled.effects(),
+        &[Effect::ReplySettled {
+            decision_id: DECISION.to_owned(),
+            digest: digest(REPLY),
+        }]
+    );
+    assert_eq!(authority.state().reply_digest, Some(digest(REPLY)));
+    let replied = authority.state().clone();
+    // The same reply again replays; another is refused.
+    assert_eq!(
+        labels(&apply(&mut authority, settle_reply(REPLY))),
+        ["ReplySettled"]
+    );
+    assert_eq!(authority.state(), &replied);
+    let other = apply(&mut authority, settle_reply(OTHER_REPLY));
+    assert_eq!(refusal(&other), DurableDecisionRefusal::NotOwed);
+    assert_eq!(authority.state(), &replied);
+
+    // Only an executed decision's work replies.
+    for phase in [
+        Phase::Open,
+        Phase::Approved,
+        Phase::Rejected,
+        Phase::Expired,
+        Phase::Withdrawn,
+        Phase::ExecutionRefused,
+    ] {
+        let mut authority = authority_in(phase);
+        let before = authority.state().clone();
+        let refused = apply(&mut authority, settle_reply(REPLY));
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::NotOwed,
+            "{phase:?}"
+        );
+        assert_eq!(authority.state(), &before);
+    }
+}
+
+// ===========================================================================
 // TLC model
 // ===========================================================================
 
@@ -1754,6 +1943,41 @@ fn recover_from_state_refuses_each_torn_shape() {
             State {
                 notice: DurableDecisionNotice::NotDue,
                 ..withdrawn
+            },
+        ),
+        (
+            "unheld_is_empty",
+            State {
+                cleanup: DurableDecisionCleanup::Owed,
+                ..State::default()
+            },
+        ),
+        (
+            "open_has_no_outcome",
+            State {
+                reply_digest: Some(digest(REPLY)),
+                ..authority_in(Phase::Open).state().clone()
+            },
+        ),
+        (
+            "cleanup_follows_a_permit",
+            State {
+                cleanup: DurableDecisionCleanup::Owed,
+                ..authority_in(Phase::Rejected).state().clone()
+            },
+        ),
+        (
+            "cleanup_settles_after_the_end",
+            State {
+                cleanup: DurableDecisionCleanup::Settled,
+                ..authority_in(Phase::Approved).state().clone()
+            },
+        ),
+        (
+            "only_executed_settles_a_reply",
+            State {
+                reply_digest: Some(digest(REPLY)),
+                ..authority_in(Phase::ExecutionRefused).state().clone()
             },
         ),
     ];

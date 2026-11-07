@@ -183,9 +183,14 @@ pub enum ApprovalBranchError {
 ///   composes no branch).
 /// - [`Self::open`] is idempotent per decision: the branch's identity
 ///   derives from the decision, so a retry finds the branch an earlier
-///   attempt opened. The branch carries the authority label
-///   [`super::APPROVAL_BRANCH_LABEL`] with the decision id, and no peer,
-///   host or console ingress besides the approved work.
+///   attempt opened. Only the decision's execution opens it: the notice
+///   seats the branch the execution opened and never opens one. The branch
+///   carries the authority label [`super::APPROVAL_BRANCH_LABEL`] with the
+///   decision id and a typed creation source only this path records
+///   (`MobHandle::open_approval_branch`: no other spawn, ensure, respawn or
+///   fork path takes its identity or label, and nothing wires, unwires or
+///   respawns it), and no peer, host or console ingress besides the
+///   approved work.
 /// - [`Self::seat`] answers the open branch's own side of the approved
 ///   work's binding: its session, destination, pinned controller and
 ///   ceilings. It never waits on the branch's turn.
@@ -196,11 +201,15 @@ pub enum ApprovalBranchError {
 ///   [`ApprovalBranchError::EnrollmentConflict`]. It is synchronous and
 ///   bounded.
 /// - [`Self::admit`] admits the bound input into the branch of `decision` as
-///   internal work, with the custody [`Self::enroll`] returned.
+///   internal work, with the custody [`Self::enroll`] returned. The input's
+///   idempotency key derives from the decision, so admitting it again
+///   admits nothing new.
 /// - [`Self::retire`] retires the branch of `decision` through the ordinary
 ///   member retire path; retiring a retired or never opened branch succeeds.
-/// - [`Self::open_branches`] lists every branch open now, by its decision
-///   (for [`super::ApprovalGrants::sweep_branches`]).
+/// - [`Self::open_branches`] lists every branch open now, by its decision,
+///   from the hosts' rosters as they stand: it wakes no dormant member and
+///   no dormant mob. Core's sweep reads it at each pass
+///   ([`super::ApprovalGrants::sweep_branches`]).
 #[async_trait]
 pub trait ApprovalBranchHost: Send + Sync {
     fn grantee_basis(&self, grantee: &PrincipalRef) -> Option<ApprovalGranteeBasis>;

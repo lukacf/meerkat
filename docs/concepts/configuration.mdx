@@ -654,8 +654,23 @@ that every launch of the kind is refused), what keeps the host's own inputs
 from its confined processes, and each convention source it does not trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
 user namespaces, and it refuses deny lists, Unix socket grants, nested grants,
-and granted paths that do not exist or pass through a symbolic link. Other
-platforms refuse every confined launch. A confined process finds its program,
+a grant of `/` or of `/proc`, `/sys`, `/dev` or anything in them, and granted
+paths that do not exist or pass through a symbolic link. One link is accepted
+on Linux: the last component of a read-only literal file grant in a `custom`
+requirement, such as `{ kind = "literal", path = "/etc/resolv.conf" }` on a
+systemd-resolved host for name resolution with unrestricted `network`, when
+the link's own text alone names its regular file (a link to a link is
+refused), that file is not in `/proc`, `/sys` or `/dev`, and only root or the
+host's user can replace the link or a directory above it. These checks trust
+the owners and modes the filesystem reports, so for a link on a FUSE or
+network filesystem they trust that filesystem's server. That file is bound
+read-only at the link's path. A file replaced under its name (a new file
+renamed into place, as systemd-resolved does when its DNS settings change) is
+checked again by the same rules at the next launch, which binds it. A link
+replaced with other text refuses the launch, even when it names the same
+file, and so does a file replaced by anything the same rules refuse. macOS
+refuses such a grant. Other platforms refuse every
+confined launch. A confined process finds its program,
 libraries and data only inside its granted subtrees and the platform
 baseline; grant anything else it needs with `read`. A confined command hook,
 MCP stdio server or stdio skill source names its program by absolute path and

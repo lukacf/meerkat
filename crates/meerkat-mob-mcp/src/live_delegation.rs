@@ -436,9 +436,9 @@ struct ChannelSchedule {
     /// restarted after waiting on them receives them verbatim.
     completed_results: std::collections::HashMap<meerkat::WorkItemId, (String, String)>,
     /// The channel closed. Its admitted delegations still start, run and
-    /// settle on the operation's own retired channel; it requeues nothing a
-    /// worker hands back, and it is dropped once nothing is queued or
-    /// running on it.
+    /// settle on the operation's own retired channel, and it is dropped once
+    /// nothing is queued or running on it. Whether a worker's blocked
+    /// hand-back requeues is the machine's settlement, not this flag's.
     closed: bool,
 }
 
@@ -466,6 +466,16 @@ fn drop_drained_closed_schedule(
         schedules.remove(channel_key);
     }
 }
+
+/// A worker's task with the continuations folded into it, and the steer
+/// authority of each, to reconcile once the continuation's row commits.
+type FoldedContinuations = (
+    String,
+    Vec<(
+        meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+        PendingContinuation,
+    )>,
+);
 
 /// Exact identity and transport needed to narrate one delegation's state.
 struct NarrationSubject {
@@ -5003,12 +5013,13 @@ impl ExperimentalLiveDelegationCoordinator {
                 return;
             };
             schedule.running.remove(operation_id);
+            // The entry keeps what the start recorded on it (the transcript
+            // it committed, the work item it claimed or replaced): a retry
+            // never commits the spoken request twice.
             if let Some(entry) = schedule.pending.get_mut(operation_id) {
                 entry.blocked = false;
                 entry.deferred = true;
                 entry.start_attempts = entry.start_attempts.saturating_add(1);
-                entry.transcript = pending.transcript.clone();
-                entry.work = pending.work.clone();
             }
             if !schedule.queue.contains(operation_id) {
                 schedule.queue.push_back(operation_id.clone());
@@ -5403,20 +5414,18 @@ impl ExperimentalLiveDelegationCoordinator {
     /// Take the continuations held for `delegation` while it waited for a
     /// worker, authorize each as a steer (the worker's start is authorized),
     /// record it delivered, and append it to the worker's task. Returns the
-    /// task and the authorities to reconcile once each row commits.
+    /// task and the authorities to reconcile once each row commits. A held
+    /// continuation the machine refuses fails the fold: the caller retires
+    /// the start instead of running the request without words the user spoke
+    /// for it, and the steers already authorized are recorded as not
+    /// delivered.
     async fn fold_pending_continuations(
         &self,
         runtime_binding: &meerkat_runtime::live_execution::LiveDelegationRuntimeBinding,
         operation: &ExactOperationIdentity<LiveUserTurnCorrelation>,
         delegation: &LiveSidebandDelegationRef,
         mut task: String,
-    ) -> (
-        String,
-        Vec<(
-            meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
-            PendingContinuation,
-        )>,
-    ) {
+    ) -> Result<FoldedContinuations, String> {
         let held: Vec<PendingContinuation> = {
             let mut pending = self.pending_continuations.lock().await;
             let (held, waiting): (Vec<_>, Vec<_>) = pending
@@ -5425,10 +5434,20 @@ impl ExperimentalLiveDelegationCoordinator {
             *pending = waiting;
             held
         };
-        let mut folded = Vec::new();
+        let mut folded: Vec<(
+            meerkat_runtime::live_execution::LiveDelegationSteerAuthority,
+            PendingContinuation,
+        )> = Vec::new();
         for continuation in held {
+            // A continuation observed twice is one steer.
+            if folded
+                .iter()
+                .any(|(_, earlier)| earlier.continuation_id == continuation.continuation_id)
+            {
+                continue;
+            }
             let digest = continuation_digest(&continuation.transcript);
-            let authority = match self
+            match self
                 .runtime
                 .authorize_live_delegation_steer(
                     runtime_binding,
@@ -5438,24 +5457,43 @@ impl ExperimentalLiveDelegationCoordinator {
                 )
                 .await
             {
-                Ok(authority) => authority,
+                Ok(authority) => folded.push((authority, continuation)),
                 Err(error) => {
-                    tracing::debug!(%error, "held continuation was not authorized as a steer");
-                    continue;
+                    for (authority, _) in &folded {
+                        if let Err(error) = self
+                            .runtime
+                            .resolve_live_delegation_steer_delivery(
+                                authority,
+                                runtime_binding,
+                                false,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "a steer of a retired start was not recorded as undelivered"
+                            );
+                        }
+                    }
+                    return Err(format!(
+                        "held continuation {} was refused as a steer: {error}",
+                        continuation.continuation_id
+                    ));
                 }
-            };
+            }
+        }
+        for (authority, continuation) in &folded {
             task.push_str("\n\n");
             task.push_str(&continuation_steer_text(&continuation.transcript));
             if let Err(error) = self
                 .runtime
-                .resolve_live_delegation_steer_delivery(&authority, runtime_binding, true)
+                .resolve_live_delegation_steer_delivery(authority, runtime_binding, true)
                 .await
             {
                 tracing::warn!(%error, "folded steer delivery outcome was not recorded");
             }
-            folded.push((authority, continuation));
         }
-        (task, folded)
+        Ok((task, folded))
     }
 
     /// A queued delegation's worker started: deliver the continuations that
@@ -6166,9 +6204,34 @@ impl ExperimentalLiveDelegationCoordinator {
         // Continuations that arrived while this delegation waited for its
         // worker join the task itself, under generated steer authority: the
         // task is the worker's runtime input, so the runtime accounts for it.
-        let (task, folded_continuations) = self
+        let (task, folded_continuations) = match self
             .fold_pending_continuations(&runtime_binding, &operation, &delegation, task)
-            .await;
+            .await
+        {
+            Ok(folded) => folded,
+            Err(reason) => {
+                // Nothing physical started. The machine records the start as
+                // not started (its slot is released and the operation is held
+                // Failed), and the schedule retires the request: it never runs
+                // without the words the user spoke for it.
+                retry_reconciled_cleanup_step("refused-continuation-start-report", || {
+                    self.runtime.resolve_live_delegation_worker_start(
+                        runtime_binding.runtime_id(),
+                        runtime_binding.fence_token(),
+                        runtime_binding.generation(),
+                        &admission,
+                        false,
+                    )
+                })
+                .await;
+                tracing::warn!(
+                    operation_id = %operation.operation_id(),
+                    %reason,
+                    "a held continuation could not join its delegation; the request is retired, not run"
+                );
+                return Err(other(format!("{reason}; the request was retired, not run")));
+            }
+        };
         let result_spec =
             BoundedResultSpec::new("gpt_live_delegation", LIVE_DELEGATION_RESULT_BYTES)
                 .map_err(|error| other(error.to_string()))?;
@@ -6472,18 +6535,28 @@ impl ExperimentalLiveDelegationCoordinator {
             .iter()
             .map(|(_, title)| title.clone())
             .collect::<Vec<_>>();
-        let mut cancel_after_close = false;
+        // The machine settled a blocked hand-back: Blocked while the channel
+        // is bound (the item requeues once it is ready again), Cancelled once
+        // the channel is unbound (a requeue needs the binding, so nothing
+        // could serve it again). The schedule follows that settlement.
+        let blocked_cancelled = terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked
+            && self
+                .runtime
+                .live_delegation_schedule_state(
+                    retained.runtime_binding.session_id(),
+                    &operation_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                == Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Cancelled);
         {
             let mut schedules = self.schedules.lock().await;
             if let Some(schedule) = schedules.get_mut(channel_key) {
                 schedule.running.remove(&operation_id);
                 if terminal.terminal == LiveDelegationWorkerTerminalKind::Blocked {
-                    if schedule.closed {
-                        // A closed channel requeues nothing a worker hands
-                        // back: like blocked work the close found, the item
-                        // is cancelled.
+                    if blocked_cancelled {
                         schedule.pending.remove(&operation_id);
-                        cancel_after_close = true;
                     } else {
                         if let Some(pending) = schedule.pending.get_mut(&operation_id) {
                             pending.blocked = true;
@@ -6508,26 +6581,14 @@ impl ExperimentalLiveDelegationCoordinator {
                 drop_drained_closed_schedule(&mut schedules, channel_key);
             }
         }
-        if cancel_after_close {
-            if let Err(error) = self
-                .runtime
-                .cancel_queued_live_delegation(&retained.runtime_binding, &retained.operation)
-                .await
-            {
-                tracing::warn!(
-                    %error,
-                    %operation_id,
-                    "live delegation blocked after its channel closed could not be cancelled"
-                );
-            }
-            if let (Some(workgraph), Some(work)) =
+        if blocked_cancelled
+            && let (Some(workgraph), Some(work)) =
                 (retained.workgraph.as_ref(), retained.work.as_ref())
-                && let Err(error) = workgraph
-                    .close(&work.id, meerkat::WorkStatus::Cancelled, None)
-                    .await
-            {
-                tracing::warn!(%error, %operation_id, "voice work item blocked after its channel closed could not be cancelled");
-            }
+            && let Err(error) = workgraph
+                .close(&work.id, meerkat::WorkStatus::Cancelled, None)
+                .await
+        {
+            tracing::warn!(%error, %operation_id, "voice work item of a cancelled blocked hand-back could not be cancelled");
         }
         match terminal.terminal {
             LiveDelegationWorkerTerminalKind::Blocked => {
@@ -7355,12 +7416,37 @@ impl ExperimentalLiveDelegationCoordinator {
     async fn cancel_channel_binding(&self, binding: &ProviderWebrtcBinding) {
         let key = (binding.session_id().clone(), binding.channel_id().clone());
         self.active_user_turns.lock().await.remove(&key);
-        self.completed_delegation_turns
-            .lock()
-            .await
-            .retain(|(session_id, channel_id, _), _| {
-                session_id != binding.session_id() || channel_id != binding.channel_id()
-            });
+        // A delegation the lifecycle seam admitted but the channel loop never
+        // claimed (a retirement cancelled the run before the loop read its
+        // request) cannot run after the close: its control payload never
+        // arrived. The machine settles it as cancelled, so it is never left
+        // Created with no schedule and no worker.
+        let unclaimed = {
+            let mut completed = self.completed_delegation_turns.lock().await;
+            let keys = completed
+                .keys()
+                .filter(|(session_id, channel_id, _)| {
+                    session_id == binding.session_id() && channel_id == binding.channel_id()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| completed.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for turn in unclaimed {
+            if let Err(error) = self
+                .runtime
+                .cancel_queued_live_delegation(&turn.runtime_binding, &turn.operation)
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    operation_id = %turn.operation.operation_id(),
+                    "an admitted delegation the channel never claimed could not be cancelled at its close"
+                );
+            }
+        }
         self.cancel_responses_executions_for_binding(binding).await;
         self.settle_result_recovery_tasks(binding).await;
         self.settle_failed_start_cleanups(binding).await;
@@ -7408,12 +7494,16 @@ impl ExperimentalLiveDelegationCoordinator {
                     schedule.pending.retain(|operation_id, _| {
                         waiting.contains(operation_id) || running.contains(operation_id)
                     });
-                    // Recorded while the item is still queued, so a worker
-                    // that starts and settles meanwhile cannot leave a stale
-                    // entry behind.
+                    // An owned delegation still waiting for its worker, mid-start
+                    // or running finishes after the close and merges its result
+                    // into the source member: a channel reopened on this
+                    // session meanwhile is told the work is still finishing.
+                    // Recorded under the schedule lock, while the item is still
+                    // queued or running, so a worker that settles meanwhile
+                    // cannot leave a stale entry behind.
                     if owned_workers {
                         let mut running_after_close = lock_unpoisoned(&self.running_after_close);
-                        for operation_id in &waiting {
+                        for operation_id in waiting.iter().chain(running.iter()) {
                             running_after_close
                                 .insert(operation_id.clone(), binding.session_id().clone());
                         }
@@ -7428,22 +7518,6 @@ impl ExperimentalLiveDelegationCoordinator {
                 ),
             }
         };
-        // An owned worker still running finishes after the close and merges
-        // its result into the source member: a channel reopened on this
-        // session meanwhile is told the work is still finishing, as it is for
-        // an owned delegation still waiting for its worker.
-        {
-            let retained = self.retained.lock().await;
-            let mut running_after_close = lock_unpoisoned(&self.running_after_close);
-            for operation_id in &running {
-                if retained.get(operation_id).is_some_and(|retained| {
-                    retained.admission.worker_ownership()
-                        == LiveDelegationWorkerOwnership::OwnedMember
-                }) {
-                    running_after_close.insert(operation_id.clone(), binding.session_id().clone());
-                }
-            }
-        }
         for pending in blocked {
             if let Err(error) = self
                 .runtime

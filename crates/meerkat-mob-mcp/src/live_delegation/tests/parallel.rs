@@ -1775,12 +1775,12 @@ async fn an_existing_member_request_queued_behind_a_running_one_runs_after_the_c
     fx.handle.shutdown().await.expect("shutdown");
 }
 
-/// A closed channel requeues nothing a worker hands back. A fork still
-/// running at the close that then hands its item back blocked behind another
-/// item is cancelled, in the machine and in the WorkGraph, as blocked work the
-/// close found is: it was left blocked with no schedule to wake it. The fork
-/// it waited on still finishes and merges, and the closed channel's schedule
-/// then drains.
+/// A fork still running at the close that then hands its item back blocked
+/// behind another item is cancelled: the machine settles a blocked hand-back
+/// on the unbound channel Cancelled (a requeue needs the binding), and the
+/// WorkGraph item follows. It used to stay blocked with no schedule to wake
+/// it. The fork it waited on still finishes and merges, and the closed
+/// channel's schedule then drains.
 #[tokio::test]
 async fn a_fork_that_blocks_after_its_channel_closed_is_cancelled() {
     let mut fx = fixture(true).await;
@@ -1877,6 +1877,41 @@ fn is_post_close_work(fx: &Fixture, operation: &OperationId) -> bool {
         .contains_key(operation)
 }
 
+impl Fixture {
+    /// Release every model call until no post-close work is left: each
+    /// owned result merged into the source member and its merge turn
+    /// completed. A shutdown waits on a merge turn, so a merge call left
+    /// unreleased would hold it.
+    async fn release_until_post_close_work_settles(&mut self) {
+        let started = std::time::Instant::now();
+        loop {
+            while let Ok(call) = self.entered.try_recv() {
+                self.client.release(call.index);
+            }
+            let settled = self
+                .coordinator
+                .running_after_close
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+                && self
+                    .coordinator
+                    .merges_awaiting_commit
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty();
+            if settled {
+                return;
+            }
+            assert!(
+                started.elapsed() < WAIT,
+                "post-close work settles: notices and merges awaiting commit remain"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+}
+
 /// A continuation the user spoke while their delegation waited for a worker
 /// is held for it. The channel then closes and the delegation starts after
 /// the close: the held continuation joins its task under steer authority,
@@ -1926,6 +1961,7 @@ async fn a_continuation_held_for_a_queued_delegation_joins_its_start_after_the_c
         Some(true)
     );
     fx.wait_for_completed(&[first, second]).await;
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2144,6 +2180,7 @@ async fn the_close_wakes_work_waiting_on_blocked_work_it_cancels() {
         settled,
         Some(meerkat_runtime::live_execution::LiveDelegationScheduleState::Completed)
     );
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2183,6 +2220,7 @@ async fn an_owned_delegation_waiting_at_the_close_is_post_close_work() {
         !is_post_close_work(&fx, &first) && !is_post_close_work(&fx, &second)
     })
     .await;
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2230,6 +2268,7 @@ async fn an_owned_delegation_retired_after_the_close_stops_being_post_close_work
         "the retired request's worker never started: {calls:?}"
     );
     wait_until(WAIT, || async { !is_post_close_work(&fx, &second) }).await;
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2298,6 +2337,7 @@ async fn a_start_after_the_close_that_meets_a_busy_source_requeues_and_runs() {
         "{calls:?}"
     );
     fx.wait_for_completed(&[first, second]).await;
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2346,6 +2386,7 @@ async fn an_owned_fork_mid_start_at_the_close_is_post_close_work() {
         "{calls:?}"
     );
     wait_until(WAIT, || async { !is_post_close_work(&fx, &operation) }).await;
+    fx.release_until_post_close_work_settles().await;
     fx.handle.shutdown().await.expect("shutdown");
 }
 
@@ -2395,6 +2436,7 @@ async fn a_delegation_started_after_its_channel_closed_keeps_the_channel_reasoni
             Some(ReasoningEffort::Low),
             "{policy:?}: the turn started after the close keeps the sealed preference"
         );
+        fx.release_until_post_close_work_settles().await;
         fx.handle.shutdown().await.expect("shutdown");
     }
 }

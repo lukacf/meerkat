@@ -48,7 +48,7 @@ use support::{
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-const SETTLE: Duration = Duration::from_secs(60);
+const SETTLE: Duration = Duration::from_mins(1);
 const FORMAL: &str = "Answer formally.";
 const BRIEF: &str = "Keep every answer brief.";
 const RECORD_COMMAND: &str = "record_member_instruction_target";

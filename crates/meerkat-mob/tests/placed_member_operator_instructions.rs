@@ -490,14 +490,11 @@ async fn an_oversized_placed_record_is_not_sent_and_blocks_the_member() {
     let scripted = spawn_scripted_host_peer("oi-oversized-host").await;
     let controlling = create_controlling_mob("oi-oversized-host").await;
     let report = controlling.bind_scripted(&scripted).await;
-    controlling
-        .spawn_placed("worker", "b2", &report.host_id)
-        .await
-        .expect("the placed spawn commits");
-    let member = AgentIdentity::from("b2");
 
     // Four bodies at the per-body limit fill the mob's active budget; their
-    // record, with its envelope, is larger than the comms frame.
+    // record, with its envelope, is larger than the comms frame. They are
+    // written before the member is placed, so the first snapshot it is owed
+    // is the oversized one: no smaller snapshot's record is sent first.
     let body = "x".repeat(256 * 1024);
     for key in ["one", "two", "three", "four"] {
         controlling
@@ -506,6 +503,11 @@ async fn an_oversized_placed_record_is_not_sent_and_blocks_the_member() {
             .await
             .expect("the write commits within the active budget");
     }
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("the placed spawn commits");
+    let member = AgentIdentity::from("b2");
     let status = settle_member(
         &controlling.handle,
         &member,

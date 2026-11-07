@@ -2302,11 +2302,8 @@ pub(crate) fn explicit_provider_credentials_refusal(
     params: &Value,
     response_id: Value,
 ) -> Option<JsonRpcResponse> {
-    let executes = method == "meta/mobpacks/deploy"
-        && params
-            .get("execute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let executes =
+        method == "meta/mobpacks/deploy" && crate::mobpack::deploy_execute_requested(params);
     if !(explicit_provider_credentials && executes) {
         return None;
     }

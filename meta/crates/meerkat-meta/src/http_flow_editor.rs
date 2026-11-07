@@ -605,8 +605,10 @@ fn with_caller_scope(mut response: Value, caller_scope: String) -> Value {
 /// Map a flow-editor RPC method to the ABAC action it requires. Mirrors the
 /// console's `console_rpc_access_requirement`: `meta/capabilities` stays
 /// open (it only describes the method surface), every mobpack-authoring
-/// method requires `mobpack.author`, and a deploy with `execute: true`
-/// requires `mobpack.deploy` instead.
+/// method requires `mobpack.author`, and a change that runs `rkat` on the
+/// host (a deploy with `execute: true`, a validation with `rkat_validate:
+/// true`, which writes a rendered mobpack archive to a caller-controlled
+/// path and spawns `rkat`) requires `mobpack.deploy` instead.
 fn flow_editor_rpc_access_requirement(method: &str, params: &Value) -> Option<&'static str> {
     if method == "meta/capabilities" {
         return None;
@@ -615,34 +617,12 @@ fn flow_editor_rpc_access_requirement(method: &str, params: &Value) -> Option<&'
         // Unknown methods fall through to the dispatcher's method-not-found.
         return None;
     }
-    if method == "meta/mobpacks/deploy"
-        && params
-            .get("execute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    if crate::rpc::mobpack_authoring_change(method, params)
+        == Some(crate::rpc::MobpackAuthoringChange::HostRun)
     {
         return Some(ACTION_MOBPACK_DEPLOY);
     }
-    // `validate` with `rkat_validate: true` writes a rendered mobpack archive
-    // to a caller-controlled path and spawns `rkat mob validate` — a
-    // host-mutating side effect, not a pure authoring read. Gate it behind
-    // the same deploy grant as host-executing deploys.
-    if method == "meta/mobpacks/validate" && validate_rkat_execution_requested(params) {
-        return Some(ACTION_MOBPACK_DEPLOY);
-    }
     Some(ACTION_MOBPACK_AUTHOR)
-}
-
-/// True when a `meta/mobpacks/validate` request asks to render the pack and
-/// run `rkat mob validate` on the host (mirrors
-/// `mobpack::validate_with_rkat_requested`). This is the host-mutating arm:
-/// it writes a mobpack archive and spawns a child process.
-fn validate_rkat_execution_requested(params: &Value) -> bool {
-    params
-        .get("rkat_validate")
-        .or_else(|| params.get("rkatValidate"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn flow_editor_rpc_access_violation(
@@ -813,7 +793,7 @@ fn dispatch_flow_editor_rpc(
             None,
         ),
         "meta/mobpacks/deploy"
-            if !auth.host_access && deploy_execute_requested(&request.params) =>
+            if !auth.host_access && crate::mobpack::deploy_execute_requested(&request.params) =>
         {
             response_value(
                 response_id,
@@ -837,7 +817,8 @@ fn dispatch_flow_editor_rpc(
         // standalone surface (no `--allow-host-deploy`) and any caller lacking
         // `mobpack.deploy` can never reach the file-write/exec sink.
         "meta/mobpacks/validate"
-            if !auth.host_access && validate_rkat_execution_requested(&request.params) =>
+            if !auth.host_access
+                && crate::mobpack::validate_with_rkat_requested(&request.params) =>
         {
             let mut params = request.params.clone();
             if let Some(object) = params.as_object_mut() {
@@ -920,13 +901,6 @@ fn host_deploy_refusal(auth: &FlowEditorAuthReport) -> &'static str {
         "standalone Flow Editor RPC cannot execute host deploys; use deploy planning or run rkat \
          mob run manually"
     }
-}
-
-fn deploy_execute_requested(params: &Value) -> bool {
-    params
-        .get("execute")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn response_value(id: Value, result: Option<Value>, error: Option<JsonRpcError>) -> Value {

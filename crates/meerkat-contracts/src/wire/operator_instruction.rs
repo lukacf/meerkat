@@ -198,13 +198,16 @@ impl WireInstructionPendingReason {
 /// Which members of a mob an operator instruction targets: every member, the
 /// members of one profile, or one member. A target is a predicate over the
 /// roster: a profile or member that does not exist yet selects nobody until
-/// it does.
+/// it does. A target refuses a field its kind does not have (`Mob` is a
+/// struct variant for that: serde lets a unit variant ignore extra fields),
+/// so a member or profile name sent with the wrong kind never widens a
+/// write to every member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireInstructionTarget {
     /// Every member of the mob.
-    Mob,
+    Mob {},
     /// The members of one profile.
     Profile { profile: String },
     /// One member.

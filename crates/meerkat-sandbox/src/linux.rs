@@ -17,7 +17,9 @@
 //! its stub file) is captured again by the same rules and pinned in its place
 //! (`Mount::bind`); a link replaced with other text, or a target replaced by
 //! anything those rules refuse, refuses the launch. Setup reopens the target
-//! only while it is the object the launch validated.
+//! only while it is the object the launch validated, which the launch holds
+//! until its setup is done, so no other object can take its identity
+//! meanwhile.
 //!
 //! Every granted path, the baseline included, is opened by its canonical name
 //! with no symbolic link in any component (`open_no_symlinks`): when the
@@ -138,13 +140,14 @@ struct Mount {
     writable: bool,
     device: bool,
     // The pinned object. Only a final link's target replaced under its own
-    // name is ever pinned again (`Mount::bind`).
+    // name is ever pinned again (`Mount::bind`); a launch's `Bound` keeps the
+    // object it validated alive past that.
     pin: Mutex<Pin>,
 }
 
 /// The host object a mount pins.
 struct Pin {
-    file: File,
+    file: Arc<File>,
     identity: (u64, u64),
     // fstat (st_dev, st_ino, st_rdev) of the pinned object. st_rdev also
     // tells the three baseline devices apart; it is zero for directories and
@@ -157,9 +160,15 @@ struct Pin {
 
 /// What one launch binds of a mount, copied from its pin when the launch is
 /// validated, before fork, so setup reads no lock: the identity the reopened
-/// source must have, and the host mount's noexec.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// source must have, and the host mount's noexec. It also holds the pinned
+/// object itself until the launch drops it, after its setup is done, so the
+/// identity cannot pass to another object meanwhile: once a re-capture drops
+/// the pin of a replaced file, the file's last reference would otherwise go,
+/// and a filesystem may give its inode number to the next object made there
+/// (ext4 often does).
+#[derive(Clone, Debug)]
 struct Bound {
+    _held: Arc<File>,
     pinned: (libc::dev_t, libc::ino_t, libc::dev_t),
     noexec: bool,
 }
@@ -290,7 +299,8 @@ impl LinuxPolicy {
 
     // Capability setup runs once per compiled host profile. It never executes
     // the requested target. Only the exact probe PID is waited/killed here.
-    // `bound` is what the probe binds of each mount, validated before fork.
+    // `bound` is what the probe binds of each mount, validated before fork;
+    // the caller holds it until the probe returns, its child gone.
     fn probe(&self, bound: &[Bound]) -> Result<(), ConfinementRefusal> {
         // One slot per mount for setup's reopened sources, allocated before
         // fork: the child only writes its own copy.
@@ -729,7 +739,7 @@ impl Mount {
             writable,
             device,
             pin: Mutex::new(Pin {
-                file,
+                file: Arc::new(file),
                 identity: (metadata.dev(), metadata.ino()),
                 pinned,
                 ancestors,
@@ -754,6 +764,7 @@ impl Mount {
             *pin = self.recapture(&pin).ok_or(refusal)?;
         }
         Ok(Bound {
+            _held: Arc::clone(&pin.file),
             pinned: pin.pinned,
             noexec: pin.noexec,
         })
@@ -1339,7 +1350,10 @@ pub(super) fn spawn(
     streams: SpawnIo,
     gate: Option<(BorrowedFd<'_>, &OsStr)>,
 ) -> io::Result<NativeChild> {
-    // What this launch binds of each mount, validated here, before fork.
+    // What this launch binds of each mount, validated here, before fork. The
+    // pre-exec closure owns it, and `command` the closure, until
+    // `command.spawn()` returns, which std does only after the child's exec
+    // or failure: each validated object stays alive through setup.
     let bound = policy.launch_bindings(&launch).map_err(io::Error::other)?;
     let inherited_stdin = inherit(streams.stdin, libc::STDIN_FILENO)?;
     let inherited_stdout = inherit(streams.stdout, libc::STDOUT_FILENO)?;
@@ -1524,8 +1538,8 @@ mod tests {
         );
         // Only a final link's target is ever captured again.
         assert_eq!(
-            directory.bind(),
-            Err(ConfinementRefusal::BackendUnavailable)
+            directory.bind().err(),
+            Some(ConfinementRefusal::BackendUnavailable)
         );
     }
 
@@ -1832,7 +1846,11 @@ mod tests {
         let before = mount.bind().unwrap();
         fixture.replace_target(b"nameserver 127.0.0.53\nsearch example.test\n");
 
-        let bound = fixture.policy.launch_bindings(&fixture.launch).unwrap()[1];
+        let bound = fixture
+            .policy
+            .launch_bindings(&fixture.launch)
+            .unwrap()
+            .swap_remove(1);
         let replacement = std::fs::metadata(&fixture.target).unwrap();
         assert_eq!(
             (bound.pinned.0, bound.pinned.1),
@@ -1840,7 +1858,11 @@ mod tests {
             "the launch binds the new file"
         );
         assert_ne!(bound.pinned, before.pinned);
-        assert_eq!(mount.bind(), Ok(bound), "the new file stays pinned");
+        assert_eq!(
+            mount.bind().unwrap().pinned,
+            bound.pinned,
+            "the new file stays pinned"
+        );
         let source = mount.reopen(bound.pinned).unwrap();
         assert_eq!(stat_identity(source), Ok(bound.pinned));
         unsafe { libc::close(source) };
@@ -1905,6 +1927,20 @@ mod tests {
         fn replace_target(&self, contents: &[u8]) {
             let staged = self.run.join(".stub-resolv.conf.new");
             std::fs::write(&staged, contents).unwrap();
+            std::fs::rename(&staged, &self.target).unwrap();
+        }
+
+        /// Replaces the target the same way with a FIFO, which no capture
+        /// accepts.
+        fn replace_target_with_fifo(&self) {
+            let staged = self.run.join(".stub-resolv.conf.new");
+            let name = CString::new(staged.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::mkfifo(name.as_ptr(), 0o644) },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
             std::fs::rename(&staged, &self.target).unwrap();
         }
 
@@ -1996,6 +2032,59 @@ mod tests {
         assert_eq!(
             fixture.validate_launch(),
             Err(ConfinementRefusal::BackendUnavailable)
+        );
+    }
+
+    /// R5: a launch holds the object it validated until its setup is done.
+    /// Launch L1 validates its bindings. The target's directory writer
+    /// renames a new file over the target, and launch L2 captures it again,
+    /// dropping the pin of the file L1 validated. The writer then renames
+    /// another object over the target: a FIFO every other round, which no
+    /// capture accepts, else a file. L1's setup refuses it every round, also
+    /// on a filesystem that hands a freed inode number to a new object (ext4
+    /// often does), where that object would otherwise carry the identity L1
+    /// validated.
+    #[test]
+    fn a_launch_refuses_an_object_put_in_place_after_a_concurrent_recapture() {
+        const ROUNDS: u32 = 400;
+        let fixture = ResolverFixture::new();
+        let mount = &fixture.policy.mounts[1];
+        let (mut fifos, mut files) = (0_u32, 0_u32);
+        for round in 0..ROUNDS {
+            let first = fixture.policy.launch_bindings(&fixture.launch).unwrap();
+            fixture.replace_target(&round.to_le_bytes());
+            let second = fixture.policy.launch_bindings(&fixture.launch).unwrap();
+            assert_ne!(
+                second[1].pinned, first[1].pinned,
+                "L2 captured the new file again"
+            );
+            let fifo = round % 2 == 0;
+            if fifo {
+                fixture.replace_target_with_fifo();
+            } else {
+                fixture.replace_target(b"nameserver 192.0.2.1\n");
+            }
+            // L1's setup, while L1 still holds what it validated.
+            if let Ok(source) = mount.reopen(first[1].pinned) {
+                if fifo {
+                    fifos += 1;
+                } else {
+                    files += 1;
+                }
+                unsafe { libc::close(source) };
+            }
+            // Both launches' setup is done.
+            drop((first, second));
+            if fifo {
+                // A regular file again, for the next round's first launch.
+                fixture.replace_target(b"nameserver 127.0.0.53\n");
+            }
+        }
+        assert_eq!(
+            (fifos, files),
+            (0, 0),
+            "setup accepted objects no launch validated in {ROUNDS} rounds: \
+             {fifos} FIFOs, {files} files"
         );
     }
 

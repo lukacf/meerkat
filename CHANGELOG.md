@@ -867,6 +867,14 @@ them.
   still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
   through 0.9.10.
 
+- `meerkat-hooks`: a run override that disables a hook entry the host
+  refuses (an entry of a convention file it does not trust) and supplies
+  its own entry under the same id now runs that entry. The refusal followed
+  the hook id, so the replacement, which never came from the refused file,
+  was refused too. The refused entry itself still never runs: disabled, left
+  in place beside an override entry of its id (a duplicate id), or beside
+  any other override. Affects 0.9.1 through 0.9.10.
+
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response no
   longer fails the turn for good when Copilot gives its output items new
   ids. Copilot re-identifies an item on most events of its lifecycle while

@@ -825,7 +825,7 @@ pub struct InMemoryRuntimeStore {
     machine_lifecycle_load_panics_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_cas_conflicts_remaining: Arc<AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     machine_lifecycle_observe_errors_remaining: Arc<AtomicUsize>,
     #[cfg(any(test, feature = "test-support"))]
     machine_lifecycle_commit_errors_remaining: Arc<AtomicUsize>,
@@ -1134,7 +1134,7 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_load_panics_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_cas_conflicts_remaining: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             machine_lifecycle_observe_errors_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-support"))]
             machine_lifecycle_commit_errors_remaining: Arc::new(AtomicUsize::new(0)),
@@ -1249,8 +1249,11 @@ impl InMemoryRuntimeStore {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_machine_lifecycle_observation(&self) {
+    /// Test support: fail the store's next machine lifecycle observation
+    /// (every clone of the store shares the count) with a read failure.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_machine_lifecycle_observation(&self) {
         self.machine_lifecycle_observe_errors_remaining
             .fetch_add(1, Ordering::SeqCst);
     }
@@ -4577,7 +4580,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .machine_lifecycle_observe_errors_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

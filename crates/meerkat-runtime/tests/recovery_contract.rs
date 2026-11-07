@@ -6114,10 +6114,13 @@ fn make_directed_peer(
 }
 
 /// Records every interaction terminal published through it, and counts
-/// them on a watch channel a test waits on.
+/// them on a watch channel a test waits on. A row can hold a settled
+/// run's terminal publication open ([`Self::hold_run_terminals`]).
 struct RecordingPublications {
     events: std::sync::Mutex<Vec<meerkat_core::event::AgentEvent>>,
     published: tokio::sync::watch::Sender<usize>,
+    /// While `true`, a settled run's terminal publication waits.
+    run_terminals_held: tokio::sync::watch::Sender<bool>,
 }
 
 impl RecordingPublications {
@@ -6125,7 +6128,19 @@ impl RecordingPublications {
         Arc::new(Self {
             events: std::sync::Mutex::new(Vec::new()),
             published: tokio::sync::watch::channel(0).0,
+            run_terminals_held: tokio::sync::watch::channel(false).0,
         })
+    }
+
+    /// Hold every settled run's terminal publication until
+    /// [`Self::release_run_terminals`]: the runtime loop waits in it.
+    fn hold_run_terminals(&self) {
+        self.run_terminals_held.send_replace(true);
+    }
+
+    /// Let the held settled runs' terminal publications go on.
+    fn release_run_terminals(&self) {
+        self.run_terminals_held.send_replace(false);
     }
 
     fn events(&self) -> Vec<meerkat_core::event::AgentEvent> {
@@ -6210,6 +6225,12 @@ impl meerkat_core::lifecycle::CoreExecutorPublicationHandle for RecordingPublica
         &self,
         settled: &meerkat_core::lifecycle::SettledRunTerminal,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        let mut held = self.run_terminals_held.subscribe();
+        while *held.borrow_and_update() {
+            if held.changed().await.is_err() {
+                break;
+            }
+        }
         let count = {
             let mut recorded = self.events.lock().unwrap();
             recorded.push(settled.run_failed_event());
@@ -7192,6 +7213,114 @@ async fn a_host_settle_whose_settlement_write_fails_is_refused_until_the_reload(
             .expect("read the provisional tail")
             .is_none(),
         "the kept run's provisional tail is closed"
+    );
+    assert!(executor.runs.applied().is_empty(), "nothing runs");
+}
+
+/// A host's settle whose settled run's tail repair fails is not answered
+/// `Settled`. The runtime loop commits the settlement, but its repair of the
+/// run's provisional tail fails (the store cannot read the session's
+/// lifecycle row), so the tail still stands and the registration needs a
+/// durability reload: the call answers the reload refusal, and the run's
+/// input holds its committed terminal. The run's input ended, so the
+/// reload's recovery closes the tail and the reloaded registration keeps no
+/// run: a settle then answers `NotRetained`. Nothing runs. The loop's
+/// publication of the run's end is held open, so the call takes the
+/// session's gate before anything that follows that publication. RED
+/// before: the loop released the gate before it asked for the reload, so the
+/// call answered `Settled` while the tail stood.
+#[tokio::test]
+async fn a_host_settle_whose_tail_repair_fails_is_refused_until_the_reload() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, run_id, input) = a_kept_run(&store, InputLifecycleState::Staged).await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let (machine, executor) = a_runtime_held_for_recovery(&store, &session_id, &run_id).await;
+
+    // The runtime loop's repair of the settled run's tail fails: the store
+    // cannot read the lifecycle row the repair checks.
+    store.fail_next_machine_lifecycle_observation();
+    executor.publications.hold_run_terminals();
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle answers once its settlement ended");
+    executor.publications.release_run_terminals();
+    assert!(
+        matches!(
+            refused,
+            Err(meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked { .. })
+        ),
+        "a settled run whose tail still stands answers the registration's reload refusal, \
+         not {refused:?}"
+    );
+    assert!(
+        machine
+            .durability_reload_required(&session_id)
+            .await
+            .is_some(),
+        "the registration needs a durability reload"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        SETTLED_ROW,
+        "the settlement committed: the run's input ends cancelled"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .is_some(),
+        "the settled run's tail stands until the reload"
+    );
+    assert!(executor.runs.applied().is_empty(), "nothing runs");
+
+    // The reload: the degraded registration is discarded, and the session
+    // registers again from the store, under the host's staged hold. The
+    // run's input ended, so its recovery closes the tail and keeps no run.
+    let witness = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the degraded registration");
+    machine
+        .recover_or_discard_reload_required_registration_if_current(&witness)
+        .await
+        .expect("the reload discards the degraded registration");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the session's runtime registers again");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        None,
+        "the reloaded registration keeps no run"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("read the provisional tail")
+            .is_none(),
+        "the reload's recovery closed the settled run's tail"
+    );
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        machine.settle_retained_run(&session_id),
+    )
+    .await
+    .expect("the settle after the reload answers")
+    .expect("the settle after the reload is decided");
+    assert_eq!(
+        answer,
+        meerkat_runtime::RetainedRunSettlement::NotRetained,
+        "after the reload nothing is retained"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        SETTLED_ROW,
+        "nothing ends the input a second time"
     );
     assert!(executor.runs.applied().is_empty(), "nothing runs");
 }

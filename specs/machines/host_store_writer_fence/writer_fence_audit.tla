@@ -50,11 +50,11 @@
 \* resume on a takeover of that grant (ListingFailedResumed); the documented
 \* residual (Residual); and a holder nobody renewed, met again after an end
 \* recorded early, waited out again, then a resume (WaitedOutAgainResumed).
-\* Four of the scopes part: a quarantine and a poison kept across a stop, a
-\* re-acquire and a resume (QuarantineKeptAcrossReacquire,
-\* PoisonKeptAcrossReacquire), a re-acquire refused after a failed open
-\* listing (FailedOpenRefusesReacquire), and a chunk's conflict that
-\* quarantines its owner's key too (ChunkOwnerQuarantined).
+\* Three of the scopes part: a quarantine and a poison kept across a stop,
+\* a re-acquire and a resume (QuarantineKeptAcrossReacquire,
+\* PoisonKeptAcrossReacquire), and a re-acquire refused after a failed open
+\* listing (FailedOpenRefusesReacquire). One of the chunks part: a chunk's
+\* conflict that quarantines its owner's key too (ChunkOwnerQuarantined).
 \* With --mutants the runner seeds one defect
 \* at a time into a copy of the generated model and requires TLC to refuse
 \* each with the property it breaks.
@@ -67,8 +67,14 @@ EXTENDS model
 CONSTANTS AuditMaxSteps, AuditPart
 
 \* AuditPart "fence": a second writer and acquires the writer gave up on,
-\* no scope classification. AuditPart "scopes": scope classification
-\* and the open's listing, no second writer and no abandoned acquire.
+\* no scope classification. AuditPart "scopes" and "chunks": scope
+\* classification and the open's listing, no second writer and no
+\* abandoned acquire; "scopes" reports two conflicted incarnations of one
+\* key, "chunks" a chunk's conflict under the chunk's own name and under
+\* its owner's key. The two report sets never meet in one key or name,
+\* so each part explores its own alone: together they multiplied the
+\* space about six times.
+AuditScopesParts == {"scopes", "chunks"}
 
 \* The highest token any grant may answer, and the most acquires the writer
 \* may have given up on at once.
@@ -402,14 +408,17 @@ AuditOtherStops ==
     /\ other_alive' = FALSE
     /\ UNCHANGED << vars, storeVars, other, ever_other, foreign_unseen, lateVars, proofVars, waitVars >>
 
-\* --- the scopes part: classification and the open's listing ----------------
+\* --- the scopes and chunks parts: classification and the open's listing ----
 
 \* The conflicted incarnations the store may report, each with the key it is
-\* reported under: two incarnations of key "k1", and a chunk "c", reported
-\* under its own name (the open's listing) and under its owner "k2" (the
-\* owner's load meets the chunk's conflict). The scopes a decision site may
-\* poison.
-AuditReports == {<< "k1", "k1~a" >>, << "k1", "k1~b" >>, << "c", "c" >>, << "k2", "c" >>}
+\* reported under: in the scopes part two incarnations of key "k1"; in the
+\* chunks part a chunk "c", reported under its own name (the open's
+\* listing) and under its owner "k2" (the owner's load meets the chunk's
+\* conflict). The scopes a decision site may poison.
+AuditReports ==
+    IF AuditPart = "chunks"
+    THEN {<< "c", "c" >>, << "k2", "c" >>}
+    ELSE {<< "k1", "k1~a" >>, << "k1", "k1~b" >>}
 AuditScopeKeys == {"k1", "k2"}
 
 \* Every generated arm of a conflicted incarnation's report.
@@ -466,7 +475,7 @@ PoisonArms(scope, cause) ==
 
 \* The open's listing ends: it listed, and nothing is reported.
 AuditOpenListed ==
-    /\ AuditPart = "scopes"
+    /\ AuditPart \in AuditScopesParts
     /\ phase # "Unopened"
     /\ ~open_listed
     /\ open_listed' = TRUE
@@ -476,7 +485,7 @@ AuditOpenListed ==
 \* The open's listing failed: the realm reports it before any re-acquire may
 \* begin (the open holds the gate a re-acquire takes).
 AuditOpenListingFails ==
-    /\ AuditPart = "scopes"
+    /\ AuditPart \in AuditScopesParts
     /\ ~open_listed
     /\ \/ OpenListingFailedLive
        \/ OpenListingFailedStopped
@@ -488,7 +497,7 @@ AuditOpenListingFails ==
 \* A conflicted incarnation is reported: by the open's listing, a load that
 \* meets the conflict, or the runtime store's open.
 AuditQuarantine ==
-    /\ AuditPart = "scopes"
+    /\ AuditPart \in AuditScopesParts
     /\ \E report \in AuditReports, version \in 1..2, commit_ids \in {{}, {"c1"}} :
           QuarantineArms(report[1], report[2], version, commit_ids)
     /\ w_q_early' = (w_q_early \/ (grants = 0 /\ quarantined_keys' # {}))
@@ -497,7 +506,7 @@ AuditQuarantine ==
 
 \* A decision site poisons a scope.
 AuditPoison ==
-    /\ AuditPart = "scopes"
+    /\ AuditPart \in AuditScopesParts
     /\ \E scope \in AuditScopeKeys, cause \in {"Unsettled", "Dropped"} :
           PoisonArms(scope, cause)
     /\ w_p_early' = (w_p_early \/ (grants = 0 /\ DOMAIN poisoned_scopes' # {}))

@@ -652,14 +652,17 @@ fi
 
 # A host store realm's writer fence (the HostStoreWriterFenceMachine) is
 # driven by a store and by other writers, which the machine's own ci sweep
-# cannot see. A hand-written audit over the same generated model runs in two
+# cannot see. A hand-written audit over the same generated model runs in three
 # parts. Its fence part adds a store that grants tokens in order and records
 # one holder's lease, acquires the writer gave up on that the store still
 # decides later, a second writer that takes the fence over once, renews,
 # commits and stops, and a waited-out end that comes before the store's own
-# (a store that answers the remaining lease rounded down). Its scopes part
-# drives the scope classifications instead (the quarantine set, the poison
-# map) and an open whose listing may fail. Under every generated invariant it
+# (a store that answers the remaining lease rounded down). Its scopes and
+# chunks parts drive the scope classifications instead (the quarantine set,
+# the poison map) and an open whose listing may fail, the scopes part with
+# two conflicted incarnations of one key, the chunks part with a chunk's
+# conflict met under its own name and its owner's. Under every generated
+# invariant it
 # checks six invariants (the realm is lost only to another writer or to the
 # documented residual; a live writer resumed through a clean listing; no
 # grant installed over an unseen foreign batch; no holder that renews is

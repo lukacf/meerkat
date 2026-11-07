@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bounded TLC audit of the HostStoreWriterFenceMachine model
-# (writer_fence_audit.tla), in two parts over the same generated model.
+# (writer_fence_audit.tla), in three parts over the same generated model.
 #
 # The fence part drives it with a host store and a second writer: grants in
 # token order, one holder's lease on the store's clock, acquires the writer
@@ -10,7 +10,11 @@
 # makes come early. The scopes part drops the second writer and the
 # abandoned acquires and drives the scope classifications instead: the
 # quarantine set (a conflicted incarnation reported under its key), the
-# poison map, and the open's listing that may fail.
+# poison map, and the open's listing that may fail. Its reports are two
+# conflicted incarnations of one key; the chunks part drives the same with
+# a chunk's conflict reported under the chunk's own name and under its
+# owner's key instead (the two report sets never meet in one key or name,
+# and together they multiplied the space about six times).
 #
 # usage: writer_fence_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
@@ -41,7 +45,8 @@
 #     re-acquired and resumed (QuarantineKeptAcrossReacquire);
 #   - the same for a poisoned scope (PoisonKeptAcrossReacquire);
 #   - a re-acquire refused after the open's listing failed
-#     (FailedOpenRefusesReacquire);
+#     (FailedOpenRefusesReacquire).
+# The chunks part's witness:
 #   - a chunk's conflict recorded under the chunk's own name and met again
 #     for its owner: both keys quarantined over one record
 #     (ChunkOwnerQuarantined).
@@ -66,12 +71,13 @@
 #   - quarantine_ignores_poison: a quarantine ignores the poison map
 #     (no_scope_is_quarantined_and_poisoned);
 #   - poison_ignores_quarantine: its mirror (the same invariant);
-#   - new_key_ignores_poison: a recorded incarnation met for a new key
-#     ignores the poison map (the same invariant);
-#   - new_key_overwrites_record: a recorded incarnation met for a new key
-#     overwrites its record's version (AuditClassificationsMonotone);
 #   - reacquire_after_failed_open: a re-acquire ignores the failed open
 #     listing (AuditNoReacquireAfterFailedOpen).
+# The chunks part's:
+#   - new_key_ignores_poison: a recorded incarnation met for a new key
+#     ignores the poison map (no_scope_is_quarantined_and_poisoned);
+#   - new_key_overwrites_record: a recorded incarnation met for a new key
+#     overwrites its record's version (AuditClassificationsMonotone).
 # Witness and mutant runs use one worker, so TLC stops at the shallowest
 # violation and prints its trace. An anchor this script expects but cannot
 # find fails the run. Each TLC run is held to the canonical lane's per-run
@@ -201,7 +207,8 @@ tlc_args=("$@")
 check_part fence ResumedAfterStop WaitedOutOwnGrantResumed HolderRenewed ForeignAfterWait \
   ListingFailedResumed Residual WaitedOutAgainResumed
 check_part scopes QuarantineKeptAcrossReacquire PoisonKeptAcrossReacquire \
-  FailedOpenRefusesReacquire ChunkOwnerQuarantined
+  FailedOpenRefusesReacquire
+check_part chunks ChunkOwnerQuarantined
 
 if [[ "${run_mutants}" == "true" ]]; then
   # Shared by every mutant edit: edit_arms rewrites, in each named arm of the
@@ -347,7 +354,7 @@ edit_arms(
 )
 PY
 
-  mutate scopes new_key_ignores_poison \
+  mutate chunks new_key_ignores_poison \
     "Invariant no_scope_is_quarantined_and_poisoned is violated" <<'PY'
 edit_arms(
     ["ScopeQuarantinedNewKey" + phase for phase in OPENED],
@@ -356,7 +363,7 @@ edit_arms(
 )
 PY
 
-  mutate scopes new_key_overwrites_record \
+  mutate chunks new_key_overwrites_record \
     "Action property AuditClassificationsMonotone is violated" <<'PY'
 for phase in OPENED:
     rewrite_frame(

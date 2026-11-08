@@ -228,3 +228,55 @@ def test_a_streaming_create_refuses_a_grant_gate_on_an_older_server() -> None:
     # A streaming create that names no gate is unaffected.
     client.create_session_streaming("hello")
     client._dispatcher.subscribe_pending_stream.assert_called_once()
+
+
+MEMBER = {"kind": "identity", "mob_id": "mob-1", "identity": "worker-1"}
+
+
+@pytest.mark.asyncio
+async def test_the_grant_wrappers_name_a_member_identity_and_a_decision_ref() -> None:
+    client, calls = fake_client(
+        {
+            "tool_grants/grant": {"grant": GRANT},
+            "tool_grants/list": {"grants": []},
+            "tool_grants/audit": {"rows": []},
+        }
+    )
+
+    await client.grant_tool(
+        mob_id="mob-1",
+        identity="worker-1",
+        family="shell",
+        duration_ms=60_000,
+        decision_ref="approval-7",
+    )
+    await client.list_tool_grants(mob_id="mob-1", identity="worker-1", include_ended=True)
+    await client.tool_grant_audit(mob_id="mob-1", identity="worker-1", limit=10)
+
+    assert calls == [
+        (
+            "tool_grants/grant",
+            {
+                "subject": MEMBER,
+                "target": {"kind": "family", "family": "shell"},
+                "duration_ms": 60_000,
+                "decision_ref": "approval-7",
+            },
+        ),
+        ("tool_grants/list", {"subject": MEMBER, "include_ended": True}),
+        ("tool_grants/audit", {"subject": MEMBER, "limit": 10}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_grant_subject_is_a_session_or_a_member_never_both() -> None:
+    client, calls = fake_client({})
+    with pytest.raises(ValueError):
+        await client.grant_tool(family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.grant_tool(mob_id="mob-1", family="shell", duration_ms=1)
+    with pytest.raises(ValueError):
+        await client.list_tool_grants(
+            SESSION_ID, mob_id="mob-1", identity="worker-1"
+        )
+    assert calls == []

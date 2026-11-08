@@ -15640,6 +15640,12 @@ pub mod effects {
         pub edge: WiringEdge,
         pub verdict: OwnedEdgeRestoreVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEnded {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclaredRosterSealRefused {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -15850,6 +15856,8 @@ pub enum Effect {
     IdentityRecordImportResolved(effects::IdentityRecordImportResolved),
     OwnedEdgeRealizationResolved(effects::OwnedEdgeRealizationResolved),
     OwnedIdentityEdgeRestored(effects::OwnedIdentityEdgeRestored),
+    IdentityEnded(effects::IdentityEnded),
+    DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -16055,6 +16063,8 @@ pub enum EffectKind {
     IdentityRecordImportResolved,
     OwnedEdgeRealizationResolved,
     OwnedIdentityEdgeRestored,
+    IdentityEnded,
+    DeclaredRosterSealRefused,
 }
 
 pub mod command_capabilities {
@@ -18202,6 +18212,7 @@ pub enum TransitionId {
     RestoreOwnedIdentityEdgeMobNotRunningCompleted,
     RestoreOwnedIdentityEdgeMobNotRunningDestroyed,
     PurgeIdentityRowsNothingToPurge,
+    SealDeclaredRosterRefused,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

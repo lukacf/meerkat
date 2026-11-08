@@ -169,12 +169,12 @@ pub use identity::{
     CallbackToolSetDeclaration, CreatedIdentityObservation, CreatedIdentityPresence,
     CreatedIdentityProvenance, CreatedIdentityRecord, CreatedIdentitySpec, DesiredExecution,
     DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery, DesiredLocalCallbackTool,
-    DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec, DesiredSessionAuthorityPolicy,
-    DesiredSessionTarget, IDENTITY_CHANGE_BATCH_MAX, IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION,
-    IdentityActuationPermit, IdentityActuatorTarget, IdentityAddressability, IdentityAdoptedFrom,
-    IdentityAdoptionId, IdentityAdoptionOutcome, IdentityAdoptionPrecondition,
-    IdentityAdoptionReceipt, IdentityAuthorityCondition, IdentityChangeConsent,
-    IdentityChangeEntryOutcome, IdentityChangeKind, IdentityChangeReceipt,
+    DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec, DesiredProfileSource,
+    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IDENTITY_CHANGE_BATCH_MAX,
+    IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
+    IdentityAddressability, IdentityAdoptedFrom, IdentityAdoptionId, IdentityAdoptionOutcome,
+    IdentityAdoptionPrecondition, IdentityAdoptionReceipt, IdentityAuthorityCondition,
+    IdentityChangeConsent, IdentityChangeEntryOutcome, IdentityChangeKind, IdentityChangeReceipt,
     IdentityChangeReceiptEntry, IdentityChangeReceiptObservation, IdentityChangeRequester,
     IdentityConvergenceCondition, IdentityConvergenceDirective, IdentityConvergenceMode,
     IdentityConvergenceResolutionId, IdentityConvergenceResolutionOutcome,
@@ -315,6 +315,7 @@ pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::HeldSpawnDeadline;
+pub use runtime::MemberGrantGate;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;

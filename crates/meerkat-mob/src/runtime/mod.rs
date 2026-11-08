@@ -387,8 +387,10 @@ pub use registration_hook::{
 // Flow-spine lane file (remote flow tickets); declared here so the events
 // lane's pump can hand pages to `RemoteFlowTicketRegistry` by name (ADJ-P6-10
 // cross-lane seams). If the flow wave also adds this line, the lead dedups.
+mod member_grant_gate;
 mod placed_completion_reconciler;
 mod placed_kickoff_reconciler;
+pub use member_grant_gate::MemberGrantGate;
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;

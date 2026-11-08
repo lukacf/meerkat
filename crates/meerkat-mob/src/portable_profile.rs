@@ -38,6 +38,17 @@ pub(crate) fn project_portable_profile(
     profile_name: &str,
     non_portable_disabled: Vec<WireNonPortableResourceKind>,
 ) -> Result<PortableProfile, String> {
+    // A tool grant gate is the controlling host's: its grants live in that
+    // host's runtime store, which a member built on another host never
+    // reads. The portable profile carries no gate, and dropping one would
+    // run the gated tools ungated there, so a gated profile is refused.
+    if !profile.tools.grant_gated.is_empty() {
+        return Err(format!(
+            "profile '{profile_name}' has a tool grant gate (its own or its role's), which a \
+             portable profile cannot carry: a member whose gate names anything cannot be placed \
+             on another host"
+        ));
+    }
     let provider = resolved_profile_provider(profile, models).ok_or_else(|| {
         format!(
             "model '{}' has no resolvable provider for remote placement of '{agent_identity}' (set provider on profile '{profile_name}' or define models.{})",
@@ -300,6 +311,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
             mcp_servers,
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: Default::default(),
         },
         peer_description: portable.peer_description.clone(),
         external_addressable: portable.external_addressable,
@@ -406,6 +418,7 @@ mod tests {
                 mcp_servers: vec![stdio, sse, selected.clone()],
                 rust_bundles: Vec::new(),
                 bundles: Vec::new(),
+                grant_gated: Default::default(),
             },
             peer_description: "review worker".to_string(),
             external_addressable: true,

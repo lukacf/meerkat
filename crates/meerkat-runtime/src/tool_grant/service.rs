@@ -12,6 +12,7 @@
 //! conflict it reloads the row and applies the input once more; a second
 //! conflict is [`ToolGrantServiceError::Conflict`].
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
@@ -64,6 +65,11 @@ pub struct StoredToolGrant {
     /// set exactly when it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Whether the grant ended with its subject (`Revoked` with the machine's
+    /// end reason `SubjectEnded`): the identity it was issued to ended. Such a
+    /// grant explains no refusal. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subject_ended: bool,
 }
 
 impl StoredToolGrant {
@@ -92,13 +98,23 @@ impl StoredToolGrant {
     /// The generated machine, rebuilt from this row. The machine's
     /// invariants refuse a torn row.
     fn authority(&self) -> Result<ToolGrantLifecycleMachineAuthority, ToolGrantServiceError> {
-        let (lifecycle_phase, end_reason) = match self.status {
-            ToolGrantStatus::Active => (ToolGrantPhase::Active, None),
-            ToolGrantStatus::Expired => {
+        let (lifecycle_phase, end_reason) = match (self.status, self.subject_ended) {
+            (ToolGrantStatus::Active, false) => (ToolGrantPhase::Active, None),
+            (ToolGrantStatus::Expired, false) => {
                 (ToolGrantPhase::Expired, Some(ToolGrantEndReason::Deadline))
             }
-            ToolGrantStatus::Revoked => {
+            (ToolGrantStatus::Revoked, false) => {
                 (ToolGrantPhase::Revoked, Some(ToolGrantEndReason::Revoked))
+            }
+            (ToolGrantStatus::Revoked, true) => (
+                ToolGrantPhase::Revoked,
+                Some(ToolGrantEndReason::SubjectEnded),
+            ),
+            (status, true) => {
+                return Err(ToolGrantServiceError::CorruptRow {
+                    grant_id: self.record.grant_id.to_string(),
+                    detail: format!("a {status:?} grant cannot have ended with its subject"),
+                });
             }
         };
         ToolGrantLifecycleMachineAuthority::recover_from_state(ToolGrantLifecycleMachineState {
@@ -137,6 +153,7 @@ impl StoredToolGrant {
             issued_at_ms: state.issued_at_ms,
             expires_at_ms: state.expires_at_ms,
             ended_at_ms: state.ended_at_ms,
+            subject_ended: state.end_reason == Some(ToolGrantEndReason::SubjectEnded),
         })
     }
 }
@@ -352,6 +369,12 @@ fn use_verdict(
                     grant_id: row.record.grant_id.clone(),
                 }));
             }
+            // A grant that ended with its subject explains nothing: a later
+            // life of the subject needs a grant of its own.
+            ToolGrantLifecycleEffect::UseRefused {
+                reason: ToolGrantUseRefusal::SubjectEnded,
+                ..
+            } => return Ok(Err(ToolGrantRefusal::Required)),
             _ => {}
         }
     }
@@ -365,7 +388,8 @@ fn use_verdict(
 
 /// Which refusal explains a refused call when several grants cover its
 /// name: an expired grant, then a revoked one, then an unavailable read;
-/// with none of them the call needs a grant.
+/// with none of them the call needs a grant. A grant that ended with its
+/// subject explains nothing (it answers `Required`).
 fn refusal_rank(refusal: &ToolGrantRefusal) -> u8 {
     match refusal {
         ToolGrantRefusal::Expired { .. } => 3,
@@ -423,8 +447,9 @@ fn quarantined_refusal(quarantined: &[QuarantinedToolGrant]) -> ToolGrantRefusal
 pub(crate) struct BoundaryAdjudication {
     /// The gated names a live grant opens now.
     pub(crate) open: ToolNameSet,
-    /// The earliest deadline of the grants that opened them.
-    pub(crate) next_deadline_ms: Option<u64>,
+    /// Per subject, the earliest deadline of the grants of it that opened
+    /// them: when the subject's deadline driver looks again.
+    pub(crate) next_deadlines: BTreeMap<ToolGrantSubjectKey, u64>,
 }
 
 /// A subject's grants, settled at one clock reading.
@@ -681,6 +706,82 @@ impl ToolGrantService {
         Ok(RevokedToolGrant { grant, changed })
     }
 
+    /// End every live grant of `subject` with it: its owner ended the subject
+    /// (a mob member identity whose identity ended, or a session that
+    /// identity held). Each grant ends through the machine's
+    /// `EndWithSubject`: revoked, its end reason `SubjectEnded`, so it
+    /// explains no later refusal; a grant at or after its deadline records
+    /// the expiry it reached instead, and a grant that already ended is left
+    /// as it stands. A row this binary cannot read admits nothing and is left
+    /// as it is, logged. A store without the grant domain holds no grant, so
+    /// there it ends none. Answers how many grants this call ended.
+    ///
+    /// # Errors
+    /// Store, clock and conflict failures; a grant the call did not reach
+    /// stays live, so the caller retries the whole end.
+    pub async fn revoke_subject(
+        &self,
+        subject: &ToolGrantSubjectKey,
+        revocation: ToolGrantRevocation,
+    ) -> Result<usize, ToolGrantServiceError> {
+        let rows = match self.subject_rows(std::slice::from_ref(subject)).await {
+            Ok(rows) => rows,
+            Err(ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_))) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        rows.warn_unreadable("revoke_subject");
+        let mut ended = 0;
+        for read in rows.readable {
+            if read.row.status != ToolGrantStatus::Active {
+                continue;
+            }
+            let now_ms = self.now_ms()?;
+            let effects = match self
+                .apply_and_commit(
+                    read,
+                    &|| ToolGrantLifecycleInput::EndWithSubject { now_ms },
+                    AuditContext::Revocation(&revocation),
+                )
+                .await
+            {
+                Ok((_, effects)) => effects,
+                // A row whose machine refuses to rebuild admits nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "revoke_subject",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    ToolGrantLifecycleEffect::Revoked { .. }
+                        | ToolGrantLifecycleEffect::Expired { .. }
+                )
+            }) {
+                ended += 1;
+            }
+        }
+        Ok(ended)
+    }
+
+    /// One grant as its row stands, read without settling it.
+    ///
+    /// # Errors
+    /// [`ToolGrantServiceError::NotFound`], [`ToolGrantServiceError::CorruptRow`]
+    /// for a row this binary cannot read, and store failures.
+    pub async fn load(
+        &self,
+        grant_id: &ToolGrantId,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+        Ok(self.load_row(&grant_id.to_string()).await?.row)
+    }
+
     /// Every grant of `subject`, each due one settled as expired first, and
     /// every row of the subject this binary cannot read, with every grant
     /// whose scope the store quarantined (its subject is unknown, so every
@@ -862,11 +963,11 @@ impl ToolGrantService {
                 for name in covered {
                     adjudication.open.insert(name);
                 }
-                adjudication.next_deadline_ms = Some(
-                    adjudication
-                        .next_deadline_ms
-                        .map_or(row.expires_at_ms, |next| next.min(row.expires_at_ms)),
-                );
+                adjudication
+                    .next_deadlines
+                    .entry(row.record.subject.key())
+                    .and_modify(|next| *next = (*next).min(row.expires_at_ms))
+                    .or_insert(row.expires_at_ms);
             }
         }
         Ok(adjudication)

@@ -1173,6 +1173,22 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RestoreOwnedIdentityEdgeMobNotRunningCompleted",
             "RestoreOwnedIdentityEdgeMobNotRunningDestroyed",
             "PurgeIdentityRowsNothingToPurge",
+            // The seal refused while an unseated entry it does not list
+            // remains, which the one-entry unlist ends first (0.9.11).
+            "SealDeclaredRosterRefused",
+        ],
+    ),
+    // The end of a grant with its subject (0.9.11), after every arm 0.9.10
+    // published. Every ToolGrantLifecycleMachine arm added after them is
+    // appended here too, so none of them moves.
+    (
+        "ToolGrantLifecycleMachine",
+        &[
+            "EndWithSubjectActive",
+            "EndWithSubjectAfterDeadline",
+            "EndWithSubjectSettledExpired",
+            "EndWithSubjectSettledRevoked",
+            "AdmitEndedWithSubject",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

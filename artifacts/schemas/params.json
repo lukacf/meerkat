@@ -26376,7 +26376,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -26444,6 +26444,13 @@
     "additionalProperties": false,
     "description": "`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and\n`duration_ms` bounds the grant, at most the host's maximum lifetime.",
     "properties": {
+      "decision_ref": {
+        "description": "The host's opaque reference to the decision it made before issuing\n(for example a person's approval in its own records): non-empty, at\nmost 1024 bytes, no control character. Recorded in the grant's issuer\nas attribution; nothing resolves or trusts it.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "duration_ms": {
         "description": "The grant's lifetime from the server's clock, in ms.",
         "format": "uint64",
@@ -29239,7 +29246,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -31604,6 +31611,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -32275,6 +32286,27 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -34863,6 +34895,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -35310,6 +35346,27 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -36109,6 +36166,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -36556,6 +36617,27 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -38978,6 +39060,27 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "WireMemberLaunchMode": {
         "description": "How a mob member should be launched by `mob/spawn`.",
         "oneOf": [
@@ -39207,6 +39310,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -46175,7 +46282,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -46254,7 +46361,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+        "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
         "properties": {
           "identity": {
             "type": "string"

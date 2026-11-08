@@ -15600,6 +15600,7 @@ async fn run_agent(
             mob_member_binding: None,
             mob_incarnation: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),

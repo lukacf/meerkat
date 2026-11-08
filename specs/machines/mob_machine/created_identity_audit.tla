@@ -737,14 +737,8 @@ UnarchiveVerdicts(id) ==
        ENABLED UnarchiveIdentityEntryMobNotRunningStopped(id) >>
 
 \* Every arm of one roster-owned identity's unlist, in a running and a
-\* stopped mob.
-UnlistArm(id) ==
-    \/ UnlistIdentityEntryRetiring(id)
-    \/ UnlistIdentityEntryRemoved(id)
-    \/ UnlistIdentityEntryDeferred(id)
-    \/ UnlistIdentityEntryNotADeclaredEntry(id)
-    \/ UnlistIdentityEntryNonAuthoritative(id)
-    \/ UnlistIdentityEntryMobNotRunningStopped(id)
+\* stopped mob: UnlistArm, in identity_entry_apply_audit (the apply run
+\* drives it too).
 UnlistVerdicts(id) ==
     << ENABLED UnlistIdentityEntryRetiring(id),
        ENABLED UnlistIdentityEntryRemoved(id),

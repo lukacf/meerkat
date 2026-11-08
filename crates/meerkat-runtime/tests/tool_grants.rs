@@ -27,9 +27,10 @@ use meerkat_core::types::{SessionId, ToolDef, ToolName, ToolProvenance, ToolSour
 use meerkat_runtime::MeerkatMachine;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SqliteRuntimeStore};
 use meerkat_runtime::tool_grant::{
-    StoredToolGrant, ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock, ToolGrantClockError,
-    ToolGrantExpiryDriver, ToolGrantRefusalKind, ToolGrantRequest, ToolGrantRevocation,
-    ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow,
+    RuntimeSessionToolGrants, StoredToolGrant, ToolGrantAuditEvent, ToolGrantAuditRow,
+    ToolGrantClock, ToolGrantClockError, ToolGrantExpiryDriver, ToolGrantRefusalKind,
+    ToolGrantRequest, ToolGrantRevocation, ToolGrantService, ToolGrantServiceError,
+    ToolGrantStatus, ToolGrantWindow,
 };
 
 /// The host clock reading every test starts at, in UNIX ms.
@@ -140,6 +141,7 @@ fn shell_grant(session_id: &SessionId, lifetime: Duration) -> ToolGrantRequest {
         },
         issuer: ToolGrantIssuer::Operator {
             caller: Some("operator".to_string()),
+            decision_ref: None,
         },
         reason: Some("maintenance".to_string()),
         window: ToolGrantWindow::For(lifetime),
@@ -287,7 +289,7 @@ async fn granted_family_is_visible_until_its_deadline_and_hidden_after() {
         );
 
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         assert_eq!(grant.status, ToolGrantStatus::Active);
@@ -315,7 +317,7 @@ async fn granted_family_is_visible_until_its_deadline_and_hidden_after() {
             "{backend:?}: at the deadline the family closes"
         );
         let listed = machine
-            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
+            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()), None)
             .await
             .unwrap();
         assert_eq!(listed.grants.len(), 1);
@@ -333,7 +335,7 @@ async fn dispatch_after_the_deadline_is_refused_although_the_boundary_showed_the
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -396,7 +398,7 @@ async fn expired_grant_stays_expired_across_restart_and_clock_rollback() {
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         clock.set(grant.expires_at_ms + 5);
@@ -425,7 +427,7 @@ async fn expired_grant_stays_expired_across_restart_and_clock_rollback() {
             "{backend:?}: {refusal:?}"
         );
         let listed = machine
-            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
+            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()), None)
             .await
             .unwrap();
         assert_eq!(listed.grants[0].status, ToolGrantStatus::Expired);
@@ -446,7 +448,7 @@ async fn live_grant_keeps_its_deadline_across_restart() {
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -458,7 +460,7 @@ async fn live_grant_keeps_its_deadline_across_restart() {
         clock.set(T0 + 30_000);
         let machine = durable.machine(&clock);
         let listed = machine
-            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()))
+            .list_tool_grants(&ToolGrantSubject::session(session_id.clone()), None)
             .await
             .unwrap();
         assert_eq!(
@@ -500,18 +502,21 @@ async fn listing_an_unserved_session_settles_due_grants_without_registering_it()
         let session_id = SessionId::new();
         let wakes = watch_wakes(&session_id);
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             None,
             "{backend:?}: an unserved session is not armed"
         );
 
         clock.set(grant.expires_at_ms + 1);
         let subject = ToolGrantSubject::session(session_id.clone());
-        let listed = machine.list_tool_grants(&subject).await.unwrap();
+        let listed = machine.list_tool_grants(&subject, None).await.unwrap();
         assert_eq!(
             listed.grants[0].status,
             ToolGrantStatus::Expired,
@@ -562,11 +567,14 @@ async fn deadline_timer_expires_served_session_grants_without_waking() {
         let _served = serve(&machine, &session_id).await;
         let wakes = watch_wakes(&session_id);
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_millis(200)))
+            .grant_tool(shell_grant(&session_id, Duration::from_millis(200)), None)
             .await
             .unwrap();
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             Some(grant.expires_at_ms),
             "{backend:?}: a grant on a served session arms its deadline"
         );
@@ -605,7 +613,10 @@ async fn deadline_timer_expires_served_session_grants_without_waking() {
             "{backend:?}: the timer woke nothing"
         );
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             None,
             "{backend:?}: no live grant is left to arm"
         );
@@ -621,7 +632,7 @@ async fn revoke_through_another_service_instance_is_refused_at_the_next_dispatch
         let session_id = SessionId::new();
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         served.boundary().await.unwrap();
@@ -675,7 +686,7 @@ async fn lifecycle_audit_rows_commit_with_the_row_and_refusals_append() {
         let store = durable.open();
 
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         assert_eq!(stored(&*store, &grant).await, grant);
@@ -812,7 +823,7 @@ async fn an_unreadable_row_admits_nothing_and_blocks_no_readable_grant() {
         let subject = ToolGrantSubject::session(session_id.clone());
         let served = serve(&machine, &session_id).await;
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
         let unreadable_id = ToolGrantId::mint();
@@ -842,7 +853,7 @@ async fn an_unreadable_row_admits_nothing_and_blocks_no_readable_grant() {
             .expect_err("no readable grant covers deploy");
         assert_eq!(refusal, ToolGrantRefusal::Required, "{backend:?}");
 
-        let listed = machine.list_tool_grants(&subject).await.unwrap();
+        let listed = machine.list_tool_grants(&subject, None).await.unwrap();
         assert_eq!(listed.grants.len(), 1, "{backend:?}");
         assert_eq!(listed.grants[0].record.grant_id, grant.record.grant_id);
         assert_eq!(listed.unreadable.len(), 1, "{backend:?}");
@@ -883,7 +894,7 @@ async fn an_unreadable_audit_row_is_reported_and_the_rest_of_the_page_served() {
             .await
             .unwrap();
         let grant = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
             .await
             .unwrap();
 
@@ -926,7 +937,7 @@ async fn settling_arms_no_deadline_for_a_revoked_grant() {
         // Granted and revoked while no runtime serves the session, so nothing
         // is armed yet.
         let revoked = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(10)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(10)), None)
             .await
             .unwrap();
         machine
@@ -935,31 +946,40 @@ async fn settling_arms_no_deadline_for_a_revoked_grant() {
             .unwrap();
         let _served = serve(&machine, &session_id).await;
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             None,
             "{backend:?}"
         );
 
-        let listed = machine.list_tool_grants(&subject).await.unwrap();
+        let listed = machine.list_tool_grants(&subject, None).await.unwrap();
         assert_eq!(
             listed.grants[0].status,
             ToolGrantStatus::Revoked,
             "{backend:?}"
         );
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             None,
             "{backend:?}: a revoked grant arms no deadline, though its deadline lies ahead"
         );
 
         let live = machine
-            .grant_tool(shell_grant(&session_id, Duration::from_mins(5)))
+            .grant_tool(shell_grant(&session_id, Duration::from_mins(5)), None)
             .await
             .unwrap();
         machine.tool_grant_deadlines().disarm(&session_id);
-        machine.list_tool_grants(&subject).await.unwrap();
+        machine.list_tool_grants(&subject, None).await.unwrap();
         assert_eq!(
-            machine.tool_grant_deadlines().armed_deadline(&session_id),
+            machine.tool_grant_deadlines().armed_deadline(
+                &session_id,
+                &ToolGrantSubject::session(session_id.clone()).key()
+            ),
             Some(live.expires_at_ms),
             "{backend:?}: a live grant arms its own deadline"
         );
@@ -974,7 +994,7 @@ async fn grant_store_failure_closes_the_gate() {
     let session_id = SessionId::new();
     let served = serve(&machine, &session_id).await;
     machine
-        .grant_tool(shell_grant(&session_id, Duration::from_mins(1)))
+        .grant_tool(shell_grant(&session_id, Duration::from_mins(1)), None)
         .await
         .unwrap();
     served.boundary().await.unwrap();
@@ -1008,4 +1028,383 @@ async fn grant_store_failure_closes_the_gate() {
         OPEN,
         "the next readable boundary opens it again"
     );
+}
+
+/// The identity subject of the member rows: one member of one mob
+/// incarnation.
+fn member_subject() -> ToolGrantSubject {
+    ToolGrantSubject::Identity {
+        mob_id: "mob-1".to_string(),
+        mob_incarnation: "incarnation-1".to_string(),
+        identity: "worker-1".to_string(),
+    }
+}
+
+fn member_shell_grant(subject: &ToolGrantSubject, lifetime: Duration) -> ToolGrantRequest {
+    ToolGrantRequest {
+        subject: subject.clone(),
+        ..shell_grant(&SessionId::new(), lifetime)
+    }
+}
+
+/// A member's build served by `session_id`: the member seam over the same
+/// grants, reading the member's identity first, then its session.
+async fn serve_member(
+    machine: &MeerkatMachine,
+    session_id: &SessionId,
+    member: &ToolGrantSubject,
+) -> Served {
+    let session = serve(machine, session_id).await;
+    let grants = Arc::new(RuntimeSessionToolGrants::for_member_subject(
+        machine.tool_grant_service(),
+        machine.tool_grant_deadlines().clone(),
+        session_id.clone(),
+        member,
+    ));
+    Served {
+        scope: session.scope,
+        gate: ToolGrantGate::new(grants, gate_table()),
+    }
+}
+
+/// A member's build reads its identity's grants first, then its
+/// session's; a plain session's build reads no identity grant; a refusal no
+/// grant explains is audited under the member's identity.
+#[tokio::test]
+async fn a_member_seam_reads_its_identity_then_its_session() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let served = serve_member(&machine, &member_session, &member).await;
+
+        let refusal = served
+            .call("shell", "call-before-any-grant")
+            .await
+            .expect_err("no grant covers shell yet");
+        assert_eq!(refusal, ToolGrantRefusal::Required, "{backend:?}");
+        let store = durable.open();
+        let member_audit: Vec<ToolGrantAuditEvent> = store
+            .read_tool_grant_audit(member.key().as_str(), None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, bytes)| ToolGrantAuditRow::decode(&bytes).unwrap().event)
+            .collect();
+        assert!(
+            matches!(
+                member_audit.as_slice(),
+                [ToolGrantAuditEvent::Refused {
+                    reason: ToolGrantRefusalKind::Required,
+                    ..
+                }]
+            ),
+            "{backend:?}: the refusal is audited under the identity: {member_audit:?}"
+        );
+        assert!(
+            audit_events(&*store, &member_session).await.is_empty(),
+            "{backend:?}: nothing is filed under the member's session"
+        );
+
+        machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(1)),
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        served.boundary().await.unwrap();
+        assert_eq!(
+            served.visible(),
+            OPEN,
+            "{backend:?}: the identity grant opens shell"
+        );
+        served.call("shell", "call-under-identity").await.unwrap();
+
+        // A plain session's build reads its own grants only.
+        let plain_session = SessionId::new();
+        let plain = serve(&machine, &plain_session).await;
+        plain.boundary().await.unwrap();
+        assert_eq!(
+            plain.visible(),
+            CLOSED,
+            "{backend:?}: an identity grant opens nothing for a plain session"
+        );
+
+        // The member's session grant counts too.
+        let session_only = SessionId::new();
+        let other_member = ToolGrantSubject::Identity {
+            mob_id: "mob-1".to_string(),
+            mob_incarnation: "incarnation-1".to_string(),
+            identity: "worker-2".to_string(),
+        };
+        let other = serve_member(&machine, &session_only, &other_member).await;
+        machine
+            .grant_tool(shell_grant(&session_only, Duration::from_mins(1)), None)
+            .await
+            .unwrap();
+        other.boundary().await.unwrap();
+        assert_eq!(
+            other.visible(),
+            OPEN,
+            "{backend:?}: a member's build reads its session's grants after its identity's"
+        );
+    }
+}
+
+/// An identity grant to a member whose session is
+/// served here arms the session's deadline driver for the identity, and the
+/// timer expires it with no boundary, dispatch or read.
+#[tokio::test]
+async fn an_identity_grant_of_a_served_member_expires_by_its_timer() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let session_id = SessionId::new();
+        let _served = serve_member(&machine, &session_id, &member).await;
+        let grant = machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_millis(200)),
+                Some(&session_id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            machine
+                .tool_grant_deadlines()
+                .armed_deadline(&session_id, &member.key()),
+            Some(grant.expires_at_ms),
+            "{backend:?}: the grant arms its identity on the serving session"
+        );
+
+        clock.set(grant.expires_at_ms);
+        let store = durable.open();
+        let mut expired = None;
+        for _ in 0..200 {
+            let row = stored(&*store, &grant).await;
+            if row.status == ToolGrantStatus::Expired {
+                expired = Some(row);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let expired = expired.expect("the deadline timer expires the identity grant");
+        assert_eq!(expired.ended_at_ms, Some(grant.expires_at_ms));
+        let events: Vec<ToolGrantAuditEvent> = store
+            .read_tool_grant_audit(member.key().as_str(), None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, bytes)| ToolGrantAuditRow::decode(&bytes).unwrap().event)
+            .collect();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ToolGrantAuditEvent::Granted { .. },
+                    ToolGrantAuditEvent::Expired {
+                        driver: ToolGrantExpiryDriver::Timer,
+                        ..
+                    },
+                ]
+            ),
+            "{backend:?}: {events:?}"
+        );
+
+        // A disarm of the session forgets its identity's deadline too.
+        machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(5)),
+                Some(&session_id),
+            )
+            .await
+            .unwrap();
+        machine.tool_grant_deadlines().disarm(&session_id);
+        assert_eq!(
+            machine
+                .tool_grant_deadlines()
+                .armed_deadline(&session_id, &member.key()),
+            None,
+            "{backend:?}"
+        );
+    }
+}
+
+/// Ending a subject revokes each of its live
+/// grants, records who ended them, and leaves every other subject's grants
+/// and its own ended grants as they stand. A read of one grant answers its
+/// row (its subject included), and an unknown grant is not found.
+#[tokio::test]
+async fn ending_a_subject_revokes_its_live_grants_only() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let other = ToolGrantSubject::Identity {
+            mob_id: "mob-1".to_string(),
+            mob_incarnation: "incarnation-1".to_string(),
+            identity: "worker-2".to_string(),
+        };
+        let first = machine
+            .grant_tool(member_shell_grant(&member, Duration::from_mins(1)), None)
+            .await
+            .unwrap();
+        let second = machine
+            .grant_tool(member_shell_grant(&member, Duration::from_mins(2)), None)
+            .await
+            .unwrap();
+        let revoked_before = machine
+            .grant_tool(member_shell_grant(&member, Duration::from_mins(3)), None)
+            .await
+            .unwrap();
+        machine
+            .revoke_tool_grant(
+                &revoked_before.record.grant_id,
+                ToolGrantRevocation::default(),
+            )
+            .await
+            .unwrap();
+        let untouched = machine
+            .grant_tool(member_shell_grant(&other, Duration::from_mins(1)), None)
+            .await
+            .unwrap();
+
+        let ended = machine
+            .end_tool_grants_of(
+                &member,
+                ToolGrantRevocation {
+                    actor: Some("mob-1".to_string()),
+                    reason: Some("identity ended".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ended, 2, "{backend:?}: the two live grants end");
+        let read = machine.tool_grant(&first.record.grant_id).await.unwrap();
+        assert_eq!(read.record.subject, member, "{backend:?}");
+        assert_eq!(read.status, ToolGrantStatus::Revoked, "{backend:?}");
+        assert!(
+            matches!(
+                machine.tool_grant(&ToolGrantId::mint()).await,
+                Err(ToolGrantServiceError::NotFound { .. })
+            ),
+            "{backend:?}: an unknown grant is not found"
+        );
+        let store = durable.open();
+        for grant in [&first, &second] {
+            assert_eq!(
+                stored(&*store, grant).await.status,
+                ToolGrantStatus::Revoked,
+                "{backend:?}"
+            );
+        }
+        assert_eq!(
+            stored(&*store, &untouched).await.status,
+            ToolGrantStatus::Active,
+            "{backend:?}: another identity's grant stays live"
+        );
+        let events: Vec<ToolGrantAuditEvent> = store
+            .read_tool_grant_audit(member.key().as_str(), None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, bytes)| ToolGrantAuditRow::decode(&bytes).unwrap().event)
+            .collect();
+        let ends: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ToolGrantAuditEvent::Revoked { reason: Some(reason), .. }
+                        if reason == "identity ended"
+                )
+            })
+            .collect();
+        assert_eq!(ends.len(), 2, "{backend:?}: {events:?}");
+        assert_eq!(
+            machine
+                .end_tool_grants_of(&member, ToolGrantRevocation::default())
+                .await
+                .unwrap(),
+            0,
+            "{backend:?}: a second end changes nothing"
+        );
+    }
+}
+
+/// A grant that ended with its subject (the identity it was issued to
+/// ended) explains no refusal: a later build under the subject's key, a
+/// name created again, needs a grant of its own, where an operator's revoke
+/// is cited. Both read `revoked`.
+#[tokio::test]
+async fn a_grant_ended_with_its_subject_explains_no_refusal() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let served = serve_member(&machine, &member_session, &member).await;
+        let ended = machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(1)),
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            machine
+                .end_tool_grants_of(&member, ToolGrantRevocation::default())
+                .await
+                .unwrap(),
+            1,
+            "{backend:?}"
+        );
+        assert_eq!(
+            machine
+                .tool_grant(&ended.record.grant_id)
+                .await
+                .unwrap()
+                .status,
+            ToolGrantStatus::Revoked,
+            "{backend:?}: a grant ended with its subject reads revoked"
+        );
+        let refusal = served
+            .call("shell", "call-after-the-subject-ended")
+            .await
+            .expect_err("an ended grant admits nothing");
+        assert_eq!(
+            refusal,
+            ToolGrantRefusal::Required,
+            "{backend:?}: a grant ended with its subject explains nothing"
+        );
+
+        let revoked = machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(1)),
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        machine
+            .revoke_tool_grant(&revoked.record.grant_id, ToolGrantRevocation::default())
+            .await
+            .unwrap();
+        let refusal = served
+            .call("shell", "call-after-the-revoke")
+            .await
+            .expect_err("a revoked grant admits nothing");
+        assert_eq!(
+            refusal,
+            ToolGrantRefusal::Revoked {
+                grant_id: revoked.record.grant_id.clone(),
+            },
+            "{backend:?}: an operator's revoke is cited"
+        );
+    }
 }

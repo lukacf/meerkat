@@ -774,14 +774,16 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessAdmittedOneTickBeforeDeadline is violated."' \
   'echo "Error: Invariant NotAuditWitnessRollbackAfterExpiryStillRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokedThenRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessEndedWithSubjectThenRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessRevokeAfterDeadlineRecordsExpiry is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSubjectEndAfterDeadlineRecordsExpiry is violated."' \
   'echo "Error: Invariant NotAuditWitnessUnpersistedRefusalThenAdmitted is violated."' \
   'echo "Error: Invariant AuditExpiryNotEarly is violated."' \
   'echo "Error: Invariant AuditNoAdmitAtOrAfterDeadline is violated."' \
   'echo "Error: Action property AuditTerminalLatched is violated."' \
   'echo "Error: Invariant AuditTerminalNeverAdmits is violated."' \
   'echo "Error: Invariant AuditVisibleOnlyWhileLive is violated."' \
-  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AbortSpawnExecActiveRunning RecoverIdentityEntrySeatedRunning RecoverIdentityEntrySeatedStopped AdoptLegacyIdentityEntryAdopted AdoptLegacyIdentityEntryAdoptedUnlisted AdoptLegacyIdentityEntryNameHeldByWorker AdoptLegacyIdentityEntryRetireUnadopted AdoptLegacyIdentityEntryNotAdoptable AdoptLegacyIdentityEntryStaleObservation AdoptLegacyIdentityEntryNotSeated AdoptLegacyIdentityEntryAlreadyAnEntry AdoptLegacyIdentityEntryNonAuthoritative AdoptLegacyIdentityEntryMobNotRunningStopped ProbeMemberAdmissionDuplicateRunning ProbeMemberAdmissionAdmittedRunning ProbeMemberAdmissionIdentityMemberRunning ProbeMemberAdmissionDuplicateStopped ProbeMemberAdmissionAdmittedStopped ProbeMemberAdmissionIdentityMemberStopped ResolveAgentLaneMemberAdmissionAdmittedRunning ResolveAgentLaneMemberAdmissionIdentityMemberRunning ResolveAgentLaneMemberAdmissionAdmittedStopped ResolveAgentLaneMemberAdmissionIdentityMemberStopped ReconcileRunning ReconcileStopped EnsureMemberRunningExisting EnsureMemberRunningMissing DestroyFromAny ResetToRunning DeclareIdentityEntryKept DeclareIdentityEntrySeatOwed DeclareIdentityEntryLifecycleInFlight DeclareIdentityEntryRefusedNameHeldByWorker DeclareIdentityEntryRefusedHostAdopted DeclareIdentityEntryRefusedNonAuthoritative DeclareIdentityEntryMobNotRunningDestroyed SealDeclaredRosterSealed SealDeclaredRosterRefused SealDeclaredRosterNonAuthoritative SealDeclaredRosterMobNotRunningDestroyed UnlistIdentityEntryRemoved RecoverIdentityEntryRetiringMarkedRunning ForgetArchivedSession DeclareIdentityEntryRuntimeModeRestamp DeclareIdentityEntryRoleMigrate DeclareIdentityEntryRoleRotate DeclareIdentityEntryRoleMigrationHeld DeclareIdentityEntryHostedOnFirstUse DeclareIdentityEntryAwaitHeldCreation DeclareIdentityEntryMobNotRunningStopped DeclareIdentityEntryMobNotRunningCompleted SealDeclaredRosterMobNotRunningStopped SealDeclaredRosterMobNotRunningCompleted BeginSpawnExecRemote AbortSpawnExecMaterializePendingRunning BindOwnerBridgeSessionRunning BeginHostBindFreshUnplaced CommitHostBind RecoverIdentityEntryRetiringStaleRunning OpenDeclaredApplyOpened OpenDeclaredApplyBusy OpenDeclaredApplyMobNotRunningStopped OpenDeclaredApplyMobNotRunningCompleted CloseDeclaredApplyRunning CloseDeclaredApplyStopped CloseDeclaredApplyCompleted CommitSpawnMembershipRemote ObserveMemberRetirementArchivedPlacedLiveRunning RetireRemoteReleasingRunning AuthorizeExplicitResumeMemberHeldRunning AdmitResetRunning AdmitResetStopped AdmitResetCompleted BeginPlacedCompletionLifecycleQuiesceStoppedReplay BeginPlacedCompletionLifecycleQuiesceCompletedReplay AuthorizeExplicitResumeMemberHeldStopped OpenDeclaredApplyMobNotRunningDestroyed CloseDeclaredApplyDestroyed; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessCustodyCommit is violated."' \
   'echo "Error: Action property NotAuditWitnessCustodyAborted is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayed is violated."' \
@@ -816,7 +818,8 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessRevived is violated."' \
   'echo "Error: Action property NotAuditWitnessRetiredEntryKept is violated."' \
   'echo "Error: Action property NotAuditWitnessFreshAfterForget is violated."' \
-  'echo "Error: Action property NotAuditWitnessSealRemovesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealRefusesUnseated is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsUnseated is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayMarked is violated."' \
   'echo "Error: Action property NotAuditWitnessDeclareOverAdopting is violated."' \
   'echo "Error: Action property NotAuditWitnessSealSparesAdopting is violated."' \
@@ -824,6 +827,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessAdoptedEntryEnds is violated."' \
   'echo "Error: Action property NotAuditWitnessAdoptionMarkReplayed is violated."' \
   'echo "Error: Action property NotAuditWitnessSealSparesIntentNamed is violated."' \
+  'echo "Error: Action property NotAuditWitnessSealSparesUnseatedIntentNamed is violated."' \
   'echo "Error: Action property NotAuditWitnessCandidateRefused is violated."' \
   'echo "Error: Action property NotAuditWitnessNameHeldByWorker is violated."' \
   'echo "Error: Action property NotAuditWitnessHostAdopted is violated."' \
@@ -859,7 +863,7 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessStaleMarkIgnored is violated."' \
   'echo "Error: Action property NotAuditWitnessPreflightAdmitsMembers is violated."' \
   'echo "Error: Action property NotAuditWitnessResetEndsRetiredEntry is violated."' \
-  'echo "Error: Action property NotAuditWitnessSealEndsRoleHold is violated."' \
+  'echo "Error: Action property NotAuditWitnessUnlistEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessResetEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessReplayEndsRoleHold is violated."' \
   'echo "Error: Action property NotAuditWitnessApplyBusy is violated."' \
@@ -990,6 +994,7 @@ printf '%s\n' \
   'echo "Error: Action property AuditListingUnmarks is violated."' \
   'echo "Error: Action property AuditSeatKeepsRoleHold is violated."' \
   'echo "Error: Invariant AuditDeclareExactlyOne is violated."' \
+  'echo "Error: Invariant AuditSealExactlyOne is violated."' \
   'echo "Error: Action property AuditReplayRecordsOnlyArchived is violated."' \
   'echo "Error: Action property AuditHostedReplayKeepsHosted is violated."' \
   'echo "Error: Invariant AuditMarkReplayExactlyOne is violated."' \

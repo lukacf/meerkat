@@ -244,16 +244,40 @@ confinement all still apply to every call it opens.
   its family, disables the provider's native tools for the session, including
   native search that the session's or a turn's provider params ask for, so the
   gated tool is the only search path.
+- **Gating a mob member.** A mob profile declares
+  `tools.grant_gated` (`grant_gated = { families = ["shell"], tools = ["deploy"] }`
+  in TOML; on `mob/create`, a realm profile or a `mob/spawn` profile override).
+  At every member build, resume included, the member's gate is its own
+  profile's gate joined with its role's current gate. A store-owned identity
+  declared with its role's named profile is built from the role's
+  definition, as a worker of the role is: its own gate is the role's current
+  gate, less the families its declaration switches off. One declared with an
+  exact profile of its own (`profile_override`) joins the role's gate as
+  role entries, as a member spawned with its own profile does. A family of the
+  member's own gate is mounted, closed by the gate, whatever its switch: leave
+  the switch off, so a binary that does not know the gate keeps the family
+  off. A role entry never fails the member's build: a role tool name is gated
+  from the moment it appears, a role family is gated where the member mounts
+  it, and a role family the member does not mount (its switch off, or a spawn
+  disabled it) or a role name the build's tool policy refuses is ignored. A
+  live member keeps the gate its build installed until its next build. A
+  member whose own gate or role gate names anything cannot be placed on
+  another host.
 - **Granting.** `MeerkatMachine::grant_tool` issues a grant for a subject (a
-  session), a target (one tool name, or a built-in family with the names it
-  provides, which `meerkat::tool_family_names` answers) and a window of at most
-  the host policy's maximum lifetime, 24 hours by default.
+  session, or a mob member identity in one mob incarnation,
+  `ToolGrantSubject::member`), a target (one tool name, or a built-in family
+  with the names it provides, which `meerkat::tool_family_names` answers) and
+  a window of at most the host policy's maximum lifetime, 24 hours by default.
   `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` complete
   the Rust API; `ToolGrantService` offers the same operations over any
   `RuntimeStore`. Over JSON-RPC, `tool_grants/grant`, `tool_grants/revoke`,
-  `tool_grants/list` and `tool_grants/audit` serve them for sessions (see
+  `tool_grants/list` and `tool_grants/audit` serve them for sessions and mob
+  member identities (see
   [scoped tool grants over JSON-RPC](/api/rpc#scoped-tool-grants)), and the
-  Python and TypeScript SDKs wrap them.
+  Python and TypeScript SDKs wrap them. A member's build reads its identity's
+  grants first, then its session's, so an identity grant follows the member
+  across respawns and restarts; its grants end when its identity ends, and a
+  reset of its mob, which ends every identity the mob held, ends them too.
 - **Adjudication.** Every model-request boundary opens the gated names a live
   grant admits at that moment, and every gated call is adjudicated again
   immediately before it is handed to its tool, so a call at or after the

@@ -923,6 +923,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `IdentityRecordImportResolved`(agent_identity: AgentIdentity, verdict: IdentityImportVerdict)
 - `OwnedEdgeRealizationResolved`(edge: WiringEdge, verdict: OwnedEdgeRealization)
 - `OwnedIdentityEdgeRestored`(edge: WiringEdge, verdict: OwnedEdgeRestoreVerdict)
+- `IdentityEnded`(agent_identity: AgentIdentity)
+- `DeclaredRosterSealRefused`
 
 ## Helpers
 - `identity_reconcile_decision`(intent: IdentityAuthorityCondition, lease: IdentityLeaseCondition, replacement: IdentityReplacementCondition, external_binding_required: Bool, initial_delivery_required: Bool, session_creation_receipt: IdentityReceiptCondition, retirement_receipt: IdentityReceiptCondition, session: IdentitySessionCondition, runtime: IdentityResourceCondition, member: IdentityResourceCondition, external_binding_receipt: IdentityReceiptCondition, external_trust: IdentityExternalTrustCondition, external_ceremony: IdentityExternalCeremonyCondition, initial_delivery_receipt: IdentityReceiptCondition, initial_delivery: IdentityInitialDeliveryCondition, wiring: IdentityResourceCondition) -> `IdentityReconcileDecision`
@@ -4931,7 +4933,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches_terminal_history`
   - `preservation_pending`
   - `abandonment_not_recorded`
-- Emits: `WiringGraphChanged`, `AppendLifecycleJournal`
+- Emits: `WiringGraphChanged`, `AppendLifecycleJournal`, `IdentityEnded`
 - To: `Running`
 
 ### `ObserveRespawnTopologyAbandonedTerminalAlreadyRecorded`
@@ -4954,6 +4956,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches_terminal_history`
   - `preservation_not_pending`
   - `abandonment_not_recorded`
+- Emits: `IdentityEnded`
 - To: `Running`
 
 ### `ObserveRespawnTopologyAbandonedStaleSuccessor`
@@ -18050,7 +18053,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SealDeclaredRoster`(desired, intent_named)
 - Guards:
   - `composition_authoritative`
+  - `no_unlisted_entry_to_end`
 - Emits: `DeclaredRosterSealed`
+- To: `Running`
+
+### `SealDeclaredRosterRefused`
+- From: `Running`
+- On: `SealDeclaredRoster`(desired, intent_named)
+- Guards:
+  - `composition_authoritative`
+  - `unlisted_entry_to_end`
+- Emits: `DeclaredRosterSealRefused`
 - To: `Running`
 
 ### `SealDeclaredRosterNonAuthoritative`
@@ -18092,7 +18105,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `UnlistIdentityEntry`(agent_identity)
 - Guards:
   - `unlist_removed`
-- Emits: `IdentityEntryUnlisted`
+- Emits: `IdentityEntryUnlisted`, `IdentityEnded`
 - To: `Running`
 
 ### `UnlistIdentityEntryDeferred`
@@ -18678,7 +18691,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RemoveIdentityEntry`(agent_identity)
 - Guards:
   - `change_removed`
-- Emits: `IdentityEntryChangeResolved`
+- Emits: `IdentityEntryChangeResolved`, `IdentityEnded`
 - To: `Running`
 
 ### `RemoveIdentityEntryAlreadyRemoved`
@@ -21027,7 +21040,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mob_operator_admission_authority` (machine `MobMachine`): `crates/meerkat-mob-mcp/src/agent_tools.rs` — MobMachine operator-admission authority for the mob tool surface: resolve create mob admission from the create-mobs capability observation and resolve profile mutation admission from the mutate-profiles capability observation, emitting the create-mob and profile-mutation admission resolved verdicts the surface mirrors (denied -> access denied)
 - `mob_membership_classifier_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor.rs` — MobMachine membership and runtime-incarnation classifiers owned by the actor: probe member admission duplicate, admitted or refused as an identity entry's name without entry custody from machine-owned binding, pending-spawn and entry state; compute respawn generation successor; reconcile desired workers to spawn retain or retire against current bindings, never an identity entry, emitting member spawn required, member retain required, and member retire required; set and observe external member rebind capability available or unavailable; classify turn timeout disposition detached canceled or retryable; and seed orphan budget once at startup, emitting the member admission probed, respawn generation computed, external member rebind capability, and turn timeout disposition classified effects
 - `mob_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/identity_entry_admission.rs` — MobMachine identity entries realized by the actor: refuse an agent-lane member command addressed to an identity entry from the resolved agent lane member admission, and adopt a legacy member as an identity entry from the shell's observation of its spawn row, journaling the adoption before it commits; the entry is seated or unseated with a typed cause, spared by the worker reconcile, and its custody belongs to an open spawn ladder, placed only for an entry hosted on its first use, emitting the agent lane member admission resolved and legacy identity entry adoption resolved effects
-- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and removing every unseated one, leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; take a Declared entry over for a host's adoption before the identity reconciler acts on its member, marking it while its member is seated so that the end of the member's retirement, whose start row records the cause HostAdopted for replay, ends the entry, ending an unseated one at once, and leaving it to the reconciler's next pass while a member step of it is in flight, and seal no entry whose identity a host's intent row names; let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, a takeover mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, identity entry unlisted, identity entry taken over and archived session forgotten effects
+- `mob_declared_apply_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/actor/declared_apply.rs` — MobMachine declared apply realized by the actor: decide one verdict per declared identity from the declaration and member facts and realize it (a Dormant seat, on the entry's archived session when it has one, a same-session restamp, a rotation, a role hold or a typed refusal), refusing every identity of a candidate composition; seal a complete declared roster, marking every unlisted Declared entry whose member is seated and refusing the seal while an unseated one remains, which the one-entry unlist ends first on the seal's own step (each end named by the identity ended effect), leaving one whose spawn is in flight to a later seal, and retire each marked member with the cause Unlisted, whose start row records the mark for replay; unlist one roster-owned identity alone the same way, reading and changing no other entry, and leave it to a later unlist while a spawn, retirement, removal or held construction of it is in flight; answer a store-owned update of an archived identity, or of one awaiting its host's preparation, record only; take a Declared entry over for a host's adoption before the identity reconciler acts on its member, marking it while its member is seated so that the end of the member's retirement, whose start row records the cause HostAdopted for replay, ends the entry, ending an unseated one at once, and leaving it to the reconciler's next pass while a member step of it is in flight, and seal no entry whose identity a host's intent row names (it neither marks one nor refuses the seal for one); let an archived session record go when the session is lost or the host asked for a fresh life; an unseated cause belongs to an entry no member holds, an unlisted mark to a seated Declared entry whose member has no spawn in flight, a takeover mark to a seated Declared entry, an archived session record to an identity no member holds, and an entry awaiting its held creation was never created, emitting the identity entry declared, declared roster sealed, declared roster seal refused, identity entry unlisted, identity ended, identity entry taken over and archived session forgotten effects
 - `mob_created_identity_entry_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/created_identity.rs` — MobMachine created identity entries realized by the shell at a start: recover each created entry row of the identity store from its presence and the replayed journal after the replay and before the boot plan (a present row of a seated local member records it a Created entry, a present row whose member the journal shows retired records the entry owed its seat with its member's last session as its revival record, a row pending its host's preparation records it unseated for that preparation unless the replay seats the published construction of a `constructed` one, a removed row reserves the name as a tombstone, and an unreadable row, a row the replay contradicts or a member row whose origin token this build does not know reserves the name as unreadable), then seat a created entry owed its seat again, Dormant, on its archived session under created custody, and settle the row of a published construction; no spawn takes a reserved name or the entry of another origin, a tombstoned name is never an entry or a member, and created custody belongs to an open ladder of a Created entry, never beside entry custody
 - `mob_identity_change_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/identity_change.rs` — MobMachine identity changes realized by the store-owned writer: a change's commit step decides its admission on its prepared authority from the facts the shell observed there (the store's receipt of the operation, the consent's form, whether a decision's permit binds the change and admits a commit now, whether the requester is the host operator, whether an agent requester's grant is current through its prepared check at this final sink, and whether a store-owned update's expected spec is its identity's current one), records each new store-owned entry (origin Created, unseated with the cause MobMachine derives from the request's facts: its host preparation pending, hosted on its first use, held for its host's creation or its seat owed) or refuses its name typed (an unlisted roster-owned identity's archived session record holds it), and only then stages the seats and writes the change's one store transaction; a refusal anywhere leaves the prepared authority unapplied and writes nothing; one identity's removal ends a held construction of it in the same step, and its archive is refused while it awaits its host's preparation; and the host holds or releases the mob's changes
 - `mob_owned_identity_edge_authority` (machine `MobMachine`): `crates/meerkat-mob/src/runtime/owned_edges.rs` — MobMachine owned edges realized by the shell: a store-owned identity's change declares the edges its peers list (each owned by the declaring identity, its other end an identity of either custody; an edge an identity owns already gives no second custody) and ends the edges its owner's change removes, in the change's own step, whose store transaction writes the owner's row; the host's policy reload ends an edge its peer rules now deny, naming its owner; the removal of either end ends the identity's edges in the removal's own step, whose store transaction writes the owners' rows with the tombstone; the mob's reset and destroy end every one; an owned edge is in force while both its ends are identity entries, and only an edge in force is realized by a seat, a spawn or a realization pass and refused a plain unwire, so a worker that takes an unlisted end's free name is no end of it; an archive or an unlisting of an end leaves the edge declared and unrealized, and a seat or a re-listing realizes it again; and the boot recovers each owned edge from its owner's row, as an import restores the edges of the rows it restores

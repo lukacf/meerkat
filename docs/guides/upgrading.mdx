@@ -172,7 +172,9 @@ A host's adoption of an identity a declared roster lists
 entry, Rust only) takes the entry over: Core retires the member with the
 cause `MemberRetirementCause::HostAdopted` and materializes it again under
 the host's intent, on its own session, as no entry, and the end of that
-retirement ends the entry. In 0.9.10 the entry outlived the retirement,
+retirement ends the entry. The adoption ends the identity's entry, not the
+identity: the identity continues under the host's intent and keeps its
+scoped tool grants. In 0.9.10 the entry outlived the retirement,
 unseated and owed its seat, and Core refused the host's spawn of the
 identity (`IdentityMember`), so the identity was not served again. From the
 host's intent row on, a declared apply answers the identity host-adopted

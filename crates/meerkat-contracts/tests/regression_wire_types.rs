@@ -1360,7 +1360,10 @@ fn tool_grant_results_pin_their_field_names() {
             family: "shell".to_string(),
             names: vec!["shell".to_string()],
         },
-        issuer: WireToolGrantIssuer::Operator { caller: None },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
         reason: None,
         status: WireToolGrantStatus::Active,
         issued_at_ms: 1_000,

@@ -6053,8 +6053,14 @@ pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
 pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
-            NamedTypeBinding::string_enum("ToolGrantEndReason", &["Deadline", "Revoked"]),
-            NamedTypeBinding::string_enum("ToolGrantUseRefusal", &["Expired", "Revoked"]),
+            NamedTypeBinding::string_enum(
+                "ToolGrantEndReason",
+                &["Deadline", "Revoked", "SubjectEnded"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ToolGrantUseRefusal",
+                &["Expired", "Revoked", "SubjectEnded"],
+            ),
             NamedTypeBinding::string_enum(
                 "ToolGrantIssueRefusal",
                 &["InvalidWindow", "AlreadyIssued"],

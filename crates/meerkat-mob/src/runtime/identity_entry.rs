@@ -25,12 +25,39 @@
 //! deletion, a same-session successor) keeps it. An entry outlives a
 //! retirement the declared apply did not start: it stays unseated
 //! ([`EntryStanding::Unseated`]), and the next apply seats it again on its own
-//! archived session. Only the end of an unlisted retirement (the declared
-//! apply's seal), the identity's removal
-//! ([`super::MobHandle::remove_identity`], which tombstones its name), the
-//! mob's destroy and the mob's reset end an entry. An unseated roster-owned
-//! entry is not journaled: after a restart, the next apply declares it
-//! again.
+//! archived session. Only these end an entry: the end of an unlisted
+//! retirement (a seated entry the declared apply's seal or one-entry unlist
+//! marked); the one-entry unlist of an unseated entry, which a complete
+//! roster's seal runs, on its own step, for each unseated entry it does not
+//! list and no host's intent row names; the identity's removal
+//! ([`super::MobHandle::remove_identity`], which tombstones its name: at once
+//! for an unseated entry, at its member's retirement end for a seated one); a
+//! host's adoption of the identity
+//! ([`super::MobHandle::adopt_member_identity_declaration`]), which takes the
+//! entry over (at once for an unseated entry, at the end of its member's
+//! retirement with the cause [`MemberRetirementCause::HostAdopted`] for a
+//! seated one) and ends the entry, not the identity; the mob's destroy and
+//! the mob's reset.
+//! An unseated roster-owned entry is not journaled: after a restart, the next
+//! apply declares it again.
+//!
+//! An identity's end ends its live scoped tool grants, with those of the
+//! session MobMachine holds for it then (its member's session, or its
+//! entry's archived session record), before the step that ends it commits; a
+//! failure fails that step. Ending grants for several identities in one step
+//! is not atomic: the ends already made stay made (they fail closed), and a
+//! retry ends the rest. MobMachine names the ends of the one-entry unlist and
+//! the removal of an unseated entry, and of a respawn abandoned after its old
+//! member's archive, whether its own step or a resume abandons it
+//! (`IdentityEnded`). The retirement terminal
+//! that ends an identity (a plain retire of a worker, or the end of an
+//! unlisted or removed entry's retirement: `retirement_ends_identity`) and
+//! the mob's reset, which ends every identity the mob held, read MobMachine's
+//! state before their step. A destroy needs nothing: the next create mints a
+//! new incarnation, whose identities hold none of the old grants. A host's
+//! adoption ends no identity: the identity continues under the host's intent
+//! and keeps its grants, so the takeover names no end, and the terminal of a
+//! `HostAdopted` retirement keeps the identity.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -256,7 +283,9 @@ pub enum MemberRetirementCause {
     /// ([`super::MobHandle::adopt_member_identity_declaration`]) and took its
     /// declared entry over: the end of the retirement ends the entry, and
     /// the identity reconciler materializes the member again under the
-    /// host's intent, as no entry.
+    /// host's intent, as no entry. The adoption ends the identity's entry,
+    /// not the identity: the identity continues under the host's intent and
+    /// keeps its scoped tool grants.
     HostAdopted,
 }
 
@@ -1743,6 +1772,36 @@ pub(crate) fn plain_retirement_facts(
         identity_entry,
         None,
     ))
+}
+
+/// Whether the end of a plain retirement of `identity`'s incarnation
+/// `agent_runtime_id` ends the identity itself, read from `state`,
+/// MobMachine's state before the terminal step: the identity is bound to
+/// the retiring incarnation, no respawn holds it for a successor, and it is
+/// no identity entry the retirement keeps (an entry outlives a retirement
+/// that neither unlists nor removes it). The identity's tool grants end with
+/// it, with those of the session the retirement archives, so a name created
+/// again later inherits none. A rotation's terminal, which seats the next
+/// incarnation, is not a plain retirement. The other ends of an identity are
+/// MobMachine's to name (its `IdentityEnded` effect), but for the reset's,
+/// which ends every identity the mob held.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) fn retirement_ends_identity(
+    state: &mob_dsl::MobMachineState,
+    identity: &AgentIdentity,
+    agent_runtime_id: &crate::ids::AgentRuntimeId,
+) -> bool {
+    let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
+    let bound = state.identity_to_runtime.get(&dsl_identity)
+        == Some(&mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id));
+    if !bound || state.pending_respawn_topology.contains(&dsl_identity) {
+        return false;
+    }
+    machine_entry_origin(state, identity).is_none()
+        || matches!(
+            stored_retirement_cause(state, identity),
+            Some(MemberRetirementCause::Unlisted | MemberRetirementCause::Removed)
+        )
 }
 
 /// What the row of `rotate_member`'s fresh life of an identity no member

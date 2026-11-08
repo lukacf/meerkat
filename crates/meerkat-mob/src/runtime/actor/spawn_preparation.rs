@@ -168,6 +168,9 @@ pub(super) struct LocalSpawnPreparationContext {
     pub(super) tool_consequence_policy_registry:
         Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     pub(super) default_llm_client: Option<Arc<dyn LlmClient>>,
+    /// The mob's identity intents: a store-owned identity declared with its
+    /// role's named profile builds with its role's current gate as its own.
+    pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
 }
 
 impl LocalSpawnPreparationContext {
@@ -182,6 +185,7 @@ impl LocalSpawnPreparationContext {
             runtime_metadata: Arc::clone(&actor.runtime_metadata),
             tool_consequence_policy_registry: actor.tool_consequence_policy_registry.clone(),
             default_llm_client: actor.default_llm_client.clone(),
+            identity: Arc::clone(&actor.identity),
         }
     }
 }

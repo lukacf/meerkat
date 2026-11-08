@@ -2,7 +2,7 @@
 
 _Generated from the Rust machine catalog. Do not edit by hand._
 
-- Version: `1`
+- Version: `2`
 - Rust owner: `self` / `catalog::dsl::tool_grant_lifecycle`
 
 ## State
@@ -18,6 +18,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Expire`(now_ms: u64)
 - `Revoke`(now_ms: u64)
 - `AdmitUse`(now_ms: u64)
+- `EndWithSubject`(now_ms: u64)
 
 ## Signals
 
@@ -125,6 +126,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Revoke`(now_ms)
 - To: `Revoked`
 
+### `EndWithSubjectActive`
+- From: `Active`
+- On: `EndWithSubject`(now_ms)
+- Guards:
+  - `deadline_not_reached`
+- Emits: `Revoked`
+- To: `Revoked`
+
+### `EndWithSubjectAfterDeadline`
+- From: `Active`
+- On: `EndWithSubject`(now_ms)
+- Guards:
+  - `deadline_reached`
+- Emits: `Expired`
+- To: `Expired`
+
+### `EndWithSubjectSettledExpired`
+- From: `Expired`
+- On: `EndWithSubject`(now_ms)
+- To: `Expired`
+
+### `EndWithSubjectSettledRevoked`
+- From: `Revoked`
+- On: `EndWithSubject`(now_ms)
+- To: `Revoked`
+
 ### `AdmitLive`
 - From: `Active`
 - On: `AdmitUse`(now_ms)
@@ -150,17 +177,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `AdmitEndedRevoked`
 - From: `Revoked`
 - On: `AdmitUse`(now_ms)
+- Guards:
+  - `revoked_by_an_operator`
+- Emits: `UseRefused`
+- To: `Revoked`
+
+### `AdmitEndedWithSubject`
+- From: `Revoked`
+- On: `AdmitUse`(now_ms)
+- Guards:
+  - `ended_with_its_subject`
 - Emits: `UseRefused`
 - To: `Revoked`
 
 ## Coverage
 ### Code Anchors
-- `tool_grant_lifecycle` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/dsl.rs` — ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, and the admission of each use; expired and revoked grants are terminal
-- `tool_grant_service` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/service.rs` — ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission
+- `tool_grant_lifecycle` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/dsl.rs` — ToolGrantLifecycleMachine owns one scoped tool grant: issuance against a maximum lifetime, expiry at a supplied clock, revocation before the deadline, its end with its subject (revoked, end reason SubjectEnded, its uses refused as ended with it), and the admission of each use; expired and revoked grants are terminal
+- `tool_grant_service` (machine `ToolGrantLifecycleMachine`): `crates/meerkat-runtime/src/tool_grant/service.rs` — ToolGrantService rebuilds each grant's machine from its stored row, applies one input per adjudication at one clock reading and decides from the effects alone: issuance, revocation, the end of a subject's grants with it (a grant ended with its subject explains no refusal), settlement on list, audit read and timer fire, a boundary's open set, and each gated dispatch's admission
 
 ### Scenarios
 - `tool_grant_issue_window` — tool_grant_lifecycle_machine.rs::issue_refuses_a_past_empty_or_overlong_window issues exactly the windows that are non-empty, in the future and within the maximum lifetime, and refuses a second issue of an issued record in every issued phase
 - `tool_grant_use_admission_at_the_deadline` — tool_grant_lifecycle_machine.rs::use_one_millisecond_before_the_deadline_is_admitted_and_at_the_deadline_expires_and_is_refused admits a use one millisecond before the deadline, expires the grant at the first use at the deadline and refuses it, and refuses every later use
 - `tool_grant_deadline_driver` — tool_grant_lifecycle_machine.rs::expire_before_the_deadline_is_a_byte_identical_noop leaves an early timer fire byte-identical and expires the grant at its deadline, and settled expired grants ignore later expiry observations; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives Expire into a revoked grant as a byte-identical self-loop
 - `tool_grant_revocation` — tool_grant_lifecycle_machine.rs::revoke_after_the_deadline_records_expiry_not_revocation revokes a live grant before its deadline, records expiry for a revoke at or after the deadline, and leaves settled grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended refuses a use of the revoked grant
+- `tool_grant_subject_end` — tool_grant_lifecycle_machine.rs::a_grant_ended_with_its_subject_refuses_its_use_as_ended_with_it ends a live grant with its subject before its deadline as revoked with the end reason SubjectEnded, refuses every later use as ended with its subject, records the expiry for an end at or after the deadline, and leaves ended grants unchanged; every_command_class_in_every_phase_is_total_and_only_mutates_where_intended drives the end into every phase
 - `tool_grant_terminal_latch` — tool_grant_lifecycle_machine.rs::terminal_grants_refuse_use_after_a_clock_rollback and recover_from_state_rejects_torn_rows keep expired and revoked grants terminal under a rolled-back clock and refuse a recovered row that breaks any invariant

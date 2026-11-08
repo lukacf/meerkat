@@ -11978,6 +11978,25 @@ mod runtime_store_write_fence_tests {
         ));
     }
 
+    /// Ending a subject's grants on a store without the grant domain ends
+    /// none, since such a store holds no grant: a mob retirement ends the
+    /// retiring identity's grants whatever store its runtime has.
+    #[tokio::test]
+    async fn ending_a_subjects_grants_on_a_store_without_grants_ends_none() {
+        let store = DefaultFenceDecorator {
+            inner: InMemoryRuntimeStore::new(),
+        };
+        let service = crate::tool_grant::ToolGrantService::new(std::sync::Arc::new(store));
+        let subject = meerkat_core::tool_grant::ToolGrantSubject::session(
+            meerkat_core::types::SessionId::new(),
+        )
+        .key();
+        let ended = service
+            .revoke_subject(&subject, crate::tool_grant::ToolGrantRevocation::default())
+            .await;
+        assert!(matches!(ended, Ok(0)), "{ended:?}");
+    }
+
     /// A store that does not implement the whole-blob session import
     /// answers `Unsupported` and writes nothing: the provided default, which
     /// a decorator that does not forward the import keeps even when the

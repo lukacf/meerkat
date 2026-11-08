@@ -6117,21 +6117,97 @@ mod scoped_tool_grants {
 
         // A live grant of the family opens it at the next boundary.
         machine
-            .grant_tool(ToolGrantRequest {
-                subject: ToolGrantSubject::session(session_id),
-                target: ToolGrantTarget::Family {
-                    family: "shell".to_string(),
-                    names: shell_names(),
+            .grant_tool(
+                ToolGrantRequest {
+                    subject: ToolGrantSubject::session(session_id),
+                    target: ToolGrantTarget::Family {
+                        family: "shell".to_string(),
+                        names: shell_names(),
+                    },
+                    issuer: ToolGrantIssuer::operator(),
+                    reason: None,
+                    window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
                 },
-                issuer: ToolGrantIssuer::Operator { caller: None },
-                reason: None,
-                window: ToolGrantWindow::For(std::time::Duration::from_mins(10)),
-            })
+                None,
+            )
             .await
             .expect("grant");
         boundary(&agent, &grants).await;
         let (_, visible) = names(&agent);
         assert!(visible.contains("shell"), "the grant opens it: {visible:?}");
+    }
+
+    /// A mob member's role entries never refuse its build. A role
+    /// family the build does not mount and a role name the build's tool
+    /// policy refuses are ignored outright; a role tool name nothing mounts
+    /// is installed all the same (it is gated from the moment it appears); a
+    /// role family the build mounts is installed closed. The session records
+    /// its own entries and the role entries the build installed.
+    #[tokio::test]
+    async fn role_entries_never_refuse_the_build_and_install_where_mounted() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = temp_factory(&temp);
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let role = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+            .with_tool("refused_by_policy");
+
+        // The shell family stays off (the factory's default), so the role's
+        // shell entry is ignored; `deploy` is installed though nothing mounts
+        // it; the policy refuses `refused_by_policy`, so it is ignored.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.grant_gated_tools_where_mounted = Some(role.clone());
+        build.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["refused_by_policy"].into_iter().collect(),
+        ));
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("role entries never refuse the build");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default().with_tool("deploy"),
+            "only the installed role entry is recorded"
+        );
+        let (base, _) = names(&agent);
+        assert!(
+            !base.iter().any(|name| name == "shell"),
+            "a role entry never mounts a family: {base:?}"
+        );
+
+        // With its switch on, the role family is mounted, and gated closed.
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            Some(GrantGatedTools::default()),
+        )
+        .await;
+        build.override_shell = ToolCategoryOverride::Enable;
+        build.grant_gated_tools_where_mounted = Some(role);
+        let agent = factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("a mounted role family installs closed");
+        let (base, visible) = names(&agent);
+        assert!(base.iter().any(|name| name == "shell"), "{base:?}");
+        assert!(!visible.contains("shell"), "closed: {visible:?}");
+        let metadata = agent.session().session_metadata().expect("metadata");
+        assert_eq!(
+            metadata.tooling.grant_gated,
+            GrantGatedTools::default()
+                .with_family("shell")
+                .with_tool("deploy")
+                .with_tool("refused_by_policy"),
+        );
     }
 
     /// The session's grants, taken from a runtime-backed build's bindings

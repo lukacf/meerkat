@@ -524,7 +524,8 @@ def stage_b_checks(f, actions):
         # and Core's next re-offer, a dispatch after the evidence, is denied.
         'row-held-claim-denied-after-restart': b and last == 'B_Settle' and f.get('door') == '"Peer"'
             and f.get('epoch') == '2' and f.get('auth_ok') == 'FALSE' and native == [] and phase(1) == 'Offered'
-            and f.get('absence_epoch') == '2'
+            and f.get('absence_epoch') == '2' and o(1, 'unresolved_dispatches') == '{1}'
+            and o(1, 'dispatch_epochs') == '<<1>>'
             and o(1, 'unresolved_dispatches') != '{}' and num(1, 'absence_through') > 0 and jr(1, 'fifo') == 'FALSE'
             and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
                     and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()

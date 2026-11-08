@@ -18,9 +18,9 @@
 //!
 //! A turn now writes them to the connections of the requests that admitted
 //! its inputs. A turn no request waits on writes them to the connection that
-//! holds the session: the one that created it or, once that one is gone, the
-//! next one that starts a turn on it. No other connection receives them, and
-//! a connection that is gone receives nothing.
+//! holds the session: the one that created or forked it or, once that one is
+//! gone, the next one that starts a turn on it. No other connection receives
+//! them, and a connection that is gone receives nothing.
 //!
 //! The provider is scripted; the RPC routers, TCP connections, session
 //! runtime and executors are real.
@@ -624,6 +624,124 @@ async fn the_next_connection_that_starts_a_turn_holds_the_session() {
         c.session_event_types(&session)
     );
     h.clean().await;
+}
+
+/// The connection that creates a session holds it from the create on: a turn
+/// no connection's request started (one the host starts on the runtime), run
+/// before the creator has started a turn of its own, reaches the creator and
+/// no other connection.
+#[tokio::test]
+async fn a_created_session_is_held_by_its_creator_before_its_first_turn() {
+    let mut h = Harness::new();
+    let (_, mut a) = h.connect().await;
+    let (_, mut b) = h.connect().await;
+    let session = a.create_session().await;
+
+    let mark = a.mark();
+    h.runtime_turn(&session).await;
+    a.wait_for(
+        mark,
+        "the host's turn on the creating connection",
+        |frame| is_session_event_of(frame, &session, "run_completed"),
+    )
+    .await;
+    b.settle().await;
+    assert_eq!(
+        a.runs_completed(&session),
+        1,
+        "{:?}",
+        a.session_event_types(&session)
+    );
+    assert_eq!(
+        b.session_events(&session),
+        0,
+        "the host's turn reached a connection that never touched the session: {:?}",
+        b.session_event_types(&session)
+    );
+    h.clean().await;
+}
+
+/// B forks a session A created and ran, with `method` and the params `fork`
+/// builds from the session's id and its messages. B holds the child, as the
+/// creating connection holds a session it created: a turn the host starts on
+/// the child, before any connection starts one, reaches B and not A, which
+/// holds the source.
+async fn assert_the_forking_connection_holds_the_child(
+    method: &str,
+    fork: impl FnOnce(&str, &[Value]) -> Value,
+) {
+    let mut h = Harness::new();
+    let (_, mut a) = h.connect().await;
+    let (_, mut b) = h.connect().await;
+    let source = a.create_session().await;
+    a.turn(&source, "materialize").await;
+    let messages = b
+        .request("session/history", json!({"session_id":source}))
+        .await["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let child = b.request(method, fork(&source, &messages)).await["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(child, source, "{method} makes a new session");
+
+    let mark = b.mark();
+    h.runtime_turn(&child).await;
+    b.wait_for(mark, "the host's turn on the forking connection", |frame| {
+        is_session_event_of(frame, &child, "run_completed")
+    })
+    .await;
+    a.settle().await;
+    assert_eq!(
+        b.runs_completed(&child),
+        1,
+        "{:?}",
+        b.session_event_types(&child)
+    );
+    assert_eq!(
+        a.session_events(&child),
+        0,
+        "the child's turn reached the source's holder: {:?}",
+        a.session_event_types(&child)
+    );
+    h.clean().await;
+}
+
+/// The connection that forks a session with `session/fork_at` holds the
+/// child.
+#[tokio::test]
+async fn a_fork_at_child_is_held_by_the_connection_that_forked_it() {
+    assert_the_forking_connection_holds_the_child("session/fork_at", |source, messages| {
+        // The source's prefix through its first answer.
+        let answered = 1 + messages
+            .iter()
+            .position(|message| message["role"] == "block_assistant")
+            .expect("the source holds an answer");
+        json!({"session_id":source,"message_index":answered,"running_behavior":"reject"})
+    })
+    .await;
+}
+
+/// The connection that forks a session with `session/fork_replace` holds the
+/// child.
+#[tokio::test]
+async fn a_fork_replace_child_is_held_by_the_connection_that_forked_it() {
+    assert_the_forking_connection_holds_the_child("session/fork_replace", |source, messages| {
+        // The source's first prompt, edited.
+        let prompt = messages
+            .iter()
+            .position(|message| message["role"] == "user")
+            .expect("the source holds a prompt");
+        json!({
+            "session_id":source,
+            "message_index":prompt,
+            "replacement":{"type":"message","message":{"role":"user","content":"edited prompt"}},
+            "running_behavior":"reject"
+        })
+    })
+    .await;
 }
 
 /// A single-client server keeps the process-default route: a turn no

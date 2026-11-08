@@ -161,10 +161,14 @@ them.
   set them (`None` keeps the previous behaviour). The new key type
   `ToolGrantRunId` names a run. Each appended last, so an exhaustive match
   needs their arms: the input `EndRun { run_id, now_ms }`
-  (`ToolGrantLifecycleInput`, kernel `Input` and `InputKind`), the phase
+  (`ToolGrantLifecycleInput`, its variant enum
+  `ToolGrantLifecycleInputVariant` in meerkat-machine-schema and
+  meerkat-runtime, kernel `Input` and `InputKind`), the phase
   `RunEnded` (`ToolGrantPhase`, kernel `Phase`), the effect
-  `RunEnded { grant_id, observed_at_ms }` (`ToolGrantLifecycleEffect`,
-  kernel `Effect` and `EffectKind`), `ToolGrantEndReason::RunEnded`,
+  `RunEnded { grant_id, observed_at_ms }` (`ToolGrantLifecycleEffect`, its
+  variant enum `ToolGrantLifecycleEffectVariant` in meerkat-machine-schema
+  and meerkat-runtime, kernel `Effect` and `EffectKind`),
+  `ToolGrantEndReason::RunEnded`,
   `ToolGrantUseRefusal::RunEnded` and `ToolGrantUseRefusal::OutsideRun`,
   and the kernel `generated::tool_grant_lifecycle::TransitionId` variants
   `AdmitEndedRunEnded`, `AdmitOtherRun`, `AdmitOutsideRun`,

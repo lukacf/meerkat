@@ -794,12 +794,12 @@ mod tests {
                 WireToolGrantApplies::AtNextBuild,
             ),
             (
-                server.clone(),
+                server,
                 WireToolGrantApplies::Now,
                 WireToolGrantApplies::AtNextBuild,
             ),
             (
-                shell.clone(),
+                shell,
                 WireToolGrantApplies::NotMounted,
                 WireToolGrantApplies::NotMounted,
             ),

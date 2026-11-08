@@ -5,8 +5,7 @@ offer and component lifetime owners, and the stage B send in the accepted order,
 Usage: generate-combined-composition GENERATED_ORIGINALS NEW_DIRECTORY
 Stage A is models/bind_attempt.tla, instanced byte-exact (the first-send write inventory
 and the service setup observation record, their marks, the partial-issuance and shared-parent
-states, the G3 witness). Stage B follows the accepted order (the stage A/B type map, sections 2
-and 3; Connect's stage B note, section 2): the offer owner is
+states, the G3 witness). Stage B follows the accepted order: the offer owner is
 prepared first, the door's first-send writes are issued outside protection (looked up again on
 Duplicate), the preparation is sealed, the effect runner records the send intent (Offered with
 its outbox) under the publication writer then the store transaction, records the dispatch start
@@ -238,7 +237,7 @@ def build_model(root, output):
     # ---- Stage B: the environment. ----
     # The source owner: registered and made ready at the start; it may close (and its
     # cancellation be confirmed) while a send is under way or an offer is not terminal,
-    # an Offered one included (the note: closing a source does not settle an offered input).
+    # an Offered one included (closing a source does not settle an offered input).
     action('B_SrcRegister', ['src!RegisterSource("source1", "scope1", "Ordinary", "", "source-prep1")'], SRC)
     action('B_SrcReady', ['src!MakeSourceReady(src_source_key, src_revision, src_preparation_id, "source-ready1")'],
            SRC)
@@ -349,7 +348,7 @@ def build_model(root, output):
                         '                                     IF ~Admission THEN "AdmissionClosed" ELSE "SourceClosed")]\n'
                         '               /\\ UNCHANGED <<prep, replayed, orphan_claim>>'],
            {'sp', 'prep', 'replayed', 'orphan_claim'}, params=PROC)
-    # The owner first (the note's Prepare): the Prepared record, with its preparing
+    # The owner first (its Prepare): the Prepared record, with its preparing
     # process's epoch, exists before any grant. The CAS's loser reads the winner back and uses
     # its offer: no second offer, no refusal. The effects-before-owner mutant issues
     # the grants first and prepares the owner after them (the earlier order).
@@ -433,9 +432,8 @@ def build_model(root, output):
     # then the store transaction (I10), feeding the owner the source (open, ready, the
     # snapshot's revision), admission, the current incarnation and the authority read inside
     # it; the owner decides (RecordOriginalSendIntent, or RefuseOriginalSendIntent below).
-    # Offered and the outbox commit together before Meta is entered (the type map, section
-    # 2). A lost CAS reply is read back. The CAS's loser reads the winner's Offered record
-    # back and dispatches it.
+    # Offered and the outbox commit together before Meta is entered. A lost CAS reply is read
+    # back. The CAS's loser reads the winner's Offered record back and dispatches it.
     action('B_CommitPub', ['sp[p].pc = "Commit"', 'alive', 'pub_holder = "none"', "pub_holder' = Runner(p)",
                            "sp' = [sp EXCEPT ![p].pc = \"CommitTx\"]"], {'pub_holder', 'sp'}, params=PROC)
     action('B_CommitStore', ['sp[p].pc = "CommitTx"', 'alive', 'conn_holder = "none"',
@@ -708,7 +706,7 @@ def build_model(root, output):
                              "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\""],
            OFFERS | {'jr', 'claimed', 'read_slot', 'raw_read', 'published_read'})
     # After a restart the driver dispatches each enumerated record's intent once more, with
-    # the same key and input (the note: replay after a crash uses Core's dedup): every door's
+    # the same key and input (a replay after a crash uses Core's dedup): every door's
     # record but a peer delivery's. A durable peer delivery's dispatcher is Core's claim;
     # a volatile or supervisor delivery has none, and nothing in production re-drives it (the
     # binder's only production caller is Core's drain, which offers only queued claims): its
@@ -744,8 +742,8 @@ def build_model(root, output):
     # admissions and its queued claims survive, and the claim of a durable peer delivery still
     # in flight (or answered NotReady) is kept queued by Core, with its record or, before the
     # record exists, without one. A dispatch open at the crash stays open in the owner:
-    # its outcome is unknown, and no later refusal settles the record over it (the type map,
-    # section 3; the crash-clears-ambiguity mutant answers it as not submitted at the scan).
+    # its outcome is unknown, and no later refusal settles the record over it (the
+    # crash-clears-ambiguity mutant answers it as not submitted at the scan).
     action('B_Crash', ['"crash" \\in Env', 'alive', 'epoch = 1', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
                        "alive' = FALSE",
                        "sp' = [q \\in Procs |-> IF Live(q) THEN [FreshProc EXCEPT !.out = \"Crashed\", !.slot = sp[q].slot,\n"
@@ -1439,21 +1437,21 @@ def build_model(root, output):
         '\\* The combined I1-I13 model. Stage A: the bind attempt model, instanced byte-exact (the\n'
         '\\* first-send writes and the service setup observation record, their marks, drops,\n'
         '\\* failures, one interruption, the partial-issuance and shared-parent states, G3). Stage B,\n'
-        '\\* in the accepted order (the stage A/B type map, sections 2 and 3): one source with two\n'
-        '\\* offer slots and a component lifetime (and, after a stop, the next process\'s new one;\n'
-        '\\* generated owners: only their transitions change owner state); two send tasks; the offer\n'
-        '\\* owner prepared first, the same writes issued outside protection and looked up again on\n'
-        '\\* Duplicate, the preparation sealed, the send intent recorded with its outbox under the\n'
-        '\\* publication writer then the store transaction, the dispatch start recorded in the owner,\n'
-        '\\* then Meta entered (the peer door: its section in Core\'s drain, one peer bind per session,\n'
-        '\\* the FIFO head first): its pure decision at (P) and (A), its wait (or Core\'s peer waiter)\n'
-        '\\* with one deadline, and native admission behind the entry fence in the same section; the\n'
-        '\\* answer fed to the owner after Meta returns. Held and the peer deadline end only the\n'
-        '\\* caller\'s wait. The driver reads by key, one crash and restart with its scan, admission\n'
-        '\\* closure with the close\'s join (its unresolved records scoped to the closing process), a\n'
-        '\\* stop after the close and the restart into the next lifetime, the declared composition\n'
-        '\\* mode. Core\'s commit and dedup by qualified key are assumptions. Liveness: LiveSpec, under\n'
-        '\\* the declared fairness and environment assumptions (below).',
+        '\\* in the accepted order: one source with two offer slots and a component lifetime (and,\n'
+        '\\* after a stop, the next process\'s new one; generated owners: only their transitions change\n'
+        '\\* owner state); two send tasks; the offer owner prepared first, the same writes issued\n'
+        '\\* outside protection and looked up again on Duplicate, the preparation sealed, the send\n'
+        '\\* intent recorded with its outbox under the publication writer then the store transaction,\n'
+        '\\* the dispatch start recorded in the owner, then Meta entered (the peer door: its section in\n'
+        '\\* Core\'s drain, one peer bind per session, the FIFO head first): its pure decision at (P)\n'
+        '\\* and (A), its wait (or Core\'s peer waiter) with one deadline, and native admission behind\n'
+        '\\* the entry fence in the same section; the answer fed to the owner after Meta returns. Held\n'
+        '\\* and the peer deadline end only the caller\'s wait. The driver reads by key, one crash and\n'
+        '\\* restart with its scan, admission closure with the close\'s join (its unresolved records\n'
+        '\\* scoped to the closing process), a stop after the close and the restart into the next\n'
+        '\\* lifetime, the declared composition mode. Core\'s commit and dedup by qualified key are\n'
+        '\\* assumptions. Liveness: LiveSpec, under the declared fairness and environment assumptions\n'
+        '\\* (below).',
         'CONSTANTS ' + ', '.join(constants) + ',\n    Fault, StageValues, DoorValues, InitialValues, MaxAttempts, '
                                               'Interrupts, ModeValues,\n    ProcBound, SendBound, UnavailBound, '
                                               'LostBound, CoreRefuseBound, GateBound, Env, RecordRows, PeerClaims',

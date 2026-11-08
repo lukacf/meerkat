@@ -240,6 +240,14 @@ struct ReassignAdmissionArgs {
     target: meerkat::GoalAttentionTarget,
 }
 
+/// The part of the upstream `workgraph_policy_escalate` tool schema the
+/// private-member refusal reads: the completion policy it escalates to
+/// (meerkat-workgraph/src/tools.rs `policy_escalate_schema`).
+#[derive(serde::Deserialize)]
+struct EscalateAdmissionArgs {
+    completion_policy: meerkat::WorkCompletionPolicy,
+}
+
 impl ScopePinnedWorkGraphTools {
     fn new(service: &WorkGraphService) -> Self {
         Self {
@@ -268,7 +276,10 @@ impl ScopePinnedWorkGraphTools {
     /// both entry points — see the struct docs — so taking the global
     /// admission would only let doomed calls stall real mutations), or an
     /// unfilled slot (a non-mob embedder, which forwards exactly as before
-    /// the guard existed).
+    /// the guard existed). A target that names a member private to a person
+    /// is refused before the admission is taken, as the RPC methods refuse
+    /// it, and so is a witnessed `workgraph_policy_escalate` whose
+    /// supervisor key names one ([`Self::admit_escalation`]).
     async fn admit(
         &self,
         name: &str,
@@ -281,6 +292,9 @@ impl ScopePinnedWorkGraphTools {
         ),
         meerkat_core::ToolError,
     > {
+        if name == "workgraph_policy_escalate" && witnessed {
+            return self.admit_escalation(name, pinned).await;
+        }
         if name != "workgraph_attention_reassign" || !witnessed {
             return Ok((None, pinned));
         }
@@ -300,6 +314,12 @@ impl ScopePinnedWorkGraphTools {
         })?;
         let target = admission
             .lower_member_session_target(args.target.clone())
+            .await
+            .map_err(|error| admission_tool_error(name, error))?;
+        // A member private to a person takes no binding, in any form of the
+        // target, as the RPC methods refuse it.
+        admission
+            .refuse_private_member_target(&target)
             .await
             .map_err(|error| admission_tool_error(name, error))?;
         let permit = admission
@@ -338,6 +358,49 @@ impl ScopePinnedWorkGraphTools {
             })?
         };
         Ok((Some(permit), forwarded))
+    }
+
+    /// Guard a witnessed `workgraph_policy_escalate`: a supervisor key that
+    /// names a member private to a person, in any form of the key, is
+    /// refused as the RPC `policy/escalate` refuses it; every other
+    /// escalation forwards unchanged. It binds no attention target, so no
+    /// admission permit is taken; an unfilled slot forwards as before.
+    async fn admit_escalation(
+        &self,
+        name: &str,
+        pinned: Box<serde_json::value::RawValue>,
+    ) -> Result<
+        (
+            Option<WorkGraphAdmissionPermit>,
+            Box<serde_json::value::RawValue>,
+        ),
+        meerkat_core::ToolError,
+    > {
+        let admission = self
+            .admission
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(admission) = admission else {
+            return Ok((None, pinned));
+        };
+        let args: EscalateAdmissionArgs = serde_json::from_str(pinned.get()).map_err(|error| {
+            meerkat_core::ToolError::invalid_arguments(
+                name,
+                format!("invalid workgraph_policy_escalate arguments: {error}"),
+            )
+        })?;
+        if let meerkat::WorkCompletionPolicy::Supervisor { owner_key } = args.completion_policy {
+            let supervisor = admission
+                .lower_member_session_target(meerkat::GoalAttentionTarget::Owner { owner_key })
+                .await
+                .map_err(|error| admission_tool_error(name, error))?;
+            admission
+                .refuse_private_member_target(&supervisor)
+                .await
+                .map_err(|error| admission_tool_error(name, error))?;
+        }
+        Ok((None, pinned))
     }
 
     /// Re-encode a `workgraph_*` call's arguments with the service scope
@@ -402,6 +465,22 @@ fn admission_tool_error(name: &str, error: WorkGraphAdmissionError) -> meerkat_c
         WorkGraphAdmissionError::Lock(detail) => meerkat_core::ToolError::execution_failed(
             format!("{name} admission lock failed: {detail}"),
         ),
+        // The RPC methods' refusal, in the tool plane's typed denial.
+        WorkGraphAdmissionError::PrivateMember { member } => {
+            meerkat_core::ToolError::policy_denied(meerkat_core::ToolConsequenceDenial::new(
+                crate::rpc::workgraph_methods::PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND,
+                format!(
+                    "{name} refused: member '{member}' is private to a person and is built \
+                     without WorkGraph tools, so no WorkGraph binding or supervisor may name it"
+                ),
+            ))
+        }
+        WorkGraphAdmissionError::MemberUnreadable { member, detail } => {
+            meerkat_core::ToolError::execution_failed(format!(
+                "{name} admission check failed: the target member '{member}' could not be read: \
+                 {detail}"
+            ))
+        }
     }
 }
 

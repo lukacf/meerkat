@@ -1114,7 +1114,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   names a member private to a person is refused for every other caller
   too, its owner and access admins included (`-32602`,
   `private_member_workgraph_target`): a private member is built without
-  WorkGraph tools, so no binding can serve it.
+  WorkGraph tools, so no binding can serve it. An agent's
+  `workgraph_attention_reassign` onto one, and its
+  `workgraph_policy_escalate` naming one as supervisor, are refused the
+  same way, as a policy denial.
 
 - `meta/routing/routes/list`, `meta/delivery/history`,
   `meta/reconcile_edges` and `meta/storage/doctor` leave out every row

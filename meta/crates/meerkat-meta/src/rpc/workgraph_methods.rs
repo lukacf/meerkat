@@ -379,7 +379,10 @@ fn owner_key_member(mob_id: &meerkat_mob::MobId, owner_key: &WorkOwnerKey) -> Op
 /// `lower_member_session_target` names: the owner forms carry the member's
 /// key, and a session form a member holds is lowered to that member's key.
 /// A session no member holds names none.
-fn target_member(mob_id: &meerkat_mob::MobId, target: &GoalAttentionTarget) -> Option<String> {
+pub(crate) fn target_member(
+    mob_id: &meerkat_mob::MobId,
+    target: &GoalAttentionTarget,
+) -> Option<String> {
     match target {
         GoalAttentionTarget::Owner { owner_key } => owner_key_member(mob_id, owner_key),
         GoalAttentionTarget::Session { .. } => None,
@@ -427,46 +430,18 @@ pub(crate) const PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND: &str = "private_member_wo
 
 /// Refuse a lowered target (or supervisor key) that names a member private
 /// to a person (its roster labels name a private owner), for every caller:
-/// the member's owner and an access admin too, who may see it. A caller it
-/// is hidden from was already refused as naming an unknown member
-/// ([`refuse_hidden_target`]).
+/// the member's owner and an access admin too, who may see it
+/// ([`WorkGraphAdmission::refuse_private_member_target`], which the agent
+/// tool plane asks too). A caller it is hidden from was already refused as
+/// naming an unknown member ([`refuse_hidden_target`]).
 async fn refuse_private_member_target(
     admission: &WorkGraphAdmission,
-    mob_id: &meerkat_mob::MobId,
     target: &GoalAttentionTarget,
 ) -> Result<(), JsonRpcError> {
-    let Some(member) = target_member(mob_id, target) else {
-        return Ok(());
-    };
-    let entry = admission
-        .mob_handle()
-        .get_member(&meerkat_mob::AgentIdentity::from(member.as_str()))
+    admission
+        .refuse_private_member_target(target)
         .await
-        .map_err(|error| {
-            let detail = format!("the target member '{member}' could not be read: {error}");
-            JsonRpcError {
-                code: WORKGRAPH_ERROR_CODE,
-                message: detail.clone(),
-                data: Some(serde_json::json!({
-                    "kind": "workgraph_error",
-                    "detail": detail,
-                })),
-            }
-        })?;
-    if entry.is_some_and(|entry| crate::access::private_owner(&entry.labels).is_some()) {
-        return Err(JsonRpcError {
-            code: -32602,
-            message: format!(
-                "Invalid params: member '{member}' is private to a person and is built without \
-                 WorkGraph tools, so no WorkGraph goal, attention binding or supervisor may name it"
-            ),
-            data: Some(serde_json::json!({
-                "kind": PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND,
-                "member": member,
-            })),
-        });
-    }
-    Ok(())
+        .map_err(admission_error_to_rpc)
 }
 
 /// [`refuse_hidden_member`] for the supervisor a completion policy names,
@@ -488,7 +463,7 @@ async fn refuse_hidden_supervisor(
         .await
         .map_err(admission_error_to_rpc)?;
     refuse_hidden_target(surface, mob_id, &supervisor)?;
-    refuse_private_member_target(admission, mob_id, &supervisor).await
+    refuse_private_member_target(admission, &supervisor).await
 }
 
 /// An attention list filter that names a member hidden from the caller,
@@ -652,6 +627,28 @@ fn admission_error_to_rpc(error: WorkGraphAdmissionError) -> JsonRpcError {
         WorkGraphAdmissionError::Service(error) => workgraph_error_to_rpc(error),
         WorkGraphAdmissionError::Lock(detail) => {
             let detail = format!("workgraph admission lock failed: {detail}");
+            JsonRpcError {
+                code: WORKGRAPH_ERROR_CODE,
+                message: detail.clone(),
+                data: Some(serde_json::json!({
+                    "kind": "workgraph_error",
+                    "detail": detail,
+                })),
+            }
+        }
+        WorkGraphAdmissionError::PrivateMember { member } => JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Invalid params: member '{member}' is private to a person and is built without \
+                 WorkGraph tools, so no WorkGraph goal, attention binding or supervisor may name it"
+            ),
+            data: Some(serde_json::json!({
+                "kind": PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND,
+                "member": member,
+            })),
+        },
+        WorkGraphAdmissionError::MemberUnreadable { member, detail } => {
+            let detail = format!("the target member '{member}' could not be read: {detail}");
             JsonRpcError {
                 code: WORKGRAPH_ERROR_CODE,
                 message: detail.clone(),
@@ -1021,7 +1018,7 @@ pub(crate) async fn handle_workgraph_method(
                 .await
                 .map_err(admission_error_to_rpc)?;
             refuse_hidden_target(&surface, mob_id, &target)?;
-            refuse_private_member_target(admission, mob_id, &target).await?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             object.insert("target".to_string(), to_result_value(&target));
@@ -1150,7 +1147,7 @@ pub(crate) async fn handle_workgraph_method(
                 .await
                 .map_err(admission_error_to_rpc)?;
             refuse_hidden_target(&surface, mob_id, &target)?;
-            refuse_private_member_target(admission, mob_id, &target).await?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
@@ -1252,7 +1249,7 @@ pub(crate) async fn handle_workgraph_method(
                 .await
                 .map_err(admission_error_to_rpc)?;
             refuse_hidden_target(&surface, mob_id, &target)?;
-            refuse_private_member_target(admission, mob_id, &target).await?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;

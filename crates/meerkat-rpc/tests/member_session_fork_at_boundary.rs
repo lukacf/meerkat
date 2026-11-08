@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use meerkat::AgentFactory;
 use meerkat_client::{LlmClient, LlmError};
 use meerkat_core::{BlobStore, Config, ConfigRuntime, MemoryConfigStore, StopReason};
-use meerkat_rpc::protocol::{RpcId, RpcRequest, RpcResponse};
+use meerkat_rpc::protocol::{RpcError, RpcId, RpcRequest, RpcResponse};
 use meerkat_rpc::router::{MethodRouter, NotificationSink};
 use meerkat_rpc::session_runtime::SessionRuntime;
 use meerkat_store::MemoryBlobStore;
@@ -229,8 +229,35 @@ impl Rig {
     /// `(role, text)` of every message of a session's history after its
     /// system prompt; a `block_assistant` row reads as `assistant`. The
     /// history must open with exactly one system row: a history that lost
-    /// its system prompt fails here rather than shifting into a prefix.
+    /// its system prompt fails here rather than shifting into a prefix. The
+    /// system row's text is [`Rig::system_prompt`].
     async fn history(&self, session_id: &str) -> Vec<(String, String)> {
+        self.rows(session_id).await.1
+    }
+
+    /// The text of a session's single system row (see [`Rig::history`]).
+    async fn system_prompt(&self, session_id: &str) -> String {
+        self.rows(session_id).await.0
+    }
+
+    /// Assert `child` holds exactly the [`prefix`] of `source`: the source's
+    /// system prompt, copied unchanged, then the first exchange.
+    async fn assert_exact_prefix(&self, child: &str, source: &str) {
+        let source_prompt = self.system_prompt(source).await;
+        assert!(
+            !source_prompt.is_empty(),
+            "setup: the source {source} has a system prompt to copy"
+        );
+        assert_eq!(
+            self.system_prompt(child).await,
+            source_prompt,
+            "the child {child} carries the source's system prompt unchanged"
+        );
+        assert_eq!(self.history(child).await, prefix());
+    }
+
+    /// The system row's text and the `(role, text)` rows after it.
+    async fn rows(&self, session_id: &str) -> (String, Vec<(String, String)>) {
         let history = self
             .ok("session/history", json!({ "session_id": session_id }))
             .await;
@@ -248,7 +275,8 @@ impl Rig {
             1,
             "the history of {session_id} must carry exactly one system row: {messages:?}"
         );
-        messages[1..]
+        let system = text_of(&messages[0]["content"]);
+        let rows = messages[1..]
             .iter()
             .map(|message| {
                 let role = message["role"].as_str().unwrap_or_default();
@@ -263,7 +291,8 @@ impl Rig {
                 }
                 (role.to_string(), text_of(&body))
             })
-            .collect()
+            .collect();
+        (system, rows)
     }
 
     /// Create mob `tui` with one turn-driven profile and seat `main` in it,
@@ -411,7 +440,7 @@ async fn a_standalone_session_forks_at_a_message_boundary() {
     assert_ne!(child, source);
     assert_eq!(forked["source_session_id"], source.as_str());
     assert_eq!(forked["message_count"], BOUNDARY);
-    assert_eq!(rig.history(&child).await, prefix());
+    rig.assert_exact_prefix(&child, &source).await;
 }
 
 /// Today: none of the RPC routes forks a member's session at a boundary.
@@ -556,7 +585,7 @@ async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
     let child = fork.session_id.to_string();
     assert_eq!(fork.agent_identity.to_string(), "main-rewound");
     assert_ne!(child, source);
-    assert_eq!(rig.history(&child).await, prefix());
+    rig.assert_exact_prefix(&child, &source).await;
     let entry = handle
         .get_member(&fork.agent_identity)
         .await
@@ -638,7 +667,7 @@ async fn today_main_cannot_be_reseated_on_an_in_process_fork_session() {
         .await
         .expect("the in-process exact-prefix fork");
     let child = fork.session_id.to_string();
-    assert_eq!(rig.history(&child).await, prefix());
+    rig.assert_exact_prefix(&child, &source).await;
     for identity in ["main-rewound", MAIN] {
         rig.ok(
             "mob/retire",
@@ -690,10 +719,13 @@ async fn today_main_cannot_be_reseated_on_an_in_process_fork_session() {
 
 /// Intended: a member's session forked at its second user message through a
 /// mob-owned RPC method becomes the identity's new session, has exactly the prefix as its
-/// history, records its lineage and keeps the source's tool restrictions.
-/// (Refusing a running source without seating anything is pinned for the
-/// in-process fork by
-/// [`today_the_exact_prefix_member_fork_exists_only_in_process`].)
+/// history (the source's system prompt and the first exchange), reports
+/// `message_count`, records its lineage and keeps the source's tool
+/// restrictions. A fork requested while the member's turn is in flight is
+/// refused with `SESSION_BUSY` and seats nothing (the in-process fork's
+/// `ForkSourceUnavailableCause::Running`, pinned by
+/// [`today_the_exact_prefix_member_fork_exists_only_in_process`], mapped
+/// onto the transport).
 ///
 /// The method does not exist; [`fork_member_at`] stands in for it and fails.
 #[tokio::test]
@@ -709,11 +741,17 @@ async fn a_member_session_forks_at_a_message_boundary() {
 
     let forked = fork_member_at(&rig, MAIN, BOUNDARY)
         .await
-        .unwrap_or_else(|error| panic!("fork the member at boundary {BOUNDARY}: {error}"));
+        .unwrap_or_else(|error| {
+            panic!(
+                "fork the member at boundary {BOUNDARY}: {} ({})",
+                error.message, error.code
+            )
+        });
     let child = forked["session_id"].as_str().unwrap().to_string();
     assert_ne!(child, source);
     assert_eq!(forked["source_session_id"], source.as_str());
-    assert_eq!(rig.history(&child).await, prefix());
+    assert_eq!(forked["message_count"], BOUNDARY);
+    rig.assert_exact_prefix(&child, &source).await;
     assert_eq!(rig.history(&source).await, three_exchanges());
     assert_eq!(rig.member_session(MAIN).await, child);
 
@@ -735,20 +773,71 @@ async fn a_member_session_forks_at_a_message_boundary() {
             .to_string(),
         source
     );
+
+    // A running member is refused with SESSION_BUSY over RPC and nothing is
+    // seated or rebound.
+    let child_history = rig.history(&child).await;
+    let held = {
+        let router_turn = rig.call(
+            "mob/turn_start",
+            json!({ "mob_id": MOB_ID, "agent_identity": MAIN, "prompt": HOLD }),
+        );
+        let entered = rig.client.entered.notified();
+        tokio::pin!(router_turn);
+        tokio::select! {
+            () = entered => {}
+            response = &mut router_turn => panic!("the held turn finished early: {:?}", response.error),
+        }
+        let refused = fork_member_at(&rig, MAIN, BOUNDARY).await;
+        let error = refused.expect_err("a fork of a running member is refused");
+        assert_eq!(
+            error.code,
+            meerkat_rpc::error::SESSION_BUSY,
+            "a running source maps to SESSION_BUSY: {}",
+            error.message
+        );
+        assert_eq!(
+            rig.roster().await,
+            vec![MAIN.to_string()],
+            "the refused fork seats nothing"
+        );
+        assert_eq!(
+            rig.member_session(MAIN).await,
+            child,
+            "the refused fork does not rebind the identity"
+        );
+        rig.client.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(30), router_turn)
+            .await
+            .expect("the held turn finishes once released")
+    };
+    assert!(held.error.is_none(), "{:?}", held.error);
+    assert!(
+        rig.history(&child).await.starts_with(&child_history),
+        "the refused fork leaves the member's session as it was"
+    );
 }
 
 /// Stand-in for the proposed `mob/fork_member_at {mob_id, agent_identity,
 /// message_index, inherited_instructions}`: a new session for the same
-/// identity whose history is exactly the prefix, lineage recorded, the
-/// source's tool restrictions kept, an idle source only (`SESSION_BUSY` for a
-/// running one, nothing seated). Replace the body with the call.
+/// identity whose history is exactly the prefix (the source's system prompt
+/// copied), lineage recorded, the source's tool restrictions kept, the
+/// response carrying `session_id`, `source_session_id` and `message_count`;
+/// an idle source only (`SESSION_BUSY` for a running one, nothing seated).
+/// Replace the body with the call, returning the response's result or its
+/// error.
 async fn fork_member_at(
     _rig: &Rig,
     _identity: &str,
     _message_index: usize,
-) -> Result<Value, String> {
-    Err(
-        "no RPC method forks a member's session at a message boundary (proposed: mob/fork_member_at)"
+) -> Result<Value, RpcError> {
+    Err(RpcError {
+        code: meerkat_rpc::error::METHOD_NOT_FOUND,
+        message: "no RPC method forks a member's session at a message boundary (proposed: \
+                  mob/fork_member_at {mob_id, agent_identity, message_index, \
+                  inherited_instructions} -> {session_id, source_session_id, message_count}; \
+                  SESSION_BUSY for a running member, nothing seated)"
             .to_string(),
-    )
+        data: None,
+    })
 }

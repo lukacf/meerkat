@@ -5989,6 +5989,103 @@ pub(crate) fn retain_announcement_rows_visible_to(
     }
 }
 
+/// The members of a runtime administration read's answer (the routing
+/// table, the delivery history, the edge reconcile, the storage doctor) the
+/// caller's audience hides ([`AccessView::hides_agent`], so an admin and a
+/// member's owner keep everything), with the session of each hidden member
+/// on the runtime's roster: those reads name members and sessions with no
+/// method field to resolve.
+pub(crate) struct AdminReadAudience {
+    view: AccessView,
+    hidden_sessions: BTreeSet<String>,
+}
+
+impl AdminReadAudience {
+    /// The audience of `view` over `runtime`'s members, its attribute cache
+    /// read from the runtime's roster first.
+    pub(crate) async fn of(runtime: &MobRuntime, view: &AccessView) -> Self {
+        prime_access_cache_from_runtime(runtime, &view.controller()).await;
+        let hidden_sessions = runtime
+            .handle()
+            .list_all_members()
+            .await
+            .into_iter()
+            .filter(|member| view.hides_agent(member.agent_identity.as_str()))
+            .filter_map(|member| member.bridge_session_id().map(ToString::to_string))
+            .collect();
+        Self {
+            view: view.clone(),
+            hidden_sessions,
+        }
+    }
+
+    /// Whether `word` names a hidden member: a spelling of one, a roster
+    /// route key of one, or the session of one.
+    fn names(&self, word: &str) -> bool {
+        let word = word.trim_matches(|c: char| ".,:;'\"`()[]{}<>".contains(c));
+        !word.is_empty()
+            && (self.view.hides_agent(word)
+                || self.hidden_sessions.contains(word)
+                || word
+                    .strip_prefix(crate::unified_runtime::ROSTER_ROUTE_PREFIX)
+                    .is_some_and(|member| self.view.hides_agent(member)))
+    }
+
+    /// Whether `text`, whole or any word of it, names a hidden member.
+    fn text_names(&self, text: &str) -> bool {
+        self.names(text)
+            || text
+                .split(|c: char| c.is_whitespace() || ",;'\"`()[]{}<>=/".contains(c))
+                .any(|word| self.names(word))
+    }
+
+    /// Whether `value` names a hidden member anywhere in it.
+    fn value_names(&self, value: &Value) -> bool {
+        match value {
+            Value::String(text) => self.text_names(text),
+            Value::Array(items) => items.iter().any(|item| self.value_names(item)),
+            Value::Object(entries) => entries
+                .iter()
+                .any(|(key, item)| self.text_names(key) || self.value_names(item)),
+            _ => false,
+        }
+    }
+
+    /// Leave out of `answer` every row (an element of an array, at any depth)
+    /// that names a hidden member anywhere in it, payloads included.
+    pub(crate) fn retain_visible_rows(&self, answer: &mut Value) {
+        match answer {
+            Value::Array(rows) => {
+                rows.retain(|row| !self.value_names(row));
+                for row in rows {
+                    self.retain_visible_rows(row);
+                }
+            }
+            Value::Object(entries) => {
+                for entry in entries.values_mut() {
+                    self.retain_visible_rows(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `answer` of a runtime administration read with every row that names a
+/// member hidden from the caller left out (see [`AdminReadAudience`]).
+async fn admin_read_answer_for_audience(
+    runtime: &MobRuntime,
+    view: Option<&AccessView>,
+    mut answer: Value,
+) -> Value {
+    if let Some(view) = view {
+        AdminReadAudience::of(runtime, view)
+            .await
+            .retain_visible_rows(&mut answer);
+    }
+    answer
+}
+
 /// `meta/mob_announcements/subscriptions/put` names the member its deliveries
 /// go to. No member holds a runtime-plane identity (`_system`, `__console__`),
 /// and a delivery to one would record a member frame under the console's own
@@ -12723,6 +12820,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                         runtime.resolved_storage(),
                     )
                     .await;
+                    // Every finding that names a member hidden from the
+                    // caller, or one's session, is left out.
+                    let result = admin_read_answer_for_audience(runtime, access_view, result).await;
                     response_value(response_id, Some(result), None)
                 }
                 Ok(None) => response_value(
@@ -14157,7 +14257,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                 );
             };
             let routes = module_runtime.lock().await.list_runtime_routes();
-            response_value(response_id, Some(json!({ "routes": routes })), None)
+            // Every route that names a member hidden from the caller is left
+            // out.
+            let answer =
+                admin_read_answer_for_audience(runtime, access_view, json!({ "routes": routes }))
+                    .await;
+            response_value(response_id, Some(answer), None)
         })
         .await,
         "meta/delivery/history" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
@@ -14185,11 +14290,15 @@ async fn handle_console_runtime_rpc_with_visibility(
                     sink: None,
                     limit,
                 });
-            response_value(
-                response_id,
-                Some(serde_json::to_value(history).unwrap_or(Value::Null)),
-                None,
+            // Every delivery that names a member hidden from the caller, as
+            // its recipient or in its payload, is left out.
+            let answer = admin_read_answer_for_audience(
+                runtime,
+                access_view,
+                serde_json::to_value(history).unwrap_or(Value::Null),
             )
+            .await;
+            response_value(response_id, Some(answer), None)
         })
         .await,
         "meta/gating/pending" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
@@ -15068,14 +15177,18 @@ async fn handle_console_runtime_rpc_with_visibility(
             // A candidate launch's reconcile is a dry run, flagged
             // `applied: false`.
             let report = reconcile_console_topology(runtime, topology).await;
-            response_value(
-                response_id,
-                Some(crate::unified_runtime::edge_reconcile::reconcile_edges_result(
+            // Every edge that names a member hidden from the caller is left
+            // out of the report.
+            let answer = admin_read_answer_for_audience(
+                runtime,
+                access_view,
+                crate::unified_runtime::edge_reconcile::reconcile_edges_result(
                     &report,
                     runtime.speaks_for_composition(),
-                )),
-                None,
+                ),
             )
+            .await;
+            response_value(response_id, Some(answer), None)
         })
         .await,
         "meta/mob_events/query" | "meta/mob_events/subscribe" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {

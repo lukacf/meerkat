@@ -209,7 +209,7 @@ fn fire_error_hook(slot: &SharedErrorHook, event: ErrorEvent) {
     }
 }
 
-const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
+pub(crate) const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
 const ROSTER_ROUTE_CHANNEL: &str = "notification";
 const ROSTER_ROUTE_SINK: &str = "mob_member";
 const ROSTER_ROUTE_TARGET_MODULE: &str = "delivery";

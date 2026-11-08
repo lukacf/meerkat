@@ -410,9 +410,16 @@ including unknown codes and outcomes. The subscription also exposes
 `terminalOutcome`. Both expose `lastRpcSequence` and `lastEventSeq` for the
 last event delivered to the caller. The former is the RPC notification's
 sequence; the latter is the canonical envelope's `seq` (the nested envelope
-for mob events). These values are not interchangeable or replay cursors.
+for mob events). These values are not interchangeable.
 Missing sequence values stay `undefined`. This API reports stream errors;
 it does not automatically reopen a stream or replay missing events.
+
+A mob member stream also reports `lastEventEpoch`, the sequence space of
+`lastEventSeq`; together they are the position to resume it from.
+`subscribeMobMemberEvents(mobId, agentIdentity, { cursor: { epoch, seq } })`
+(or `mob.subscribeMemberEvents(agentIdentity, { cursor })`) replays the
+events the member still retains after that position, then streams live.
+Outside a member stream neither value is a replay cursor.
 
 `TurnCompletedEvent.usage` is optional; absent means unmeasured, not zero.
 `RunStartedEvent.input` preserves the typed `RunInput`: content (text or blocks)

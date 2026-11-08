@@ -283,6 +283,7 @@ async fn an_authenticated_scoped_original_carries_a_native_turn() {
         })),
         operation_owner: Arc::new(RecordOwner),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let machine = Arc::new(
@@ -580,6 +581,7 @@ async fn a_governed_dispatch_builds_its_helper_fence_from_its_own_operation() {
         })),
         operation_owner: Arc::new(RecordOwner),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let machine = Arc::new(

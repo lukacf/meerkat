@@ -273,8 +273,12 @@ async fn record_claims_reject_stale_renewed_and_foreign_store_tokens() {
         .unwrap()
         .record()
         .clone();
-    let old = store
-        .claim_record(&record.key, record.revision, "first", 10)
+    // Another worker is refused while the first claim is live (its TTL is far
+    // longer than that check takes), and the claim then expires by a renewal
+    // to 1 ms, waited past on the store clock. A first claim with a 10 ms TTL
+    // could expire before the refusal was checked on a loaded runner.
+    let live = store
+        .claim_record(&record.key, record.revision, "first", 60_000)
         .await
         .unwrap();
     assert!(matches!(
@@ -283,6 +287,7 @@ async fn record_claims_reject_stale_renewed_and_foreign_store_tokens() {
             .await,
         Err(StoreError::Claimed)
     ));
+    let old = store.renew_record_claim(&live, 1).await.unwrap();
     wait_past(&store, old.expires_at_ms).await;
     let fresh = store
         .claim_record(&record.key, record.revision, "second", 10_000)

@@ -201,9 +201,11 @@ pub const FINDING_OPERATOR_INSTRUCTION_MOB_EVENTS: &str = "operator-instruction-
 /// this build cannot read. A release before 0.9.9 does not read them (Core
 /// 0.9.8 reads each such identity as unreadable and refuses every new
 /// identity-first adoption in the mob, and does not open a mob storage on a
-/// host store that holds one), and this release has no step that deletes
-/// them, so a mob that holds any has no supported downgrade to such a
-/// release. Informational, with the counts only.
+/// host store that holds one), so a mob that holds any is downgraded to such
+/// a release only through the downgrade cycle (an export, the purge of the
+/// rows, and the import of the export after the roll-forward). A host's
+/// downgrade tooling refuses while any remains. Informational, with the
+/// counts only.
 ///
 /// The rows are counted by the mob crate's reader
 /// (`meerkat_mob::MobStorage::read_identity_record_rows`), which owns the

@@ -1850,21 +1850,38 @@ fn reset_all_resets_every_registered_identity_and_keeps_the_gateway_alive() {
     assert_eq!(health.body.trim(), "ok", "/healthz body after reset_all");
 
     // The lifecycle the console shows: one identity_reset per identity, and
-    // not a single identity_retired anywhere on the timeline.
-    let timeline = console_rpc_while_answering_callbacks(
-        &mut gateway,
-        &base_url,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "timeline",
-            "method": "meta/console/query_timeline",
-            "params": { "limit": 400 }
-        }),
-        answer_reset_all_host_callbacks,
-    );
-    let frames = timeline["result"]["frames"]
-        .as_array()
-        .unwrap_or_else(|| panic!("query_timeline must return frames: {timeline:#?}"));
+    // not a single identity_retired anywhere on the timeline. reset_all records
+    // each frame in the console event store before it answers, and the
+    // console's timeline takes it in from that store's broadcast, so the
+    // timeline is read until every identity's frame has arrived (within the
+    // backstop) and then judged.
+    let timeline_deadline = Instant::now() + WEDGE_BACKSTOP;
+    let frames = loop {
+        let timeline = console_rpc_while_answering_callbacks(
+            &mut gateway,
+            &base_url,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "timeline",
+                "method": "meta/console/query_timeline",
+                "params": { "limit": 400 }
+            }),
+            answer_reset_all_host_callbacks,
+        );
+        let frames = timeline["result"]["frames"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| panic!("query_timeline must return frames: {timeline:#?}"));
+        let every_reset_arrived = RESET_ALL_IDENTITIES.iter().all(|identity| {
+            frames
+                .iter()
+                .any(|frame| frame["kind"] == "identity_reset" && frame["identity"] == *identity)
+        });
+        if every_reset_arrived || Instant::now() >= timeline_deadline {
+            break frames;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
     for identity in RESET_ALL_IDENTITIES {
         let reset_frames = frames
             .iter()

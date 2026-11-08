@@ -1383,6 +1383,23 @@ meerkat_machine_runtime_internal_inputs!(
     RunExecutionLifecycle => [
         SettleRetainedRun,
     ],
+    // The run marked resumable whose resumed-run admission could not decide,
+    // held until a later answer releases it.
+    RunExecutionLifecycle => [
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
+    ],
+    // The scoped tool grant gate's server gate: each model-request
+    // boundary's extension of the gate by the names a gated MCP server
+    // provides, applied by the visibility owner.
+    VisibilityAuthorityLifecycle => [
+        ExtendToolGrantGate,
+    ],
+    // A grant-time live attach's stage of an MCP server the build's grant
+    // gate gates.
+    ExternalSurfaceLifecycle => [
+        SurfaceStageGatedAdd,
+    ],
     // A host's compaction request, applied directly by
     // `MeerkatMachine::request_compaction`, and its consumption by the
     // agent's compaction check through the session's turn-state handle.

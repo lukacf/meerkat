@@ -18,7 +18,8 @@
 //!   execute one approved decision's held request.
 //! - [`executor`]: [`DecisionExecutorLoop`], the one executor of a store's
 //!   registered decision kinds, which keeps the permit's obligations.
-//! - [`wire`]: the projection of decisions onto their wire contracts.
+//! - [`wire`]: the projection of decisions onto their wire contracts, with
+//!   the effect an executed decision's kind names (`effect`).
 //!
 //! Nothing caches a decision, nothing is read at open, and nothing scans
 //! every row: a call touches one row or one index page.
@@ -35,6 +36,7 @@ use meerkat_core::time_compat::{SystemTime, UNIX_EPOCH};
     clippy::unnecessary_map_on_constructor
 )]
 pub mod dsl;
+pub(crate) mod effect;
 pub mod executor;
 pub mod permit;
 pub mod service;

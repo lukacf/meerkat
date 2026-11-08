@@ -1,24 +1,32 @@
-//! `tool_grants/*` JSON-RPC handlers: the scoped tool grants of a session.
+//! `tool_grants/*` JSON-RPC handlers: the scoped tool grants of a session or
+//! of a mob member identity.
 //!
 //! Every method reads and writes grant rows through the runtime's grant
-//! service only: it never loads, registers or wakes the subject's session.
-//! A grant reads the gate the session records (its staged build before or
-//! during its first turn, its persisted metadata after) and refuses a
-//! target the session does not gate.
+//! service only: it never loads, registers or wakes the subject's session or
+//! member. A session grant reads the gate the session records (its staged
+//! build before or during its first turn, its persisted metadata after). An
+//! identity grant reads the gate the member's next build resolves, its own
+//! gate joined with its role's current gate, and needs the identity in the
+//! mob's roster. List and audit resolve the mob only, so a retired
+//! identity's history stays readable. Every refusal of these methods is the
+//! typed `tool_grant_request_refused` refusal.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use meerkat_contracts::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantSubjectRequest, ToolGrantTargetRequest,
+    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireMemberToolGrantGate, WireToolGrantApplies,
+    WireToolGrantGateEntries, WireToolGrantGateView,
 };
 use meerkat_core::SessionId;
+use meerkat_core::approval::decision::DecisionReference;
 use meerkat_core::tool_grant::{
-    GrantGatedTools, ToolGrantId, ToolGrantIssuer, ToolGrantSubject, ToolGrantTarget,
+    GrantGatedTools, RunningToolGrantGate, ToolGrantId, ToolGrantIssuer, ToolGrantRequestRefusal,
+    ToolGrantSubject, ToolGrantTarget,
 };
-use meerkat_core::types::ToolName;
 use meerkat_runtime::RuntimeStoreError;
 use meerkat_runtime::tool_grant::wire::{
     wire_tool_grant, wire_tool_grant_audit_row, wire_unreadable_tool_grant,
@@ -39,11 +47,29 @@ const DEFAULT_AUDIT_PAGE: usize = 100;
 /// The largest audit page: a request asking for more reads this many.
 const MAX_AUDIT_PAGE: usize = 1_000;
 
+/// The typed refusal of a grant request: invalid params carrying
+/// `{"kind": "tool_grant_request_refused", "tool_grant_request_refusal": ...}`.
+fn refused(
+    id: Option<RpcId>,
+    refusal: &ToolGrantRequestRefusal,
+    message: impl Into<String>,
+) -> RpcResponse {
+    RpcResponse::error_with_data(id, error::INVALID_PARAMS, message, refusal.data())
+}
+
 fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError) -> RpcResponse {
+    let refusal = match &error_value {
+        ToolGrantServiceError::InvalidWindow { .. } => Some(ToolGrantRequestRefusal::InvalidWindow),
+        ToolGrantServiceError::EmptyTarget => Some(ToolGrantRequestRefusal::EmptyTarget),
+        ToolGrantServiceError::NotFound { grant_id } => Some(ToolGrantRequestRefusal::NotFound {
+            grant_id: grant_id.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(refusal) = refusal {
+        return refused(id, &refusal, error_value.to_string());
+    }
     let code = match &error_value {
-        ToolGrantServiceError::InvalidWindow { .. }
-        | ToolGrantServiceError::EmptyTarget
-        | ToolGrantServiceError::NotFound { .. } => error::INVALID_PARAMS,
         // Concurrent writers changed the row under this one twice: the
         // busy class, which a retry resolves by reading the row afresh.
         ToolGrantServiceError::Conflict { .. } => error::SESSION_BUSY,
@@ -57,64 +83,378 @@ fn grant_error_to_response(id: Option<RpcId>, error_value: ToolGrantServiceError
     RpcResponse::error(id, code, error_value.to_string())
 }
 
-/// The session a subject names. This server grants to sessions only.
+/// The session a session subject names. An id that names no session is the
+/// typed `subject_unknown`.
 #[allow(clippy::result_large_err)]
-fn subject_session(
+fn session_of(
     id: Option<RpcId>,
-    subject: &ToolGrantSubjectRequest,
+    raw: &str,
     runtime: &SessionRuntime,
 ) -> Result<SessionId, RpcResponse> {
-    match subject {
+    parse_session_id_for_runtime(id.clone(), raw, runtime).map_err(|response| {
+        let message = response
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| format!("no session '{raw}'"));
+        refused(id, &ToolGrantRequestRefusal::SubjectUnknown, message)
+    })
+}
+
+/// A member identity's gate as its next build resolves it: what that build
+/// gates, the role entries it ignores as not mounted, and the MCP servers it
+/// configures.
+#[cfg_attr(not(feature = "mob"), allow(dead_code))]
+struct NextBuildGate {
+    gated: GrantGatedTools,
+    not_mounted: GrantGatedTools,
+    configured_servers: BTreeSet<String>,
+}
+
+/// A write's subject, resolved: whose grants, the gate a target must be in
+/// (with the servers its build configures ungated), the session serving the
+/// subject here when there is one, for a member identity the gate its next
+/// build resolves, and who commits the grant.
+struct GrantSubject {
+    subject: ToolGrantSubject,
+    gate: GrantGatedTools,
+    ungated_servers: BTreeSet<String>,
+    serving: Option<SessionId>,
+    next_build: Option<NextBuildGate>,
+    commit: GrantCommit,
+}
+
+/// Who commits a grant: the runtime's grant service for a session subject;
+/// for a member identity, the mob's actor, which decides it against its live
+/// roster in order with the retirements that end an identity's grants.
+enum GrantCommit {
+    Session,
+    #[cfg(feature = "mob")]
+    Member {
+        handle: meerkat_mob::MobHandle,
+        mob_id: String,
+        identity: meerkat_mob::AgentIdentity,
+    },
+}
+
+async fn subject_for_grant(
+    id: Option<RpcId>,
+    request: &ToolGrantSubjectRequest,
+    runtime: &SessionRuntime,
+) -> Result<GrantSubject, RpcResponse> {
+    match request {
         ToolGrantSubjectRequest::Session { session_id } => {
-            parse_session_id_for_runtime(id, session_id, runtime)
+            let session_id = session_of(id.clone(), session_id, runtime)?;
+            let gate = match runtime.session_grant_gate(&session_id).await {
+                Ok(Some(gate)) => gate,
+                Ok(None) => {
+                    return Err(refused(
+                        id,
+                        &ToolGrantRequestRefusal::SubjectUnknown,
+                        format!("Session not found: {session_id}"),
+                    ));
+                }
+                Err(error_value) => return Err(RpcResponse::from_error(id, error_value)),
+            };
+            // A session's recorded gate names no ungated server: with its
+            // unconfigured-servers mode on, a grant of a server the session
+            // configured ungated is issued and opens nothing.
+            Ok(GrantSubject {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                gate,
+                ungated_servers: BTreeSet::new(),
+                serving: Some(session_id),
+                next_build: None,
+                commit: GrantCommit::Session,
+            })
         }
-        ToolGrantSubjectRequest::Identity { .. } => Err(RpcResponse::error(
-            id,
-            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            "this server grants tools to sessions only: identity subjects are unsupported",
-        )),
+        ToolGrantSubjectRequest::Identity { mob_id, identity } => {
+            members::identity_for_grant(id, mob_id, identity, runtime).await
+        }
     }
 }
 
-/// The target a grant request names, checked against the gate its session
-/// records: a tool name the session gates (by name, or through a gated
-/// family), or a family the session gates, with every name the family can
-/// provide (the gate admits only the names the session's build gated).
-fn resolve_target(
-    target: ToolGrantTargetRequest,
-    gate: &GrantGatedTools,
-) -> Result<ToolGrantTarget, String> {
-    match target {
-        ToolGrantTargetRequest::Tool { name } => {
-            let gated = gate.tools.contains(&name)
-                || gate.families.iter().any(|family| {
-                    meerkat::tool_family_names(family)
-                        .is_some_and(|names| names.contains(&name.as_str()))
-                });
-            if !gated {
-                return Err(format!(
-                    "the session does not grant-gate the tool '{name}': a grant opens only \
-                     names its build gated"
-                ));
-            }
-            Ok(ToolGrantTarget::Tool {
-                name: ToolName::from(name),
+/// A read's subject, resolved: whose grants, the session serving the subject
+/// here when there is one, and, for a member identity in the mob's roster,
+/// the gate its next build resolves. A session subject is not looked up, and
+/// an identity subject resolves its mob only, so a retired identity's history
+/// stays readable.
+struct ReadSubject {
+    subject: ToolGrantSubject,
+    serving: Option<SessionId>,
+    next_build: Option<NextBuildGate>,
+}
+
+async fn subject_for_read(
+    id: Option<RpcId>,
+    request: &ToolGrantSubjectRequest,
+    runtime: &SessionRuntime,
+) -> Result<ReadSubject, RpcResponse> {
+    match request {
+        ToolGrantSubjectRequest::Session { session_id } => {
+            let session_id = session_of(id, session_id, runtime)?;
+            Ok(ReadSubject {
+                subject: ToolGrantSubject::session(session_id.clone()),
+                serving: Some(session_id),
+                next_build: None,
             })
         }
-        ToolGrantTargetRequest::Family { family } => {
-            if !gate.families.contains(&family) {
-                return Err(format!(
-                    "the session does not grant-gate the tool family '{family}'"
-                ));
-            }
-            let Some(names) = meerkat::tool_family_names(&family) else {
-                return Err(format!("'{family}' is not a built-in tool family"));
-            };
-            Ok(ToolGrantTarget::Family {
-                family,
-                names: names.into_iter().map(ToolName::from).collect(),
-            })
+        ToolGrantSubjectRequest::Identity { mob_id, identity } => {
+            members::identity_for_read(id, mob_id, identity, runtime).await
         }
+    }
+}
+
+/// The gate the member identity's live build runs, read from the machine of
+/// the session serving it here: `None` when no build of it is live here.
+async fn running_gate(
+    runtime: &SessionRuntime,
+    serving: Option<&SessionId>,
+) -> Option<RunningToolGrantGate> {
+    runtime.runtime_adapter().tool_grant_gate(serving?).await
+}
+
+/// Whether an identity grant of `target` applies to the member's running
+/// build now: `now` when the running gate covers the target, unless the
+/// target is a gated MCP server the member's build configures and the
+/// running build's surface does not hold (the build left it unattached, so
+/// the next build connects it); `not_mounted` when that build ignored it,
+/// or, with no live build, when the next build leaves its family off;
+/// `at_next_build` otherwise.
+fn grant_applies(
+    running: Option<&RunningToolGrantGate>,
+    next_build: &NextBuildGate,
+    target: &ToolGrantTarget,
+) -> WireToolGrantApplies {
+    match running {
+        Some(running) if running.gate.gates_target(target) => match target {
+            ToolGrantTarget::McpServer { server, .. }
+                if !running.attached_servers.contains(server)
+                    && next_build.configured_servers.contains(server) =>
+            {
+                WireToolGrantApplies::AtNextBuild
+            }
+            _ => WireToolGrantApplies::Now,
+        },
+        Some(running) if running.gate.ignores_target(target) => WireToolGrantApplies::NotMounted,
+        Some(_) => WireToolGrantApplies::AtNextBuild,
+        None => match target {
+            ToolGrantTarget::Family { family, .. }
+                if next_build.not_mounted.families.contains(family) =>
+            {
+                WireToolGrantApplies::NotMounted
+            }
+            _ => WireToolGrantApplies::AtNextBuild,
+        },
+    }
+}
+
+/// A running gate as `tool_grants/list` shows it: its gated names under
+/// `tools` with its gated servers and its unconfigured-servers mode, and the
+/// names it ignored as not mounted.
+fn wire_running_gate(running: &RunningToolGrantGate) -> WireToolGrantGateView {
+    WireToolGrantGateView {
+        gated: WireToolGrantGateEntries {
+            families: Vec::new(),
+            tools: running.gate.gated.iter().map(ToString::to_string).collect(),
+            mcp_servers: running.gate.gated_servers.iter().cloned().collect(),
+            unconfigured_mcp_servers: running.gate.gates_unconfigured_servers,
+        },
+        not_mounted: WireToolGrantGateEntries {
+            tools: running
+                .gate
+                .not_mounted_names
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            ..WireToolGrantGateEntries::default()
+        },
+    }
+}
+
+/// A member identity's gate as `tool_grants/list` answers it.
+async fn wire_member_gate(
+    runtime: &SessionRuntime,
+    serving: Option<&SessionId>,
+    next_build: &NextBuildGate,
+) -> WireMemberToolGrantGate {
+    WireMemberToolGrantGate {
+        running: running_gate(runtime, serving)
+            .await
+            .as_ref()
+            .map(wire_running_gate),
+        next_build: WireToolGrantGateView {
+            gated: WireToolGrantGateEntries::from(&next_build.gated),
+            not_mounted: WireToolGrantGateEntries::from(&next_build.not_mounted),
+        },
+    }
+}
+
+/// Identity subjects: the members of the mobs this server runs.
+#[cfg(feature = "mob")]
+mod members {
+    use super::*;
+
+    /// The handle of the mob `mob_id`; a mob this server does not run is
+    /// the typed `subject_unknown`.
+    async fn mob_handle(
+        id: Option<RpcId>,
+        mob_id: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<meerkat_mob::MobHandle, RpcResponse> {
+        let unknown = || {
+            refused(
+                id.clone(),
+                &ToolGrantRequestRefusal::SubjectUnknown,
+                format!("no mob '{mob_id}'"),
+            )
+        };
+        let Some(state) = runtime.mob_state() else {
+            return Err(unknown());
+        };
+        match state.handle_for(&meerkat_mob::MobId::from(mob_id)).await {
+            Ok(handle) => Ok(handle),
+            Err(meerkat_mob::MobError::MobNotFound(_)) => Err(unknown()),
+            Err(error_value) => Err(crate::handlers::mob::mob_call_error(id, &error_value)),
+        }
+    }
+
+    pub(super) async fn identity_for_grant(
+        id: Option<RpcId>,
+        mob_id: &str,
+        identity: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<GrantSubject, RpcResponse> {
+        let handle = mob_handle(id.clone(), mob_id, runtime).await?;
+        let member = meerkat_mob::AgentIdentity::from(identity);
+        let gate = match handle.member_grant_gate(&member).await {
+            Ok(gate) => gate,
+            Err(meerkat_mob::MobError::MemberNotFound(_)) => {
+                return Err(unknown_member(id, mob_id, identity));
+            }
+            Err(error_value) => return Err(crate::handlers::mob::mob_call_error(id, &error_value)),
+        };
+        Ok(GrantSubject {
+            subject: ToolGrantSubject::member(mob_id, &handle.live_incarnation(), identity),
+            gate: gate.named(),
+            ungated_servers: gate.ungated_servers.clone(),
+            serving: handle.resolve_bridge_session_id(&member).await,
+            next_build: Some(NextBuildGate {
+                gated: gate.gated,
+                not_mounted: gate.not_mounted,
+                configured_servers: gate.configured_servers,
+            }),
+            commit: GrantCommit::Member {
+                handle,
+                mob_id: mob_id.to_string(),
+                identity: member,
+            },
+        })
+    }
+
+    /// The refusal of an identity the mob's roster does not hold, at the
+    /// read and at the commit alike.
+    fn unknown_member(id: Option<RpcId>, mob_id: &str, identity: &str) -> RpcResponse {
+        refused(
+            id,
+            &ToolGrantRequestRefusal::SubjectUnknown,
+            format!("no member '{identity}' in mob '{mob_id}'"),
+        )
+    }
+
+    /// Commit a member identity's grant through the mob's actor, which
+    /// decides it against its live roster: an identity retired since the
+    /// gate read is refused as the read refuses an unknown one.
+    pub(super) async fn commit(
+        id: Option<RpcId>,
+        handle: &meerkat_mob::MobHandle,
+        mob_id: &str,
+        identity: &meerkat_mob::AgentIdentity,
+        request: ToolGrantRequest,
+        serving: Option<&SessionId>,
+    ) -> Result<meerkat_runtime::tool_grant::StoredToolGrant, RpcResponse> {
+        use meerkat_mob::MemberToolGrantError;
+        let grant = meerkat_mob::MemberToolGrant {
+            target: request.target,
+            issuer: request.issuer,
+            reason: request.reason,
+            window: request.window,
+        };
+        match handle.grant_member_tool(identity, grant, serving).await {
+            Ok(grant) => Ok(grant),
+            Err(MemberToolGrantError::Mob(meerkat_mob::MobError::MemberNotFound(_))) => {
+                Err(unknown_member(id, mob_id, identity.as_str()))
+            }
+            Err(MemberToolGrantError::Mob(error_value)) => {
+                Err(crate::handlers::mob::mob_call_error(id, &error_value))
+            }
+            Err(MemberToolGrantError::Grant(error_value)) => {
+                Err(grant_error_to_response(id, error_value))
+            }
+            Err(MemberToolGrantError::NoRuntime) => Err(RpcResponse::error(
+                id,
+                meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+                "this mob runs without a runtime: it holds no scoped tool grants",
+            )),
+        }
+    }
+
+    pub(super) async fn identity_for_read(
+        id: Option<RpcId>,
+        mob_id: &str,
+        identity: &str,
+        runtime: &SessionRuntime,
+    ) -> Result<ReadSubject, RpcResponse> {
+        let handle = mob_handle(id, mob_id, runtime).await?;
+        let member = meerkat_mob::AgentIdentity::from(identity);
+        let serving = handle.resolve_bridge_session_id(&member).await;
+        // An identity outside the roster (a retired one) has no next build:
+        // its history stays readable, without a gate.
+        let next_build = handle
+            .member_grant_gate(&member)
+            .await
+            .ok()
+            .map(|gate| NextBuildGate {
+                gated: gate.gated,
+                not_mounted: gate.not_mounted,
+                configured_servers: gate.configured_servers,
+            });
+        Ok(ReadSubject {
+            subject: ToolGrantSubject::member(mob_id, &handle.live_incarnation(), identity),
+            serving,
+            next_build,
+        })
+    }
+}
+
+/// Identity subjects: a server without mobs has none.
+#[cfg(not(feature = "mob"))]
+mod members {
+    use super::*;
+
+    fn unsupported(id: Option<RpcId>) -> RpcResponse {
+        RpcResponse::error(
+            id,
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
+            "this server runs no mobs: identity subjects are unsupported",
+        )
+    }
+
+    pub(super) async fn identity_for_grant(
+        id: Option<RpcId>,
+        _mob_id: &str,
+        _identity: &str,
+        _runtime: &SessionRuntime,
+    ) -> Result<GrantSubject, RpcResponse> {
+        Err(unsupported(id))
+    }
+
+    pub(super) async fn identity_for_read(
+        id: Option<RpcId>,
+        _mob_id: &str,
+        _identity: &str,
+        _runtime: &SessionRuntime,
+    ) -> Result<ReadSubject, RpcResponse> {
+        Err(unsupported(id))
     }
 }
 
@@ -132,47 +472,107 @@ pub async fn handle_grant(
         (Some(expires_at_ms), None) => ToolGrantWindow::Until { expires_at_ms },
         (None, Some(duration_ms)) => ToolGrantWindow::For(Duration::from_millis(duration_ms)),
         _ => {
-            return RpcResponse::error(
+            return refused(
                 id,
-                error::INVALID_PARAMS,
+                &ToolGrantRequestRefusal::InvalidWindow,
                 "a tool grant is bounded by exactly one of expires_at_ms and duration_ms",
             );
         }
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
-        Err(response) => return response,
-    };
-    let gate = match runtime.session_grant_gate(&session_id).await {
-        Ok(Some(gate)) => gate,
-        Ok(None) => {
-            return RpcResponse::error(
+    let decision_ref = match params.decision_ref.map(DecisionReference::new).transpose() {
+        Ok(decision_ref) => decision_ref,
+        Err(error_value) => {
+            return refused(
                 id,
-                error::SESSION_NOT_FOUND,
-                format!("Session not found: {session_id}"),
+                &ToolGrantRequestRefusal::InvalidDecisionRef,
+                error_value.to_string(),
             );
         }
-        Err(error_value) => return RpcResponse::from_error(id, error_value),
     };
-    let target = match resolve_target(params.target, &gate) {
-        Ok(target) => target,
-        Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+    let subject = match subject_for_grant(id.clone(), &params.subject, &runtime).await {
+        Ok(subject) => subject,
+        Err(response) => return response,
     };
+    let named = match &params.target {
+        ToolGrantTargetRequest::Tool { name } => format!("the tool '{name}'"),
+        ToolGrantTargetRequest::Family { family } => format!("the tool family '{family}'"),
+        ToolGrantTargetRequest::McpServer { server, .. } => format!("the MCP server '{server}'"),
+    };
+    let names_a_tool = matches!(params.target, ToolGrantTargetRequest::Tool { .. });
+    let target =
+        match meerkat::resolve_grant_target(params.target, &subject.gate, &subject.ungated_servers)
+        {
+            Ok(target) => target,
+            Err(refusal) => {
+                let message = match refusal {
+                    ToolGrantRequestRefusal::TargetNotGated if names_a_tool => format!(
+                        "the subject's grant gate does not name {named}: a grant opens only names \
+                     the subject's build gates; a gated MCP server's tools are granted with \
+                     {{\"kind\": \"mcp_server\", \"server\": ..., \"tools\": [...]}}"
+                    ),
+                    ToolGrantRequestRefusal::TargetNotGated => format!(
+                        "the subject's grant gate does not name {named}: a grant opens only what \
+                     the subject's build gates"
+                    ),
+                    _ => refusal.to_string(),
+                };
+                return refused(id, &refusal, message);
+            }
+        };
     let request = ToolGrantRequest {
-        subject: ToolGrantSubject::session(session_id),
+        subject: subject.subject,
         target,
-        issuer: ToolGrantIssuer::Operator { caller: None },
+        issuer: ToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref,
+        },
         reason: params.reason,
         window,
     };
-    match runtime.runtime_adapter().grant_tool(request).await {
-        Ok(grant) => RpcResponse::success(
-            id,
-            GrantToolResult {
-                grant: wire_tool_grant(&grant),
-            },
-        ),
-        Err(error_value) => grant_error_to_response(id, error_value),
+    let issued = match &subject.commit {
+        GrantCommit::Session => runtime
+            .runtime_adapter()
+            .grant_tool(request, subject.serving.as_ref())
+            .await
+            .map_err(|error_value| grant_error_to_response(id.clone(), error_value)),
+        #[cfg(feature = "mob")]
+        GrantCommit::Member {
+            handle,
+            mob_id,
+            identity,
+        } => {
+            members::commit(
+                id.clone(),
+                handle,
+                mob_id,
+                identity,
+                request,
+                subject.serving.as_ref(),
+            )
+            .await
+        }
+    };
+    match issued {
+        Ok(grant) => {
+            let applies = match &subject.next_build {
+                Some(next_build) => Some(grant_applies(
+                    running_gate(&runtime, subject.serving.as_ref())
+                        .await
+                        .as_ref(),
+                    next_build,
+                    &grant.record.target,
+                )),
+                None => None,
+            };
+            RpcResponse::success(
+                id,
+                GrantToolResult {
+                    grant: wire_tool_grant(&grant),
+                    applies,
+                },
+            )
+        }
+        Err(response) => response,
     }
 }
 
@@ -190,7 +590,13 @@ pub async fn handle_revoke(
     let grant_id = match ToolGrantId::parse(&params.grant_id) {
         Ok(grant_id) => grant_id,
         Err(error_value) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, error_value.to_string());
+            return refused(
+                id,
+                &ToolGrantRequestRefusal::NotFound {
+                    grant_id: params.grant_id,
+                },
+                error_value.to_string(),
+            );
         }
     };
     let revocation = ToolGrantRevocation {
@@ -224,13 +630,21 @@ pub async fn handle_list(
         Ok(params) => params,
         Err(response) => return response.with_id(id),
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    let ReadSubject {
+        subject,
+        serving,
+        next_build,
+    } = match subject_for_read(id.clone(), &params.subject, &runtime).await {
+        Ok(resolved) => resolved,
         Err(response) => return response,
+    };
+    let gate = match &next_build {
+        Some(next_build) => Some(wire_member_gate(&runtime, serving.as_ref(), next_build).await),
+        None => None,
     };
     match runtime
         .runtime_adapter()
-        .list_tool_grants(&ToolGrantSubject::session(session_id))
+        .list_tool_grants(&subject, serving.as_ref())
         .await
     {
         Ok(listing) => RpcResponse::success(
@@ -249,6 +663,7 @@ pub async fn handle_list(
                     .iter()
                     .map(wire_unreadable_tool_grant)
                     .collect(),
+                gate,
             },
         ),
         Err(error_value) => grant_error_to_response(id, error_value),
@@ -271,9 +686,9 @@ pub async fn handle_audit(
     let limit = match params.limit {
         None => DEFAULT_AUDIT_PAGE,
         Some(0) => {
-            return RpcResponse::error(
+            return refused(
                 id,
-                error::INVALID_PARAMS,
+                &ToolGrantRequestRefusal::InvalidPageLimit,
                 "an audit page limit must be at least 1",
             );
         }
@@ -281,17 +696,13 @@ pub async fn handle_audit(
             .unwrap_or(MAX_AUDIT_PAGE)
             .min(MAX_AUDIT_PAGE),
     };
-    let session_id = match subject_session(id.clone(), &params.subject, &runtime) {
-        Ok(session_id) => session_id,
+    let subject = match subject_for_read(id.clone(), &params.subject, &runtime).await {
+        Ok(resolved) => resolved.subject,
         Err(response) => return response,
     };
     match runtime
         .runtime_adapter()
-        .read_tool_grant_audit(
-            &ToolGrantSubject::session(session_id),
-            params.after_sequence,
-            limit,
-        )
+        .read_tool_grant_audit(&subject, params.after_sequence, limit)
         .await
     {
         Ok(page) => {
@@ -318,73 +729,17 @@ pub async fn handle_audit(
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_target_must_be_gated_by_the_session() {
-        let gate = GrantGatedTools::default()
-            .with_family("shell")
-            .with_tool("deploy");
-
-        assert_eq!(
-            resolve_target(
-                ToolGrantTargetRequest::Tool {
-                    name: "deploy".to_string()
-                },
-                &gate
-            ),
-            Ok(ToolGrantTarget::Tool {
-                name: ToolName::from("deploy")
-            })
-        );
-        // A name a gated family provides is gated through the family.
-        assert!(
-            resolve_target(
-                ToolGrantTargetRequest::Tool {
-                    name: "shell".to_string()
-                },
-                &gate
-            )
-            .is_ok()
-        );
-        let Ok(ToolGrantTarget::Family { family, names }) = resolve_target(
-            ToolGrantTargetRequest::Family {
-                family: "shell".to_string(),
-            },
-            &gate,
-        ) else {
-            panic!("a gated family resolves");
-        };
-        assert_eq!(family, "shell");
-        assert!(names.contains("shell"), "{names:?}");
-
-        for refused in [
-            ToolGrantTargetRequest::Tool {
-                name: "web_search".to_string(),
-            },
-            ToolGrantTargetRequest::Family {
-                family: "tasks".to_string(),
-            },
-        ] {
-            assert!(
-                resolve_target(refused.clone(), &gate).is_err(),
-                "{refused:?} must be refused"
-            );
-        }
-    }
-
     /// A grant row that concurrent writers kept changing answers the busy
     /// class, which a retry resolves; the other service faults stay
-    /// internal.
+    /// internal; the request's own faults are typed refusals.
     #[test]
-    fn a_contended_grant_write_answers_busy() {
-        let code = |error_value| {
-            grant_error_to_response(None, error_value)
-                .error
-                .map(|error| error.code)
-        };
+    fn grant_service_errors_answer_their_classes() {
+        let response = |error_value| grant_error_to_response(None, error_value);
+        let code = |error_value| response(error_value).error.map(|error| error.code);
         assert_eq!(
             code(ToolGrantServiceError::Conflict {
                 grant_id: "g1".to_string()
@@ -395,5 +750,119 @@ mod tests {
             code(ToolGrantServiceError::Clock),
             Some(error::INTERNAL_ERROR)
         );
+        let not_found = response(ToolGrantServiceError::NotFound {
+            grant_id: "g1".to_string(),
+        })
+        .error
+        .expect("refused");
+        assert_eq!(not_found.code, error::INVALID_PARAMS);
+        assert_eq!(
+            not_found.data,
+            Some(serde_json::json!({
+                "kind": "tool_grant_request_refused",
+                "tool_grant_request_refusal": {"kind": "not_found", "grant_id": "g1"},
+            }))
+        );
+    }
+
+    /// An identity grant applies now when the member's running build gates
+    /// its target, except a gated MCP server the member's build configures
+    /// and the running build's surface does not hold, which applies at the
+    /// next build; it is not mounted when that build ignored every name it
+    /// names, or, with no live build, when the next build leaves its family
+    /// off; otherwise it applies at the next build. The running gate lists
+    /// its gated names under `tools`, with its servers and its mode.
+    #[test]
+    fn an_identity_grant_answers_whether_it_applies_to_the_running_build() {
+        use meerkat_core::tool_grant::InstalledToolGrantGate;
+        use meerkat_core::types::ToolName;
+        let running = RunningToolGrantGate {
+            gate: InstalledToolGrantGate {
+                gated: BTreeSet::from([ToolName::from("deploy")]),
+                gated_servers: BTreeSet::from([
+                    "drive".to_string(),
+                    "mail".to_string(),
+                    "tickets".to_string(),
+                ]),
+                gates_unconfigured_servers: false,
+                ungated_servers: BTreeSet::new(),
+                not_mounted_names: BTreeSet::from([ToolName::from("shell")]),
+            },
+            open: BTreeSet::new(),
+            attached_servers: BTreeSet::from(["tickets".to_string()]),
+        };
+        let next_build = NextBuildGate {
+            gated: GrantGatedTools::default()
+                .with_tool("deploy")
+                .with_tool("web_search")
+                .with_mcp_server("drive")
+                .with_mcp_server("mail")
+                .with_mcp_server("tickets"),
+            not_mounted: GrantGatedTools::default().with_family("shell"),
+            configured_servers: BTreeSet::from(["mail".to_string(), "tickets".to_string()]),
+        };
+        let tool = |name: &str| ToolGrantTarget::Tool {
+            name: ToolName::from(name),
+        };
+        let shell = ToolGrantTarget::Family {
+            family: "shell".to_string(),
+            names: BTreeSet::from([ToolName::from("shell")]),
+        };
+        let server = |server: &str| ToolGrantTarget::McpServer {
+            server: server.to_string(),
+            tools: None,
+        };
+        for (target, live, idle) in [
+            (
+                tool("deploy"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Configured and attached.
+            (
+                server("tickets"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Configured, left unattached by the running build.
+            (
+                server("mail"),
+                WireToolGrantApplies::AtNextBuild,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            // Gated, configured by no build: gated wherever it is attached.
+            (
+                server("drive"),
+                WireToolGrantApplies::Now,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+            (
+                shell,
+                WireToolGrantApplies::NotMounted,
+                WireToolGrantApplies::NotMounted,
+            ),
+            (
+                tool("web_search"),
+                WireToolGrantApplies::AtNextBuild,
+                WireToolGrantApplies::AtNextBuild,
+            ),
+        ] {
+            assert_eq!(
+                grant_applies(Some(&running), &next_build, &target),
+                live,
+                "{target:?}"
+            );
+            assert_eq!(
+                grant_applies(None, &next_build, &target),
+                idle,
+                "{target:?}"
+            );
+        }
+
+        let listed = wire_running_gate(&running);
+        assert_eq!(listed.gated.tools, ["deploy"]);
+        assert_eq!(listed.gated.mcp_servers, ["drive", "mail", "tickets"]);
+        assert!(!listed.gated.unconfigured_mcp_servers);
+        assert_eq!(listed.not_mounted.tools, ["shell"]);
     }
 }

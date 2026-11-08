@@ -175,6 +175,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
             bundles,
+            grant_gated: input.tools.grant_gated.into(),
         },
         peer_description: input.peer_description,
         external_addressable: input.external_addressable,

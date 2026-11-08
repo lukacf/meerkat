@@ -286,3 +286,78 @@ async def test_subscription_without_terminal_error_ends_normally(scope, outcome)
         assert sub.terminal_outcome["outcome"] == outcome
         assert sub.terminal_outcome.get("error") is None
         assert (sub.last_rpc_sequence, sub.last_event_seq) == (8, 42)
+
+
+@pytest.mark.asyncio
+async def test_member_subscription_reports_the_epoch_of_its_last_event():
+    from meerkat.event_envelope import parse_agent_event_envelope
+    from meerkat.streaming import EventSubscription, _StdoutDispatcher
+    from tests.test_streaming import agent_event_envelope, jline, make_reader
+
+    def member_event(sequence, seq, payload, epoch):
+        envelope = agent_event_envelope(payload)
+        envelope["seq"] = seq
+        params = {"stream_id": "stream-1", "sequence": sequence, "event": envelope}
+        if epoch is not None:
+            params["epoch"] = epoch
+        return jline({"jsonrpc": "2.0", "method": "mob/stream_event", "params": params})
+
+    gap = {"type": "stream_truncated", "reason": {"kind": "stream_lagged", "dropped": 1}}
+    dispatcher = _StdoutDispatcher(make_reader([
+        member_event(1, 41, {"type": "text_delta", "delta": "a"}, "epoch-a"),
+        member_event(2, 0, gap, "epoch-b"),
+        member_event(3, 7, {"type": "text_delta", "delta": "b"}, "epoch-b"),
+        member_event(4, 8, {"type": "text_delta", "delta": "c"}, None),
+    ]))
+    sub = EventSubscription(
+        stream_id="stream-1", event_queue=dispatcher.subscribe_stream("stream-1"),
+        dispatcher=dispatcher, close_remote=lambda _: asyncio.sleep(0),
+        parse_event_fn=parse_agent_event_envelope,
+    )
+    dispatcher.start()
+    iterator = sub.__aiter__()
+    assert sub.last_event_epoch is None
+    await anext(iterator)
+    assert (sub.last_event_epoch, sub.last_event_seq) == ("epoch-a", 41)
+    # A gap marker moves neither half of the resume position.
+    await anext(iterator)
+    assert (sub.last_event_epoch, sub.last_event_seq) == ("epoch-a", 41)
+    await anext(iterator)
+    assert (sub.last_event_epoch, sub.last_event_seq) == ("epoch-b", 7)
+    # An event that names no epoch (a mob-wide stream's) names none.
+    await anext(iterator)
+    assert (sub.last_event_epoch, sub.last_event_seq) == (None, 8)
+
+
+@pytest.mark.asyncio
+async def test_member_subscription_sends_its_resume_cursor():
+    from meerkat import MeerkatClient, Mob, MobStreamCursor
+
+    client = MeerkatClient()
+    calls = []
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return {"stream_id": f"stream-{len(calls)}"}
+
+    class DummyDispatcher:
+        def subscribe_stream(self, _stream_id):
+            queue = asyncio.Queue()
+            queue.put_nowait(None)
+            return queue
+
+        def unsubscribe_stream(self, _stream_id):
+            return None
+
+    client._request = fake_request  # type: ignore[method-assign]
+    client._dispatcher = DummyDispatcher()  # type: ignore[assignment]
+    cursor = MobStreamCursor(epoch="0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", seq=41)
+    await client.subscribe_mob_member_events("mob-1", "agent-a", cursor=cursor)
+    await Mob(client, "mob-1").subscribe_member_events("agent-a", cursor=cursor)
+    await client.subscribe_mob_member_events("mob-1", "agent-a")
+    wire_cursor = {"epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", "seq": 41}
+    assert calls == [
+        ("mob/stream_open", {"mob_id": "mob-1", "agent_identity": "agent-a", "cursor": wire_cursor}),
+        ("mob/stream_open", {"mob_id": "mob-1", "agent_identity": "agent-a", "cursor": wire_cursor}),
+        ("mob/stream_open", {"mob_id": "mob-1", "agent_identity": "agent-a"}),
+    ]

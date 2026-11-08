@@ -388,6 +388,7 @@ impl McpScheduleContext {
                     initial_turn_metadata: None,
                     initial_work_authorization: None,
                     grant_gated_tools: None,
+                    grant_gated_tools_where_mounted: None,
                 };
                 let request = CreateSessionRequest {
                     injected_context: Vec::new(),

@@ -956,27 +956,21 @@ impl MeerkatMachine {
                                     let effects = staged.effects.clone();
                                     let signal = Self::post_admission_signal_from_effects(&effects);
                                     let runtime_effect =
-                                    crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                                    crate::effect::boundary_cancel_dispatch_optional_from_dsl_effects(
                                         &effects,
                                     )
                                     .map_err(RuntimeControlPlaneError::Internal)?;
                                     // Arm exact compensation synchronously after the
                                     // DSL stage, before routed-signal or driver awaits.
                                     let cancel_plan = runtime_effect
-                                    .map(|projected_effect| {
+                                    .map(|dispatch| {
                                         let committed_state = staged.committed_snapshot.state();
-                                        let expected_run_id = committed_state
-                                            .current_run_id
-                                            .as_ref()
-                                            .and_then(
-                                                crate::meerkat_machine::dsl_authority::current_run_id_from_dsl,
-                                            )
-                                            .ok_or_else(|| {
-                                                RuntimeControlPlaneError::Internal(
-                                                    "AcceptWithCompletion(Ingest) emitted boundary cancel without an exact active run id"
-                                                        .to_string(),
-                                                )
-                                            })?;
+                                        if dispatch.run_id().is_none() {
+                                            return Err(RuntimeControlPlaneError::Internal(
+                                                "AcceptWithCompletion(Ingest) emitted boundary cancel without an exact active run id"
+                                                    .to_string(),
+                                            ));
+                                        }
                                         let dispatch_generation =
                                             committed_state.boundary_cancel_dispatch_generation;
                                         let pending_dispatch =
@@ -1005,8 +999,7 @@ impl MeerkatMachine {
                                             },
                                             boundary_handle: boundary_handle.clone(),
                                             pending_dispatch,
-                                            expected_run_id,
-                                            projected_effect,
+                                            dispatch,
                                             dispatch_generation,
                                             dispatch_lifecycle_phase: committed_state.lifecycle_phase,
                                         })

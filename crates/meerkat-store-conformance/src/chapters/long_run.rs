@@ -52,9 +52,9 @@ use meerkat_core::{RunId, ToolCallDedupeKey};
 
 use crate::failure::{ConformanceFailure, Steps};
 use crate::long_run::{
-    BeforeResume, DurableWorkerHarness, KillPoint, KilledRun, LongRunHarness, LongRunPlan,
-    OtherWriterOutcome, RestartReport, ResumeGate, ResumePointKind, RoundSet, UnrepeatableTool,
-    call_id, resumes, takes_first_commit,
+    BeforeResume, DurableWorkerHarness, KillPoint, KilledRun, KilledWorker, LongRunHarness,
+    LongRunPlan, OtherWriterOutcome, RestartReport, RestartedWorker, ResumeGate, ResumePointKind,
+    RoundSet, UnrepeatableTool, call_id, resumes, takes_first_commit,
 };
 
 /// Rounds of every row's run in the long run chapter.
@@ -299,7 +299,9 @@ async fn run_rows(
 
 /// Durable worker chapter: a durable worker killed mid run resumes under
 /// the same identity and session, unless its resume gate refuses the resume
-/// (superseded, or unavailable through every retry).
+/// (superseded). A gate unavailable through every retry neither resumes nor
+/// ends the run: it stays marked, and the next restart, with the gate
+/// recovered, resumes it once.
 pub async fn durable_worker(harness: &dyn DurableWorkerHarness) -> Result<(), ConformanceFailure> {
     let steps = Steps::chapter("durable_worker");
     let expect_lease_wait = harness.fence_leases();
@@ -307,15 +309,8 @@ pub async fn durable_worker(harness: &dyn DurableWorkerHarness) -> Result<(), Co
         let killed = harness.spawn_and_kill(&plan).await?;
         check_killed(&steps, step, &plan, &killed.run)?;
         let restarted = harness.restart(&plan, gate).await?;
-        steps.ensure(
-            step,
-            restarted.identity == killed.identity && restarted.session == killed.session,
-            format!(
-                "the worker came back as {} on session {}, not as {} on session {}",
-                restarted.identity, restarted.session, killed.identity, killed.session
-            ),
-        )?;
-        let refused = matches!(gate, ResumeGate::Superseded | ResumeGate::Unavailable);
+        check_same_worker(&steps, step, &killed, &restarted)?;
+        let refused = matches!(gate, ResumeGate::Superseded);
         steps.ensure(
             step,
             restarted.refused == refused,
@@ -332,6 +327,31 @@ pub async fn durable_worker(harness: &dyn DurableWorkerHarness) -> Result<(), Co
                 &restarted.report,
                 expect_lease_wait,
             )?;
+        } else if gate == ResumeGate::Unavailable {
+            check_held(
+                &steps,
+                step,
+                &killed.run,
+                &restarted.report,
+                expect_lease_wait,
+            )?;
+            // The gate recovers at the next start: the run resumes once,
+            // from its last committed round.
+            let recovered = harness.restart(&plan, ResumeGate::Continue).await?;
+            check_same_worker(&steps, step, &killed, &recovered)?;
+            steps.ensure(
+                step,
+                !recovered.refused,
+                "the worker's run was refused at the restart after its gate recovered",
+            )?;
+            check_restart(
+                &steps,
+                step,
+                &plan,
+                &killed.run,
+                &recovered.report,
+                expect_lease_wait,
+            )?;
         } else {
             check_restart(
                 &steps,
@@ -344,6 +364,54 @@ pub async fn durable_worker(harness: &dyn DurableWorkerHarness) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// The restarted worker is the killed one: the same identity and session.
+fn check_same_worker(
+    steps: &Steps,
+    step: &'static str,
+    killed: &KilledWorker,
+    restarted: &RestartedWorker,
+) -> Result<(), ConformanceFailure> {
+    steps.ensure(
+        step,
+        restarted.identity == killed.identity && restarted.session == killed.session,
+        format!(
+            "the worker came back as {} on session {}, not as {} on session {}",
+            restarted.identity, restarted.session, killed.identity, killed.session
+        ),
+    )
+}
+
+/// A restart whose resume gate could not decide: the run neither resumed
+/// nor ended. Nothing of it ran, and every input bound to it is still open
+/// in the store, for the next start to resume.
+fn check_held(
+    steps: &Steps,
+    step: &'static str,
+    killed: &KilledRun,
+    report: &RestartReport,
+    expect_lease_wait: bool,
+) -> Result<(), ConformanceFailure> {
+    steps.ensure(
+        step,
+        report.resumed.is_none()
+            && report.runs.is_empty()
+            && report.model_call_rounds.is_empty()
+            && report.dispatched.is_empty(),
+        format!(
+            "the restart whose gate could not decide resumed {:?}, ran {:?}, called the model for \
+             rounds {:?} and dispatched {:?} for run {}",
+            report.resumed, report.runs, report.model_call_rounds, report.dispatched, killed.run_id
+        ),
+    )?;
+    steps.ensure(
+        step,
+        !report.inputs_settled,
+        "the run's inputs ended, though its gate could not decide: the run must stay for the next \
+         start",
+    )?;
+    check_lease_wait(steps, step, report, expect_lease_wait)
 }
 
 /// The compaction race over a store with fence leases: the second Core took

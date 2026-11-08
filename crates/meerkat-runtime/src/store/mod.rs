@@ -2985,20 +2985,22 @@ pub enum RuntimeStoreError {
     /// inconsistent. A re-read answers the same until it is repaired.
     #[error("Store data is corrupt: {0}")]
     Corrupt(String),
-    /// A host store refuses the call until its realm is reopened: scopes the
-    /// call needs are poisoned. A batch that touched each of them failed, or
-    /// its outcome stayed unknown, after the process's memory changed, so
-    /// that memory may hold what the host does not. Nothing was read or
-    /// written. Every later call that needs one of these scopes answers the
-    /// same until the process opens the realm again, and a call that needs
-    /// none of them is served: this is no outage a later call gets past, and
-    /// a caller does not retry it.
-    #[error(
-        "Store refused until the host store realm is reopened: {}",
-        RefusedScopesDisplay(scopes)
-    )]
+    /// A host store refuses the call: scopes the call needs are poisoned or
+    /// quarantined. A poisoned scope's batch failed, or its outcome stayed
+    /// unknown, after the process's memory changed, so that memory may hold
+    /// what the host does not: it refuses until the process opens the realm
+    /// again. A quarantined scope is one the store reports a conflict for
+    /// (two batches hold one of its versions): it refuses until it is
+    /// repaired in the store and the realm is reopened, and a reopen without
+    /// the repair quarantines it again. Nothing was read or written. Every
+    /// later call that needs one of these scopes answers the same, and a call
+    /// that needs none of them is served: this is no outage a later call gets
+    /// past, and a caller does not retry it.
+    #[error("{}", ScopeRefusedDisplay(scopes))]
     ScopeRefused {
-        /// The poisoned scopes the call needs, each with its poison cause.
+        /// The refused scopes the call needs, each with its cause: a
+        /// poisoned scope's poison cause, or a quarantined scope's conflict
+        /// and its repair.
         scopes: Vec<RefusedScope>,
     },
     /// A host store realm lost its fence (another writer holds it, or this
@@ -3012,7 +3014,8 @@ pub enum RuntimeStoreError {
     /// A host store write stopped settling its batch when the self-fence
     /// window of the fence token the batch carries closed: the host store
     /// sends no batch past that window, since that token's lease at the
-    /// store may have ended by then. The batch may or may not have landed.
+    /// store may have ended by then. A batch that was sent may or may not
+    /// have landed; one never sent did not.
     /// The scopes it touched are poisoned: a later call that needs one of
     /// them is refused ([`Self::ScopeRefused`]) until the realm is reopened,
     /// and the reopened realm shows the batch if it landed. The realm keeps
@@ -3023,37 +3026,79 @@ pub enum RuntimeStoreError {
         /// answer.
         cause: String,
     },
+    /// A host store write stopped settling its batch when its retry budget
+    /// ran out, the writer's fence window open throughout: every attempt
+    /// answered unknown or unavailable and no head read showed the batch.
+    /// The batch may or may not have landed, as one stopped at its fence
+    /// window ([`Self::UnsettledAtFenceWindow`]). The scopes it touched are
+    /// poisoned: a later call that needs one of them is refused
+    /// ([`Self::ScopeRefused`]) until the realm is reopened, and the reopened
+    /// realm shows the batch if it landed. The realm keeps its fence.
+    #[error("Store write left unsettled past its retry budget: {cause}")]
+    UnsettledPastRetryBudget {
+        /// The batch's account: the attempts sent and the last answer.
+        cause: String,
+    },
 }
 
 impl RuntimeStoreError {
-    /// Whether the store refuses this call until its realm is reopened
-    /// ([`Self::ScopeRefused`], [`Self::RealmRefused`]): every later call
-    /// that needs the same scopes answers the same, so the refusal can be
-    /// remembered and is never retried as an outage.
+    /// Whether the store refuses this call until its realm is reopened, or
+    /// beyond ([`Self::ScopeRefused`], [`Self::RealmRefused`]): every later
+    /// call that needs the same scopes answers the same, so the refusal can
+    /// be remembered and is never retried as an outage. A quarantined
+    /// scope's refusal outlasts a reopen: it lasts until the scope is
+    /// repaired in the store and the realm is reopened.
     #[must_use]
     pub fn is_refused_until_reopen(&self) -> bool {
         matches!(self, Self::ScopeRefused { .. } | Self::RealmRefused { .. })
     }
 }
 
-/// One poisoned host store scope a refused call needs
-/// ([`RuntimeStoreError::ScopeRefused`]).
+/// One host store scope a refused call needs
+/// ([`RuntimeStoreError::ScopeRefused`]): a poisoned scope, refused until the
+/// realm is reopened, or a quarantined one (the store reports a conflict for
+/// it), refused until it is repaired in the store and the realm is reopened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefusedScope {
     /// The scope, as its family tag and key: `<tag>:<key>`. A runtime's
     /// scope is `rt:<runtime id>`.
     pub scope: String,
-    /// Why the scope was poisoned.
+    /// Why the scope is refused: its poison cause, or the conflict that
+    /// quarantined it, with the repair.
     pub cause: String,
+    /// Whether the store quarantined the scope (a poisoned one otherwise):
+    /// what the refusal's text says lifts it.
+    quarantined: bool,
 }
 
 impl RefusedScope {
+    /// The refusal of a poisoned scope.
     #[must_use]
     pub fn new(scope: impl Into<String>, cause: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
             cause: cause.into(),
+            quarantined: false,
+        }
+    }
+
+    /// The refusal of a quarantined scope.
+    #[must_use]
+    pub(crate) fn of_quarantined(scope: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+            cause: cause.into(),
+            quarantined: true,
+        }
+    }
+
+    /// The state the refusal's text names.
+    fn state(&self) -> &'static str {
+        if self.quarantined {
+            "quarantined"
+        } else {
+            "poisoned"
         }
     }
 }
@@ -3062,9 +3107,30 @@ impl std::fmt::Display for RefusedScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "host store scope {} is poisoned: {}",
-            self.scope, self.cause
+            "host store scope {} is {}: {}",
+            self.scope,
+            self.state(),
+            self.cause
         )
+    }
+}
+
+/// A [`RuntimeStoreError::ScopeRefused`]: what lifts the refusal, then its
+/// scopes. Only a reopen lifts a poisoned scope's; a quarantined scope's
+/// needs its repair in the store first.
+struct ScopeRefusedDisplay<'a>(&'a [RefusedScope]);
+
+impl std::fmt::Display for ScopeRefusedDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.iter().any(|scope| scope.quarantined) {
+            f.write_str(
+                "Store refused until the quarantined scopes are repaired in the store and the \
+                 realm is reopened: ",
+            )?;
+        } else {
+            f.write_str("Store refused until the host store realm is reopened: ")?;
+        }
+        RefusedScopesDisplay(self.0).fmt(f)
     }
 }
 
@@ -3077,6 +3143,7 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
             [] => f.write_str("a host store scope is poisoned"),
             [only] => only.fmt(f),
             several => {
+                let poisoned = several.iter().all(|scope| !scope.quarantined);
                 f.write_str("host store scopes ")?;
                 for (index, scope) in several.iter().enumerate() {
                     if index > 0 {
@@ -3084,12 +3151,20 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
                     }
                     f.write_str(&scope.scope)?;
                 }
-                f.write_str(" are poisoned (")?;
+                f.write_str(if poisoned {
+                    " are poisoned ("
+                } else {
+                    " are refused ("
+                })?;
                 for (index, scope) in several.iter().enumerate() {
                     if index > 0 {
                         f.write_str("; ")?;
                     }
-                    write!(f, "{}: {}", scope.scope, scope.cause)?;
+                    if poisoned {
+                        write!(f, "{}: {}", scope.scope, scope.cause)?;
+                    } else {
+                        write!(f, "{} is {}: {}", scope.scope, scope.state(), scope.cause)?;
+                    }
                 }
                 f.write_str(")")
             }
@@ -3098,7 +3173,8 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
 }
 
 /// A runtime a store-wide read could not answer for: the store refuses the
-/// runtime's scope until its realm is reopened
+/// runtime's scope, poisoned until its realm is reopened, or quarantined
+/// until the scope is repaired in the store and the realm is reopened
 /// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -3119,21 +3195,47 @@ impl UnavailableRuntime {
     }
 }
 
+/// A tool grant whose row the store refuses because it quarantined the
+/// grant's scope ([`RuntimeStore::quarantined_tool_grants`]): its subject
+/// and target are unknown, so it is in no subject's listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuarantinedToolGrant {
+    /// The grant's id, or `None` while the store names the grant's scope by
+    /// a hash of the id and no call named the grant.
+    pub grant_id: Option<String>,
+    /// The store's refusal of the grant's scope, naming the conflict and the
+    /// repair.
+    pub refusal: RefusedScope,
+}
+
+impl QuarantinedToolGrant {
+    #[must_use]
+    pub fn new(grant_id: Option<String>, refusal: RefusedScope) -> Self {
+        Self { grant_id, refusal }
+    }
+}
+
 /// The delivery authorities of a store, answered per runtime
 /// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]):
-/// the record of every runtime the store answers for, and every runtime it
-/// cannot answer for now. The two sets are disjoint, and a runtime in
-/// neither holds no delivery authority.
+/// the record of every runtime the store answers for, every runtime it
+/// cannot answer for now, and every refused runtime scope it cannot name by
+/// runtime id. The first two are disjoint, and a runtime in none of them
+/// holds no delivery authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RuntimeDeliveryAuthorityListing {
     /// Every runtime the store answers for that holds a delivery authority,
     /// with its record.
     pub records: Vec<(LogicalRuntimeId, RuntimeDeliveryAuthorityRecord)>,
-    /// Every runtime the store cannot answer for until it is reopened. Any
-    /// of them may hold a delivery authority with pending rows: none is
-    /// reported absent.
+    /// Every runtime the store refuses until it is reopened, or until its
+    /// quarantined scope is repaired and the realm reopened. Any of them may
+    /// hold a delivery authority with pending rows: none is reported absent.
     pub unavailable: Vec<UnavailableRuntime>,
+    /// Every refused runtime scope the store cannot name by runtime id
+    /// ([`RuntimeStore::unnamed_refused_runtimes`]): each may hold a delivery
+    /// authority with pending rows, named here by its scope.
+    pub unnamed: Vec<RefusedScope>,
 }
 
 impl RuntimeDeliveryAuthorityListing {
@@ -3145,7 +3247,16 @@ impl RuntimeDeliveryAuthorityListing {
         Self {
             records,
             unavailable,
+            unnamed: Vec::new(),
         }
+    }
+
+    /// The listing with `unnamed`, the refused runtime scopes the store
+    /// cannot name by runtime id.
+    #[must_use]
+    pub fn with_unnamed(mut self, unnamed: Vec<RefusedScope>) -> Self {
+        self.unnamed = unnamed;
+        self
     }
 }
 
@@ -10086,6 +10197,45 @@ pub trait RuntimeStore: Send + Sync {
         None
     }
 
+    /// Whether this store refuses every later call that needs `runtime_id`'s
+    /// state until its realm is reopened, or beyond: a host store realm that
+    /// lost its fence, or whose scope of that runtime is poisoned (a batch of
+    /// it failed, or its outcome stayed unknown) or quarantined (the store
+    /// reports a conflict for it, refused until the scope is repaired in the
+    /// store and the realm is reopened). Nothing a caller writes for the
+    /// runtime lands before that, so the store keeps the runtime's inputs as
+    /// it last committed them, for the next start. A store answers `true`
+    /// exactly while every call that needs the runtime's state answers such a
+    /// refusal ([`RuntimeStoreError::ScopeRefused`] or
+    /// [`RuntimeStoreError::RealmRefused`]), and `false` otherwise; the
+    /// runtime then tells the waiters of the inputs the store keeps that
+    /// they stay queued. A store with no such refusal answers `false`, the
+    /// default. Decorators must forward their inner store's answer.
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        let _ = runtime_id;
+        false
+    }
+
+    /// The runtime scopes this store refuses that it cannot name by runtime
+    /// id, each with its refusal naming the scope as the store does. A host
+    /// store names a runtime's scope by a hash of the runtime id when the id
+    /// does not fit its scope names verbatim (over 200 bytes, or with a
+    /// control character), and knows the id only once a call named the
+    /// runtime. Such a scope quarantined before any call named it (the store
+    /// reports a conflict for it) refuses every call, but the reads that list
+    /// runtimes by id cannot list it: they answer every runtime they can name
+    /// ([`Self::list_runtimes_with_recovery_work`],
+    /// [`Self::list_runtime_delivery_authorities_or_unavailable`], which
+    /// reports these in its `unnamed`), so one such scope never refuses a
+    /// store-wide read. A caller that must account for every runtime reads
+    /// these too, and a caller that knows a runtime's id finds whether its
+    /// scope is one of them with [`Self::refuses_runtime_until_reopen`]. A
+    /// store that names every runtime it refuses answers none, the default.
+    /// Decorators must forward their inner store's answer.
+    fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+        Vec::new()
+    }
+
     /// Load the exact generated runtime-delivery authority record.
     async fn load_runtime_delivery_authority(
         &self,
@@ -10225,19 +10375,21 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// [`Self::list_runtime_delivery_authorities`], answered per runtime: the
-    /// record of every runtime the store can answer for, and every runtime
-    /// it cannot answer for until it is reopened
-    /// ([`UnavailableRuntime`]: a host store whose scope of that runtime is
-    /// poisoned). An unavailable runtime may hold pending rows, so a caller
-    /// never reads it as holding none: a drain leaves it alone, a boot plan
-    /// reads it as an obligation, and a total refuses.
+    /// record of every runtime the store can answer for, every runtime it
+    /// refuses ([`UnavailableRuntime`]: a host store whose scope of that
+    /// runtime is poisoned or quarantined), and every refused runtime scope
+    /// it cannot name by runtime id (`unnamed`,
+    /// [`Self::unnamed_refused_runtimes`]). An unavailable runtime, named or
+    /// not, may hold pending rows, so a caller never reads it as holding
+    /// none: a drain leaves it alone, a boot plan reads it as an obligation,
+    /// and a total refuses.
     ///
     /// The default answers every record of
     /// [`Self::list_runtime_delivery_authorities`] and no unavailable
     /// runtime: a store whose listing answers all or nothing changes nothing.
     /// A decorator forwards this method to the store it wraps; left to the
     /// default, it answers through its own listing, which a host store
-    /// refuses while any of its runtime scopes is poisoned.
+    /// refuses while any of its runtime scopes is poisoned or quarantined.
     async fn list_runtime_delivery_authorities_or_unavailable(
         &self,
     ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
@@ -10268,8 +10420,12 @@ pub trait RuntimeStore: Send + Sync {
     /// A mob boot reads this to decide which members it materializes: a
     /// member whose runtime appears here is materialized, and one with no
     /// other reason to start stays dormant until something wakes it. An
-    /// implementation must therefore never omit a runtime that holds work;
-    /// listing one that holds none only materializes its member early. The
+    /// implementation must therefore never omit a runtime that holds work
+    /// and that it can name; a refused runtime scope it cannot name by
+    /// runtime id is reported by [`Self::unnamed_refused_runtimes`] instead,
+    /// and a boot attributes it to its member with
+    /// [`Self::refuses_runtime_until_reopen`]. Listing a runtime that holds
+    /// none only materializes its member early. The
     /// default answers [`RuntimeStoreError::Unsupported`]: a boot over such a
     /// store cannot tell which members hold work and materializes all of
     /// them. A decorator forwards this method to the store it wraps; left to
@@ -10291,7 +10447,10 @@ pub trait RuntimeStore: Send + Sync {
     /// The default answers through the store-wide scan, so a store or a
     /// decorator that implements the scan answers this too, and one that
     /// does not answers [`RuntimeStoreError::Unsupported`]. A store answers
-    /// it for the one runtime when it can, with the same predicate.
+    /// it for the one runtime when it can, with the same predicate; a store
+    /// that refuses runtimes it cannot name in its scan
+    /// ([`Self::unnamed_refused_runtimes`]) answers it for the runtime the
+    /// caller names, a refused one holding work.
     async fn runtime_holds_recovery_work(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -11378,13 +11537,30 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Every grant row filed under `subject_key`, as `(grant_id, row)` in
-    /// grant id order. A subject with no grants reads as empty.
+    /// grant id order. A subject with no grants reads as empty. A grant whose
+    /// row the store refuses because it quarantined its scope (a host store
+    /// reports a conflict for it) has an unknown subject: no subject's
+    /// listing holds it, and [`Self::quarantined_tool_grants`] reports it.
     async fn list_tool_grants(
         &self,
         subject_key: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
         let _ = subject_key;
         Err(RuntimeStoreError::Unsupported("list_tool_grants".into()))
+    }
+
+    /// Every tool grant whose row the store refuses because it quarantined
+    /// the grant's scope (a host store reports a conflict for it, refused
+    /// until the scope is repaired in the store and the realm is reopened).
+    /// Its head, and so its subject and target, are unknown, so
+    /// [`Self::list_tool_grants`] leaves it out of every subject's listing:
+    /// the grant service reads these beside it, refuses a call no known live
+    /// grant admits as unavailable, naming them, and lists them among the
+    /// rows it cannot read. No store read. A store that quarantines nothing
+    /// answers none, the default. Decorators must forward their inner
+    /// store's answer.
+    fn quarantined_tool_grants(&self) -> Vec<QuarantinedToolGrant> {
+        Vec::new()
     }
 
     /// Insert `grant_id`'s row under `subject_key` iff no row has that id,
@@ -11800,6 +11976,25 @@ mod runtime_store_write_fence_tests {
             store.read_tool_grant_audit("s:a", None, 1).await,
             Err(RuntimeStoreError::Unsupported(_))
         ));
+    }
+
+    /// Ending a subject's grants on a store without the grant domain ends
+    /// none, since such a store holds no grant: a mob retirement ends the
+    /// retiring identity's grants whatever store its runtime has.
+    #[tokio::test]
+    async fn ending_a_subjects_grants_on_a_store_without_grants_ends_none() {
+        let store = DefaultFenceDecorator {
+            inner: InMemoryRuntimeStore::new(),
+        };
+        let service = crate::tool_grant::ToolGrantService::new(std::sync::Arc::new(store));
+        let subject = meerkat_core::tool_grant::ToolGrantSubject::session(
+            meerkat_core::types::SessionId::new(),
+        )
+        .key();
+        let ended = service
+            .revoke_subject(&subject, crate::tool_grant::ToolGrantRevocation::default())
+            .await;
+        assert!(matches!(ended, Ok(0)), "{ended:?}");
     }
 
     /// A store that does not implement the whole-blob session import

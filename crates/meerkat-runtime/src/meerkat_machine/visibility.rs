@@ -307,6 +307,11 @@ pub(super) fn mirror_visibility_projection_from_state(
     projection.filter_witnesses = core_witnesses(&authority_state.filter_visibility_witnesses);
     projection.tool_grant_gated_names = authority_state.tool_grant_gated_names.clone();
     projection.tool_grant_open_names = authority_state.tool_grant_open_names.clone();
+    projection.tool_grant_gated_servers = authority_state.tool_grant_gated_servers.clone();
+    projection.tool_grant_gates_unconfigured_servers =
+        authority_state.tool_grant_gates_unconfigured_servers;
+    projection.tool_grant_ungated_servers = authority_state.tool_grant_ungated_servers.clone();
+    projection.tool_grant_not_mounted_names = authority_state.tool_grant_not_mounted_names.clone();
 }
 
 impl MachineToolVisibilityOwner {
@@ -593,6 +598,35 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn replace_tool_grant_gate(
         &self,
+        gate: meerkat_core::tool_grant::InstalledToolGrantGate,
+    ) -> Result<(), ToolScopeApplyError> {
+        let authority = self.dsl_authority_for_apply()?;
+        let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
+            message: "machine visibility state lock poisoned".to_string(),
+        })?;
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(
+            &mut *guard,
+            super::dsl::MeerkatMachineInput::ReplaceToolGrantGate {
+                gated: gate.gated,
+                gated_servers: gate.gated_servers,
+                gates_unconfigured_servers: gate.gates_unconfigured_servers,
+                ungated_servers: gate.ungated_servers,
+                not_mounted_names: gate.not_mounted_names,
+            },
+        )
+        .map_err(|err| ToolScopeApplyError::Owner {
+            message: super::dsl_authority::map_error(err, "ReplaceToolGrantGate"),
+        })?;
+        mirror_visibility_projection_from_authority(&mut state, &guard);
+        Ok(())
+    }
+
+    fn extend_tool_grant_gate(
+        &self,
+        server: &str,
         gated: std::collections::BTreeSet<ToolName>,
     ) -> Result<(), ToolScopeApplyError> {
         let authority = self.dsl_authority_for_apply()?;
@@ -604,10 +638,13 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::dsl::MeerkatMachineMutator::apply(
             &mut *guard,
-            super::dsl::MeerkatMachineInput::ReplaceToolGrantGate { gated },
+            super::dsl::MeerkatMachineInput::ExtendToolGrantGate {
+                server: server.to_owned(),
+                gated,
+            },
         )
         .map_err(|err| ToolScopeApplyError::Owner {
-            message: super::dsl_authority::map_error(err, "ReplaceToolGrantGate"),
+            message: super::dsl_authority::map_error(err, "ExtendToolGrantGate"),
         })?;
         mirror_visibility_projection_from_authority(&mut state, &guard);
         Ok(())

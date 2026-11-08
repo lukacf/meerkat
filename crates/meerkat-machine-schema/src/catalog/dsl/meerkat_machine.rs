@@ -4076,6 +4076,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             // grant service's adjudication, applied as an input.
             tool_grant_gated_names: Set<ToolName>,
             tool_grant_open_names: Set<ToolName>,
+            // The MCP servers this build marked grant-gated, by server name.
+            // Every tool a gated server provides is gated from the moment it
+            // appears: a boundary adds its names (ExtendToolGrantGate), and
+            // a grant-time live attach stages only a server the gate gates
+            // (SurfaceStageGatedAdd). Replaced by every build.
+            tool_grant_gated_servers: Set<String>,
+            // Whether this build gates every MCP server it does not configure
+            // ungated: one the installation provides, at the build or later,
+            // and one attached later by any path. Replaced by every build.
+            tool_grant_gates_unconfigured_servers: bool,
+            // The servers this build configures and leaves ungated: while the
+            // mode above is on, the only servers it does not gate. Empty while
+            // the mode is off. Replaced by every build.
+            tool_grant_ungated_servers: Set<String>,
+            // The role gate entries this build ignored outright: the names of
+            // a role family the member does not mount and the role names the
+            // build's tool policy refuses. Never gated and never open; kept so
+            // a listing can show them as not mounted. Replaced by every build.
+            tool_grant_not_mounted_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             // Authenticated shell supplies exact opaque association bytes. These
@@ -4207,6 +4226,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             // drops its hold. Live only: never persisted, every registration
             // holds its recovered inputs again from their first answer.
             input_controller_holds: Set<String>,
+            // The run marked resumable whose host's resumed-run admission
+            // could not decide (every attempt answered unavailable or late):
+            // it stays marked, with its inputs bound and none ended, and
+            // waits for a later lap of the runtime loop or a later
+            // registration to ask again. While it is held, ResumeRun and the
+            // resumed-run plan refuse it; a later `Continue` releases it
+            // (ReleaseResumedRunAdmission), and settling or releasing the
+            // run drops it. It names only the run marked resumable. Live
+            // only: never persisted, every registration asks again.
+            resumed_run_admission_hold: Option<RunId>,
             recovered_admitted_lanes: Map<String, Enum<InputLane>>,
             // Whether the registration served live work: an input admitted
             // live (QueueAccepted, SteerAccepted), a resubmission
@@ -4922,6 +4951,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_deny_names = EmptySet,
             tool_grant_gated_names = EmptySet,
             tool_grant_open_names = EmptySet,
+            tool_grant_gated_servers = EmptySet,
+            tool_grant_gates_unconfigured_servers = false,
+            tool_grant_ungated_servers = EmptySet,
+            tool_grant_not_mounted_names = EmptySet,
             // Input lifecycle substate
             input_authority_bindings = EmptyMap,
             input_authority_batch_keys = EmptyMap,
@@ -4970,6 +5003,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             run_stop_requested = None,
             run_start_holds = EmptySet,
             input_controller_holds = EmptySet,
+            resumed_run_admission_hold = None,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -7414,9 +7448,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
             // The scoped tool grant gate: every build replaces the gated
-            // names (every open name closes), and every model-request
-            // boundary applies the gated names a live grant opens.
-            ReplaceToolGrantGate { gated: Set<ToolName> },
+            // names, the gated servers, the unconfigured-servers mode, the
+            // ungated servers and the not-mounted names (every open name
+            // closes), and every model-request boundary applies the gated
+            // names a live grant opens.
+            ReplaceToolGrantGate {
+                gated: Set<ToolName>,
+                gated_servers: Set<String>,
+                gates_unconfigured_servers: bool,
+                ungated_servers: Set<String>,
+                not_mounted_names: Set<ToolName>,
+            },
             ApplyToolGrantOpenSet { open: Set<ToolName> },
             // A failed until-changed switch-turn reconfigure withdraws the
             // request it staged, and nothing else
@@ -7428,6 +7470,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             // the caller observed marked resumable, under the same mutation
             // gate as this input (none when none is marked).
             SettleRetainedRun { run_id: Option<RunId> },
+            // The run marked resumable whose resumed-run admission could not
+            // decide is held (`resumed_run_admission_hold`); a later
+            // `Continue` releases it. Appended last: every input before them
+            // keeps its place.
+            HoldResumedRunForAdmission { run_id: RunId },
+            ReleaseResumedRunAdmission { run_id: RunId },
+            // A model-request boundary gates the names a gated MCP server
+            // provides now (ExtendToolGrantGate): the gate only grows within
+            // a build, and no name opens.
+            ExtendToolGrantGate { server: String, gated: Set<ToolName> },
+            // A grant-time live attach stages an MCP server the gate gates,
+            // and no other (SurfaceStageGatedAdd); the ordinary stage is
+            // SurfaceStageAdd.
+            SurfaceStageGatedAdd { surface_id: String, now_ms: u64 },
             // A host asks the session's next compaction check to compact
             // (`MeerkatMachine::request_compaction`): the machine records the
             // request or answers why not.
@@ -8817,6 +8873,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // retained: `run_id` is the run an accepted settle settles, the
             // current run (if any) of a busy one, and none otherwise.
             RetainedRunSettleResolved { verdict: Enum<RetainedRunSettleVerdict>, run_id: Option<RunId> },
+            // A boundary cancel bound to the exact run `run_id`, current when
+            // the cancel was admitted. Realized only through the executor's
+            // exact-run boundary handle, never as a runtime-loop effect: the
+            // loop applies its effects only between runs, so a loop-delivered
+            // cancel could never reach this run, and an executor-wide cancel
+            // there would meet no run, or another one.
+            ExactRunBoundaryCancel { run_id: RunId, reason: String },
             // The verdict for a host's compaction request.
             CompactionRequestResolved { verdict: Enum<CompactionRequestVerdict> },
             // The compaction check of `run_id` consumed the host's request:
@@ -9107,6 +9170,9 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InputControllerReleased => local seam SurfaceResultAlignment,
         // The host's settle verb answers the verdict of its own transition.
         disposition RetainedRunSettleResolved => local seam SurfaceResultAlignment,
+        // Only the executor's exact-run boundary handle realizes a run-bound
+        // boundary cancel.
+        disposition ExactRunBoundaryCancel => local seam NoOwnerRealization,
         // The host's compaction request answers the verdict of its own
         // transition.
         disposition CompactionRequestResolved => local seam SurfaceResultAlignment,
@@ -10543,6 +10609,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                                 == Some(InputPhase::AppliedPendingConsumption)))))
         }
 
+        // A resumed-run admission hold names only the run marked resumable:
+        // releasing, settling or resuming the run drops it with the mark.
+        invariant resumed_run_admission_hold_names_the_marked_run {
+            self.resumed_run_admission_hold == None
+            || self.resumed_run_admission_hold == self.resumable_run_id
+        }
+
         // Durable in-turn Steer delivery. The tracked delivery class exists
         // only while its input still awaits a live boundary in the Steer lane.
         invariant live_boundary_delivery_only_for_queued_steer {
@@ -10814,6 +10887,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant tool_grant_open_names_are_gated {
             for_all(name in self.tool_grant_open_names,
                 self.tool_grant_gated_names.contains(name))
+        }
+
+        // A role entry the build ignored is never gated, so no grant can
+        // ever open it.
+        invariant tool_grant_not_mounted_are_not_gated {
+            for_all(name in self.tool_grant_not_mounted_names,
+                !self.tool_grant_gated_names.contains(name))
+        }
+
+        // A server the build configures ungated is never a gated server.
+        invariant tool_grant_ungated_servers_are_not_gated {
+            for_all(server in self.tool_grant_ungated_servers,
+                !self.tool_grant_gated_servers.contains(server))
         }
 
 
@@ -11786,6 +11872,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 for_all(held_input_id in self.input_controller_holds,
                     self.input_run_associations.get_cloned(held_input_id) != Some(run_id))
             }
+            // A run whose resumed-run admission could not decide does not
+            // resume until a later answer releases it (the resumed-run plan
+            // refuses it too).
+            guard "run_admission_not_held" { self.resumed_run_admission_hold != Some(run_id) }
             // A governed run on a document that requires a destination
             // resumes only once one is bound again (or was bound, and then
             // retired), as `scoped_context_attached` stages recovered
@@ -11836,6 +11926,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
             update {
                 self.resumable_run_id = None;
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it: they requeue as
                 // inputs of no run, and the runtime asks their host again for
                 // a controller client they still miss.
@@ -11871,6 +11963,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.resumable_run_id = None;
                 self.turn_terminal_run_id = Some(run_id);
+                // Its admission hold goes with the mark.
+                self.resumed_run_admission_hold = None;
                 // Its held inputs stop waiting with it; the shell then ends
                 // them with the run.
                 for held_input_id in self.input_controller_holds {
@@ -15983,8 +16077,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // 11. CancelAfterBoundary: Attached + Running self-loops.
-        // The first cancel in a turn window dispatches (RuntimeEffectFact)
-        // and marks the dispatch outstanding; while outstanding, further
+        // The first cancel in a turn window dispatches and marks the dispatch
+        // outstanding. With no run current (Attached) the dispatch is the
+        // runtime-loop RuntimeEffectFact, the one way to reach an idle
+        // executor. With a run current (Running) it is ExactRunBoundaryCancel
+        // for that run, realized only through the exact-run boundary handle;
+        // no runtime-loop effect is emitted, so an executor-wide cancel never
+        // follows a run-bound one. While outstanding, further
         // cancels take the AlreadyPending no-op arms below — this is what
         // bounds an embedder boundary handle that (wrongly) re-enters
         // MeerkatMachine::cancel_after_boundary to exactly one extra lap.
@@ -16025,7 +16124,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: self.current_run_id.get("value"), reason: reason }
         }
         transition CancelAfterBoundaryAttachedAlreadyPending {
             on input CancelAfterBoundary { reason }
@@ -16082,7 +16181,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Running
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRetired {
             on input CancelAfterBoundaryForRun { run_id, reason }
@@ -16102,7 +16201,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Retired
             emit RequestCancellationAtBoundary
-            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
+            emit ExactRunBoundaryCancel { run_id: run_id, reason: reason }
         }
         transition CancelAfterBoundaryForRunRunningAlreadyPending {
             on input CancelAfterBoundaryForRun { run_id, reason }
@@ -23751,6 +23850,82 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceStageAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Running }
             guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+
+        // SurfaceStageGatedAdd: a grant-time live attach's stage of a gated
+        // MCP server, the live attach's check (its caller lands with the
+        // live attach; a build's lazy residency of a gated server it
+        // configures is the factory's build-composition filter). It is the
+        // ordinary add stage, admitted only for a server the build's scoped
+        // tool grant gate gates (a server the gate names, or, while the build
+        // gates every server it does not configure ungated, any server
+        // outside its ungated servers). Its apply is the ordinary
+        // SurfaceApplyBoundary.
+        transition SurfaceStageGatedAddIdle {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddAttached {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddRunning {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
@@ -36813,20 +36988,88 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // ReplaceToolGrantGate: every build installs its scoped tool grant
-        // gate, the names it marked grant-gated, and every open name closes.
-        // A new build therefore starts closed until a model-request boundary
-        // applies the open set a live grant admits. A build without a gate
-        // installs the empty gate, which clears the last build's.
+        // gate (the names it marked grant-gated, the MCP servers it gated,
+        // whether it gates every server it does not configure ungated, the
+        // servers it configures ungated, and the role entries it ignored as
+        // not mounted), and every open name closes. A new build therefore
+        // starts closed until a model-request boundary applies the open set a
+        // live grant admits. A build without a gate installs the empty gate,
+        // which clears the last build's. An ignored name is never gated and
+        // an ungated server is never a gated server: a gate that says
+        // otherwise matches no arm and is refused.
         transition ReplaceToolGrantGate {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ReplaceToolGrantGate { gated }
+            on input ReplaceToolGrantGate {
+                gated,
+                gated_servers,
+                gates_unconfigured_servers,
+                ungated_servers,
+                not_mounted_names
+            }
             guard "session_registered" { self.session_id != None }
+            guard "not_mounted_disjoint" {
+                for_all(name in not_mounted_names, !gated.contains(name))
+            }
+            guard "server_sets_disjoint" {
+                for_all(server in ungated_servers, !gated_servers.contains(server))
+            }
             update {
                 self.tool_grant_gated_names = gated;
                 self.tool_grant_open_names = EmptySet;
+                self.tool_grant_gated_servers = gated_servers;
+                self.tool_grant_gates_unconfigured_servers = gates_unconfigured_servers;
+                self.tool_grant_ungated_servers = ungated_servers;
+                self.tool_grant_not_mounted_names = not_mounted_names;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        // ExtendToolGrantGate: a model-request boundary gates the names an MCP
+        // server the gate gates provides now (a server the gate names, or,
+        // while the build gates every server it does not configure ungated,
+        // any server outside its ungated servers). Within a build the gated
+        // names only grow, and no name opens; a name the build ignored as not
+        // mounted that such a server provides becomes gated. An extension for
+        // a server the gate does not gate matches no arm and is refused.
+        transition ExtendToolGrantGateChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            // The negation of the unchanged arm's `already_gated`, so the two
+            // arms exclude each other by their guards' form.
+            guard "adds_names" {
+                !for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {
+                for name in gated {
+                    self.tool_grant_gated_names.insert(name);
+                    self.tool_grant_not_mounted_names.remove(name);
+                }
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ExtendToolGrantGateUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            guard "already_gated" {
+                for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {}
+            to Idle
         }
 
         // ApplyToolGrantOpenSet: a model-request boundary applies the gated
@@ -40708,6 +40951,37 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
+        // The run marked resumable waits for its resumed-run admission. When
+        // every attempt of the host's admission answered unavailable or did
+        // not answer in time, the run is neither resumed nor settled: it is
+        // held, stays marked with its inputs bound, and a later lap of the
+        // runtime loop or a later registration asks again. A run whose stop
+        // was asked is settled instead, never held. Holding a run already
+        // held changes nothing.
+        transition HoldResumedRunForAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input HoldResumedRunForAdmission { run_id }
+            guard "run_is_resumable" { self.resumable_run_id == Some(run_id) }
+            guard "run_not_stopped" { self.run_stop_requested != Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = Some(run_id);
+            }
+            to Idle
+        }
+
+        // A later answer of the admission let the held run continue: the
+        // hold is released, and the runtime resumes the run in the same lap
+        // (ResumeRun). Settling or releasing the run drops the hold instead.
+        transition ReleaseResumedRunAdmission {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReleaseResumedRunAdmission { run_id }
+            guard "run_admission_held" { self.resumed_run_admission_hold == Some(run_id) }
+            update {
+                self.resumed_run_admission_hold = None;
+            }
+            to Idle
+        }
+
         // A host asks the session's next compaction check to compact
         // (`MeerkatMachine::request_compaction`), without a rebuild and
         // without changing any threshold. The request is a one-shot fact of
@@ -40988,7 +41262,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 /// `ResumeRun` guard `run_not_stopped`), at least one input
                 /// is bound to it, no input bound to it is held for its
                 /// controller (mirrors the `ResumeRun` guard
-                /// `run_inputs_not_controller_held`), and its destination is
+                /// `run_inputs_not_controller_held`), its admission does not
+                /// hold it (`run_admission_not_held`), and its destination is
                 /// attached (`resumed_run_destination_attached`).
                 #[must_use]
                 pub fn authorize_resumed_run_from_state(
@@ -41007,6 +41282,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                         .iter()
                         .any(|held| state.input_run_associations.get(held) == Some(run_id))
                     {
+                        return None;
+                    }
+                    // Mirrors the `ResumeRun` guard `run_admission_not_held`.
+                    if state.resumed_run_admission_hold.as_ref() == Some(run_id) {
                         return None;
                     }
                     if !resumed_run_destination_attached(state, run_id) {

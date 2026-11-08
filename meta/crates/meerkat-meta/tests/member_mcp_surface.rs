@@ -200,6 +200,7 @@ fn governed_configuration() -> NativeGrantWorkConfiguration {
         invocation_owner: Arc::new(RefusingOwner),
         operation_owner: Arc::new(RefusingOwner),
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: true,
         configured_mcp_attachment: Some(Arc::new(AllowEveryConfiguredServer)),
     }

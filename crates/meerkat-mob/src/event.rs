@@ -236,7 +236,10 @@ impl<'de> Deserialize<'de> for MemberRef {
 // internal `seat_rotation` and `seat_session`; the replay reads none of
 // them, and a reader that predates them ignores them. A cause, a rotation or
 // a seat rotation this build cannot read decodes as none, and an entry
-// origin it does not know keeps its token.
+// origin it does not know keeps its token. A stored `MemberSpawned` may also
+// carry the internal `approval_branch` decision of an approval branch's seat
+// (the member's typed creation source); a reader that predates it ignores
+// it, and the member reads there as an ordinary member.
 const CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION: u32 = 9;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -560,12 +563,14 @@ pub enum MobEventKind {
         rotation: Option<Box<crate::runtime::MemberRotationRecord>>,
         /// Why the retirement started, when it is recorded: the declared
         /// apply's seal unlisted the member's identity entry
-        /// ([`crate::runtime::MemberRetirementCause::Unlisted`]), so the end
-        /// of the retirement ends the entry. Replay marks the entry again
-        /// (`RecoverIdentityEntryRetiring`). Stored only by the internal event
-        /// codec; a reader that predates it ignores it and replays the
-        /// retirement as one the seal did not start, and journals written
-        /// before it decode it as absent.
+        /// ([`crate::runtime::MemberRetirementCause::Unlisted`]), or a host's
+        /// adoption took the entry over
+        /// ([`crate::runtime::MemberRetirementCause::HostAdopted`]), so the
+        /// end of the retirement ends the entry. Replay marks the entry again
+        /// (`RecoverIdentityEntryRetiring`, `RecoverIdentityEntryAdopting`).
+        /// Stored only by the internal event codec; a reader that predates it
+        /// ignores it and replays the retirement as one the seal did not
+        /// start, and journals written before it decode it as absent.
         #[serde(skip, default)]
         cause: Option<crate::runtime::MemberRetirementCause>,
     },
@@ -1258,6 +1263,14 @@ pub struct MemberSpawnedEvent {
     /// journals written before it decode it as absent.
     #[serde(skip, default)]
     pub(crate) seat_session: Option<SessionId>,
+    /// The decision whose approval branch this row seats: the member's typed
+    /// creation source, which only the branch's own opening records
+    /// (`MobHandle::open_approval_branch`). Replay records it on the roster
+    /// entry, so the branch stays private across a restart. Stored only by
+    /// the internal event codec; a reader that predates it ignores it, and
+    /// journals written before it decode it as absent.
+    #[serde(skip, default)]
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
 }
 
 impl MemberSpawnedEvent {
@@ -1299,7 +1312,22 @@ impl MemberSpawnedEvent {
             history_unavailable: None,
             seat_rotation: None,
             seat_session: None,
+            approval_branch: None,
         }
+    }
+
+    pub(crate) fn with_approval_branch(
+        mut self,
+        approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    ) -> Self {
+        self.approval_branch = approval_branch;
+        self
+    }
+
+    /// The decision whose approval branch this row seats, when it records
+    /// one (its member's typed creation source).
+    pub(crate) fn approval_branch(&self) -> Option<&meerkat_core::approval::decision::DecisionId> {
+        self.approval_branch.as_ref()
     }
 
     pub(crate) fn with_history_unavailable(
@@ -2242,6 +2270,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             serde_json::to_value(seat_session)?,
         );
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(decision) = member_spawned.approval_branch()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "approval_branch".to_string(),
+            Value::String(decision.as_str().to_owned()),
+        );
+    }
     if let Some(facts) = event.kind.retired_facts()
         && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
     {
@@ -2626,6 +2663,24 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
             }
         })
         .and_then(|session| serde_json::from_value::<SessionId>(session).ok());
+    // The decision whose approval branch a MemberSpawned row seats (the
+    // member's typed creation source): a value this build cannot read reads
+    // as absent, so the member is no branch here and is never adopted as one.
+    let spawned_approval_branch = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| {
+            if kind.get("type").and_then(Value::as_str) == Some("member_spawned") {
+                kind.remove("approval_branch")
+            } else {
+                None
+            }
+        })
+        .and_then(|decision| {
+            decision.as_str().and_then(|decision| {
+                meerkat_core::approval::decision::DecisionId::new(decision).ok()
+            })
+        });
     let retired_facts = value
         .get_mut("kind")
         .and_then(Value::as_object_mut)
@@ -2742,6 +2797,11 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.seat_session = Some(seat_session);
+    }
+    if let Some(decision) = spawned_approval_branch
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.approval_branch = Some(decision);
     }
     if let Some(facts) = retired_facts
         && let Some(stored) = event.kind.retired_facts_mut()

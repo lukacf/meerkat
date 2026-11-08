@@ -494,7 +494,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         methods.extend([
             RpcMethodDescriptor::typed(
                 "tool_grants/grant",
-                "Grant a session's grant-gated tool name or built-in tool family for a bounded window",
+                "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
                 "GrantToolParams",
                 "GrantToolResult",
             ),
@@ -506,13 +506,13 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "tool_grants/list",
-                "List a session's scoped tool grants, each due grant settled as expired first",
+                "List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first",
                 "ListToolGrantsParams",
                 "ListToolGrantsResult",
             ),
             RpcMethodDescriptor::typed(
                 "tool_grants/audit",
-                "Read a page of the audit log of a session's scoped tool grants",
+                "Read a page of the audit log of a session's or a mob member identity's scoped tool grants",
                 "ToolGrantAuditParams",
                 "ToolGrantAuditResult",
             ),

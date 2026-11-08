@@ -1497,6 +1497,7 @@ where
             bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     ));
@@ -3372,6 +3373,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
         });
         roster
     }
@@ -3860,6 +3862,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
         }
     }
 

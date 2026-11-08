@@ -134,6 +134,7 @@ fn bootstrap() -> RealmGovernance {
         invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
         operation_owner: Arc::new(Operations),
         retained_resume: None,
+        kept_original: None,
         publication: LocalAuthorizationPublication::new(),
         clock: Arc::new(Clock),
     }))

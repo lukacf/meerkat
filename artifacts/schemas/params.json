@@ -3362,7 +3362,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -22685,6 +22686,17 @@
             "description": "Where the rendering was shown.",
             "type": "string"
           },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary a surface with a size limit showed, the link it\ncarried to the full presentation and the digest of the rendering\nthat link served."
+          },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when it presented one part.",
             "format": "uint32",
@@ -22745,11 +22757,30 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering to\nthe party that decides now.",
+    "description": "`decision/present` parameters: record what a host presenter showed. It\ncounts only when it shows every canonical part of the held rendering, or\nis a summary whose link served the held rendering, to the party that\ndecides now.",
     "properties": {
       "decision_id": {
         "type": "string"
@@ -22835,6 +22866,25 @@
           "part_digest"
         ],
         "type": "object"
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -22853,6 +22903,17 @@
       "channel_ref": {
         "description": "Where the rendering was shown.",
         "type": "string"
+      },
+      "link": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePresentationLink"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a summary a surface with a size limit showed, the link it\ncarried to the full presentation and the digest of the rendering\nthat link served."
       },
       "max_part_bytes": {
         "description": "The presenter's part size; absent when it presented one part.",
@@ -26369,7 +26430,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -26392,7 +26453,7 @@
         ]
       },
       "ToolGrantTargetRequest": {
-        "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+        "description": "The target a grant request names: one tool name, a built-in tool family,\nwhose names the server takes at grant time, or an MCP server. Closed: a\nkind or a field this version does not know is refused, never ignored, so\na request is never read as wider than it asked.",
         "oneOf": [
           {
             "additionalProperties": false,
@@ -26429,6 +26490,33 @@
               "family"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "An MCP server: every tool it provides when a call or a boundary\nadjudicates the grant, or, with `tools`, only those of its tools\nnamed there (a non-empty list, which only narrows).",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
           }
         ]
       }
@@ -26437,6 +26525,13 @@
     "additionalProperties": false,
     "description": "`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and\n`duration_ms` bounds the grant, at most the host's maximum lifetime.",
     "properties": {
+      "decision_ref": {
+        "description": "The host's opaque reference to the decision it made before issuing\n(for example a person's approval in its own records): non-empty, at\nmost 1024 bytes, no control character. Recorded in the grant's issuer\nas attribution; nothing resolves or trusts it.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "duration_ms": {
         "description": "The grant's lifetime from the server's clock, in ms.",
         "format": "uint64",
@@ -29232,7 +29327,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -31616,6 +31711,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -32287,6 +32386,38 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -34875,6 +35006,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -35322,6 +35457,38 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -36121,6 +36288,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -36568,6 +36739,38 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -38990,6 +39193,38 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "WireMemberLaunchMode": {
         "description": "How a mob member should be launched by `mob/spawn`.",
         "oneOf": [
@@ -39219,6 +39454,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -40143,7 +40382,53 @@
     "title": "MobStreamCloseParams",
     "type": "object"
   },
+  "MobStreamCursor": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+    "properties": {
+      "epoch": {
+        "description": "The sequence space of the position (a UUID).",
+        "type": "string"
+      },
+      "seq": {
+        "description": "The last envelope sequence the client received in that space.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "epoch",
+      "seq"
+    ],
+    "title": "MobStreamCursor",
+    "type": "object"
+  },
   "MobStreamOpenParams": {
+    "$defs": {
+      "MobStreamCursor": {
+        "additionalProperties": false,
+        "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+        "properties": {
+          "epoch": {
+            "description": "The sequence space of the position (a UUID).",
+            "type": "string"
+          },
+          "seq": {
+            "description": "The last envelope sequence the client received in that space.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "seq"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "description": "Request payload for `mob/stream_open`.",
@@ -40153,6 +40438,17 @@
           "string",
           "null"
         ]
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobStreamCursor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Resume the member stream `agent_identity` names right after this\nposition: the events the member still retains after it are replayed,\nthen the stream is live. Absent opens the stream live. A mob-wide\nstream (no `agent_identity`) takes no cursor."
       },
       "mob_id": {
         "type": "string"
@@ -46187,7 +46483,7 @@
           },
           {
             "additionalProperties": false,
-            "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+            "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
             "properties": {
               "identity": {
                 "type": "string"
@@ -46266,7 +46562,7 @@
       },
       {
         "additionalProperties": false,
-        "description": "One mob member identity's grants. Refused by servers that do not\nsupport identity subjects.",
+        "description": "One mob member identity's grants, in the mob's running incarnation.\nA server that runs no mobs refuses it.",
         "properties": {
           "identity": {
             "type": "string"
@@ -46291,7 +46587,7 @@
   },
   "ToolGrantTargetRequest": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "The target a grant request names: one tool name, or a built-in tool\nfamily, whose names the server takes at grant time. Closed: a kind or a\nfield this version does not know is refused, never ignored, so a request\nis never read as wider than it asked.",
+    "description": "The target a grant request names: one tool name, a built-in tool family,\nwhose names the server takes at grant time, or an MCP server. Closed: a\nkind or a field this version does not know is refused, never ignored, so\na request is never read as wider than it asked.",
     "oneOf": [
       {
         "additionalProperties": false,
@@ -46326,6 +46622,33 @@
         "required": [
           "kind",
           "family"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "description": "An MCP server: every tool it provides when a call or a boundary\nadjudicates the grant, or, with `tools`, only those of its tools\nnamed there (a non-empty list, which only narrows).",
+        "properties": {
+          "kind": {
+            "const": "mcp_server",
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "server"
         ],
         "type": "object"
       }

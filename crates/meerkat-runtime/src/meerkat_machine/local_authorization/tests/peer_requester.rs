@@ -355,6 +355,7 @@ impl Peers {
                 agents: agents(&sender_agent),
             }),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         let mut composed = composed;

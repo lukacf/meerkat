@@ -185,8 +185,11 @@ impl PreparedConfinement {
 
     /// Spawn behind a host-owned custody release pipe. The fixed gate reads
     /// one release token, closes descriptor 3, then enters the bound executor
-    /// without changing PID or process group. EOF or a different token exits
-    /// with code 125 before any target code runs.
+    /// without changing PID or process group: the target keeps the gate's.
+    /// EOF or a different token exits with code 125 before any target code
+    /// runs. On Linux the gate runs as the command of the launch's own pid
+    /// namespace (pid 2 there), under the launch's init, which is the direct
+    /// child the returned [`NativeChild`] owns.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn spawn_behind_gate(
         self,
@@ -274,6 +277,43 @@ impl ConfinementCapabilityReport {
 impl std::fmt::Debug for ConfinementCapabilityReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ConfinementCapabilityReport([REDACTED])")
+    }
+}
+
+/// A host setting the native backend needs and this host refuses, as far as
+/// the backend can tell. Such a host refuses every requirement with
+/// [`ConfinementRefusal::BackendUnavailable`]; the requirement's text names
+/// the setting, so an operator can act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnmetHostRequirement {
+    /// Linux: the host refuses memory files it may execute, from which the
+    /// backend executes each launch's init (`vm.memfd_noexec` is 2).
+    ExecutableMemoryFiles,
+}
+
+impl std::fmt::Display for UnmetHostRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExecutableMemoryFiles => f.write_str(
+                "executable memory files are refused, and each launch's init runs from one: set vm.memfd_noexec below 2",
+            ),
+        }
+    }
+}
+
+/// The host settings the native backend needs and this host refuses, as far
+/// as the backend can tell: on Linux, executable memory files. Empty when it
+/// finds none, and on every other platform.
+#[must_use]
+pub fn unmet_host_requirements() -> Vec<UnmetHostRequirement> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::unmet_host_requirements()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
     }
 }
 

@@ -356,6 +356,10 @@ struct ScopedSessionStreamEventNotificationParams<'a> {
 struct MobStreamEventNotificationParams<'a> {
     stream_id: String,
     sequence: u64,
+    /// The sequence space of a member event's `event.seq`; absent on a
+    /// mob-wide stream, whose events come from several members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<String>,
     event: &'a serde_json::Value,
 }
 
@@ -374,6 +378,16 @@ impl NotificationSink {
     pub fn noop() -> Self {
         let (tx, _rx) = mpsc::channel(1);
         Self::new(tx)
+    }
+
+    /// Whether `other` writes to the same connection as this sink.
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    /// True once the connection this sink writes to is gone.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 
     /// Emit one notification of `method` with `params`, best effort and
@@ -528,16 +542,19 @@ impl NotificationSink {
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
     /// For mob-wide streams the event is an [`AttributedEvent`] (source + profile + envelope).
-    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
+    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`], and
+    /// `epoch` names the sequence space of its `seq`.
     async fn emit_mob_stream_event(
         &self,
         stream_id: &StreamRef,
         sequence: u64,
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = MobStreamEventNotificationParams {
             stream_id: stream_id.as_string(),
             sequence,
+            epoch: epoch.map(|epoch| epoch.to_string()),
             event,
         };
         let notification = match RpcNotification::try_new_with_admission(
@@ -1221,6 +1238,92 @@ async fn close_session_stream(
     close
 }
 
+/// Where a `mob/stream_open` member stream starts: live without a cursor,
+/// else right after the cursor's position. A cursor names one member's
+/// sequence space, so a mob-wide stream takes none, and its epoch is the
+/// UUID a member `mob/stream_event` named.
+#[cfg(feature = "mob")]
+fn member_stream_cursor(
+    cursor: Option<&meerkat_contracts::MobStreamCursor>,
+    member_stream: bool,
+) -> Result<meerkat_core::comms::SessionEventCursor, String> {
+    let Some(cursor) = cursor else {
+        return Ok(meerkat_core::comms::SessionEventCursor::Live);
+    };
+    if !member_stream {
+        return Err(
+            "Invalid params: a cursor resumes a member stream and needs agent_identity; \
+             a mob-wide stream has no single sequence space"
+                .to_string(),
+        );
+    }
+    let epoch = cursor
+        .epoch
+        .parse::<meerkat_core::comms::SessionEventEpoch>()
+        .map_err(|_| "Invalid params: the cursor epoch is not a UUID".to_string())?;
+    Ok(meerkat_core::comms::SessionEventCursor::After {
+        epoch,
+        seq: cursor.seq,
+    })
+}
+
+/// Subscribe to a member's agent events for `mob/stream_open` from `cursor`.
+///
+/// A position the member's current sequence space cannot resume from (one
+/// of another epoch, after a runtime restart or a move to a new host
+/// binding, or one ahead of the space's newest event) replays the current
+/// space from its earliest retained event instead; the stream's events then
+/// name the current epoch, so the client sees the change.
+#[cfg(feature = "mob")]
+async fn subscribe_member_events_resuming(
+    mob_state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &meerkat_mob::MobId,
+    identity: &meerkat_mob::AgentIdentity,
+    cursor: meerkat_core::comms::SessionEventCursor,
+) -> Result<meerkat_mob::AgentEventSubscription, meerkat_mob::MobError> {
+    match mob_state
+        .subscribe_agent_events_from(mob_id, identity, cursor)
+        .await
+    {
+        Err(meerkat_mob::MobError::AgentEventCursorRejected { .. })
+            if matches!(
+                cursor,
+                meerkat_core::comms::SessionEventCursor::After { .. }
+            ) =>
+        {
+            mob_state
+                .subscribe_agent_events_from(
+                    mob_id,
+                    identity,
+                    meerkat_core::comms::SessionEventCursor::Earliest,
+                )
+                .await
+        }
+        result => result,
+    }
+}
+
+/// The sequence space a member stream's events belong to: the one its
+/// subscription named or, for a member that was not materialized when the
+/// stream opened, the one its woken actor names at the attach, which is set
+/// before the stream's first event.
+#[cfg(feature = "mob")]
+struct MemberStreamEpoch {
+    named: Option<meerkat_core::comms::SessionEventEpoch>,
+    attached: Option<Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>>,
+}
+
+#[cfg(feature = "mob")]
+impl MemberStreamEpoch {
+    fn current(&self) -> Option<meerkat_core::comms::SessionEventEpoch> {
+        self.named.or_else(|| {
+            self.attached
+                .as_ref()
+                .and_then(|attached| attached.get().copied().flatten())
+        })
+    }
+}
+
 async fn resolve_mob_stream_open_authority(
     authority: &RpcStreamAuthority,
     stream_id: &StreamRef,
@@ -1648,6 +1751,18 @@ impl RoutedRpcResponse {
     fn into_response(self) -> RpcResponse {
         self.response
     }
+
+    /// This response as the answer to the request `request_id` names. A
+    /// handler that refuses before it reads the request's id (the params
+    /// refusal of `handlers::parse_params`, a shared helper's error) builds
+    /// its response with no id; it gets the request's id here. An id the
+    /// handler set is kept.
+    fn answering(mut self, request_id: Option<crate::protocol::RpcId>) -> Self {
+        if self.response.id.is_none() {
+            self.response.id = request_id;
+        }
+        self
+    }
 }
 
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
@@ -1716,15 +1831,47 @@ pub struct MethodRouter {
 
 use meerkat_runtime::stack_relief::box_in_own_frame as routed_arm;
 
+/// Whether a router's connection becomes its runtime's process-default
+/// `session/event` route ([`SessionRuntime::set_notification_sink`]): the
+/// one that takes the copies of a turn of a session no connection holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProcessDefaultRoute {
+    /// The server's only client (stdio, a single-client embedding).
+    Install,
+    /// One of several connections a shared runtime serves (TCP): never.
+    Leave,
+}
+
 impl MethodRouter {
     /// Create a new method router.
     ///
     /// Reuses existing mob state from the runtime if available, otherwise
-    /// creates a default. Also spawns schedule host startup.
+    /// creates a default. Also spawns schedule host startup. The router's
+    /// connection becomes the runtime's process-default `session/event`
+    /// route, as the only client of a single-client server: build one router
+    /// per runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`], whose connections never become it.
     pub fn new(
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         notification_sink: NotificationSink,
+    ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
+        Self::new_on_connection(
+            runtime,
+            config_store,
+            notification_sink,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new`] for one connection of a server that may hold several
+    /// on the same runtime: `default_route` says whether the connection also
+    /// becomes the runtime's process-default `session/event` route.
+    pub(crate) fn new_on_connection(
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        notification_sink: NotificationSink,
+        default_route: ProcessDefaultRoute,
     ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         let runtime_adapter = runtime.runtime_adapter();
         // Reuse the runtime's existing mob state if one was pre-configured
@@ -1755,9 +1902,15 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
-        runtime.set_notification_sink(notification_sink.clone());
+        // A turn writes its session/event copies to the connections of the
+        // requests that admitted its inputs, and a turn no request waits on
+        // to the connection holding its session (see
+        // `SessionRuntime::turn_session_event_sinks`). Only the turns of a
+        // session no connection holds go to the runtime's process default:
+        // a single-client server's connection, never one of several.
+        if default_route == ProcessDefaultRoute::Install {
+            runtime.set_notification_sink(notification_sink.clone());
+        }
         runtime.arm_runtime_delivery_owner();
         Ok(Self {
             #[cfg(feature = "local-authorization")]
@@ -2311,7 +2464,10 @@ impl MethodRouter {
     /// Create a new method router with an explicit mob state.
     ///
     /// The mob state is registered on the runtime. Also spawns schedule host
-    /// startup and updates the notification sink.
+    /// startup and, as [`Self::new`] does, makes the router's connection the
+    /// runtime's process-default `session/event` route: build one router per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     #[cfg(feature = "mob")]
     pub fn new_with_mob_state(
         runtime: Arc<SessionRuntime>,
@@ -2336,8 +2492,8 @@ impl MethodRouter {
                 tracing::warn!("failed to start RPC schedule host: {error}");
             }
         });
-        // Ensure the runtime's notification sink is up-to-date so that
-        // executors created lazily read the current sink at apply time.
+        // The single-client server's connection is the runtime's
+        // process-default session/event route (see `Self::new`).
         runtime.set_notification_sink(notification_sink.clone());
         Self {
             #[cfg(feature = "local-authorization")]
@@ -2666,8 +2822,22 @@ impl MethodRouter {
             .await
     }
 
-    #[allow(clippy::if_not_else)]
+    /// Route `request` and answer it under its own id. JSON-RPC answers a
+    /// request under the request's id, so a response its handler built with
+    /// none gets the request's id here, once for every route.
     async fn dispatch_routed_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RoutedRpcResponse> {
+        let request_id = request.id.clone();
+        routed_arm(|| self.route_request(request, request_context))
+            .await
+            .map(|routed| routed.answering(request_id))
+    }
+
+    #[allow(clippy::if_not_else)]
+    async fn route_request(
         &self,
         request: RpcRequest,
         request_context: Option<RequestContext>,
@@ -4508,6 +4678,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -4569,6 +4745,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -5282,6 +5464,11 @@ impl MethodRouter {
         };
 
         let mob_id = meerkat_mob::MobId::from(params.mob_id.as_str());
+        let cursor =
+            match member_stream_cursor(params.cursor.as_ref(), params.agent_identity.is_some()) {
+                Ok(cursor) => cursor,
+                Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+            };
 
         let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
@@ -5300,18 +5487,23 @@ impl MethodRouter {
             }
         };
         let opened = if let Some(agent_identity) = params.agent_identity {
-            // Per-member stream: subscribe to a specific member's agent events.
+            // Per-member stream: subscribe to a specific member's agent events,
+            // live or right after the client's cursor.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-            let stream: meerkat_core::comms::EventStream = match self
-                .mob_state
-                .subscribe_agent_events(&mob_id, &identity)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    return handlers::mob::mob_error_response(id, &e);
-                }
+            let subscription =
+                match subscribe_member_events_resuming(&self.mob_state, &mob_id, &identity, cursor)
+                    .await
+                {
+                    Ok(subscription) => subscription,
+                    Err(e) => {
+                        return handlers::mob::mob_error_response(id, &e);
+                    }
+                };
+            let epoch = MemberStreamEpoch {
+                named: subscription.epoch,
+                attached: subscription.attached_epoch,
             };
+            let stream = subscription.stream;
 
             let open_authority =
                 match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
@@ -5381,6 +5573,7 @@ impl MethodRouter {
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            epoch.current(),
                                             &event_json,
                                         )
                                         .await;
@@ -5491,10 +5684,13 @@ impl MethodRouter {
                                             break;
                                         }
                                     };
+                                    // A mob-wide stream interleaves several members'
+                                    // sequence spaces, so its events name no epoch.
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            None,
                                             &event_json,
                                         )
                                         .await;
@@ -7354,7 +7550,16 @@ mod tests {
                 }),
             )
             .await;
-            assert_eq!(error_code(&unknown_session), error::SESSION_NOT_FOUND);
+            // An absent subject of either kind is the typed `subject_unknown`
+            // refusal, never `SESSION_NOT_FOUND`.
+            let failure = unknown_session.error.as_ref().expect("refused");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure.data.as_ref().expect("typed refusal data");
+            assert_eq!(data["kind"], "tool_grant_request_refused");
+            assert_eq!(
+                data["tool_grant_request_refusal"]["kind"],
+                "subject_unknown"
+            );
 
             let identity = call(
                 &router,
@@ -7366,6 +7571,18 @@ mod tests {
                 }),
             )
             .await;
+            #[cfg(feature = "mob")]
+            {
+                let failure = identity.error.as_ref().expect("refused");
+                assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+                let data = failure.data.as_ref().expect("typed refusal data");
+                assert_eq!(
+                    data["tool_grant_request_refusal"]["kind"], "subject_unknown",
+                    "an identity of a mob this server does not run is unknown"
+                );
+            }
+            // A server without mobs has no identity subjects at all.
+            #[cfg(not(feature = "mob"))]
             assert_eq!(
                 error_code(&identity),
                 meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
@@ -7882,6 +8099,2992 @@ mod tests {
             assert_eq!(keep_alive.message, immediate.message);
             assert_eq!(keep_alive.data, immediate.data);
             assert_eq!(router.runtime.first_build_waiter_count_for_testing(), 0);
+        }
+    }
+
+    /// Scoped tool grants of mob members over `mob/*` and `tool_grants/*`:
+    /// the gate a member's profile and its role declare, grants to a member
+    /// identity, and their end with the identity.
+    #[cfg(feature = "mob")]
+    mod member_grant_rpc {
+        use super::*;
+        use meerkat_core::tool_grant::ToolGrantSubject;
+        use meerkat_runtime::tool_grant::{
+            StoredToolGrant, ToolGrantAuditEvent, ToolGrantAuditRow, ToolGrantClock,
+            ToolGrantClockError, ToolGrantExpiryDriver, ToolGrantRefusalKind, ToolGrantStatus,
+        };
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+        /// Bounds a failure only; a passing row never waits for it.
+        const PROBE_BOUND: Duration = Duration::from_mins(1);
+
+        /// The host clock reading the clocked rows start at, in UNIX ms.
+        const T0: u64 = 1_800_000_000_000;
+
+        /// A grant clock the row sets.
+        struct RowClock(AtomicU64);
+
+        impl ToolGrantClock for RowClock {
+            fn now_ms(&self) -> Result<u64, ToolGrantClockError> {
+                Ok(self.0.load(Ordering::SeqCst))
+            }
+        }
+
+        /// One probed `shell` call's result text, as the next model request
+        /// carried it back.
+        #[derive(Debug, Clone)]
+        struct Probed {
+            text: String,
+        }
+
+        impl Probed {
+            /// The grant refusal code the result carries, if any.
+            fn grant_refusal(&self) -> Option<&'static str> {
+                [
+                    meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE,
+                    meerkat_core::tool_grant::TOOL_GRANT_EXPIRED_CODE,
+                    meerkat_core::tool_grant::TOOL_GRANT_REVOKED_CODE,
+                    meerkat_core::tool_grant::TOOL_GRANT_UNAVAILABLE_CODE,
+                ]
+                .into_iter()
+                .find(|code| self.text.contains(code))
+            }
+        }
+
+        /// The members' model in these rows: a request whose last message is
+        /// not a tool result calls `shell` once, under a fresh call id; a
+        /// request whose last message carries tool results sends that call's
+        /// result on the row's channel and answers.
+        struct ShellProbeClient {
+            next_call: AtomicUsize,
+            results: mpsc::UnboundedSender<Probed>,
+        }
+
+        #[async_trait]
+        impl LlmClient for ShellProbeClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let mut events = Vec::new();
+                let stop_reason = match request.messages.last() {
+                    Some(Message::ToolResults { results, .. }) => {
+                        for result in results {
+                            let _ = self.results.send(Probed {
+                                text: result.text_content(),
+                            });
+                        }
+                        events.push(Ok(meerkat_client::LlmEvent::TextDelta {
+                            delta: "noted".to_string(),
+                            meta: None,
+                        }));
+                        StopReason::EndTurn
+                    }
+                    _ => {
+                        let call = self.next_call.fetch_add(1, Ordering::SeqCst);
+                        events.push(Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                            id: format!("probe-call-{call}"),
+                            name: "shell".to_string(),
+                            args: serde_json::json!({"command": "echo probe"}),
+                            meta: None,
+                        }));
+                        StopReason::ToolUse
+                    }
+                };
+                events.push(Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }));
+                events.push(Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(stop_reason),
+                }));
+                Box::pin(stream::iter(events))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        /// A router whose members run the probe model, over a runtime store
+        /// the row reads directly (a read that settles nothing).
+        struct Rig {
+            router: MethodRouter,
+            probes: mpsc::UnboundedReceiver<Probed>,
+            store: Arc<dyn meerkat_runtime::RuntimeStore>,
+            /// The same store, for its scripted grant-store failure.
+            memory: Arc<meerkat_runtime::InMemoryRuntimeStore>,
+            _notifications: mpsc::Receiver<RpcNotification>,
+            _temp: tempfile::TempDir,
+        }
+
+        async fn rig() -> Rig {
+            let temp = tempfile::tempdir().unwrap();
+            let factory = AgentFactory::new(temp.path().join("sessions"));
+            let config = anthropic_test_config();
+            let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                config.clone(),
+                meerkat_models::canonical(),
+            ));
+            let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+            let memory = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            let store: Arc<dyn meerkat_runtime::RuntimeStore> = memory.clone();
+            let persistence =
+                meerkat::PersistenceBundle::new(sessions, Arc::clone(&store), memory_blob_store())
+                    .expect("construct runtime authority");
+            let runtime =
+                SessionRuntime::new(factory, config, 10, persistence, NotificationSink::noop())
+                    .expect("compose the RPC session runtime");
+            let (results, probes) = mpsc::unbounded_channel();
+            runtime.set_default_llm_client(Some(Arc::new(ShellProbeClient {
+                next_call: AtomicUsize::new(0),
+                results,
+            })));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                Arc::clone(&config_store),
+                temp.path().join("config_state.json"),
+            )));
+            let runtime = Arc::new(runtime);
+            let (notif_tx, notif_rx) = mpsc::channel(100);
+            let router = MethodRouter::new(runtime, config_store, NotificationSink::new(notif_tx))
+                .expect("construct runtime authority");
+            Rig {
+                router,
+                probes,
+                store,
+                memory,
+                _notifications: notif_rx,
+                _temp: temp,
+            }
+        }
+
+        async fn call(rig: &Rig, method: &str, params: serde_json::Value) -> RpcResponse {
+            rig.router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// The success result of `method`, failing the row with `what` when
+        /// the call is refused.
+        async fn ok(
+            rig: &Rig,
+            method: &str,
+            params: serde_json::Value,
+            what: &str,
+        ) -> serde_json::Value {
+            let response = call(rig, method, params).await;
+            assert!(
+                response.error.is_none(),
+                "{what}: {method} was refused: {:?}",
+                response.error
+            );
+            result_value(&response)
+        }
+
+        /// The typed refusal a `tool_grants/*` call answered: invalid params
+        /// carrying `{"kind": "tool_grant_request_refused",
+        /// "tool_grant_request_refusal": {"kind": <kind>, ...}}`.
+        fn request_refusal(response: &RpcResponse) -> serde_json::Value {
+            let failure = response.error.as_ref().expect("a refused call is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure
+                .data
+                .as_ref()
+                .unwrap_or_else(|| panic!("a typed refusal carries data: {failure:?}"));
+            assert_eq!(data["kind"], "tool_grant_request_refused", "{failure:?}");
+            data["tool_grant_request_refusal"].clone()
+        }
+
+        fn refusal_kind(response: &RpcResponse) -> String {
+            request_refusal(response)["kind"]
+                .as_str()
+                .expect("a refusal kind")
+                .to_string()
+        }
+
+        /// A mob whose `worker` role declares `tools` (comms is added).
+        async fn create_mob(rig: &Rig, mob_id: &str, mut tools: serde_json::Value) {
+            tools["comms"] = serde_json::json!(true);
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "external_addressable": true,
+                                "tools": tools,
+                            }
+                        }
+                    }
+                }),
+                "a profile may declare a tool grant gate",
+            )
+            .await;
+        }
+
+        /// The role gate of these rows: the shell family, its switch off.
+        fn shell_gated_role() -> serde_json::Value {
+            serde_json::json!({"grant_gated": {"families": ["shell"]}})
+        }
+
+        async fn spawn(rig: &Rig, mob_id: &str, identity: &str, tools: Option<serde_json::Value>) {
+            let mut params = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": identity,
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(mut tools) = tools {
+                tools["comms"] = serde_json::json!(true);
+                params["override_profile"] = serde_json::json!({
+                    "model": "claude-sonnet-4-5",
+                    "external_addressable": true,
+                    "tools": tools,
+                });
+            }
+            ok(rig, "mob/spawn", params, "the member spawns").await;
+        }
+
+        /// Run one member turn that calls `shell`, and answer that call's
+        /// result.
+        async fn probe(rig: &mut Rig, mob_id: &str, identity: &str) -> Probed {
+            ok(
+                rig,
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": identity,
+                    "content": "call shell",
+                }),
+                "the member takes a turn",
+            )
+            .await;
+            tokio::time::timeout(PROBE_BOUND, rig.probes.recv())
+                .await
+                .expect("the member's turn calls shell within the bound")
+                .expect("the probe channel stays open")
+        }
+
+        fn identity_subject(mob_id: &str, identity: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "identity", "mob_id": mob_id, "identity": identity})
+        }
+
+        async fn grant_identity_shell(
+            rig: &Rig,
+            mob_id: &str,
+            identity: &str,
+            duration_ms: u64,
+        ) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": identity_subject(mob_id, identity),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": duration_ms,
+                }),
+                "an identity subject is granted",
+            )
+            .await["grant"]
+                .clone()
+        }
+
+        async fn list_identity(
+            rig: &Rig,
+            mob_id: &str,
+            identity: &str,
+            include_ended: bool,
+        ) -> Vec<serde_json::Value> {
+            ok(
+                rig,
+                "tool_grants/list",
+                serde_json::json!({
+                    "subject": identity_subject(mob_id, identity),
+                    "include_ended": include_ended,
+                }),
+                "an identity subject is listed",
+            )
+            .await["grants"]
+                .as_array()
+                .expect("grants")
+                .clone()
+        }
+
+        fn session_subject(session_id: &SessionId) -> serde_json::Value {
+            serde_json::json!({"kind": "session", "session_id": session_id.to_string()})
+        }
+
+        /// Grant `session_id`'s session the shell family for `duration_ms`.
+        async fn grant_session_shell(
+            rig: &Rig,
+            session_id: &SessionId,
+            duration_ms: u64,
+        ) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": duration_ms,
+                }),
+                "a member's session is granted",
+            )
+            .await["grant"]
+                .clone()
+        }
+
+        async fn list_session(
+            rig: &Rig,
+            session_id: &SessionId,
+            include_ended: bool,
+        ) -> Vec<serde_json::Value> {
+            ok(
+                rig,
+                "tool_grants/list",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "include_ended": include_ended,
+                }),
+                "a session subject is listed",
+            )
+            .await["grants"]
+                .as_array()
+                .expect("grants")
+                .clone()
+        }
+
+        /// `grants` are exactly `grant`, ended: `what` ended it.
+        fn assert_ended(grants: &[serde_json::Value], grant: &serde_json::Value, what: &str) {
+            assert_eq!(grants.len(), 1, "{what}: {grants:?}");
+            assert_eq!(
+                grants[0]["grant_id"], grant["grant_id"],
+                "{what}: {grants:?}"
+            );
+            assert_eq!(grants[0]["status"], "revoked", "{what}: {grants:?}");
+        }
+
+        /// The store key of `identity`'s grants in the mob's running
+        /// incarnation.
+        async fn identity_key(rig: &Rig, mob_id: &str, identity: &str) -> String {
+            let state = rig.router.runtime.mob_state().expect("the mob surface");
+            let handle = state
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("the mob runs");
+            ToolGrantSubject::Identity {
+                mob_id: mob_id.to_string(),
+                mob_incarnation: handle.live_incarnation().incarnation().to_string(),
+                identity: identity.to_string(),
+            }
+            .key()
+            .as_str()
+            .to_string()
+        }
+
+        /// A grant's row as stored, read without settling it.
+        async fn stored_grant(rig: &Rig, grant_id: &str) -> StoredToolGrant {
+            let bytes = rig
+                .store
+                .load_tool_grant(grant_id)
+                .await
+                .expect("the store reads")
+                .expect("the grant's row");
+            serde_json::from_slice(&bytes).expect("the row decodes")
+        }
+
+        /// A subject's audit events as stored, read without settling them.
+        async fn stored_audit(rig: &Rig, key: &str) -> Vec<ToolGrantAuditEvent> {
+            rig.store
+                .read_tool_grant_audit(key, None, 100)
+                .await
+                .expect("the store reads")
+                .into_iter()
+                .map(|(_, bytes)| ToolGrantAuditRow::decode(&bytes).expect("a row").event)
+                .collect()
+        }
+
+        /// A role's gate mounts its family closed for a member built
+        /// from the role, whose switch for it is off; a respawn keeps it.
+        #[tokio::test]
+        async fn a_role_gated_family_is_mounted_closed_for_its_member_across_respawn() {
+            let mut rig = rig().await;
+            create_mob(&rig, "gated-role", shell_gated_role()).await;
+            spawn(&rig, "gated-role", "worker-1", None).await;
+
+            let first = probe(&mut rig, "gated-role", "worker-1").await;
+            assert_eq!(
+                first.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the role's gate mounts shell closed, so the call needs a grant: {first:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/respawn",
+                serde_json::json!({"mob_id": "gated-role", "agent_identity": "worker-1"}),
+                "the member respawns",
+            )
+            .await;
+            let second = probe(&mut rig, "gated-role", "worker-1").await;
+            assert_eq!(
+                second.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the respawned member's build installs the same gate: {second:?}"
+            );
+        }
+
+        /// The role's gate joins a member spawned with its own
+        /// profile. A member whose own switch leaves the role-gated family
+        /// off builds without it (the role entry is ignored, never refused);
+        /// one whose own switch turns it on gets it closed.
+        #[tokio::test]
+        async fn a_role_gate_reaches_a_member_spawned_with_its_own_profile_where_it_mounts() {
+            let mut rig = rig().await;
+            create_mob(&rig, "role-union", shell_gated_role()).await;
+
+            spawn(
+                &rig,
+                "role-union",
+                "shell-off",
+                Some(serde_json::json!({"shell": false})),
+            )
+            .await;
+            let off = probe(&mut rig, "role-union", "shell-off").await;
+            assert_eq!(
+                off.grant_refusal(),
+                None,
+                "a role-gated family the member does not mount is ignored: it has no shell \
+                 and nothing to grant: {off:?}"
+            );
+
+            spawn(
+                &rig,
+                "role-union",
+                "shell-on",
+                Some(serde_json::json!({"shell": true})),
+            )
+            .await;
+            let on = probe(&mut rig, "role-union", "shell-on").await;
+            assert_eq!(
+                on.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the role's gate closes the shell the member's own profile mounts: {on:?}"
+            );
+        }
+
+        /// An identity grant opens the gated family for the member at
+        /// its next turn, and the refusal before it is audited under the
+        /// identity; the grant survives a respawn to a new session, and
+        /// matches nothing after the mob is destroyed and created again
+        /// under the same id.
+        #[tokio::test]
+        async fn an_identity_grant_opens_the_family_for_the_member_and_survives_respawn() {
+            let mut rig = rig().await;
+            create_mob(&rig, "identity-grants", shell_gated_role()).await;
+            spawn(&rig, "identity-grants", "worker-1", None).await;
+            let refused = probe(&mut rig, "identity-grants", "worker-1").await;
+            assert_eq!(
+                refused.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "{refused:?}"
+            );
+
+            let grant = grant_identity_shell(&rig, "identity-grants", "worker-1", 600_000).await;
+            assert_eq!(
+                grant["subject"],
+                identity_subject("identity-grants", "worker-1")
+            );
+            let admitted = probe(&mut rig, "identity-grants", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "the identity grant opens shell for the member: {admitted:?}"
+            );
+
+            let key = identity_key(&rig, "identity-grants", "worker-1").await;
+            let audit = stored_audit(&rig, &key).await;
+            assert!(
+                audit.iter().any(|event| matches!(
+                    event,
+                    ToolGrantAuditEvent::Refused {
+                        reason: ToolGrantRefusalKind::Required,
+                        tool,
+                        ..
+                    } if tool.as_str() == "shell"
+                )),
+                "the member's refusal is audited under its identity: {audit:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/respawn",
+                serde_json::json!({"mob_id": "identity-grants", "agent_identity": "worker-1"}),
+                "the member respawns",
+            )
+            .await;
+            let respawned = probe(&mut rig, "identity-grants", "worker-1").await;
+            assert_eq!(
+                respawned.grant_refusal(),
+                None,
+                "the grant follows the identity to its new session: {respawned:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/destroy",
+                serde_json::json!({"mob_id": "identity-grants"}),
+                "the mob is destroyed",
+            )
+            .await;
+            create_mob(&rig, "identity-grants", shell_gated_role()).await;
+            spawn(&rig, "identity-grants", "worker-1", None).await;
+            assert!(
+                list_identity(&rig, "identity-grants", "worker-1", true)
+                    .await
+                    .is_empty(),
+                "a new incarnation lists no grant of the old one"
+            );
+            let recreated = probe(&mut rig, "identity-grants", "worker-1").await;
+            assert_eq!(
+                recreated.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "an old incarnation's grant matches nothing: {recreated:?}"
+            );
+        }
+
+        /// An identity grant of a served, idle member expires on time
+        /// through the deadline timer, with no turn, list or audit read.
+        #[tokio::test]
+        async fn an_identity_grant_of_a_served_idle_member_expires_by_its_timer() {
+            let mut rig = rig().await;
+            let clock = Arc::new(RowClock(AtomicU64::new(T0)));
+            rig.router
+                .runtime
+                .runtime_adapter()
+                .set_tool_grant_clock(clock.clone());
+            create_mob(&rig, "timed-grants", shell_gated_role()).await;
+            spawn(&rig, "timed-grants", "worker-1", None).await;
+            // One turn builds the member: it is served from here on.
+            probe(&mut rig, "timed-grants", "worker-1").await;
+
+            let grant = grant_identity_shell(&rig, "timed-grants", "worker-1", 200).await;
+            let grant_id = grant["grant_id"].as_str().expect("grant id").to_string();
+            clock.0.store(T0 + 200, Ordering::SeqCst);
+
+            let mut expired = None;
+            for _ in 0..400 {
+                let row = stored_grant(&rig, &grant_id).await;
+                if row.status == ToolGrantStatus::Expired {
+                    expired = Some(row);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let expired = expired.expect("the deadline timer expires the identity grant");
+            assert_eq!(expired.ended_at_ms, Some(T0 + 200));
+            let key = identity_key(&rig, "timed-grants", "worker-1").await;
+            let audit = stored_audit(&rig, &key).await;
+            assert!(
+                audit.iter().any(|event| matches!(
+                    event,
+                    ToolGrantAuditEvent::Expired {
+                        driver: ToolGrantExpiryDriver::Timer,
+                        ..
+                    }
+                )),
+                "the timer observed the expiry: {audit:?}"
+            );
+        }
+
+        /// Identity grant, list, audit and revoke, and every refusal
+        /// of the methods in the one typed shape. An absent session and an
+        /// absent identity are both `subject_unknown`.
+        #[tokio::test]
+        async fn identity_grants_round_trip_and_every_refusal_is_typed() {
+            let mut rig = rig().await;
+            create_mob(&rig, "typed-refusals", shell_gated_role()).await;
+            spawn(&rig, "typed-refusals", "worker-1", None).await;
+            probe(&mut rig, "typed-refusals", "worker-1").await;
+
+            let grant = grant_identity_shell(&rig, "typed-refusals", "worker-1", 600_000).await;
+            let grant_id = grant["grant_id"].as_str().expect("grant id").to_string();
+            assert_eq!(grant["status"], "active");
+            assert_eq!(
+                grant["issuer"],
+                serde_json::json!({"kind": "operator"}),
+                "{grant}"
+            );
+            let active = list_identity(&rig, "typed-refusals", "worker-1", false).await;
+            assert_eq!(active.len(), 1, "{active:?}");
+            assert_eq!(active[0]["grant_id"], grant_id.as_str());
+            let audit = ok(
+                &rig,
+                "tool_grants/audit",
+                serde_json::json!({"subject": identity_subject("typed-refusals", "worker-1")}),
+                "an identity's audit reads",
+            )
+            .await;
+            assert!(
+                audit["rows"]
+                    .as_array()
+                    .expect("rows")
+                    .iter()
+                    .any(|row| row["event"]["kind"] == "granted"),
+                "{audit}"
+            );
+            let revoked = ok(
+                &rig,
+                "tool_grants/revoke",
+                serde_json::json!({"grant_id": grant_id}),
+                "the identity grant revokes",
+            )
+            .await;
+            assert_eq!(revoked["changed"], true);
+
+            let grant_params = |subject: serde_json::Value, target: serde_json::Value| {
+                serde_json::json!({
+                    "subject": subject,
+                    "target": target,
+                    "duration_ms": 60_000,
+                })
+            };
+            let shell_family = serde_json::json!({"kind": "family", "family": "shell"});
+            for (what, params, kind) in [
+                (
+                    "an absent session",
+                    grant_params(
+                        serde_json::json!({
+                            "kind": "session",
+                            "session_id": SessionId::new().to_string(),
+                        }),
+                        shell_family.clone(),
+                    ),
+                    "subject_unknown",
+                ),
+                (
+                    "an absent mob",
+                    grant_params(
+                        identity_subject("no-such-mob", "worker-1"),
+                        shell_family.clone(),
+                    ),
+                    "subject_unknown",
+                ),
+                (
+                    "an absent identity",
+                    grant_params(
+                        identity_subject("typed-refusals", "worker-9"),
+                        shell_family.clone(),
+                    ),
+                    "subject_unknown",
+                ),
+                (
+                    "a target the member's gate does not name",
+                    grant_params(
+                        identity_subject("typed-refusals", "worker-1"),
+                        serde_json::json!({"kind": "tool", "name": "web_search"}),
+                    ),
+                    "target_not_gated",
+                ),
+                (
+                    "an empty tool name",
+                    grant_params(
+                        identity_subject("typed-refusals", "worker-1"),
+                        serde_json::json!({"kind": "tool", "name": ""}),
+                    ),
+                    "empty_target",
+                ),
+                (
+                    "a window longer than the maximum lifetime",
+                    serde_json::json!({
+                        "subject": identity_subject("typed-refusals", "worker-1"),
+                        "target": shell_family.clone(),
+                        "duration_ms": 25 * 60 * 60 * 1_000,
+                    }),
+                    "invalid_window",
+                ),
+                (
+                    "both window bounds",
+                    serde_json::json!({
+                        "subject": identity_subject("typed-refusals", "worker-1"),
+                        "target": shell_family.clone(),
+                        "duration_ms": 60_000,
+                        "expires_at_ms": 4_102_444_800_000_u64,
+                    }),
+                    "invalid_window",
+                ),
+            ] {
+                let refused = call(&rig, "tool_grants/grant", params).await;
+                assert_eq!(refusal_kind(&refused), kind, "{what}");
+            }
+            for grant_id in [
+                meerkat_core::tool_grant::ToolGrantId::mint().to_string(),
+                "not-a-grant-id".to_string(),
+            ] {
+                let refused = call(
+                    &rig,
+                    "tool_grants/revoke",
+                    serde_json::json!({"grant_id": grant_id}),
+                )
+                .await;
+                assert_eq!(refusal_kind(&refused), "not_found", "{grant_id}");
+            }
+            let refused = call(
+                &rig,
+                "tool_grants/audit",
+                serde_json::json!({
+                    "subject": identity_subject("typed-refusals", "worker-1"),
+                    "limit": 0,
+                }),
+            )
+            .await;
+            assert_eq!(refusal_kind(&refused), "invalid_page_limit");
+            for subject in [
+                identity_subject("no-such-mob", "worker-1"),
+                serde_json::json!({"kind": "session", "session_id": "not-a-session-id"}),
+            ] {
+                let refused = call(
+                    &rig,
+                    "tool_grants/list",
+                    serde_json::json!({"subject": subject}),
+                )
+                .await;
+                assert_eq!(refusal_kind(&refused), "subject_unknown", "{subject}");
+            }
+
+            // A retired identity's history stays readable.
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "typed-refusals", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            let history = list_identity(&rig, "typed-refusals", "worker-1", true).await;
+            assert_eq!(history.len(), 1, "{history:?}");
+            assert_eq!(history[0]["grant_id"], grant_id.as_str());
+            ok(
+                &rig,
+                "tool_grants/audit",
+                serde_json::json!({"subject": identity_subject("typed-refusals", "worker-1")}),
+                "a retired identity's audit reads",
+            )
+            .await;
+        }
+
+        /// An operator grant records the decision its host made
+        /// before issuing it, in the grant's issuer, on the list and on the
+        /// `granted` audit row; an invalid reference is refused, typed.
+        #[tokio::test]
+        async fn an_operator_grant_records_its_decision_ref() {
+            let rig = rig().await;
+            let session_id = ok(
+                &rig,
+                "session/create",
+                serde_json::json!({
+                    "prompt": "hello",
+                    "grant_gated_tools": {"families": ["shell"]},
+                    "initial_turn": "deferred",
+                }),
+                "a gated session",
+            )
+            .await["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+            let subject = serde_json::json!({"kind": "session", "session_id": session_id});
+            let granted = ok(
+                &rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": subject,
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": 60_000,
+                    "decision_ref": "approval-7",
+                }),
+                "a grant names its decision",
+            )
+            .await;
+            let issuer = serde_json::json!({"kind": "operator", "decision_ref": "approval-7"});
+            assert_eq!(granted["grant"]["issuer"], issuer);
+            let listed = ok(
+                &rig,
+                "tool_grants/list",
+                serde_json::json!({"subject": subject}),
+                "the session's grants list",
+            )
+            .await;
+            assert_eq!(listed["grants"][0]["issuer"], issuer);
+            let audit = ok(
+                &rig,
+                "tool_grants/audit",
+                serde_json::json!({"subject": subject}),
+                "the session's audit reads",
+            )
+            .await;
+            assert_eq!(audit["rows"][0]["event"]["kind"], "granted");
+            assert_eq!(audit["rows"][0]["event"]["issuer"], issuer);
+
+            for decision_ref in ["", "approval\u{7}"] {
+                let refused = call(
+                    &rig,
+                    "tool_grants/grant",
+                    serde_json::json!({
+                        "subject": subject,
+                        "target": {"kind": "family", "family": "shell"},
+                        "duration_ms": 60_000,
+                        "decision_ref": decision_ref,
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    refusal_kind(&refused),
+                    "invalid_decision_ref",
+                    "{decision_ref:?}"
+                );
+            }
+        }
+
+        /// A renewal is a second grant of the same identity and
+        /// target, issued while the first is live. Both list as active, a
+        /// call is admitted throughout, and once both have ended the call is
+        /// refused `tool_grant_expired`: when several ended grants cover a
+        /// call, the service's `refusal_rank` lets an expired grant explain
+        /// it before a revoked one.
+        #[tokio::test]
+        async fn a_renewal_overlaps_the_identity_grant_it_renews() {
+            let mut rig = rig().await;
+            let clock = Arc::new(RowClock(AtomicU64::new(T0)));
+            rig.router
+                .runtime
+                .runtime_adapter()
+                .set_tool_grant_clock(clock.clone());
+            create_mob(&rig, "renewals", shell_gated_role()).await;
+            spawn(&rig, "renewals", "worker-1", None).await;
+
+            let first = grant_identity_shell(&rig, "renewals", "worker-1", 60_000).await;
+            let second = grant_identity_shell(&rig, "renewals", "worker-1", 120_000).await;
+            let active = list_identity(&rig, "renewals", "worker-1", false).await;
+            assert_eq!(active.len(), 2, "both grants are active: {active:?}");
+            assert_eq!(
+                probe(&mut rig, "renewals", "worker-1")
+                    .await
+                    .grant_refusal(),
+                None
+            );
+
+            clock.0.store(T0 + 60_000, Ordering::SeqCst);
+            let all = list_identity(&rig, "renewals", "worker-1", true).await;
+            let status_of = |grant: &serde_json::Value| {
+                all.iter()
+                    .find(|listed| listed["grant_id"] == grant["grant_id"])
+                    .map(|listed| listed["status"].clone())
+            };
+            assert_eq!(status_of(&first), Some(serde_json::json!("expired")));
+            assert_eq!(status_of(&second), Some(serde_json::json!("active")));
+            assert_eq!(
+                probe(&mut rig, "renewals", "worker-1")
+                    .await
+                    .grant_refusal(),
+                None,
+                "the renewal keeps the tool open"
+            );
+
+            ok(
+                &rig,
+                "tool_grants/revoke",
+                serde_json::json!({"grant_id": second["grant_id"]}),
+                "the renewal revokes",
+            )
+            .await;
+            let ended = probe(&mut rig, "renewals", "worker-1").await;
+            assert_eq!(
+                ended.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_EXPIRED_CODE),
+                "{ended:?}"
+            );
+        }
+
+        /// An identity's grants end with the identity. A grant
+        /// to a member that retires matches nothing when a new member takes
+        /// the same name in the same mob incarnation, and the new member's
+        /// refusal cites no grant of the old life: its call needs a grant.
+        #[tokio::test]
+        async fn a_recreated_identity_inherits_no_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "recreated", shell_gated_role()).await;
+            spawn(&rig, "recreated", "worker-1", None).await;
+            let grant = grant_identity_shell(&rig, "recreated", "worker-1", 600_000).await;
+            assert_eq!(
+                probe(&mut rig, "recreated", "worker-1")
+                    .await
+                    .grant_refusal(),
+                None
+            );
+
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "recreated", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            spawn(&rig, "recreated", "worker-1", None).await;
+
+            let all = list_identity(&rig, "recreated", "worker-1", true).await;
+            assert_eq!(all.len(), 1, "{all:?}");
+            assert_eq!(all[0]["grant_id"], grant["grant_id"]);
+            assert_eq!(
+                all[0]["status"], "revoked",
+                "the retirement ended the identity's grant"
+            );
+            let recreated = probe(&mut rig, "recreated", "worker-1").await;
+            assert_eq!(
+                recreated.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the new member inherits nothing and needs a grant of its own: {recreated:?}"
+            );
+        }
+
+        /// The mob's handle, as its host's surface holds it.
+        async fn mob_handle(rig: &Rig, mob_id: &str) -> meerkat_mob::MobHandle {
+            rig.router
+                .runtime
+                .mob_state()
+                .expect("the mob surface")
+                .handle_for(&meerkat_mob::MobId::from(mob_id))
+                .await
+                .expect("the mob runs")
+        }
+
+        /// The session `identity`'s member holds now.
+        async fn member_session(rig: &Rig, mob_id: &str, identity: &str) -> SessionId {
+            rig.router
+                .runtime
+                .mob_state()
+                .expect("the mob surface")
+                .mob_resolve_bridge_session_id(
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::AgentIdentity::from(identity),
+                )
+                .await
+                .expect("the member's session resolves")
+                .expect("the member holds a session")
+        }
+
+        /// Declare `identity` an identity entry of the `worker` role, in a
+        /// partial roster: the apply seats its member.
+        async fn declare_entry(rig: &Rig, mob_id: &str, identity: &str) {
+            let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", identity);
+            spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
+            let outcome = mob_handle(rig, mob_id)
+                .await
+                .apply_declared_roster(meerkat_mob::DeclaredRoster::partial([
+                    meerkat_mob::DeclaredEntry::new(spec),
+                ]))
+                .await
+                .expect("the declared apply runs");
+            assert!(
+                matches!(
+                    outcome
+                        .entries
+                        .get(&meerkat_mob::AgentIdentity::from(identity)),
+                    Some(
+                        meerkat_mob::DeclaredEntryOutcome::Seated { .. }
+                            | meerkat_mob::DeclaredEntryOutcome::Embodied { .. }
+                    )
+                ),
+                "the apply seats the entry: {:?}",
+                outcome.entries
+            );
+        }
+
+        /// Adopt `identity`'s member as a store-owned identity of the `worker`
+        /// role, over the session it holds: declared with the role's named
+        /// profile, or with `profile_override`, an exact portable profile.
+        /// Waits until the identity's member converges on the declaration.
+        async fn adopt_identity(
+            rig: &Rig,
+            mob_id: &str,
+            identity: &str,
+            profile_override: Option<serde_json::Value>,
+        ) {
+            use meerkat_mob::identity::{
+                AdoptMemberIdentityDeclaration, DesiredExecution, DesiredSessionAuthorityPolicy,
+                DesiredSessionTarget, IdentityAdoptionId, IdentityAdoptionOutcome,
+                IdentityAdoptionPrecondition, IdentityConvergenceMode, IdentityConvergenceStatus,
+                IdentityDeclarationScopeId, IdentityProfileMemberDeclaration,
+                IdentityReconcileDecision, IdentityStoredObservation, IdentityWiringCustody,
+            };
+
+            let mob = meerkat_mob::MobId::from(mob_id);
+            let agent = meerkat_mob::AgentIdentity::from(identity);
+            let session_id = member_session(rig, mob_id, identity).await;
+            let adoption = AdoptMemberIdentityDeclaration {
+                mob_id: mob.clone(),
+                agent_identity: agent.clone(),
+                request_id: IdentityAdoptionId::new(format!("adopt-{identity}"))
+                    .expect("adoption id"),
+                precondition: IdentityAdoptionPrecondition::ExpectedAbsent,
+                declaration_scope: IdentityDeclarationScopeId::new("member-grant-rows")
+                    .expect("declaration scope"),
+                declaration_revision: 1,
+                session: DesiredSessionTarget {
+                    session_id: session_id.clone(),
+                    lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+                    lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+                    authority_policy: DesiredSessionAuthorityPolicy::RequireExisting,
+                },
+                member: IdentityProfileMemberDeclaration {
+                    profile_name: meerkat_mob::ProfileName::from("worker"),
+                    profile_override: profile_override.map(|profile| {
+                        serde_json::from_value(profile).expect("a portable profile")
+                    }),
+                    model_override: None,
+                    external_addressable_override: None,
+                    context: None,
+                    labels: None,
+                    additional_instructions: None,
+                    system_prompt_override: None,
+                    tool_access_policy: None,
+                    auth_binding: None,
+                    budget_limits: None,
+                    runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+                    required_env_keys: Vec::new(),
+                    required_local_callback_tools: Vec::new(),
+                    execution: DesiredExecution::ControllingSession,
+                },
+                wiring_custody: IdentityWiringCustody::ExternalManaged,
+                owned_wiring: std::collections::BTreeSet::new(),
+                convergence: IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+            };
+            let mob_state = rig.router.runtime.mob_state().expect("the mob surface");
+            let adopted = mob_state
+                .mob_adopt_member_identity_declaration(&mob, adoption)
+                .await
+                .expect("the member's identity is adopted");
+            assert!(
+                matches!(
+                    adopted.adoption,
+                    IdentityAdoptionOutcome::Adopted {
+                        desired_revision: 1
+                    }
+                ),
+                "{:?}",
+                adopted.adoption
+            );
+            tokio::time::timeout(PROBE_BOUND, async {
+                loop {
+                    if let IdentityStoredObservation::Valid(IdentityConvergenceStatus {
+                        decision: Some(IdentityReconcileDecision::Converged),
+                        ..
+                    }) = mob_state
+                        .mob_identity_convergence_status(&mob, &agent)
+                        .await
+                        .expect("the identity's convergence reads")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the adopted identity converges within the bound");
+        }
+
+        /// A mob reset ends the grants of every identity the mob held,
+        /// a worker's and an identity entry's alike, before its epoch begins:
+        /// the reset keeps the mob's incarnation, so both names declared again
+        /// after it would otherwise match the old grants. Neither new member
+        /// is admitted by them, and the list shows them ended.
+        #[tokio::test]
+        async fn a_mob_reset_ends_the_grants_of_its_identity_entries() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-grants", shell_gated_role()).await;
+            spawn(&rig, "reset-grants", "worker-1", None).await;
+            declare_entry(&rig, "reset-grants", "entry-1").await;
+            let mut grants = Vec::new();
+            for identity in ["worker-1", "entry-1"] {
+                let grant = grant_identity_shell(&rig, "reset-grants", identity, 600_000).await;
+                let admitted = probe(&mut rig, "reset-grants", identity).await;
+                assert_eq!(
+                    admitted.grant_refusal(),
+                    None,
+                    "the identity grant opens shell for {identity}: {admitted:?}"
+                );
+                grants.push((identity, grant));
+            }
+
+            ok(
+                &rig,
+                "mob/lifecycle",
+                serde_json::json!({"mob_id": "reset-grants", "action": "reset"}),
+                "the mob resets",
+            )
+            .await;
+            spawn(&rig, "reset-grants", "worker-1", None).await;
+            declare_entry(&rig, "reset-grants", "entry-1").await;
+
+            for (identity, grant) in grants {
+                let all = list_identity(&rig, "reset-grants", identity, true).await;
+                assert_eq!(all.len(), 1, "{identity}: {all:?}");
+                assert_eq!(all[0]["grant_id"], grant["grant_id"], "{identity}");
+                assert_eq!(
+                    all[0]["status"], "revoked",
+                    "the reset ended {identity}'s grant: {all:?}"
+                );
+                let declared_again = probe(&mut rig, "reset-grants", identity).await;
+                assert_eq!(
+                    declared_again.grant_refusal(),
+                    Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                    "{identity} declared again inherits nothing and needs a grant of its own: \
+                     {declared_again:?}"
+                );
+            }
+        }
+
+        /// An identity declared with its role's named profile is built
+        /// from the role's definition, as a worker of the role is: its gate is
+        /// the role's current gate, its own, so the gated family whose switch
+        /// is off is mounted closed. A call needs a grant, and an identity
+        /// grant opens it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_identity_of_a_gated_profile_mounts_the_gated_family_closed() {
+            let mut rig = rig().await;
+            create_mob(&rig, "identity-gate", shell_gated_role()).await;
+            spawn(&rig, "identity-gate", "worker-1", None).await;
+            adopt_identity(&rig, "identity-gate", "worker-1", None).await;
+
+            let gate = mob_handle(&rig, "identity-gate")
+                .await
+                .member_grant_gate(&meerkat_mob::AgentIdentity::from("worker-1"))
+                .await
+                .expect("the identity's gate resolves");
+            assert_eq!(
+                gate.gated,
+                meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"),
+                "the role's gate is the identity's own: {gate:?}"
+            );
+            assert!(gate.not_mounted.is_empty(), "{gate:?}");
+
+            let refused = probe(&mut rig, "identity-gate", "worker-1").await;
+            assert_eq!(
+                refused.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the gated family is mounted closed: {refused:?}"
+            );
+            grant_identity_shell(&rig, "identity-gate", "worker-1", 600_000).await;
+            let admitted = probe(&mut rig, "identity-gate", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "the identity grant opens it: {admitted:?}"
+            );
+        }
+
+        /// An identity declared with its own exact profile
+        /// (`profile_override`) keeps the role-entries rule, as a member
+        /// spawned with its own profile does: the role's gated family its
+        /// profile leaves off is not mounted, so nothing of it is gated.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn an_identity_with_a_profile_override_gets_role_entries_only() {
+            let mut rig = rig().await;
+            create_mob(&rig, "identity-override", shell_gated_role()).await;
+            spawn(&rig, "identity-override", "worker-1", None).await;
+            adopt_identity(
+                &rig,
+                "identity-override",
+                "worker-1",
+                Some(serde_json::json!({
+                    "model": "claude-sonnet-4-5",
+                    "provider": "anthropic",
+                    "tools": {"comms": true},
+                    "external_addressable": true,
+                    "runtime_mode": "turn_driven",
+                })),
+            )
+            .await;
+
+            let gate = mob_handle(&rig, "identity-override")
+                .await
+                .member_grant_gate(&meerkat_mob::AgentIdentity::from("worker-1"))
+                .await
+                .expect("the identity's gate resolves");
+            assert!(gate.gated.is_empty(), "{gate:?}");
+            assert_eq!(
+                gate.not_mounted,
+                meerkat_core::tool_grant::GrantGatedTools::default().with_family("shell"),
+                "the role's family is a role entry its profile does not mount: {gate:?}"
+            );
+            let probed = probe(&mut rig, "identity-override", "worker-1").await;
+            assert_eq!(
+                probed.grant_refusal(),
+                None,
+                "shell is not mounted, so no grant is asked for: {probed:?}"
+            );
+        }
+
+        /// The resume row on the wire: a member whose session recorded
+        /// its family disabled (built before its gate named the family) is
+        /// resumed with the family mounted closed, not refused as a disabled
+        /// gated family and never mounted open. A call with no grant is
+        /// refused `tool_grant_required`, and an identity grant opens it.
+        #[tokio::test]
+        async fn a_member_resume_mounts_its_gated_family_over_a_recorded_disable() {
+            let mut rig = rig().await;
+            create_mob(&rig, "gated-resume", shell_gated_role()).await;
+            spawn(
+                &rig,
+                "gated-resume",
+                "worker-1",
+                Some(serde_json::json!({"shell": false})),
+            )
+            .await;
+            let first = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                first.grant_refusal(),
+                None,
+                "the first build leaves shell off and records it disabled: {first:?}"
+            );
+            let session_id = member_session(&rig, "gated-resume", "worker-1").await;
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "gated-resume", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "gated-resume",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                    "launch_mode": {
+                        "mode": "resume",
+                        "bridge_session_id": session_id.to_string(),
+                    },
+                }),
+                "the member resumes its session under the gated role",
+            )
+            .await;
+
+            let refused = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                refused.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the resumed member mounts shell closed: {refused:?}"
+            );
+            grant_identity_shell(&rig, "gated-resume", "worker-1", 600_000).await;
+            let admitted = probe(&mut rig, "gated-resume", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "an identity grant opens it: {admitted:?}"
+            );
+        }
+
+        /// An identity entry whose member the host retired outlives the
+        /// retirement, unseated, with its grants. The one-entry unlist of
+        /// the unseated entry ends the identity at once, and with it the
+        /// identity's grants and its archived session's grants. The name
+        /// listed again is seated on that session and holds none of them:
+        /// its call needs a grant of its own.
+        #[tokio::test]
+        async fn an_unlisted_unseated_entry_listed_again_inherits_no_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "unlist-grants", shell_gated_role()).await;
+            declare_entry(&rig, "unlist-grants", "entry-1").await;
+            let session_id = member_session(&rig, "unlist-grants", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "unlist-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "unlist-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "unlist-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            handle
+                .retire(entry.clone())
+                .await
+                .expect("the host retires the entry's member");
+            assert_eq!(
+                list_identity(&rig, "unlist-grants", "entry-1", false)
+                    .await
+                    .len(),
+                1,
+                "the entry outlives a retirement the declared apply did not start, and so do \
+                 its grants"
+            );
+            let unlisted = handle
+                .unlist_declared_identity(&entry)
+                .await
+                .expect("the unseated entry is unlisted");
+            assert!(
+                matches!(
+                    unlisted.unlisted.get(&entry),
+                    Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                ),
+                "{:?}",
+                unlisted.unlisted
+            );
+            assert_ended(
+                &list_identity(&rig, "unlist-grants", "entry-1", true).await,
+                &identity_grant,
+                "the unlist ended the identity's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the unlist ended the grant of the entry's archived session",
+            );
+
+            declare_entry(&rig, "unlist-grants", "entry-1").await;
+            assert_eq!(
+                member_session(&rig, "unlist-grants", "entry-1").await,
+                session_id,
+                "the name listed again is seated on its own archived session"
+            );
+            let listed_again = probe(&mut rig, "unlist-grants", "entry-1").await;
+            assert_eq!(
+                listed_again.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the name listed again needs a grant of its own: {listed_again:?}"
+            );
+        }
+
+        /// As the unlist above, with a complete roster's seal ending the
+        /// unseated entry: the seal's step ends it, its grants and its
+        /// archived session's grants before it commits.
+        #[tokio::test]
+        async fn a_sealed_unseated_entry_listed_again_inherits_no_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "seal-grants", shell_gated_role()).await;
+            declare_entry(&rig, "seal-grants", "entry-1").await;
+            let session_id = member_session(&rig, "seal-grants", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "seal-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "seal-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "seal-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            handle
+                .retire(entry.clone())
+                .await
+                .expect("the host retires the entry's member");
+            let sealed = handle
+                .apply_declared_roster(meerkat_mob::DeclaredRoster::complete(Vec::<
+                    meerkat_mob::DeclaredEntry,
+                >::new(
+                )))
+                .await
+                .expect("the complete roster seals");
+            assert!(
+                matches!(
+                    sealed.unlisted.get(&entry),
+                    Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                ),
+                "{:?}",
+                sealed.unlisted
+            );
+            assert_ended(
+                &list_identity(&rig, "seal-grants", "entry-1", true).await,
+                &identity_grant,
+                "the seal ended the identity's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the seal ended the grant of the entry's archived session",
+            );
+
+            declare_entry(&rig, "seal-grants", "entry-1").await;
+            let listed_again = probe(&mut rig, "seal-grants", "entry-1").await;
+            assert_eq!(
+                listed_again.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the name listed again needs a grant of its own: {listed_again:?}"
+            );
+        }
+
+        /// A host's adoption of a declared identity ends the identity's
+        /// entry, not the identity: the identity continues under the host's
+        /// intent and keeps its scoped tool grants. An operator's grant to
+        /// the declared identity before the adoption still admits the member
+        /// the reconciler materializes under the host's intent, and the list
+        /// reads it active.
+        #[tokio::test]
+        async fn a_host_adoption_of_a_declared_identity_keeps_its_grants() {
+            let mut rig = rig().await;
+            create_mob(&rig, "adopt-grants", shell_gated_role()).await;
+            declare_entry(&rig, "adopt-grants", "entry-1").await;
+            let grant = grant_identity_shell(&rig, "adopt-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+
+            adopt_identity(&rig, "adopt-grants", "entry-1", None).await;
+            let handle = mob_handle(&rig, "adopt-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            assert!(
+                matches!(
+                    handle.identity_entry(&entry),
+                    Ok(meerkat_mob::IdentityEntryRead::NotAnEntry { .. })
+                ),
+                "the adoption ended the identity's entry: {:?}",
+                handle.identity_entry(&entry)
+            );
+            let listed = list_identity(&rig, "adopt-grants", "entry-1", false).await;
+            assert_eq!(listed.len(), 1, "the identity keeps its grant: {listed:?}");
+            assert_eq!(listed[0]["grant_id"], grant["grant_id"], "{listed:?}");
+            assert_eq!(listed[0]["status"], "active", "{listed:?}");
+            let adopted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            assert_eq!(
+                adopted.grant_refusal(),
+                None,
+                "the grant admits the member the host's intent materialized: {adopted:?}"
+            );
+        }
+
+        /// A complete roster's seal ends every unseated entry it does not
+        /// list in its one step, and their grants with them, before the
+        /// step commits. When no entry's grant end succeeds (the grant
+        /// store fails), the step fails and nothing commits: both entries
+        /// and all their grants stand, and the next apply ends them all.
+        /// Ending grants for several identities is not atomic: the row
+        /// after this one fails the second entry's end only.
+        #[tokio::test]
+        async fn a_seal_whose_grant_store_fails_is_refused_and_the_next_apply_ends_them() {
+            let rig = rig().await;
+            create_mob(&rig, "seal-step", shell_gated_role()).await;
+            let handle = mob_handle(&rig, "seal-step").await;
+            let mut grants = Vec::new();
+            for name in ["entry-1", "entry-2"] {
+                declare_entry(&rig, "seal-step", name).await;
+                grants.push((
+                    meerkat_mob::AgentIdentity::from(name),
+                    grant_identity_shell(&rig, "seal-step", name, 600_000).await,
+                ));
+                handle
+                    .retire(meerkat_mob::AgentIdentity::from(name))
+                    .await
+                    .expect("the host retires the entry's member");
+            }
+            let complete =
+                || meerkat_mob::DeclaredRoster::complete(Vec::<meerkat_mob::DeclaredEntry>::new());
+
+            rig.memory
+                .fail_tool_grant_store_for_test(Some("grant store offline"));
+            let failed = handle.apply_declared_roster(complete()).await;
+            rig.memory.fail_tool_grant_store_for_test(None);
+            assert!(
+                failed.is_err(),
+                "a seal whose grant end fails fails its step: {failed:?}"
+            );
+            for (entry, _) in &grants {
+                assert!(
+                    matches!(
+                        handle.identity_entry(entry),
+                        Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+                    ),
+                    "the failed step ended no entry: {entry}"
+                );
+                assert_eq!(
+                    list_identity(&rig, "seal-step", entry.as_str(), false)
+                        .await
+                        .len(),
+                    1,
+                    "the failed step ended no grant: {entry}"
+                );
+            }
+
+            let sealed = handle
+                .apply_declared_roster(complete())
+                .await
+                .expect("the next apply seals");
+            for (entry, grant) in &grants {
+                assert!(
+                    matches!(
+                        sealed.unlisted.get(entry),
+                        Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                    ),
+                    "{entry}: {:?}",
+                    sealed.unlisted
+                );
+                assert_ended(
+                    &list_identity(&rig, "seal-step", entry.as_str(), true).await,
+                    grant,
+                    "the seal ended the entry's grant",
+                );
+            }
+        }
+
+        /// Ending grants for several identities in one step is not atomic.
+        /// When the seal's end of the second entry's grants fails, the
+        /// first entry's grants it already ended stay ended, and nothing
+        /// else commits: the seal fails, both entries stand, and so do the
+        /// second entry's grants. The next apply ends the rest and seals.
+        #[tokio::test]
+        async fn a_seal_whose_second_grant_end_fails_keeps_the_first_end_and_commits_nothing_else()
+        {
+            let rig = rig().await;
+            create_mob(&rig, "seal-partial", shell_gated_role()).await;
+            let handle = mob_handle(&rig, "seal-partial").await;
+            let mut grants = Vec::new();
+            for name in ["entry-1", "entry-2"] {
+                declare_entry(&rig, "seal-partial", name).await;
+                grants.push((
+                    meerkat_mob::AgentIdentity::from(name),
+                    grant_identity_shell(&rig, "seal-partial", name, 600_000).await,
+                ));
+                handle
+                    .retire(meerkat_mob::AgentIdentity::from(name))
+                    .await
+                    .expect("the host retires the entry's member");
+            }
+            let complete =
+                || meerkat_mob::DeclaredRoster::complete(Vec::<meerkat_mob::DeclaredEntry>::new());
+            let second = meerkat_core::tool_grant::ToolGrantSubject::member(
+                "seal-partial",
+                &handle.live_incarnation(),
+                "entry-2",
+            )
+            .key();
+
+            rig.memory.fail_tool_grant_subject_for_test(
+                second.as_str(),
+                Some("entry-2's grants offline"),
+            );
+            let failed = handle.apply_declared_roster(complete()).await;
+            rig.memory
+                .fail_tool_grant_subject_for_test(second.as_str(), None);
+            assert!(
+                failed.is_err(),
+                "a seal whose second grant end fails fails its step: {failed:?}"
+            );
+            for (entry, _) in &grants {
+                assert!(
+                    matches!(
+                        handle.identity_entry(entry),
+                        Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+                    ),
+                    "the failed step ended no entry: {entry}"
+                );
+            }
+            assert_ended(
+                &list_identity(&rig, "seal-partial", "entry-1", true).await,
+                &grants[0].1,
+                "the first entry's ended grant stays ended",
+            );
+            assert_eq!(
+                list_identity(&rig, "seal-partial", "entry-2", false)
+                    .await
+                    .len(),
+                1,
+                "the second entry's grant stands"
+            );
+
+            let sealed = handle
+                .apply_declared_roster(complete())
+                .await
+                .expect("the next apply seals");
+            for (entry, grant) in &grants {
+                assert!(
+                    matches!(
+                        sealed.unlisted.get(entry),
+                        Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                    ),
+                    "{entry}: {:?}",
+                    sealed.unlisted
+                );
+                assert_ended(
+                    &list_identity(&rig, "seal-partial", entry.as_str(), true).await,
+                    grant,
+                    "the next apply ended the entry's grant",
+                );
+            }
+        }
+
+        /// A member's session grants end with its identity: a name created
+        /// again by a resume of the retired member's archived session sees
+        /// none of them, and its call needs a grant.
+        #[tokio::test]
+        async fn a_member_resumed_on_its_archived_session_inherits_no_session_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "session-grants", shell_gated_role()).await;
+            spawn(&rig, "session-grants", "worker-1", None).await;
+            let session_id = member_session(&rig, "session-grants", "worker-1").await;
+            let grant = grant_session_shell(&rig, &session_id, 600_000).await;
+            let admitted = probe(&mut rig, "session-grants", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "the session grant opens shell: {admitted:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "session-grants", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "session-grants",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                    "launch_mode": {
+                        "mode": "resume",
+                        "bridge_session_id": session_id.to_string(),
+                    },
+                }),
+                "the name is created again on the archived session",
+            )
+            .await;
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &grant,
+                "the identity's end ended its session's grant",
+            );
+            let resumed = probe(&mut rig, "session-grants", "worker-1").await;
+            assert_eq!(
+                resumed.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the resumed member needs a grant of its own: {resumed:?}"
+            );
+        }
+
+        /// The reset ends its identities' grants before its epoch marker.
+        /// When that end fails, the reset is refused: the mob is left
+        /// Stopped with no `MobReset` row and the grants stand, and a retry
+        /// of the reset ends them.
+        #[tokio::test]
+        async fn a_reset_whose_grant_end_fails_is_refused_and_a_retry_ends_them() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-retry", shell_gated_role()).await;
+            declare_entry(&rig, "reset-retry", "entry-1").await;
+            let grant = grant_identity_shell(&rig, "reset-retry", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "reset-retry", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            let reset = serde_json::json!({"mob_id": "reset-retry", "action": "reset"});
+
+            rig.memory
+                .fail_tool_grant_store_for_test(Some("grant store offline"));
+            let refused = call(&rig, "mob/lifecycle", reset.clone()).await;
+            rig.memory.fail_tool_grant_store_for_test(None);
+            assert!(
+                refused.error.is_some(),
+                "a reset whose grant end fails is refused: {refused:?}"
+            );
+            let handle = mob_handle(&rig, "reset-retry").await;
+            assert_eq!(
+                handle.status().await.expect("the mob's state"),
+                meerkat_mob::MobState::Stopped,
+                "the refused reset leaves the mob Stopped"
+            );
+            let journal = handle
+                .events()
+                .replay_all()
+                .await
+                .expect("the mob's journal");
+            assert!(
+                journal
+                    .iter()
+                    .all(|event| !matches!(event.kind, meerkat_mob::MobEventKind::MobReset)),
+                "the refused reset appends no epoch marker"
+            );
+            assert_eq!(
+                list_identity(&rig, "reset-retry", "entry-1", false)
+                    .await
+                    .len(),
+                1,
+                "the entry's grant stands"
+            );
+
+            ok(&rig, "mob/lifecycle", reset, "the retried reset commits").await;
+            assert_ended(
+                &list_identity(&rig, "reset-retry", "entry-1", true).await,
+                &grant,
+                "the retried reset ended the entry's grant",
+            );
+        }
+
+        /// The reset ends the grants of the sessions MobMachine holds for
+        /// its identities, not only the identities' own: an unseated entry's
+        /// archived session record is one, and a grant of that session
+        /// reads revoked after the reset.
+        #[tokio::test]
+        async fn a_mob_reset_ends_the_grants_of_its_entries_archived_sessions() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-sessions", shell_gated_role()).await;
+            declare_entry(&rig, "reset-sessions", "entry-1").await;
+            let session_id = member_session(&rig, "reset-sessions", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "reset-sessions", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "reset-sessions", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "reset-sessions").await;
+            handle
+                .retire(meerkat_mob::AgentIdentity::from("entry-1"))
+                .await
+                .expect("the host retires the entry's member");
+            assert_eq!(
+                list_session(&rig, &session_id, false).await.len(),
+                1,
+                "the entry outlives the retirement, unseated, and its archived session's \
+                 grant stands"
+            );
+
+            ok(
+                &rig,
+                "mob/lifecycle",
+                serde_json::json!({"mob_id": "reset-sessions", "action": "reset"}),
+                "the mob resets",
+            )
+            .await;
+            assert_ended(
+                &list_identity(&rig, "reset-sessions", "entry-1", true).await,
+                &identity_grant,
+                "the reset ended the entry's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the reset ended the grant of the entry's archived session",
+            );
+        }
+    }
+
+    /// The MCP server gate over `session/create`, `mcp/*`, `mob/*` and
+    /// `tool_grants/*`: a gate that names an MCP server, or gates every
+    /// server its build does not configure, keeps that server's tools hidden
+    /// and refused until an `mcp_server` grant opens them; a gated server a
+    /// member's profile configures starts no process until a grant covers
+    /// it; an identity grant answers whether it applies to the member's
+    /// running build, and `tool_grants/list` answers the member's gate.
+    #[cfg(all(feature = "mcp", feature = "mob", feature = "workspace-tests"))]
+    mod server_gate_rpc {
+        use super::*;
+        use meerkat_core::tool_grant::{
+            TOOL_GRANT_EXPIRED_CODE, TOOL_GRANT_REQUIRED_CODE, TOOL_GRANT_REVOKED_CODE,
+            TOOL_GRANT_UNAVAILABLE_CODE,
+        };
+        use std::collections::{BTreeSet, HashMap, VecDeque};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Bounds a failure only; a passing row never waits for it.
+        const PROBE_BOUND: Duration = Duration::from_mins(1);
+
+        /// What one turn offered the model and, when the turn called a tool,
+        /// that call's result text.
+        #[derive(Debug, Clone)]
+        struct Turn {
+            offered: BTreeSet<String>,
+            result: Option<String>,
+        }
+
+        impl Turn {
+            fn offers(&self, name: &str) -> bool {
+                self.offered.contains(name)
+            }
+
+            /// Whether the turn offered any tool whose name starts `prefix`.
+            fn offers_any(&self, prefix: &str) -> bool {
+                self.offered.iter().any(|name| name.starts_with(prefix))
+            }
+
+            fn result(&self) -> &str {
+                self.result.as_deref().expect("the turn called a tool")
+            }
+
+            /// The grant refusal code the call's result carries, if any.
+            fn grant_refusal(&self) -> Option<&'static str> {
+                [
+                    TOOL_GRANT_REQUIRED_CODE,
+                    TOOL_GRANT_EXPIRED_CODE,
+                    TOOL_GRANT_REVOKED_CODE,
+                    TOOL_GRANT_UNAVAILABLE_CODE,
+                ]
+                .into_iter()
+                .find(|code| self.result().contains(code))
+            }
+
+            /// Whether the call found no tool of its name.
+            fn found_no_tool(&self) -> bool {
+                self.result().contains("tool_not_found")
+            }
+
+            /// Whether the call ran: the fixture's tools answer `probe`.
+            fn ran(&self) -> bool {
+                self.grant_refusal().is_none()
+                    && !self.found_no_tool()
+                    && self.result().contains("probe")
+            }
+
+            /// Whether the call met the server connected: it ran, or the
+            /// grant gate refused it. A server still connecting answers
+            /// neither (its tool is not found, or not loadable yet).
+            fn settled(&self) -> bool {
+                self.ran() || self.grant_refusal().is_some()
+            }
+        }
+
+        /// One scripted turn: the names the model asks the deferred catalog
+        /// for (MCP tools sit behind it), then the tool it calls, if any.
+        #[derive(Debug, Clone, Default)]
+        struct Step {
+            load: Vec<String>,
+            call: Option<String>,
+        }
+
+        /// The model of these rows. A turn the row scripted asks the deferred
+        /// catalog for its names, if any, and reports the tool names the
+        /// request after that load offers; then it calls the scripted tool,
+        /// if any, with `{"message": "probe"}`, and reports that call's result
+        /// text. An unscripted turn reports its first request's offer and
+        /// answers.
+        struct ScriptedProbeClient {
+            script: StdMutex<VecDeque<Step>>,
+            pending: StdMutex<Option<String>>,
+            next_call: AtomicUsize,
+            offered: mpsc::UnboundedSender<BTreeSet<String>>,
+            results: mpsc::UnboundedSender<String>,
+        }
+
+        impl ScriptedProbeClient {
+            fn script(&self, step: Step) {
+                self.script.lock().unwrap().push_back(step);
+            }
+        }
+
+        #[async_trait]
+        impl LlmClient for ScriptedProbeClient {
+            fn project_replay_messages(
+                &self,
+                messages: &[meerkat_core::Message],
+            ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+                Ok(messages.to_vec())
+            }
+
+            fn stream<'a>(
+                &'a self,
+                request: &'a meerkat_client::LlmRequest,
+            ) -> Pin<
+                Box<
+                    dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let offered = || -> BTreeSet<String> {
+                    request
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.to_string())
+                        .collect()
+                };
+                let probe = |tool: String| (tool, serde_json::json!({"message": "probe"}));
+                // The latest turn message: a boundary's system notice may
+                // follow the tool results it answers.
+                let latest = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !matches!(message, Message::SystemNotice(_)));
+                let call = match latest {
+                    Some(Message::ToolResults { results, .. })
+                        if results
+                            .iter()
+                            .any(|result| result.tool_use_id.starts_with("load-")) =>
+                    {
+                        let _ = self.offered.send(offered());
+                        self.pending.lock().unwrap().take().map(probe)
+                    }
+                    Some(Message::ToolResults { results, .. }) => {
+                        for result in results {
+                            let _ = self.results.send(result.text_content());
+                        }
+                        None
+                    }
+                    _ => match self.script.lock().unwrap().pop_front() {
+                        Some(Step { load, call }) if !load.is_empty() => {
+                            *self.pending.lock().unwrap() = call;
+                            Some((
+                                meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME.to_string(),
+                                serde_json::json!({"names": load}),
+                            ))
+                        }
+                        step => {
+                            let _ = self.offered.send(offered());
+                            step.and_then(|step| step.call).map(probe)
+                        }
+                    },
+                };
+                let mut events = Vec::new();
+                let stop_reason = match call {
+                    Some((tool, args)) => {
+                        let call = self.next_call.fetch_add(1, Ordering::SeqCst);
+                        let id = if tool == meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME {
+                            format!("load-{call}")
+                        } else {
+                            format!("probe-call-{call}")
+                        };
+                        events.push(Ok(meerkat_client::LlmEvent::ToolCallComplete {
+                            id,
+                            name: tool,
+                            args,
+                            meta: None,
+                        }));
+                        StopReason::ToolUse
+                    }
+                    None => {
+                        events.push(Ok(meerkat_client::LlmEvent::TextDelta {
+                            delta: "noted".to_string(),
+                            meta: None,
+                        }));
+                        StopReason::EndTurn
+                    }
+                };
+                events.push(Ok(meerkat_client::LlmEvent::UsageUpdate {
+                    usage: meerkat_core::TurnUsage::host_declared(
+                        meerkat_core::Provider::Anthropic,
+                        &request.model,
+                        meerkat_core::Usage::default(),
+                    ),
+                }));
+                events.push(Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::success(stop_reason),
+                }));
+                Box::pin(stream::iter(events))
+            }
+
+            fn provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Anthropic
+            }
+
+            async fn health_check(&self) -> Result<(), LlmError> {
+                Ok(())
+            }
+        }
+
+        struct Rig {
+            router: MethodRouter,
+            client: Arc<ScriptedProbeClient>,
+            offered: mpsc::UnboundedReceiver<BTreeSet<String>>,
+            results: mpsc::UnboundedReceiver<String>,
+            temp: tempfile::TempDir,
+            _notifications: mpsc::Receiver<RpcNotification>,
+        }
+
+        async fn rig() -> Rig {
+            let temp = tempfile::tempdir().unwrap();
+            let (offered_tx, offered) = mpsc::unbounded_channel();
+            let (results_tx, results) = mpsc::unbounded_channel();
+            let client = Arc::new(ScriptedProbeClient {
+                script: StdMutex::new(VecDeque::new()),
+                pending: StdMutex::new(None),
+                next_call: AtomicUsize::new(0),
+                offered: offered_tx,
+                results: results_tx,
+            });
+            let factory = AgentFactory::new(temp.path().join("sessions"));
+            let config = anthropic_test_config();
+            let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+            let runtime = SessionRuntime::new(
+                factory,
+                config.clone(),
+                10,
+                runtime_backed_persistence(store),
+                NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime");
+            let config_store: Arc<dyn ConfigStore> =
+                Arc::new(MemoryConfigStore::new(config, meerkat_models::canonical()));
+            runtime.set_default_llm_client(Some(Arc::clone(&client) as Arc<dyn LlmClient>));
+            runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
+                Arc::clone(&config_store),
+                temp.path().join("config_state.json"),
+            )));
+            let (notif_tx, notif_rx) = mpsc::channel(100);
+            let router = MethodRouter::new(
+                Arc::new(runtime),
+                config_store,
+                NotificationSink::new(notif_tx),
+            )
+            .expect("construct runtime authority");
+            Rig {
+                router,
+                client,
+                offered,
+                results,
+                temp,
+                _notifications: notif_rx,
+            }
+        }
+
+        /// The fixture MCP server `name`, whose tools are `<prefix>echo`,
+        /// `<prefix>add`, `<prefix>slow` and `<prefix>fail`, and whose process
+        /// appends a line to `started` when it starts.
+        fn fixture_server(
+            name: &str,
+            prefix: &str,
+            started: &std::path::Path,
+        ) -> meerkat_core::McpServerConfig {
+            meerkat_core::McpServerConfig::stdio(
+                name,
+                mcp_test_server::fixture_binary()
+                    .to_string_lossy()
+                    .to_string(),
+                vec![
+                    "--tool-prefix".to_string(),
+                    prefix.to_string(),
+                    "--started-file".to_string(),
+                    started.to_string_lossy().to_string(),
+                ],
+                HashMap::new(),
+            )
+        }
+
+        /// How many processes the fixture servers logging to `started`
+        /// started.
+        fn started_count(started: &std::path::Path) -> usize {
+            std::fs::read_to_string(started).map_or(0, |log| log.lines().count())
+        }
+
+        async fn call(rig: &Rig, method: &str, params: serde_json::Value) -> RpcResponse {
+            rig.router
+                .dispatch(make_request(method, params))
+                .await
+                .expect("response")
+        }
+
+        /// The success result of `method`, failing the row with `what` when
+        /// the call is refused.
+        async fn ok(
+            rig: &Rig,
+            method: &str,
+            params: serde_json::Value,
+            what: &str,
+        ) -> serde_json::Value {
+            let response = call(rig, method, params).await;
+            assert!(
+                response.error.is_none(),
+                "{what}: {method} was refused: {:?}",
+                response.error
+            );
+            result_value(&response)
+        }
+
+        /// The kind of the typed refusal a `tool_grants/*` call answered.
+        fn refusal_kind(response: &RpcResponse) -> String {
+            let failure = response.error.as_ref().expect("a refused call is an error");
+            assert_eq!(failure.code, error::INVALID_PARAMS, "{failure:?}");
+            let data = failure
+                .data
+                .as_ref()
+                .unwrap_or_else(|| panic!("a typed refusal carries data: {failure:?}"));
+            assert_eq!(data["kind"], "tool_grant_request_refused", "{failure:?}");
+            data["tool_grant_request_refusal"]["kind"]
+                .as_str()
+                .expect("a refusal kind")
+                .to_string()
+        }
+
+        /// The strings of a JSON array (none for anything else).
+        fn names(value: &serde_json::Value) -> BTreeSet<String> {
+            value
+                .as_array()
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
+        fn session_subject(session_id: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "session", "session_id": session_id})
+        }
+
+        fn identity_subject(mob_id: &str, identity: &str) -> serde_json::Value {
+            serde_json::json!({"kind": "identity", "mob_id": mob_id, "identity": identity})
+        }
+
+        /// A grant of `target` to `subject` for ten minutes: the result.
+        async fn grant(
+            rig: &Rig,
+            subject: serde_json::Value,
+            target: serde_json::Value,
+            what: &str,
+        ) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": subject,
+                    "target": target,
+                    "duration_ms": 600_000,
+                }),
+                what,
+            )
+            .await
+        }
+
+        async fn revoke(rig: &Rig, grant: &serde_json::Value) {
+            ok(
+                rig,
+                "tool_grants/revoke",
+                serde_json::json!({"grant_id": grant["grant"]["grant_id"], "reason": "done"}),
+                "the grant is revoked",
+            )
+            .await;
+        }
+
+        async fn list(rig: &Rig, subject: serde_json::Value) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/list",
+                serde_json::json!({"subject": subject, "include_ended": true}),
+                "the subject's grants are listed",
+            )
+            .await
+        }
+
+        /// A session whose build takes the gate `gate`, its first turn run.
+        async fn gated_session(rig: &Rig, gate: serde_json::Value) -> String {
+            ok(
+                rig,
+                "session/create",
+                serde_json::json!({"prompt": "hello", "grant_gated_tools": gate}),
+                "a session's gate may name MCP servers",
+            )
+            .await["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string()
+        }
+
+        async fn add_server(rig: &Rig, session_id: &str, server: meerkat_core::McpServerConfig) {
+            ok(
+                rig,
+                "mcp/add",
+                serde_json::json!({"session_id": session_id, "server_config": server}),
+                "the server is staged",
+            )
+            .await;
+        }
+
+        async fn remove_server(rig: &Rig, session_id: &str, server: &str) {
+            ok(
+                rig,
+                "mcp/remove",
+                serde_json::json!({"session_id": session_id, "server_name": server}),
+                "the server's removal is staged",
+            )
+            .await;
+        }
+
+        /// Forget what earlier turns reported.
+        fn drain(rig: &mut Rig) {
+            while rig.offered.try_recv().is_ok() {}
+            while rig.results.try_recv().is_ok() {}
+        }
+
+        /// What the turn now running reports: its offer, and its call's
+        /// result when it calls a tool.
+        async fn observe(rig: &mut Rig, calls: bool) -> Turn {
+            let offered = tokio::time::timeout(PROBE_BOUND, rig.offered.recv())
+                .await
+                .expect("the turn reaches the model within the bound")
+                .expect("the offer channel stays open");
+            let result = if calls {
+                Some(
+                    tokio::time::timeout(PROBE_BOUND, rig.results.recv())
+                        .await
+                        .expect("the turn's call answers within the bound")
+                        .expect("the result channel stays open"),
+                )
+            } else {
+                None
+            };
+            Turn { offered, result }
+        }
+
+        /// Script the next turn: ask the deferred catalog for `load`, then
+        /// call `call`, if any. An empty script answers at once.
+        fn script(rig: &mut Rig, load: &[&str], call: Option<&str>) {
+            drain(rig);
+            if !load.is_empty() || call.is_some() {
+                rig.client.script(Step {
+                    load: load.iter().map(|name| (*name).to_string()).collect(),
+                    call: call.map(str::to_owned),
+                });
+            }
+        }
+
+        /// One turn of the session as scripted (`load`, then `call`).
+        async fn turn(rig: &mut Rig, session_id: &str, load: &[&str], call: Option<&str>) -> Turn {
+            script(rig, load, call);
+            ok(
+                rig,
+                "turn/start",
+                serde_json::json!({"session_id": session_id, "prompt": "go"}),
+                "the session takes a turn",
+            )
+            .await;
+            observe(rig, call.is_some()).await
+        }
+
+        /// Turns of the session that load `load` and call `call`, until one
+        /// satisfies `done` (a staged server connects in the background).
+        async fn turn_until(
+            rig: &mut Rig,
+            session_id: &str,
+            load: &[&str],
+            call: &str,
+            done: impl Fn(&Turn) -> bool,
+        ) -> Turn {
+            let deadline = tokio::time::Instant::now() + PROBE_BOUND;
+            loop {
+                let turn = turn(rig, session_id, load, Some(call)).await;
+                if done(&turn) {
+                    return turn;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no turn within the bound satisfied the row; the last: {turn:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        /// A mob profile with `tools` (comms added).
+        fn worker_profile(mut tools: serde_json::Value) -> serde_json::Value {
+            tools["comms"] = serde_json::json!(true);
+            serde_json::json!({
+                "model": "claude-sonnet-4-5",
+                "external_addressable": true,
+                "tools": tools,
+            })
+        }
+
+        /// A mob whose `worker` role is bound to `profile`.
+        async fn create_mob(rig: &Rig, mob_id: &str, profile: serde_json::Value) {
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {"id": mob_id, "profiles": {"worker": profile}}
+                }),
+                "the mob is created",
+            )
+            .await;
+        }
+
+        /// Spawn `identity` in the `worker` role, with the profile `own` of
+        /// its own when given.
+        async fn spawn(rig: &Rig, mob_id: &str, identity: &str, own: Option<serde_json::Value>) {
+            let mut params = serde_json::json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": identity,
+                "runtime_mode": "turn_driven",
+            });
+            if let Some(own) = own {
+                params["override_profile"] = own;
+            }
+            ok(rig, "mob/spawn", params, "the member spawns").await;
+        }
+
+        async fn respawn(rig: &Rig, mob_id: &str, identity: &str) {
+            ok(
+                rig,
+                "mob/respawn",
+                serde_json::json!({"mob_id": mob_id, "agent_identity": identity}),
+                "the member respawns",
+            )
+            .await;
+        }
+
+        /// One member turn as scripted (`load`, then `call`).
+        async fn member_turn(
+            rig: &mut Rig,
+            mob_id: &str,
+            identity: &str,
+            load: &[&str],
+            call: Option<&str>,
+        ) -> Turn {
+            script(rig, load, call);
+            ok(
+                rig,
+                "mob/member_send",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": identity,
+                    "content": "go",
+                }),
+                "the member takes a turn",
+            )
+            .await;
+            observe(rig, call.is_some()).await
+        }
+
+        /// Member turns that load `load` and call `call`, until one satisfies
+        /// `done`.
+        async fn member_turn_until(
+            rig: &mut Rig,
+            mob_id: &str,
+            identity: &str,
+            load: &[&str],
+            call: &str,
+            done: impl Fn(&Turn) -> bool,
+        ) -> Turn {
+            let deadline = tokio::time::Instant::now() + PROBE_BOUND;
+            loop {
+                let turn = member_turn(rig, mob_id, identity, load, Some(call)).await;
+                if done(&turn) {
+                    return turn;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "no member turn within the bound satisfied the row; the last: {turn:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        /// The tools of the fixture server `s` the rows ask for.
+        const S_TOOLS: [&str; 2] = ["s_echo", "s_add"];
+
+        /// A session whose gate names the MCP server `s`: once `s` is added
+        /// its tools are hidden and a call is refused `tool_grant_required`;
+        /// an `mcp_server` grant opens them at the following turn; after a
+        /// revoke they are hidden again and a call is refused
+        /// `tool_grant_revoked`. A session subject's list carries no member
+        /// gate.
+        #[tokio::test]
+        async fn a_gated_server_opens_only_under_a_server_grant() {
+            let mut rig = rig().await;
+            let session_id = gated_session(&rig, serde_json::json!({"mcp_servers": ["s"]})).await;
+            let started = rig.temp.path().join("started");
+            add_server(&rig, &session_id, fixture_server("s", "s_", &started)).await;
+            let closed = turn_until(&mut rig, &session_id, &S_TOOLS, "s_echo", |turn| {
+                turn.grant_refusal().is_some()
+            })
+            .await;
+            assert_eq!(
+                closed.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{closed:?}"
+            );
+            assert!(
+                !closed.offers_any("s_"),
+                "the gated server's tools are hidden: {closed:?}"
+            );
+
+            let granted = grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "a server grant",
+            )
+            .await;
+            assert_eq!(
+                granted["grant"]["target"],
+                serde_json::json!({"kind": "mcp_server", "server": "s"})
+            );
+            assert!(
+                granted.get("applies").is_none(),
+                "only an identity grant answers whether it applies: {granted}"
+            );
+            let open = turn(&mut rig, &session_id, &S_TOOLS, Some("s_echo")).await;
+            assert!(open.offers("s_echo") && open.offers("s_add"), "{open:?}");
+            assert!(open.ran(), "the granted server's tool runs: {open:?}");
+
+            revoke(&rig, &granted).await;
+            let revoked = turn(&mut rig, &session_id, &S_TOOLS, Some("s_echo")).await;
+            assert!(!revoked.offers_any("s_"), "{revoked:?}");
+            assert_eq!(
+                revoked.grant_refusal(),
+                Some(TOOL_GRANT_REVOKED_CODE),
+                "{revoked:?}"
+            );
+            let listed = list(&rig, session_subject(&session_id)).await;
+            assert!(listed.get("gate").is_none(), "{listed}");
+        }
+
+        /// Servers `s` (gated) and `t` (ungated, one of whose names is gated):
+        /// a tool target naming one of `s`'s tools is refused; a grant of the
+        /// gated name `t_add` opens it and none of `s`'s tools; a server grant
+        /// narrowed to `s_echo` opens it alone, and `tools: []` is no target.
+        /// Once `s` is removed, a server `u` serving the names `s` had keeps
+        /// them hidden for the rest of the build.
+        #[tokio::test]
+        async fn a_server_grant_opens_its_own_server_only_within_its_tools() {
+            const TOOLS: [&str; 4] = ["s_echo", "s_add", "t_echo", "t_add"];
+            let mut rig = rig().await;
+            let session_id = gated_session(
+                &rig,
+                serde_json::json!({"mcp_servers": ["s"], "tools": ["t_add"]}),
+            )
+            .await;
+            let started = rig.temp.path().join("started");
+            add_server(&rig, &session_id, fixture_server("s", "s_", &started)).await;
+            add_server(&rig, &session_id, fixture_server("t", "t_", &started)).await;
+            let connected = turn_until(&mut rig, &session_id, &TOOLS, "s_echo", |turn| {
+                turn.grant_refusal().is_some() && turn.offers("t_echo")
+            })
+            .await;
+            assert!(
+                !connected.offers("t_add") && !connected.offers_any("s_"),
+                "{connected:?}"
+            );
+
+            let named = call(
+                &rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "tool", "name": "s_echo"},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(refusal_kind(&named), "target_not_gated");
+            assert!(
+                named
+                    .error
+                    .as_ref()
+                    .is_some_and(|failure| failure.message.contains("mcp_server")),
+                "the refusal names the server form: {named:?}"
+            );
+            let empty = call(
+                &rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(&session_id),
+                    "target": {"kind": "mcp_server", "server": "s", "tools": []},
+                    "duration_ms": 60_000,
+                }),
+            )
+            .await;
+            assert_eq!(refusal_kind(&empty), "empty_target");
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "tool", "name": "t_add"}),
+                "a grant of a gated name",
+            )
+            .await;
+            let by_name = turn(&mut rig, &session_id, &TOOLS, Some("s_echo")).await;
+            assert!(
+                by_name.offers("t_add") && by_name.offers("t_echo"),
+                "{by_name:?}"
+            );
+            assert!(!by_name.offers_any("s_"), "{by_name:?}");
+            assert_eq!(
+                by_name.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{by_name:?}"
+            );
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "s", "tools": ["s_echo"]}),
+                "a server grant narrowed to one tool",
+            )
+            .await;
+            let narrowed = turn(&mut rig, &session_id, &TOOLS, Some("s_echo")).await;
+            assert!(
+                narrowed.offers("s_echo") && !narrowed.offers("s_add"),
+                "{narrowed:?}"
+            );
+            assert!(narrowed.ran(), "{narrowed:?}");
+            let outside = turn(&mut rig, &session_id, &TOOLS, Some("s_add")).await;
+            assert_eq!(
+                outside.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{outside:?}"
+            );
+
+            remove_server(&rig, &session_id, "s").await;
+            turn_until(&mut rig, &session_id, &[], "s_echo", Turn::found_no_tool).await;
+            add_server(&rig, &session_id, fixture_server("u", "s_", &started)).await;
+            let reused = turn_until(&mut rig, &session_id, &S_TOOLS, "s_echo", Turn::settled).await;
+            assert!(!reused.offers_any("s_"), "{reused:?}");
+            assert_eq!(
+                reused.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "a name a gated server had stays gated for the build: {reused:?}"
+            );
+        }
+
+        /// A session whose gate gates every MCP server it does not configure,
+        /// over a configured server `c` (configured as a trusted host composes
+        /// one: a public `session/create` takes no configured server): `c`
+        /// stays open, a server `n` added later is hidden and refused, and an
+        /// `mcp_server` grant for `n` opens it at the following turn.
+        #[tokio::test]
+        async fn the_unconfigured_servers_mode_gates_a_later_server_only() {
+            const TOOLS: [&str; 2] = ["n_echo", "c_echo"];
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let params: crate::handlers::session::CreateSessionParams =
+                serde_json::from_value(serde_json::json!({
+                    "prompt": "hello",
+                    "grant_gated_tools": {"unconfigured_mcp_servers": true},
+                }))
+                .expect("session/create takes the unconfigured-servers mode");
+            let created =
+                crate::handlers::session::create_session_with_params_on_route_and_configured_mcp(
+                    Some(RpcId::Num(1)),
+                    params,
+                    Arc::clone(&rig.router.runtime),
+                    &NotificationSink::noop(),
+                    &rig.router.runtime.runtime_adapter(),
+                    None,
+                    None,
+                    vec![fixture_server("c", "c_", &started)],
+                    None,
+                )
+                .await;
+            assert!(created.error.is_none(), "{:?}", created.error);
+            let session_id = result_value(&created)["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+
+            add_server(&rig, &session_id, fixture_server("n", "n_", &started)).await;
+            let closed = turn_until(&mut rig, &session_id, &TOOLS, "n_echo", |turn| {
+                turn.grant_refusal().is_some() && turn.offers("c_echo")
+            })
+            .await;
+            assert_eq!(
+                closed.grant_refusal(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{closed:?}"
+            );
+            assert!(!closed.offers_any("n_"), "{closed:?}");
+            let configured = turn(&mut rig, &session_id, &TOOLS, Some("c_echo")).await;
+            assert!(
+                configured.ran(),
+                "a configured server stays open: {configured:?}"
+            );
+
+            grant(
+                &rig,
+                session_subject(&session_id),
+                serde_json::json!({"kind": "mcp_server", "server": "n"}),
+                "a grant of a server the mode gates",
+            )
+            .await;
+            let open = turn(&mut rig, &session_id, &TOOLS, Some("n_echo")).await;
+            assert!(open.offers("n_echo") && open.offers("c_echo"), "{open:?}");
+            assert!(open.ran(), "{open:?}");
+        }
+
+        /// A mob whose `worker` role is bound to the realm profile `name`,
+        /// created with `profile`: on rkat-rpc a member's profile configures
+        /// MCP servers only through a realm profile (an inline profile and a
+        /// spawn override take none).
+        async fn create_realm_mob(rig: &Rig, mob_id: &str, name: &str, profile: serde_json::Value) {
+            ok(
+                rig,
+                "mob/profile/create",
+                serde_json::json!({"name": name, "profile": profile}),
+                "a realm profile configures and gates a server",
+            )
+            .await;
+            ok(
+                rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {"id": mob_id, "profiles": {"worker": {"realm_profile": name}}}
+                }),
+                "a mob over the realm profile",
+            )
+            .await;
+        }
+
+        /// A role whose profile configures the fixture server `s` and gates
+        /// it: a member built without a grant starts no `s` process; after an
+        /// identity `mcp_server` grant and a respawn, `s` is connected and its
+        /// tools run; after the grant ends and another respawn, `s` is not
+        /// connected.
+        #[tokio::test]
+        async fn a_role_gated_server_starts_only_while_an_identity_grant_covers_it() {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            create_realm_mob(
+                &rig,
+                "role-lazy",
+                "lazy-worker",
+                worker_profile(serde_json::json!({
+                    "mcp_servers": [server],
+                    "grant_gated": {"mcp_servers": ["s"]},
+                })),
+            )
+            .await;
+            spawn(&rig, "role-lazy", "worker-1", None).await;
+            let before =
+                member_turn(&mut rig, "role-lazy", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(before.found_no_tool(), "{before:?}");
+            assert_eq!(started_count(&started), 0);
+
+            let granted = grant(
+                &rig,
+                identity_subject("role-lazy", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity server grant",
+            )
+            .await;
+            respawn(&rig, "role-lazy", "worker-1").await;
+            let open = member_turn_until(
+                &mut rig,
+                "role-lazy",
+                "worker-1",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            assert_eq!(started_count(&started), 1);
+
+            revoke(&rig, &granted).await;
+            respawn(&rig, "role-lazy", "worker-1").await;
+            let after =
+                member_turn(&mut rig, "role-lazy", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(after.found_no_tool(), "{after:?}");
+            assert_eq!(
+                started_count(&started),
+                1,
+                "a build no grant covers starts no new process"
+            );
+        }
+
+        /// A role whose profile configures and gates the server `s` and gates
+        /// the server `u` it does not configure; its member built without a
+        /// grant left `s` unattached. An identity grant of `s` answers
+        /// `applies: "at_next_build"`: a turn right after it still finds no
+        /// `s` tool and no `s` process starts. A grant of `u` answers `now`:
+        /// no build attaches `u`, and the running build gates it wherever it
+        /// is attached. After a respawn the build connects `s`, and a grant
+        /// of `s` answers `now`.
+        #[tokio::test]
+        async fn a_grant_of_a_server_its_build_left_unattached_applies_at_the_next_build() {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            create_realm_mob(
+                &rig,
+                "unattached",
+                "unattached-worker",
+                worker_profile(serde_json::json!({
+                    "mcp_servers": [server],
+                    "grant_gated": {"mcp_servers": ["s", "u"]},
+                })),
+            )
+            .await;
+            spawn(&rig, "unattached", "worker-1", None).await;
+            let before =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(before.found_no_tool(), "{before:?}");
+
+            let granted = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the unattached server",
+            )
+            .await;
+            assert_eq!(granted["applies"], "at_next_build", "{granted}");
+            let after =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(
+                after.found_no_tool(),
+                "the running build has no s tool: {after:?}"
+            );
+            assert_eq!(started_count(&started), 0);
+
+            let unconfigured = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "u"}),
+                "an identity grant of a gated server no build configures",
+            )
+            .await;
+            assert_eq!(unconfigured["applies"], "now", "{unconfigured}");
+
+            respawn(&rig, "unattached", "worker-1").await;
+            let open = member_turn_until(
+                &mut rig,
+                "unattached",
+                "worker-1",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            let attached = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the attached server",
+            )
+            .await;
+            assert_eq!(attached["applies"], "now", "{attached}");
+        }
+
+        /// A role gates the shell family and the tool name `fx_echo`, which
+        /// nothing the member mounts provides; a member spawned with its own
+        /// profile that switches shell off builds, with `fx_echo` gated from
+        /// the moment it appears and shell ignored. Its list shows both; a
+        /// grant of shell answers `not_mounted` and a grant of `fx_echo`
+        /// answers `now`.
+        #[tokio::test]
+        async fn a_member_list_shows_what_its_build_gates_and_ignores() {
+            let mut rig = rig().await;
+            create_mob(
+                &rig,
+                "union",
+                worker_profile(serde_json::json!({
+                    "grant_gated": {"families": ["shell"], "tools": ["fx_echo"]},
+                })),
+            )
+            .await;
+            spawn(
+                &rig,
+                "union",
+                "worker-1",
+                Some(worker_profile(serde_json::json!({"shell": false}))),
+            )
+            .await;
+            member_turn(&mut rig, "union", "worker-1", &[], None).await;
+
+            let listed = list(&rig, identity_subject("union", "worker-1")).await;
+            let gate = &listed["gate"];
+            assert!(
+                names(&gate["running"]["gated"]["tools"]).contains("fx_echo"),
+                "{listed}"
+            );
+            assert!(
+                names(&gate["running"]["not_mounted"]["tools"]).contains("shell"),
+                "{listed}"
+            );
+            assert_eq!(
+                gate["next_build"]["not_mounted"]["families"],
+                serde_json::json!(["shell"]),
+                "{listed}"
+            );
+            assert!(
+                names(&gate["next_build"]["gated"]["tools"]).contains("fx_echo"),
+                "{listed}"
+            );
+
+            let shell = grant(
+                &rig,
+                identity_subject("union", "worker-1"),
+                serde_json::json!({"kind": "family", "family": "shell"}),
+                "a grant of an ignored family",
+            )
+            .await;
+            assert_eq!(shell["applies"], "not_mounted", "{shell}");
+            let echo = grant(
+                &rig,
+                identity_subject("union", "worker-1"),
+                serde_json::json!({"kind": "tool", "name": "fx_echo"}),
+                "a grant of a gated role name",
+            )
+            .await;
+            assert_eq!(echo["applies"], "now", "{echo}");
+        }
+
+        /// A gate the role's realm profile gains while a member built from the
+        /// role and a member spawned with its own profile are live reaches
+        /// their next builds only: their lists show it under
+        /// `gate.next_build` and not under `gate.running`, and a grant answers
+        /// `at_next_build`; after a respawn both builds gate it and a grant
+        /// answers `now`.
+        #[tokio::test]
+        async fn a_role_gate_added_while_members_are_live_applies_at_their_next_build() {
+            let mut rig = rig().await;
+            let created = ok(
+                &rig,
+                "mob/profile/create",
+                serde_json::json!({
+                    "name": "realm-worker",
+                    "profile": worker_profile(serde_json::json!({"shell": true})),
+                }),
+                "a realm profile",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "live-role",
+                        "profiles": {"worker": {"realm_profile": "realm-worker"}},
+                    }
+                }),
+                "a mob over the realm profile",
+            )
+            .await;
+            spawn(&rig, "live-role", "from-role", None).await;
+            spawn(
+                &rig,
+                "live-role",
+                "own-profile",
+                Some(worker_profile(serde_json::json!({"shell": true}))),
+            )
+            .await;
+            for identity in ["from-role", "own-profile"] {
+                member_turn(&mut rig, "live-role", identity, &[], None).await;
+            }
+
+            ok(
+                &rig,
+                "mob/profile/update",
+                serde_json::json!({
+                    "name": "realm-worker",
+                    "profile": worker_profile(serde_json::json!({
+                        "shell": true,
+                        "grant_gated": {"tools": ["shell"]},
+                    })),
+                    "expected_revision": created["revision"],
+                }),
+                "the role's realm profile gains a gate",
+            )
+            .await;
+            for identity in ["from-role", "own-profile"] {
+                let listed = list(&rig, identity_subject("live-role", identity)).await;
+                assert!(
+                    names(&listed["gate"]["next_build"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                assert!(
+                    !names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                let granted = grant(
+                    &rig,
+                    identity_subject("live-role", identity),
+                    serde_json::json!({"kind": "tool", "name": "shell"}),
+                    "a grant of the new gate's name",
+                )
+                .await;
+                assert_eq!(granted["applies"], "at_next_build", "{identity}: {granted}");
+            }
+
+            for identity in ["from-role", "own-profile"] {
+                respawn(&rig, "live-role", identity).await;
+                member_turn(&mut rig, "live-role", identity, &[], None).await;
+                let listed = list(&rig, identity_subject("live-role", identity)).await;
+                assert!(
+                    names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                    "{identity}: {listed}"
+                );
+                let granted = grant(
+                    &rig,
+                    identity_subject("live-role", identity),
+                    serde_json::json!({"kind": "tool", "name": "shell"}),
+                    "a grant after the respawn",
+                )
+                .await;
+                assert_eq!(granted["applies"], "now", "{identity}: {granted}");
+            }
+        }
+
+        /// A live member's identity grant answers `applies: "now"`, and its
+        /// list answers the member's gate, running and next build; a retired
+        /// identity's list answers its history without a gate.
+        #[tokio::test]
+        async fn an_identity_grant_answers_whether_it_applies_and_its_list_the_gate() {
+            let mut rig = rig().await;
+            create_mob(
+                &rig,
+                "gate-half",
+                worker_profile(serde_json::json!({"grant_gated": {"families": ["shell"]}})),
+            )
+            .await;
+            spawn(&rig, "gate-half", "worker-1", None).await;
+            member_turn(&mut rig, "gate-half", "worker-1", &[], None).await;
+
+            let granted = grant(
+                &rig,
+                identity_subject("gate-half", "worker-1"),
+                serde_json::json!({"kind": "family", "family": "shell"}),
+                "an identity grant",
+            )
+            .await;
+            assert_eq!(granted["applies"], "now", "{granted}");
+            let listed = list(&rig, identity_subject("gate-half", "worker-1")).await;
+            assert_eq!(
+                listed["gate"]["next_build"]["gated"]["families"],
+                serde_json::json!(["shell"]),
+                "{listed}"
+            );
+            assert!(
+                names(&listed["gate"]["running"]["gated"]["tools"]).contains("shell"),
+                "{listed}"
+            );
+
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "gate-half", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            let retired = list(&rig, identity_subject("gate-half", "worker-1")).await;
+            assert!(retired.get("gate").is_none(), "{retired}");
+            assert_eq!(
+                retired["grants"].as_array().map(Vec::len),
+                Some(1),
+                "{retired}"
+            );
         }
     }
 
@@ -8425,6 +11628,10 @@ mod tests {
             &self,
             _binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -12558,7 +15765,12 @@ mod tests {
             .map(|_| admission.try_admit(1).expect("data permit"))
             .collect();
         let emit = sink
-            .emit_mob_stream_event(&stream_id, 1, &serde_json::json!({"type": "synthetic"}))
+            .emit_mob_stream_event(
+                &stream_id,
+                1,
+                None,
+                &serde_json::json!({"type": "synthetic"}),
+            )
             .await;
         assert_eq!(emit, StreamEmitStatus::Overflow);
         let (observation, detail) = terminal_observation_from_emit_status(emit).unwrap();
@@ -13524,11 +16736,13 @@ mod tests {
         });
 
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 1, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 1, None, &event)
+                .await,
             StreamEmitStatus::Delivered
         );
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 2, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 2, None, &event)
+                .await,
             StreamEmitStatus::Overflow
         );
 
@@ -13588,7 +16802,9 @@ mod tests {
             }
         });
 
-        let emit_status = sink.emit_mob_stream_event(&stream_id, 1, &event).await;
+        let emit_status = sink
+            .emit_mob_stream_event(&stream_id, 1, None, &event)
+            .await;
         assert_eq!(emit_status, StreamEmitStatus::ReceiverGone);
         let (observation, detail) = terminal_observation_from_emit_status(emit_status)
             .expect("closed receiver should lower into a terminal observation");
@@ -20119,9 +23335,14 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         );
     }
 
-    #[tokio::test]
-    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
-        let (router, _notif_rx) = test_router().await;
+    /// The router the catalog sweeps dispatch to, and the catalog options
+    /// that describe exactly what it serves.
+    async fn catalog_sweep_router() -> (
+        MethodRouter,
+        mpsc::Receiver<RpcNotification>,
+        meerkat_contracts::RpcMethodCatalogOptions,
+    ) {
+        let (router, notif_rx) = test_router().await;
         // Wire a live transport so the `live/*` catalog methods are
         // dispatchable exactly as the catalog advertises them
         // (`runtime_available` => live surface present).
@@ -20173,6 +23394,12 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             // receives them.
             decision_notices_enabled: false,
         };
+        (router, notif_rx, options)
+    }
+
+    #[tokio::test]
+    async fn catalog_methods_all_dispatch_and_unknown_methods_reject() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
         let mut id = 0_i64;
         for method in meerkat_contracts::rpc_method_names(options) {
             id += 1;
@@ -20209,6 +23436,59 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             .expect("unknown method must produce a response");
         let err = response.error.expect("unknown method must be an error");
         assert_eq!(err.code, error::METHOD_NOT_FOUND);
+    }
+
+    /// Every catalog method answers a request under that request's id, its
+    /// refusal of params it cannot read included: a client that matches
+    /// answers by id never receives an answer with another id. The params
+    /// are a bare number, which no method's params type reads, so every
+    /// method that declares params refuses them as invalid params.
+    #[tokio::test]
+    async fn catalog_methods_answer_unreadable_params_under_the_request_id() {
+        let (router, _notif_rx, options) = catalog_sweep_router().await;
+        let mut other_id = Vec::new();
+        let mut not_refused = Vec::new();
+        for (index, method) in meerkat_contracts::rpc_method_catalog(options)
+            .into_iter()
+            .enumerate()
+        {
+            // Number and string ids alike.
+            let request_id = if index % 2 == 0 {
+                RpcId::Num(i64::try_from(index).expect("catalog index fits i64") + 1)
+            } else {
+                RpcId::Str(format!("request-{index}"))
+            };
+            let response = router
+                .dispatch(RpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    method: method.name.to_string(),
+                    params: Some(RawValue::from_string("42".to_string()).expect("static JSON")),
+                    id: Some(request_id.clone()),
+                })
+                .await
+                .unwrap_or_else(|| panic!("catalog method `{}` produced no response", method.name));
+            if response.id.as_ref() != Some(&request_id) {
+                other_id.push(format!("{} answered id {:?}", method.name, response.id));
+            }
+            if method.params_type.is_some()
+                && response.error.as_ref().map(|error| error.code) != Some(error::INVALID_PARAMS)
+            {
+                not_refused.push(format!(
+                    "{} answered {:?}",
+                    method.name,
+                    response.error.as_ref().map(|error| error.code)
+                ));
+            }
+        }
+        assert!(
+            other_id.is_empty(),
+            "every catalog method answers under the request's id: {other_id:#?}"
+        );
+        assert!(
+            not_refused.is_empty(),
+            "every method that declares params refuses unreadable ones as invalid params: \
+             {not_refused:#?}"
+        );
     }
 
     #[cfg(feature = "openai-live")]

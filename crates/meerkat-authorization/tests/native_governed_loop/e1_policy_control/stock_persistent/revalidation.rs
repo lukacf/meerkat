@@ -123,6 +123,7 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants: grants.clone(),
             ingress,

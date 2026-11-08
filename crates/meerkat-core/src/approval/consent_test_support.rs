@@ -269,6 +269,10 @@ impl PreparedOperationAuthorization for R3Decision {
     ) -> Result<(), OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// R3 is never model-reviewed.

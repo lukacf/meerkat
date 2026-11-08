@@ -967,7 +967,9 @@ pub struct AgentBuildConfig {
     /// The witness of the mob runtime performing this member build (a fresh
     /// spawn, a restore or a wake), set only by that runtime; see
     /// `SessionBuildOptions::mob_incarnation`, which carries it to a host's
-    /// member build hook. Never persisted, and not consumed by the build.
+    /// member build hook. Never persisted. The build forms the member's tool
+    /// grant subject from it: its identity in this incarnation, read before
+    /// its session.
     pub mob_incarnation: Option<meerkat_core::service::LiveMobIncarnation>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
@@ -1098,6 +1100,15 @@ pub struct AgentBuildConfig {
     /// `None` restores the recorded gate. A gate needs the runtime's grant
     /// service, on the session's runtime bindings.
     pub grant_gated_tools: Option<meerkat_core::tool_grant::GrantGatedTools>,
+    /// The entries of a mob member's gate that come from its role's current
+    /// gate and that its own gate (`grant_gated_tools`) lacks. None ever
+    /// refuses the build: a tool name is installed whether or not the build
+    /// mounts it (it is gated from the moment it appears), a family where
+    /// the build mounts it; a family the build does not mount, and a name the
+    /// build's tool policy refuses, are ignored. The session records the
+    /// entries the build installed with its own. Set by the mob runtime's
+    /// member builds only.
+    pub grant_gated_tools_where_mounted: Option<meerkat_core::tool_grant::GrantGatedTools>,
     /// Stable application consequence-policy binding for the member/session.
     pub application_tool_policy: meerkat_core::ApplicationToolPolicyBinding,
     /// Host-scoped registry containing in-process immutable policy providers.
@@ -1256,6 +1267,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("grant_gated_tools", &self.grant_gated_tools)
             .field(
+                "grant_gated_tools_where_mounted",
+                &self.grant_gated_tools_where_mounted,
+            )
+            .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),
             )
@@ -1353,6 +1368,7 @@ impl AgentBuildConfig {
             declared_tool_restriction: None,
             tool_dispatch_admission: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
             application_tool_policy: meerkat_core::ApplicationToolPolicyBinding::Unmanaged,
             tool_consequence_policy_registry: None,
             session_comms_runtime_override: None,
@@ -1495,6 +1511,7 @@ impl AgentBuildConfig {
         self.declared_tool_restriction = build.declared_tool_restriction.clone();
         self.tool_dispatch_admission = build.tool_dispatch_admission.clone();
         self.grant_gated_tools = build.grant_gated_tools.clone();
+        self.grant_gated_tools_where_mounted = build.grant_gated_tools_where_mounted.clone();
         self.application_tool_policy = build.application_tool_policy.clone();
         self.tool_consequence_policy_registry = build.tool_consequence_policy_registry.clone();
         self.shell_env = build.shell_env.clone();
@@ -1598,6 +1615,7 @@ impl AgentBuildConfig {
             prepared_controller: None,
             host_prompt_sections: self.host_prompt_sections,
             grant_gated_tools: self.grant_gated_tools.clone(),
+            grant_gated_tools_where_mounted: self.grant_gated_tools_where_mounted.clone(),
         }
     }
 }
@@ -1744,6 +1762,218 @@ pub fn tool_family_names(family: &str) -> Option<Vec<&'static str>> {
 /// surfaces as the typed `AgentError::ToolGrantGateRefused`.
 pub use meerkat_core::tool_grant::GrantGateRefusal as GrantGateBuildError;
 
+/// The grant target a grant request names, checked against `gate`: the gate
+/// a session's build recorded, or every entry a mob member identity's gate
+/// names. A tool name must be gated by name or through a gated family; a
+/// family must be gated, and the grant takes every name the family can
+/// provide (the gate admits only the names a build gated); an MCP server
+/// must be named by the gate, or gated by its unconfigured-servers mode and
+/// not among `ungated_servers` (the servers the subject's build configures
+/// ungated). Only a server target opens a server's tools: a tool name only a
+/// gated server provides is named by no gate. Every grant surface resolves
+/// targets here, so no surface owns the rule.
+///
+/// # Errors
+/// [`ToolGrantRequestRefusal::EmptyTarget`] for an empty tool or server name
+/// or an empty `tools` subset, and
+/// [`ToolGrantRequestRefusal::TargetNotGated`] for a target the gate does not
+/// name.
+///
+/// [`ToolGrantRequestRefusal::EmptyTarget`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::EmptyTarget
+/// [`ToolGrantRequestRefusal::TargetNotGated`]: meerkat_core::tool_grant::ToolGrantRequestRefusal::TargetNotGated
+pub fn resolve_grant_target(
+    target: meerkat_contracts::ToolGrantTargetRequest,
+    gate: &meerkat_core::tool_grant::GrantGatedTools,
+    ungated_servers: &BTreeSet<String>,
+) -> Result<
+    meerkat_core::tool_grant::ToolGrantTarget,
+    meerkat_core::tool_grant::ToolGrantRequestRefusal,
+> {
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+    match target {
+        ToolGrantTargetRequest::Tool { name } => {
+            if name.is_empty() {
+                return Err(ToolGrantRequestRefusal::EmptyTarget);
+            }
+            let gated = gate.tools.contains(&name)
+                || gate.families.iter().any(|family| {
+                    tool_family_names(family).is_some_and(|names| names.contains(&name.as_str()))
+                });
+            if !gated {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from(name),
+            })
+        }
+        ToolGrantTargetRequest::Family { family } => {
+            if !gate.families.contains(&family) {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            let Some(names) = tool_family_names(&family) else {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            };
+            Ok(ToolGrantTarget::Family {
+                family,
+                names: names.into_iter().map(ToolName::from).collect(),
+            })
+        }
+        ToolGrantTargetRequest::McpServer { server, tools } => {
+            if server.is_empty()
+                || tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.is_empty() || tools.iter().any(String::is_empty))
+            {
+                return Err(ToolGrantRequestRefusal::EmptyTarget);
+            }
+            if !gate.gates_mcp_server(&server, ungated_servers) {
+                return Err(ToolGrantRequestRefusal::TargetNotGated);
+            }
+            Ok(ToolGrantTarget::McpServer {
+                server,
+                tools: tools.map(|tools| tools.into_iter().map(ToolName::from).collect()),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod grant_target_tests {
+    use super::*;
+    use meerkat_contracts::ToolGrantTargetRequest;
+    use meerkat_core::tool_grant::{GrantGatedTools, ToolGrantRequestRefusal, ToolGrantTarget};
+    use meerkat_core::types::ToolName;
+
+    /// The target `target` resolves to under `gate`, for a subject that
+    /// configures no server ungated.
+    fn resolve(
+        target: ToolGrantTargetRequest,
+        gate: &GrantGatedTools,
+    ) -> Result<ToolGrantTarget, ToolGrantRequestRefusal> {
+        resolve_grant_target(target, gate, &BTreeSet::new())
+    }
+
+    #[test]
+    fn a_target_must_be_named_by_the_gate() {
+        let gate = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy");
+
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "deploy".to_string()
+                },
+                &gate
+            ),
+            Ok(ToolGrantTarget::Tool {
+                name: ToolName::from("deploy")
+            })
+        );
+        // A name a gated family provides is gated through the family.
+        assert!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "shell".to_string()
+                },
+                &gate
+            )
+            .is_ok()
+        );
+        let Ok(ToolGrantTarget::Family { family, names }) = resolve(
+            ToolGrantTargetRequest::Family {
+                family: "shell".to_string(),
+            },
+            &gate,
+        ) else {
+            panic!("a gated family resolves");
+        };
+        assert_eq!(family, "shell");
+        assert!(names.contains("shell"), "{names:?}");
+
+        for refused in [
+            ToolGrantTargetRequest::Tool {
+                name: "web_search".to_string(),
+            },
+            ToolGrantTargetRequest::Family {
+                family: "tasks".to_string(),
+            },
+        ] {
+            assert_eq!(
+                resolve(refused.clone(), &gate),
+                Err(ToolGrantRequestRefusal::TargetNotGated),
+                "{refused:?} must be refused"
+            );
+        }
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: String::new()
+                },
+                &gate
+            ),
+            Err(ToolGrantRequestRefusal::EmptyTarget)
+        );
+    }
+
+    /// A server target passes a gate that names the server, or one whose
+    /// unconfigured-servers mode gates it (a server the subject's build
+    /// configures ungated is not gated); its `tools` subset only narrows,
+    /// and an empty subset or server name is an empty target. A tool name
+    /// is never resolved through a gated server.
+    #[test]
+    fn a_server_target_must_be_gated_by_name_or_by_the_mode() {
+        let server = |server: &str, tools: Option<&[&str]>| ToolGrantTargetRequest::McpServer {
+            server: server.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| (*tool).to_string()).collect()),
+        };
+        let named = GrantGatedTools::default().with_mcp_server("tickets");
+        assert_eq!(
+            resolve(server("tickets", Some(&["open_ticket"])), &named),
+            Ok(ToolGrantTarget::McpServer {
+                server: "tickets".to_string(),
+                tools: Some(BTreeSet::from([ToolName::from("open_ticket")])),
+            })
+        );
+        assert_eq!(
+            resolve(server("calendar", None), &named),
+            Err(ToolGrantRequestRefusal::TargetNotGated)
+        );
+        assert_eq!(
+            resolve(
+                ToolGrantTargetRequest::Tool {
+                    name: "open_ticket".to_string()
+                },
+                &named
+            ),
+            Err(ToolGrantRequestRefusal::TargetNotGated),
+            "a server's tool is granted through the server target"
+        );
+        for empty in [server("", None), server("tickets", Some(&[]))] {
+            assert_eq!(
+                resolve(empty.clone(), &named),
+                Err(ToolGrantRequestRefusal::EmptyTarget),
+                "{empty:?}"
+            );
+        }
+
+        let mode = GrantGatedTools::default().with_unconfigured_mcp_servers();
+        assert!(resolve(server("calendar", None), &mode).is_ok());
+        assert_eq!(
+            resolve_grant_target(
+                server("calendar", None),
+                &mode,
+                &BTreeSet::from(["calendar".to_string()])
+            ),
+            Err(ToolGrantRequestRefusal::TargetNotGated),
+            "a server the subject configures ungated is not gated by the mode"
+        );
+    }
+}
+
 /// Whether a build's gate covers web search, by name or through its family.
 /// Such a build disables every provider-native tool, so the gated `web_search`
 /// tool is its only search path and the gate adjudicates every search.
@@ -1824,24 +2054,59 @@ fn mount_grant_gated_families(
     Ok(())
 }
 
+/// A build's resolved grant gate: the gate to install (`None` for a gate
+/// that gates nothing) and the gate the session records, the build's own
+/// entries and the role entries it installed.
+struct ResolvedGrantGate {
+    gate: Option<meerkat_core::tool_grant::ToolGrantGate>,
+    recorded: meerkat_core::tool_grant::GrantGatedTools,
+}
+
 /// A build's grant gate, rules 3 to 6, over the build's final dispatcher:
 /// every gated tool name is mounted (a name a pending source may provide once
-/// it connects is gated from the moment it appears), the build's tool policy
-/// refuses no gated name, every gated family has a mounted name, and the
-/// runtime carries the session's grants. Answers the gate to install, or
-/// `None` for an empty gate. A gate that covers web search has already
-/// disabled every provider-native tool for the build
-/// (`grant_gate_covers_web_search`), so no gated name is served natively.
+/// it connects is gated from the moment it appears, and so is a name a gated
+/// MCP server the build does not configure, or any server the
+/// unconfigured-servers mode gates, may provide once it is attached), the
+/// build's tool policy refuses no gated name, every gated family has a
+/// mounted name, and the runtime carries the session's grants. These rules
+/// hold the build's own entries (`gated`), each refused typed.
+///
+/// A gated MCP server need not be configured: it may be attached later, and
+/// every tool it provides is gated from the moment it appears. While the
+/// gate's unconfigured-servers mode is on, every server the build configures
+/// (`configured_servers`) that the gate does not name is ungated, and every
+/// other server is gated.
+///
+/// The role entries of a mob member's gate (`where_mounted`, the entries of
+/// its role's current gate its own gate lacks) never refuse the build: a
+/// role tool name and a role server are installed whether or not the build
+/// mounts them now, so each is gated from the moment it appears; a role
+/// family is installed when the build mounts any of its names. A role family
+/// the build mounts none of, and a role name the build's tool policy refuses,
+/// are ignored outright (installed as not mounted): their tools cannot appear
+/// within the build, so no grant could open them.
+///
+/// A gate that covers web search has already disabled every provider-native
+/// tool for the build (`grant_gate_covers_web_search`), so no gated name is
+/// served natively.
+#[allow(clippy::too_many_arguments)]
 fn grant_gate_for_build(
     gated: &meerkat_core::tool_grant::GrantGatedTools,
+    where_mounted: &meerkat_core::tool_grant::GrantGatedTools,
+    configured_servers: &BTreeSet<String>,
     tools: &Arc<dyn AgentToolDispatcher>,
     tool_execution_policy: Option<&meerkat_core::ToolExecutionPolicy>,
     declared_tool_restriction: Option<&meerkat_core::ops::DeclaredToolRestriction>,
     session_grants: Option<Arc<dyn meerkat_core::tool_grant::SessionToolGrants>>,
-) -> Result<Option<meerkat_core::tool_grant::ToolGrantGate>, GrantGateBuildError> {
+    owner: Option<&meerkat_core::GeneratedToolVisibilityOwner>,
+) -> Result<ResolvedGrantGate, GrantGateBuildError> {
     use meerkat_core::types::ToolName;
-    if gated.is_empty() {
-        return Ok(None);
+    let mut recorded = gated.clone();
+    if gated.is_empty() && where_mounted.is_empty() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
     }
     let mut families = BTreeMap::new();
     for family in &gated.families {
@@ -1857,8 +2122,8 @@ fn grant_gate_for_build(
                 .collect::<BTreeSet<_>>(),
         );
     }
-    let table = meerkat_core::tool_grant::GatedToolTable::new(
-        families,
+    let own = meerkat_core::tool_grant::GatedToolTable::new(
+        families.clone(),
         gated.tools.iter().cloned().collect(),
     );
 
@@ -1885,10 +2150,25 @@ fn grant_gate_for_build(
                 .any(|names| names.contains(name))
         })
     };
+    // A gated server the build does not configure, and any server the
+    // unconfigured-servers mode gates, may still be attached: such a source
+    // may provide a gated name later, as a pending source may.
+    let gated_servers: BTreeSet<String> = gated
+        .mcp_servers
+        .iter()
+        .chain(where_mounted.mcp_servers.iter())
+        .cloned()
+        .collect();
+    let gates_unconfigured_servers =
+        gated.unconfigured_mcp_servers || where_mounted.unconfigured_mcp_servers;
     let pending_sources = !tools.pending_catalog_sources().is_empty()
         || declared_tool_restriction
-            .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty());
-    for name in table.tools() {
+            .is_some_and(|restriction| !restriction.deferred_mcp_servers.is_empty())
+        || gates_unconfigured_servers
+        || gated_servers
+            .iter()
+            .any(|server| !configured_servers.contains(server));
+    for name in own.tools() {
         let name = name.as_str();
         if mounted.contains(name) {
             continue;
@@ -1911,29 +2191,33 @@ fn grant_gate_for_build(
         });
     }
 
-    if let Some(policy) = tool_execution_policy {
-        for name in table.gated_names() {
-            let name = name.as_str();
-            let refused = if mounted.contains(name) {
+    // Whether the build's tool policy refuses `name`: a mounted name by its
+    // mutation class, a name not mounted yet by name only, since only a
+    // refusal by name is certain before the name appears.
+    let policy_refuses = |name: &str| {
+        tool_execution_policy.is_some_and(|policy| {
+            if mounted.contains(name) {
                 !policy.permits_call(name, tools.tool_mutation_class(name))
-            } else if table.tools().contains(name) {
-                // Not mounted yet: only a refusal by name is certain now.
-                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
             } else {
-                false
-            };
-            if refused {
-                return Err(GrantGateBuildError::PolicyRefused {
-                    tool: name.to_string(),
-                });
+                !policy.permits_call(name, meerkat_core::ToolMutationClass::ReadOnly)
             }
+        })
+    };
+    for name in own.gated_names() {
+        let name = name.as_str();
+        // A gated family's name that is not mounted is never callable, so
+        // only a mounted one, or an individually gated one, can be refused.
+        if (mounted.contains(name) || own.tools().contains(name)) && policy_refuses(name) {
+            return Err(GrantGateBuildError::PolicyRefused {
+                tool: name.to_string(),
+            });
         }
     }
 
     // Every gated family reaches the final dispatcher: a family none of whose
     // names this build mounts (comms without a comms runtime, a builtin
     // family the build leaves off) could never open.
-    for (family, names) in table.families() {
+    for (family, names) in own.families() {
         if !names.iter().any(|name| mounted.contains(name.as_str())) {
             return Err(GrantGateBuildError::FamilyNotMounted {
                 family: family.clone(),
@@ -1941,10 +2225,80 @@ fn grant_gate_for_build(
         }
     }
 
+    // The role entries: installed where this build can ever show them,
+    // ignored outright (not mounted) otherwise, never refused.
+    let mut tool_names: BTreeSet<ToolName> = gated.tools.iter().cloned().collect();
+    let mut not_mounted: BTreeSet<ToolName> = BTreeSet::new();
+    for family in &where_mounted.families {
+        let Some(names) = tool_family_names(family) else {
+            tracing::warn!(
+                family = family.as_str(),
+                "a role's grant gate names no built-in tool family; the member's build ignores it"
+            );
+            continue;
+        };
+        let (refused, names): (BTreeSet<ToolName>, BTreeSet<ToolName>) = names
+            .into_iter()
+            .map(ToolName::from)
+            .partition(|name| policy_refuses(name.as_str()));
+        if !names.iter().any(|name| mounted.contains(name.as_str())) {
+            not_mounted.extend(names);
+            not_mounted.extend(refused);
+            continue;
+        }
+        not_mounted.extend(refused);
+        families.insert(family.clone(), names);
+        recorded.families.insert(family.clone());
+    }
+    for name in where_mounted.tools.iter() {
+        if policy_refuses(name.as_str()) {
+            not_mounted.insert(name.clone());
+            continue;
+        }
+        tool_names.insert(name.clone());
+        recorded.tools.insert(name.clone());
+    }
+    recorded
+        .mcp_servers
+        .extend(where_mounted.mcp_servers.iter().cloned());
+    recorded.unconfigured_mcp_servers = gates_unconfigured_servers;
+    let table = meerkat_core::tool_grant::GatedToolTable::new(families, tool_names);
+    let gated_names = table.gated_names();
+    // A name another entry gates is gated: only the names nothing gates are
+    // not mounted.
+    not_mounted.retain(|name| !gated_names.contains(name));
+    let install = meerkat_core::tool_grant::InstalledToolGrantGate {
+        ungated_servers: if gates_unconfigured_servers {
+            configured_servers
+                .iter()
+                .filter(|server| !gated_servers.contains(*server))
+                .cloned()
+                .collect()
+        } else {
+            BTreeSet::new()
+        },
+        gated: gated_names,
+        gated_servers,
+        gates_unconfigured_servers,
+        not_mounted_names: not_mounted,
+    };
+    if install.gates_nothing() {
+        return Ok(ResolvedGrantGate {
+            gate: None,
+            recorded,
+        });
+    }
+
     let grants = session_grants.ok_or(GrantGateBuildError::NoGrantService)?;
-    Ok(Some(meerkat_core::tool_grant::ToolGrantGate::new(
-        grants, table,
-    )))
+    let owner = owner.ok_or(GrantGateBuildError::NoGrantService)?;
+    Ok(ResolvedGrantGate {
+        gate: Some(meerkat_core::tool_grant::ToolGrantGate::new(
+            grants,
+            install,
+            owner.clone(),
+        )),
+        recorded,
+    })
 }
 
 /// Where the operator-instruction entry rows `session` wrote itself stand in
@@ -3374,7 +3728,9 @@ pub struct AgentFactory {
     pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
-    /// When unset, convention loading remains disabled unless caller opts in.
+    /// When unset, a build takes `project_root` as that root (its
+    /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
+    /// root set, it reads no project convention.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -3393,6 +3749,11 @@ pub struct AgentFactory {
     /// this factory's hosts trust.
     #[cfg(not(target_arch = "wasm32"))]
     host_confinement: Option<crate::HostConfinement>,
+    /// The host's trust over the convention hook sources, installed with
+    /// [`Self::with_hook_source_trust`]: asked about each source over the
+    /// bytes the build read.
+    #[cfg(not(target_arch = "wasm32"))]
+    hook_source_trust: Option<Arc<dyn crate::HookSourceTrust>>,
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
     mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile,
     /// The host's HTTP egress profile, retained by newly built routers.
@@ -3519,6 +3880,8 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_mob", &self.enable_mob);
         #[cfg(not(target_arch = "wasm32"))]
         d.field("shell_confinement", &self.shell_confinement);
+        #[cfg(not(target_arch = "wasm32"))]
+        d.field("hook_source_trust", &self.hook_source_trust.is_some());
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         d.field("mcp_stdio_launch_profile", &self.mcp_stdio_launch_profile);
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4708,6 +5071,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -4918,6 +5283,8 @@ impl AgentFactory {
             command_hook_confinement: None,
             #[cfg(not(target_arch = "wasm32"))]
             host_confinement: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hook_source_trust: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp_stdio_launch_profile: meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -5294,6 +5661,30 @@ impl AgentFactory {
             return env.with_host_launch_guard(guard);
         }
         env
+    }
+
+    /// Install the host's trust over the convention hook sources
+    /// (`<context_root>/.rkat/config.toml`, or `<project_root>/.rkat/config.toml`
+    /// when the factory has no context root, and
+    /// `<user_config_root>/.rkat/config.toml`).
+    /// Each build, of this factory or a clone of it, asks it once about every
+    /// such file it read and parsed, with the SHA-256 of the exact bytes
+    /// ([`crate::HookSource`]), so the decision covers the content consumed
+    /// rather than a check the host made before the build: a file changed
+    /// after the host's check is judged as changed. Every hook of an
+    /// untrusted source keeps its slot and is refused at each invocation with
+    /// [`meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource`];
+    /// none of them runs. Without one, every source is trusted (unless the
+    /// host confinement says otherwise). The trust judges those files' bytes
+    /// only, not the programs their command hooks name, a run's hook
+    /// overrides or the hooks of the config passed to the build. A build
+    /// handed its own hook engine ([`AgentBuildConfig::hook_engine_override`])
+    /// reads no such file, so the trust is not asked. It must not block: see
+    /// [`crate::HookSourceTrust`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
+        self.hook_source_trust = Some(trust);
+        self
     }
 
     /// Install a stock host's resolved OS process confinement: each launch
@@ -5924,7 +6315,9 @@ impl AgentFactory {
         }
         // The grant gate is durable session truth, like the launch policy: a
         // resume that names no gate restores the recorded one, so a gated
-        // session cannot shed its gate by being resumed.
+        // session cannot shed its gate by being resumed. A mob member's build
+        // always names its gate (the one its profiles declare now, the empty
+        // gate included), so this serves plain sessions.
         if build_config.grant_gated_tools.is_none() && !metadata.tooling.grant_gated.is_empty() {
             build_config.grant_gated_tools = Some(metadata.tooling.grant_gated.clone());
         }
@@ -7789,8 +8182,51 @@ impl AgentFactory {
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config)?;
         // The build's scoped tool grant gate. The session's metadata records
         // the category overrides the caller asked for, before the gate mounts
-        // its gated families as if enabled.
+        // its gated families as if enabled. A mob member's build carries the
+        // entries of its role's gate its own gate lacks apart: the gate
+        // installs them where the build mounts them and never refuses for
+        // them.
         let grant_gated = build_config.grant_gated_tools.clone().unwrap_or_default();
+        let grant_gated_where_mounted = build_config
+            .grant_gated_tools_where_mounted
+            .clone()
+            .unwrap_or_default();
+        // A mob member's build reads its identity's grants, formed from the
+        // sealed incarnation witness its mob runtime handed the build.
+        let grant_member = build_config
+            .mob_member_binding
+            .clone()
+            .zip(build_config.mob_incarnation);
+        // The build's grant seam, formed once, before any MCP server is
+        // staged: the session's grants, or a mob member's (its identity's
+        // first, then its session's; a seam without identity subjects reads
+        // the session's).
+        let session_grants = match &build_config.runtime_build_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
+            RuntimeBuildMode::StandaloneEphemeral => None,
+        }
+        .map(|grants| match &grant_member {
+            Some((member, incarnation)) => grants.for_member(member, incarnation).unwrap_or(grants),
+            None => grants,
+        });
+        // The MCP servers the gate gates by name, own and role: a configured
+        // one is staged only while a live server grant covers it.
+        let grant_gated_servers: BTreeSet<String> = grant_gated
+            .mcp_servers
+            .iter()
+            .chain(grant_gated_where_mounted.mcp_servers.iter())
+            .cloned()
+            .collect();
+        let grant_gates_unconfigured_servers = grant_gated.unconfigured_mcp_servers
+            || grant_gated_where_mounted.unconfigured_mcp_servers;
+        // The servers the build configures: while the gate's
+        // unconfigured-servers mode is on, the ones it does not name are its
+        // only ungated servers.
+        let grant_configured_servers: BTreeSet<String> = build_config
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect();
         let recorded_overrides = RecordedToolOverrides::of(&build_config);
         mount_grant_gated_families(&mut build_config, &grant_gated)
             .map_err(BuildAgentError::GrantGate)?;
@@ -8167,7 +8603,8 @@ impl AgentFactory {
             || tool_execution_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.is_unrestricted())
-            || grant_gate_covers_web_search(&grant_gated);
+            || grant_gate_covers_web_search(&grant_gated)
+            || grant_gate_covers_web_search(&grant_gated_where_mounted);
         // Refuse a fallback the browser profile cannot provision before any
         // credential is resolved. Governed inputs already disable native
         // search; the final identity is rechecked before helper provisioning.
@@ -8990,11 +9427,16 @@ impl AgentFactory {
         // A governed session-owned construction (one whose bindings carry the
         // host's configured attachment authority) owns a router even with no
         // configured server, so its member can attach its first server live.
+        // So does a session-owned construction whose grant gate names an MCP
+        // server or gates every server it does not configure: a later grant
+        // or attach can reach it.
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         let live_mcp_attachable = matches!(
             resolved_mode,
             RuntimeBuildMode::SessionOwned(bindings)
                 if bindings.configured_mcp_attachment().is_some()
+                    || !grant_gated_servers.is_empty()
+                    || grant_gates_unconfigured_servers
         );
         #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
         if !build_config.mcp_servers.is_empty()
@@ -9093,7 +9535,40 @@ impl AgentFactory {
                 Arc::clone(&adapter),
                 configured_authority.is_some(),
             )));
+            // Lazy residency: a configured server the grant gate names is
+            // staged only while a live server grant of the build's subjects
+            // covers it, so a gated server costs no process until it is
+            // granted. When the grants cannot be read, none is staged and its
+            // tools stay closed. Every other server is staged as before.
+            let gated_configured: BTreeSet<String> = build_config
+                .mcp_servers
+                .iter()
+                .map(|server| server.name.clone())
+                .filter(|name| grant_gated_servers.contains(name))
+                .collect();
+            let granted_servers = match (&session_grants, gated_configured.is_empty()) {
+                (Some(grants), false) => match grants.granted_servers(&gated_configured).await {
+                    Ok(granted) => granted,
+                    Err(refusal) => {
+                        tracing::warn!(
+                            error = %refusal,
+                            "tool grants could not be read at build; no grant-gated MCP server is attached"
+                        );
+                        BTreeSet::new()
+                    }
+                },
+                _ => BTreeSet::new(),
+            };
             for server in &build_config.mcp_servers {
+                if gated_configured.contains(&server.name)
+                    && !granted_servers.contains(&server.name)
+                {
+                    tracing::info!(
+                        server = server.name.as_str(),
+                        "grant-gated MCP server not attached: no live grant covers it"
+                    );
+                    continue;
+                }
                 let staged = match &configured_authority {
                     Some(authority) => {
                         adapter
@@ -9602,14 +10077,35 @@ impl AgentFactory {
                         config,
                     )
                     .await;
-                    // A hook a confined process could have defined keeps its
-                    // slot and is refused at every invocation.
-                    let refused_hooks = self
-                        .host_confinement
-                        .as_ref()
-                        .map_or_else(Vec::new, |host| {
-                            layered.untrusted_entries(|source| host.untrusted_source(source))
-                        });
+                    // A hook a confined process could have defined, or one
+                    // whose content the host does not trust as read here,
+                    // keeps its slot and is refused at every invocation.
+                    let refused_hooks = if self.host_confinement.is_none()
+                        && self.hook_source_trust.is_none()
+                    {
+                        Vec::new()
+                    } else {
+                        layered.untrusted_entries(|source| {
+                            // Both policies see every read source: the
+                            // trust is asked once per source whatever
+                            // confinement said, so an auditing or
+                            // stateful trust observes each build's files.
+                            let confined = self
+                                .host_confinement
+                                .as_ref()
+                                .is_some_and(|host| host.untrusted_source(source.path));
+                            let untrusted = self.hook_source_trust.as_ref().is_some_and(|trust| {
+                                // Exhaustive on purpose: a decision added
+                                // later is classified here, never trusted
+                                // by default.
+                                match trust.decide(source) {
+                                    crate::HookSourceDecision::Trusted => false,
+                                    crate::HookSourceDecision::Untrusted => true,
+                                }
+                            });
+                            confined || untrusted
+                        })
+                    };
                     let layered_hooks = layered.config;
                     // Run overrides execute through this engine too. With
                     // override entries and no base entries the engine is
@@ -10478,6 +10974,21 @@ impl AgentFactory {
                         "deny name {tool} deferred to runtime (server {servers} declares no tool list)"
                     );
                 }
+            } else if grant_gates_unconfigured_servers
+                || grant_gated_servers
+                    .iter()
+                    .any(|server| !grant_configured_servers.contains(server))
+            {
+                // A grant-gated MCP server the build does not configure, and
+                // any server the gate's unconfigured-servers mode gates, may
+                // be attached later and provide any name: the gate enforces
+                // these by name.
+                for tool in unknown.drain(..) {
+                    tracing::info!(
+                        declared_by = %restriction.declared_by,
+                        "deny name {tool} deferred to runtime (a grant-gated MCP server may provide it)"
+                    );
+                }
             }
             let withheld = restriction
                 .vocabulary
@@ -10518,20 +11029,32 @@ impl AgentFactory {
         }
 
         // 12i-gate. The scoped tool grant gate over the final dispatcher: the
-        // agent opens the gated names a live grant admits at each boundary,
-        // and the outermost dispatch gate adjudicates every gated call.
-        let session_grants = match resolved_mode {
-            RuntimeBuildMode::SessionOwned(bindings) => bindings.tool_grants().cloned(),
+        // agent gates each gated server's names and opens the gated names a
+        // live grant admits at each boundary, and the outermost dispatch gate
+        // adjudicates every gated call. The gate reads the session's machine
+        // through the build's generated visibility owner.
+        let grant_gate_owner = match resolved_mode {
+            RuntimeBuildMode::SessionOwned(bindings) => Some(bindings.tool_visibility_owner()),
             RuntimeBuildMode::StandaloneEphemeral => None,
         };
-        let tool_grant_gate = grant_gate_for_build(
+        let ResolvedGrantGate {
+            gate: tool_grant_gate,
+            recorded: recorded_grant_gate,
+        } = grant_gate_for_build(
             &grant_gated,
+            &grant_gated_where_mounted,
+            &grant_configured_servers,
             &tools,
             tool_execution_policy.as_ref(),
             declared_tool_restriction.as_ref(),
             session_grants,
+            grant_gate_owner,
         )
         .map_err(BuildAgentError::GrantGate)?;
+        // The session records its own gate entries and the role entries this
+        // build installed.
+        let mut factory_metadata = factory_metadata;
+        factory_metadata.tooling.grant_gated = recorded_grant_gate;
         if let Some(gate) = &tool_grant_gate {
             builder = builder.with_tool_grant_gate(gate.clone());
         }
@@ -27087,5 +27610,616 @@ mod prepared_agent_tests {
         })
         .await
         .expect("the abandoned preparation's router is shut down");
+    }
+}
+
+/// The MCP server grant gate at the factory: a gated configured server's lazy
+/// residency, a member build's role entries (servers included), a server and
+/// a role tool name that appear after the build, the unconfigured-servers
+/// mode, and the order of the gate and an MCP call's preparation.
+#[cfg(all(
+    test,
+    feature = "workspace-tests",
+    feature = "mcp",
+    not(target_arch = "wasm32")
+))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod mcp_server_grant_gate_tests {
+    use super::*;
+    use meerkat_core::ToolCatalogVisibility;
+    use meerkat_core::tool_grant::{
+        GrantGatedTools, TOOL_GRANT_REQUIRED_CODE, ToolGrantIssuer, ToolGrantSubject,
+        ToolGrantTarget,
+    };
+    use meerkat_core::types::{ToolCall, ToolName};
+    use meerkat_runtime::MeerkatMachine;
+    use meerkat_runtime::tool_grant::{
+        ToolGrantAuditEvent, ToolGrantClock, ToolGrantClockError, ToolGrantExpiryDriver,
+        ToolGrantRequest, ToolGrantWindow,
+    };
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// The host clock reading the rows start at, in UNIX ms.
+    const T0: u64 = 1_800_000_000_000;
+
+    #[derive(Debug)]
+    struct RowClock(AtomicU64);
+
+    impl ToolGrantClock for RowClock {
+        fn now_ms(&self) -> Result<u64, ToolGrantClockError> {
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    /// Publishes each construction's own adapter as it is, and keeps it, so
+    /// a row can attach a server to the construction after its build.
+    #[derive(Default)]
+    struct Adapters(std::sync::Mutex<Vec<Arc<meerkat_mcp::McpRouterAdapter>>>);
+
+    impl McpAdapterComposer for Adapters {
+        fn compose(
+            &self,
+            adapter: &Arc<meerkat_mcp::McpRouterAdapter>,
+            _session_id: &SessionId,
+            _member: Option<&meerkat_core::MobMemberBinding>,
+        ) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
+            self.0.lock().unwrap().push(Arc::clone(adapter));
+            Ok(Arc::clone(adapter) as Arc<dyn AgentToolDispatcher>)
+        }
+    }
+
+    impl Adapters {
+        fn last(&self) -> Arc<meerkat_mcp::McpRouterAdapter> {
+            Arc::clone(self.0.lock().unwrap().last().expect("a composed adapter"))
+        }
+    }
+
+    /// Counts the MCP calls whose preparation ran.
+    #[derive(Default)]
+    struct CountingPreparation(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl meerkat_mcp::McpCallContextProvider for CountingPreparation {
+        async fn prepare(
+            &self,
+            _target: meerkat_mcp::McpCallTarget<'_>,
+            _call: meerkat_core::ToolCallView<'_>,
+            _context: &meerkat_core::ToolDispatchContext,
+        ) -> Result<Option<meerkat_mcp::McpCallContext>, meerkat_mcp::McpCallContextError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    struct Rig {
+        machine: Arc<MeerkatMachine>,
+        clock: Arc<RowClock>,
+        adapters: Arc<Adapters>,
+        preparations: Arc<CountingPreparation>,
+        factory: AgentFactory,
+        started: PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    fn rig() -> Rig {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let clock = Arc::new(RowClock(AtomicU64::new(T0)));
+        machine.set_tool_grant_clock(Arc::clone(&clock) as Arc<dyn ToolGrantClock>);
+        let adapters = Arc::new(Adapters::default());
+        let preparations = Arc::new(CountingPreparation::default());
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .with_mcp_adapter_composer(Arc::clone(&adapters) as Arc<dyn McpAdapterComposer>)
+            .mcp_call_context_provider(
+                Arc::clone(&preparations) as Arc<dyn meerkat_mcp::McpCallContextProvider>
+            );
+        Rig {
+            machine,
+            clock,
+            adapters,
+            preparations,
+            factory,
+            started: temp.path().join("started"),
+            _temp: temp,
+        }
+    }
+
+    /// The fixture server `name`, whose tools are `<prefix>echo`,
+    /// `<prefix>add`, ..., and whose process starts the rig counts.
+    fn fixture(rig: &Rig, name: &str, prefix: &str) -> meerkat_core::McpServerConfig {
+        meerkat_core::McpServerConfig::stdio(
+            name,
+            mcp_test_server::fixture_binary()
+                .to_string_lossy()
+                .to_string(),
+            vec![
+                "--tool-prefix".to_string(),
+                prefix.to_string(),
+                "--started-file".to_string(),
+                rig.started.to_string_lossy().to_string(),
+            ],
+            std::collections::HashMap::new(),
+        )
+    }
+
+    /// How many fixture server processes started.
+    fn started(rig: &Rig) -> usize {
+        std::fs::read_to_string(&rig.started).map_or(0, |log| log.lines().count())
+    }
+
+    /// A build of a new session on the rig's runtime: its own gate `gate`,
+    /// the role entries `role`, and its own MCP servers `servers`.
+    async fn session_build(
+        rig: &Rig,
+        session: &Session,
+        gate: GrantGatedTools,
+        role: Option<GrantGatedTools>,
+        servers: Vec<meerkat_core::McpServerConfig>,
+    ) -> AgentBuildConfig {
+        let bindings = rig
+            .machine
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("runtime bindings");
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.provider = Some(Provider::Anthropic);
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(session.clone());
+        build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
+        build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
+        build.grant_gated_tools = Some(gate);
+        build.grant_gated_tools_where_mounted = role;
+        build.mcp_servers = servers;
+        build.wait_for_mcp = true;
+        build
+    }
+
+    async fn build_agent(rig: &Rig, build: AgentBuildConfig) -> DynAgent {
+        rig.factory
+            .build_agent(build, &Config::default())
+            .await
+            .expect("the build builds")
+    }
+
+    async fn grant(rig: &Rig, session: &Session, target: ToolGrantTarget, lifetime: Duration) {
+        rig.machine
+            .grant_tool(
+                ToolGrantRequest {
+                    subject: ToolGrantSubject::session(session.id().clone()),
+                    target,
+                    issuer: ToolGrantIssuer::operator(),
+                    reason: None,
+                    window: ToolGrantWindow::For(lifetime),
+                },
+                None,
+            )
+            .await
+            .expect("the grant is issued");
+    }
+
+    fn server(server: &str, tools: Option<&[&str]>) -> ToolGrantTarget {
+        ToolGrantTarget::McpServer {
+            server: server.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| ToolName::from(*tool)).collect()),
+        }
+    }
+
+    fn mounted(agent: &DynAgent, name: &str) -> bool {
+        agent
+            .tool_scope()
+            .base_tools_snapshot()
+            .expect("base tools")
+            .iter()
+            .any(|tool| tool.name == name)
+    }
+
+    /// How the agent's next model request shows `name`: `None` for a tool it
+    /// does not mount.
+    fn shown(agent: &DynAgent, name: &str) -> Option<ToolCatalogVisibility> {
+        agent
+            .tool_catalog_view()
+            .expect("an exact catalog")
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.visibility)
+    }
+
+    /// Whether the grant gate hides the mounted tool `name`.
+    fn closed(agent: &DynAgent, name: &str) -> bool {
+        shown(agent, name) == Some(ToolCatalogVisibility::Hidden)
+    }
+
+    /// One turn, so the agent crosses a model-request boundary.
+    async fn turn(agent: &mut DynAgent) {
+        agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+        ));
+        agent
+            .run(meerkat_core::ContentInput::Text("go".into()))
+            .await
+            .expect("an agent turn");
+    }
+
+    /// One call through the agent's own precheck and dispatch gate.
+    async fn call(agent: &mut DynAgent, name: &str) -> meerkat_core::ToolDispatchOutcome {
+        agent
+            .dispatch_external_tool_call(ToolCall::new(
+                format!("{name}-call"),
+                name.to_string(),
+                serde_json::json!({"message": "probe"}),
+            ))
+            .await
+            .expect("an external call outcome")
+    }
+
+    /// The grant refusal code a call was refused with, if any.
+    fn refusal_code(outcome: &meerkat_core::ToolDispatchOutcome) -> Option<String> {
+        match outcome.terminal_cause() {
+            Some(meerkat_core::ToolDispatchTerminalCause::RuntimeToolError {
+                error: meerkat_core::ToolError::PolicyDenied { denial },
+            }) => Some(denial.code.clone()),
+            _ => None,
+        }
+    }
+
+    fn ran(outcome: &meerkat_core::ToolDispatchOutcome) -> bool {
+        outcome.terminal_cause().is_none()
+            && !outcome.result.is_error
+            && outcome.result.text_content().contains("probe")
+    }
+
+    /// A configured server the gate names is staged only while a live server
+    /// grant covers it: without one its process never starts and its tools
+    /// are not mounted; with one, the build connects it and its tools are
+    /// mounted closed, by their provenance, until a boundary opens them. A
+    /// grant the build finds past its deadline is settled expired by the
+    /// build and starts nothing.
+    #[tokio::test]
+    async fn a_gated_configured_server_starts_only_under_a_live_server_grant() {
+        let rig = rig();
+        let gate = GrantGatedTools::default().with_mcp_server("s");
+
+        let ungranted = Session::new();
+        let build = session_build(
+            &rig,
+            &ungranted,
+            gate.clone(),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 0, "no live grant covers it: no process");
+        assert!(!mounted(&agent, "s_echo"));
+        let running = rig
+            .machine
+            .tool_grant_gate(ungranted.id())
+            .await
+            .expect("the session is registered");
+        assert_eq!(
+            running.gate.gated_servers,
+            BTreeSet::from(["s".to_string()])
+        );
+        drop(agent);
+
+        let granted = Session::new();
+        grant(&rig, &granted, server("s", None), Duration::from_mins(10)).await;
+        let build = session_build(
+            &rig,
+            &granted,
+            gate.clone(),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1, "a live server grant attaches it");
+        assert!(mounted(&agent, "s_echo"));
+        assert!(closed(&agent, "s_echo"), "mounted closed until a boundary");
+        drop(agent);
+
+        let lapsed = Session::new();
+        grant(&rig, &lapsed, server("s", None), Duration::from_mins(1)).await;
+        rig.clock.0.store(T0 + 120_000, Ordering::SeqCst);
+        let build = session_build(&rig, &lapsed, gate, None, vec![fixture(&rig, "s", "s_")]).await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1, "a lapsed grant attaches nothing");
+        assert!(!mounted(&agent, "s_echo"));
+        let audit = rig
+            .machine
+            .read_tool_grant_audit(&ToolGrantSubject::session(lapsed.id().clone()), None, 10)
+            .await
+            .expect("the audit reads");
+        assert!(
+            audit.rows.iter().any(|record| matches!(
+                record.row.event,
+                ToolGrantAuditEvent::Expired {
+                    driver: ToolGrantExpiryDriver::Build,
+                    ..
+                }
+            )),
+            "the build settles the lapsed grant: {audit:?}"
+        );
+    }
+
+    /// A member's role entries never refuse its build: a role family it does
+    /// not mount and a role name its tool policy refuses reach the machine as
+    /// not-mounted names, never gated; a role tool name nothing mounts and a
+    /// role server neither configured nor attached are gated all the same;
+    /// a configured role server is gated, and staged only under a grant.
+    #[tokio::test]
+    async fn role_entries_are_gated_or_not_mounted_and_never_refuse_the_build() {
+        let rig = rig();
+        let role = GrantGatedTools::default()
+            .with_family("shell")
+            .with_tool("deploy")
+            .with_tool("refused_by_policy")
+            .with_mcp_server("s")
+            .with_mcp_server("later");
+        let session = Session::new();
+        let mut build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default(),
+            Some(role.clone()),
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        build.tool_access_policy = Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+            ["refused_by_policy"].into_iter().collect(),
+        ));
+        let agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert_eq!(
+            running.gate.gated_servers,
+            BTreeSet::from(["later".to_string(), "s".to_string()])
+        );
+        assert!(running.gate.gated.contains("deploy"), "{running:?}");
+        for ignored in ["refused_by_policy", "shell"] {
+            assert!(
+                running.gate.not_mounted_names.contains(ignored)
+                    && !running.gate.gated.contains(ignored),
+                "{ignored}: {running:?}"
+            );
+        }
+        assert_eq!(
+            started(&rig),
+            0,
+            "a configured role server waits for a grant"
+        );
+        assert_eq!(
+            agent
+                .session()
+                .session_metadata()
+                .expect("metadata")
+                .tooling
+                .grant_gated,
+            GrantGatedTools::default()
+                .with_tool("deploy")
+                .with_mcp_server("later")
+                .with_mcp_server("s"),
+            "the session records the role entries the build installed"
+        );
+        drop(agent);
+
+        let granted = Session::new();
+        grant(&rig, &granted, server("s", None), Duration::from_mins(10)).await;
+        let build = session_build(
+            &rig,
+            &granted,
+            GrantGatedTools::default(),
+            Some(role),
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let agent = build_agent(&rig, build).await;
+        assert_eq!(started(&rig), 1);
+        assert!(mounted(&agent, "s_echo") && closed(&agent, "s_echo"));
+    }
+
+    /// A role gate's server and tool name that nothing mounts at the build
+    /// are gated from the moment they appear: once the server, and another
+    /// server that provides the name, are attached after the build through
+    /// the ordinary add, the next boundary gates the server's names, both
+    /// stay hidden, and a call to either is refused `tool_grant_required`,
+    /// while the other server's ungated tools stay open.
+    #[tokio::test]
+    async fn a_role_server_and_name_attached_after_the_build_are_gated() {
+        let rig = rig();
+        let role = GrantGatedTools::default()
+            .with_mcp_server("s")
+            .with_tool("u_echo");
+        let session = Session::new();
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default(),
+            Some(role),
+            Vec::new(),
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(
+            running.gate.gated_servers.contains("s") && running.gate.gated.contains("u_echo"),
+            "{running:?}"
+        );
+
+        let adapter = rig.adapters.last();
+        for (name, prefix) in [("s", "s_"), ("u", "u_")] {
+            adapter
+                .stage_add(fixture(&rig, name, prefix))
+                .await
+                .expect("an ordinary add stages");
+        }
+        adapter.apply_staged().await.expect("the adds apply");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("both servers connect");
+        turn(&mut agent).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(
+            running.gate.gated.contains("s_echo") && running.gate.gated.contains("s_add"),
+            "the boundary gates the server's names: {running:?}"
+        );
+        for gated in ["s_echo", "u_echo"] {
+            assert!(closed(&agent, gated), "{gated}");
+            assert_eq!(
+                refusal_code(&call(&mut agent, gated).await).as_deref(),
+                Some(TOOL_GRANT_REQUIRED_CODE),
+                "{gated}"
+            );
+        }
+        assert!(
+            mounted(&agent, "u_add") && !closed(&agent, "u_add"),
+            "an ungated server's other tools stay open"
+        );
+    }
+
+    /// With the unconfigured-servers mode on, the servers the build
+    /// configures are its ungated servers and stay open; a server staged
+    /// after the build through the ordinary add is gated by provenance:
+    /// hidden, a call refused `tool_grant_required`, its names gated at the
+    /// next boundary, and opened by a grant of it. With the mode off such a
+    /// server stays ungated.
+    #[tokio::test]
+    async fn the_unconfigured_servers_mode_gates_a_server_attached_after_the_build() {
+        let rig = rig();
+        let session = Session::new();
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default().with_unconfigured_mcp_servers(),
+            None,
+            vec![fixture(&rig, "c", "c_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(running.gate.gates_unconfigured_servers);
+        assert_eq!(
+            running.gate.ungated_servers,
+            BTreeSet::from(["c".to_string()])
+        );
+        assert!(mounted(&agent, "c_echo") && !closed(&agent, "c_echo"));
+
+        let adapter = rig.adapters.last();
+        adapter
+            .stage_add(fixture(&rig, "n", "n_"))
+            .await
+            .expect("an ordinary add stages");
+        adapter.apply_staged().await.expect("the add applies");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the server connects");
+        turn(&mut agent).await;
+        assert!(closed(&agent, "n_echo") && !closed(&agent, "c_echo"));
+        assert_eq!(
+            refusal_code(&call(&mut agent, "n_echo").await).as_deref(),
+            Some(TOOL_GRANT_REQUIRED_CODE)
+        );
+        let running = rig
+            .machine
+            .tool_grant_gate(session.id())
+            .await
+            .expect("the session is registered");
+        assert!(running.gate.gated.contains("n_echo"), "{running:?}");
+
+        grant(&rig, &session, server("n", None), Duration::from_mins(10)).await;
+        turn(&mut agent).await;
+        assert!(!closed(&agent, "n_echo"), "the grant opens it");
+
+        let ungated = Session::new();
+        let build = session_build(
+            &rig,
+            &ungated,
+            GrantGatedTools::default(),
+            None,
+            vec![fixture(&rig, "c", "c_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+        let adapter = rig.adapters.last();
+        adapter
+            .stage_add(fixture(&rig, "n", "n_"))
+            .await
+            .expect("an ordinary add stages");
+        adapter.apply_staged().await.expect("the add applies");
+        adapter
+            .wait_until_ready(Duration::from_secs(10))
+            .await
+            .expect("the server connects");
+        turn(&mut agent).await;
+        assert!(
+            mounted(&agent, "n_echo") && !closed(&agent, "n_echo"),
+            "without the mode a later server is ungated"
+        );
+    }
+
+    /// The grant gate authorizes an MCP call before the host's call
+    /// preparation runs: a call the gate refuses never reaches preparation,
+    /// so no per-call credential is ever chosen for it; a call a grant
+    /// admits is prepared once.
+    #[tokio::test]
+    async fn the_server_gate_refuses_before_call_preparation_runs() {
+        let rig = rig();
+        let session = Session::new();
+        grant(
+            &rig,
+            &session,
+            server("s", Some(&["s_echo"])),
+            Duration::from_mins(10),
+        )
+        .await;
+        let build = session_build(
+            &rig,
+            &session,
+            GrantGatedTools::default().with_mcp_server("s"),
+            None,
+            vec![fixture(&rig, "s", "s_")],
+        )
+        .await;
+        let mut agent = build_agent(&rig, build).await;
+
+        let refused = call(&mut agent, "s_add").await;
+        assert_eq!(
+            refusal_code(&refused).as_deref(),
+            Some(TOOL_GRANT_REQUIRED_CODE),
+            "{refused:?}"
+        );
+        assert_eq!(
+            rig.preparations.0.load(Ordering::SeqCst),
+            0,
+            "a refused call is never prepared"
+        );
+
+        let admitted = call(&mut agent, "s_echo").await;
+        assert!(ran(&admitted), "{admitted:?}");
+        assert_eq!(
+            rig.preparations.0.load(Ordering::SeqCst),
+            1,
+            "an admitted call is prepared once"
+        );
     }
 }

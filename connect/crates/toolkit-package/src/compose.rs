@@ -87,7 +87,7 @@ pub struct ComposeHealthcheck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComposeMount {
-    /// Source is configuration, policy, or files/<profile-pinned filename>.
+    /// Source is configuration, policy, or `files/<profile-pinned filename>`.
     File { source: String, target: String },
     Volume {
         source: Id,

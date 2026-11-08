@@ -978,6 +978,7 @@ export function parseWireAuthError(value: unknown, path = 'auth_error'): WireAut
       'credential_interaction_required',
       'credential_access_pending',
       'credential_store_unavailable',
+      'source_unavailable',
     ],
     `${path}.kind`,
     'wire auth error kind',

@@ -1118,10 +1118,10 @@ class ToolGrantSubjectIdentity(TypedDict, total=False):
 
 ToolGrantSubjectRequest = ToolGrantSubjectSession | ToolGrantSubjectIdentity
 
-# The target a grant request names: one tool name, or a built-in tool
-# family, whose names the server takes at grant time. Closed: a kind or a
-# field this version does not know is refused, never ignored, so a request
-# is never read as wider than it asked.
+# The target a grant request names: one tool name, a built-in tool family,
+# whose names the server takes at grant time, or an MCP server. Closed: a
+# kind or a field this version does not know is refused, never ignored, so
+# a request is never read as wider than it asked.
 class ToolGrantTargetTool(TypedDict, total=False):
     kind: Required[Literal['tool']]
     name: Required[str]
@@ -1130,7 +1130,12 @@ class ToolGrantTargetFamily(TypedDict, total=False):
     family: Required[str]
     kind: Required[Literal['family']]
 
-ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily
+class ToolGrantTargetMcpServer(TypedDict, total=False):
+    kind: Required[Literal['mcp_server']]
+    server: Required[str]
+    tools: NotRequired[Optional[list[str]]]
+
+ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer
 
 # Whose grant a record names: a session, or (in a later version) a mob
 # member's identity.
@@ -1148,8 +1153,8 @@ class WireToolGrantSubjectUnknown(TypedDict, total=False):
 
 WireToolGrantSubject = WireToolGrantSubjectSession | WireToolGrantSubjectIdentity | WireToolGrantSubjectUnknown
 
-# What a grant record opens: one tool name, or a built-in tool family with
-# the names the server took for it at grant time.
+# What a grant record opens: one tool name, a built-in tool family with
+# the names the server took for it at grant time, or an MCP server's tools.
 class WireToolGrantTargetTool(TypedDict, total=False):
     kind: Required[Literal['tool']]
     name: Required[str]
@@ -1159,14 +1164,20 @@ class WireToolGrantTargetFamily(TypedDict, total=False):
     kind: Required[Literal['family']]
     names: NotRequired[list[str]]
 
+class WireToolGrantTargetMcpServer(TypedDict, total=False):
+    kind: Required[Literal['mcp_server']]
+    server: Required[str]
+    tools: NotRequired[Optional[list[str]]]
+
 class WireToolGrantTargetUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
-WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown
+WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown
 
 # Who issued a grant.
 class WireToolGrantIssuerOperator(TypedDict, total=False):
     caller: NotRequired[Optional[str]]
+    decision_ref: NotRequired[Optional[str]]
     kind: Required[Literal['operator']]
 
 class WireToolGrantIssuerApproval(TypedDict, total=False):
@@ -1182,7 +1193,7 @@ WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval 
 WireToolGrantStatus = Literal['active', 'expired', 'revoked', 'requested', 'declined', 'unknown']
 
 # Which driver observed a grant's expiry.
-WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['unknown']
+WireToolGrantExpiryDriver = Literal['timer', 'boundary', 'dispatch', 'read', 'revoke'] | Literal['build'] | Literal['unknown']
 
 # Why a gated call was refused.
 WireToolGrantRefusalKind = Literal['required', 'expired', 'revoked', 'unavailable'] | Literal['unknown']
@@ -1222,6 +1233,9 @@ class WireToolGrantAuditEventUnknown(TypedDict, total=False):
     kind: Required[Literal['unknown']]
 
 WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown
+
+# Whether an identity grant applies to the member's running build.
+WireToolGrantApplies = Literal['now', 'not_mounted', 'at_next_build', 'unknown']
 
 # Who a presenter showed a rendering to. Closed.
 class DecisionAudienceApprover(TypedDict, total=False):
@@ -2206,11 +2220,42 @@ version, or damaged): its place in the subject's log."""
 
 
 @dataclass
+class WireToolGrantGateEntries:
+    """The entries of a build's tool grant gate as `tool_grants/list` shows
+them: built-in tool families, tool names, MCP servers and the
+unconfigured-servers mode. Advisory, so tolerant: a field this version
+does not know is ignored, never refused, and a newer server's gate never
+fails the result it rides on. (A gate a request names is the closed
+[`WireGrantGatedTools`].)"""
+    families: Optional[list[str]] = None
+    mcp_servers: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+    unconfigured_mcp_servers: Optional[bool] = None
+
+
+@dataclass
+class WireToolGrantGateView:
+    """A build's tool grant gate: what it gates, and the role entries it
+ignores as not mounted (never gated, never open)."""
+    gated: Optional[WireToolGrantGateEntries] = None
+    not_mounted: Optional[WireToolGrantGateEntries] = None
+
+
+@dataclass
+class WireMemberToolGrantGate:
+    """A mob member identity's tool grant gate, as `tool_grants/list` answers
+it: what its live build runs, and what its next build resolves."""
+    next_build: WireToolGrantGateView
+    running: Optional[WireToolGrantGateView] = None
+
+
+@dataclass
 class GrantToolParams:
     """`tool_grants/grant` parameters. Exactly one of `expires_at_ms` and
 `duration_ms` bounds the grant, at most the host's maximum lifetime."""
     subject: ToolGrantSubjectRequest
     target: ToolGrantTargetRequest
+    decision_ref: Optional[str] = None
     duration_ms: Optional[int] = None
     expires_at_ms: Optional[int] = None
     reason: Optional[str] = None
@@ -2220,6 +2265,7 @@ class GrantToolParams:
 class GrantToolResult:
     """`tool_grants/grant` result."""
     grant: WireToolGrant
+    applies: Optional[WireToolGrantApplies] = None
 
 
 @dataclass
@@ -2248,6 +2294,7 @@ class ListToolGrantsParams:
 class ListToolGrantsResult:
     """`tool_grants/list` result. Due grants are settled as expired first."""
     grants: list[WireToolGrant]
+    gate: Optional[WireMemberToolGrantGate] = None
     unreadable: Optional[list[WireUnreadableToolGrant]] = None
 
 
@@ -2279,6 +2326,17 @@ digest."""
 
 
 @dataclass
+class WirePresentationLink:
+    """The link a summary presentation carried to the full presentation of a
+decision's rendering, and the digest of the rendering that link served
+when it was followed. A surface with a size limit shows a summary that
+says it is shortened, with such a link; the summary counts as a complete
+presentation only when the link served the held rendering."""
+    reference: str
+    served_digest: str
+
+
+@dataclass
 class WirePresentationRecord:
     """One recorded presentation of a decision's rendering."""
     at_ms: int
@@ -2287,6 +2345,7 @@ class WirePresentationRecord:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2295,6 +2354,15 @@ class WireDecisionOutcome:
     """A decided decision's outcome: who decided, and the evidence."""
     evidence: WireDecisionEvidence
     tier: WireDecisionTier
+
+
+@dataclass
+class WireDecisionEffect:
+    """What an executed decision did, as its kind names it: each field names
+one thing its execution committed. An executed `grant.child` decision
+names the grant it issued. Read tolerantly: a field this version does
+not know is ignored."""
+    grant_id: Optional[str] = None
 
 
 @dataclass
@@ -2317,6 +2385,7 @@ class WireDecision:
     subject_digest: str
     subject_key: str
     decided_at_ms: Optional[int] = None
+    effect: Optional[WireDecisionEffect] = None
     ended_at_ms: Optional[int] = None
     execution_refusal: Optional[str] = None
     first_presented_to_approver_at_ms: Optional[int] = None
@@ -2343,6 +2412,7 @@ class DecisionPresentationRequest:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2405,8 +2475,9 @@ request and its canonical parts for the asked part size."""
 @dataclass
 class DecisionPresentParams:
     """`decision/present` parameters: record what a host presenter showed. It
-counts only when it shows every canonical part of the held rendering to
-the party that decides now."""
+counts only when it shows every canonical part of the held rendering, or
+is a summary whose link served the held rendering, to the party that
+decides now."""
     decision_id: str
     presentation: DecisionPresentationRequest
 
@@ -3065,11 +3136,26 @@ not know instead of refusing it."""
 
 
 @dataclass
+class WireGrantGatedTools:
+    """A scoped tool grant gate: the built-in tool families, the tool names and
+the MCP servers a build mounts hidden and refuses at dispatch until a live
+grant opens them. A session's build takes it on `session/create`
+(`grant_gated_tools`); a mob profile declares its members'
+(`tools.grant_gated`). A field this version does not know is refused,
+never ignored."""
+    families: Optional[list[str]] = None
+    mcp_servers: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+    unconfigured_mcp_servers: Optional[bool] = None
+
+
+@dataclass
 class WireMobToolConfig:
     """Tool configuration embedded in a wire mob profile override."""
     builtins: Optional[bool] = None
     comms: Optional[bool] = None
     deny: Optional[list[str]] = None
+    grant_gated: Optional[WireGrantGatedTools] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
@@ -3870,6 +3956,7 @@ class MobStreamOpenParams:
     """Request payload for `mob/stream_open`."""
     mob_id: str
     agent_identity: Optional[str] = None
+    cursor: Optional[MobStreamCursor] = None
 
 
 @dataclass
@@ -4368,6 +4455,7 @@ class MobToolConfigInput:
     bundles: Optional[list[str]] = None
     comms: Optional[bool] = None
     deny: Optional[list[str]] = None
+    grant_gated: Optional[WireGrantGatedTools] = None
     image_generation: Optional[bool] = None
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
@@ -4726,6 +4814,14 @@ class WireProviderParamsOverride:
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None
+
+
+@dataclass
+class MobStreamCursor:
+    """A position in a mob member's event sequence: the `epoch` a member
+`mob/stream_event` names and the `seq` of its event (`event.seq`)."""
+    epoch: str
+    seq: int
 
 
 @dataclass
@@ -5683,7 +5779,7 @@ WireFlowTurnOutcome = Literal['run_completed'] | Literal['extraction_succeeded']
 
 # Stable discriminant for [`AuthError`]. Used in serialized error summaries
 # and for SDK-facing wire codes.
-AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable']
+AuthErrorKind = Literal['missing_secret', 'unsupported_combination', 'missing_required_metadata', 'workspace_mismatch', 'stale_credential', 'refresh_required', 'lease_absent', 'user_reauth_required', 'expired', 'refresh_failed', 'resolve_required', 'interactive_login_required', 'host_owned_unavailable', 'io', 'other', 'credential_access_denied', 'credential_interaction_required', 'credential_access_pending', 'credential_store_unavailable', 'source_unavailable']
 
 # Wire projection of `meerkat_core::connection::ConnectionTargetError`'s
 # variant set (closed; kinds only — the parameters stay in the diagnostic
@@ -7422,7 +7518,11 @@ class WireAuthErrorCredentialStoreUnavailable(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['credential_store_unavailable']]
 
-WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable
+class WireAuthErrorSourceUnavailable(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['source_unavailable']]
+
+WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable
 
 # Wire-safe content block (no `source_path` — internal only).
 class WireContentBlockText(TypedDict, total=False):

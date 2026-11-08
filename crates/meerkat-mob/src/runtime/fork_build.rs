@@ -1248,6 +1248,9 @@ pub(crate) fn member_resume_spec(
     spec.spawned_by = entry.spawned_by.clone();
     spec.fork_job = entry.fork_job.clone();
     spec.definition_wiring = entry.definition_wiring;
+    // An approval branch is restored as the branch it is: its typed
+    // creation source admits its reserved identity and label.
+    spec.approval_branch = entry.approval_branch.clone();
     spec
 }
 
@@ -1535,6 +1538,7 @@ mod tests {
             fork_source,
             fork_overlay: ForkOverlayOrigin::Source,
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
         });
         roster.get(&identity).cloned().expect("the entry is seated")
     }

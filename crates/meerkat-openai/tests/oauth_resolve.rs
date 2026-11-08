@@ -520,6 +520,90 @@ async fn openai_managed_chatgpt_oauth_refresh_failure_is_typed() {
     }
 }
 
+/// Resolve the managed ChatGPT OAuth binding over an expired token whose
+/// refresh fails with `error`.
+async fn resolve_after_refresh_failure(
+    error: RefreshError,
+) -> meerkat_llm_core::provider_runtime::ProviderAuthError {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let expired = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("expired-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+        last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
+        scopes: o_oauth::chatgpt_declaration()
+            .scopes
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    let (expired, auth_lease) =
+        mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
+    store.save(&key, &expired).await.unwrap();
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_provider_auth_persistence(ProviderAuthPersistence::new(
+            store,
+            Arc::new(FailingRefreshCoordinator { error }),
+        ))
+        .with_auth_lease_handle(auth_lease);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    registry
+        .resolve(&realm, &default_auth_binding(), &env)
+        .await
+        .unwrap_err()
+}
+
+/// AuthMachine's verdict on a refresh failure reaches the resolution: a
+/// failure that clears on its own (the token endpoint is down or busy)
+/// answers `source_unavailable`, one that needs a new sign-in
+/// `user_reauth_required`. The runtime reads the verdict and never
+/// classifies the provider's answer itself: an unclassified failure stays
+/// `refresh_failed` (above).
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_refresh_verdict_reaches_the_resolution() {
+    let transient = resolve_after_refresh_failure(RefreshError::Classified {
+        message: "token endpoint answered 503".into(),
+        observation: meerkat_core::RefreshFailureObservation::http_status(503),
+        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+    })
+    .await;
+    match transient {
+        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+            meerkat_core::AuthError::SourceUnavailable { reason },
+        ) => assert!(
+            reason.contains("token endpoint answered 503"),
+            "got {reason}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+
+    let permanent = resolve_after_refresh_failure(RefreshError::Classified {
+        message: "token endpoint refused the refresh token".into(),
+        observation: meerkat_core::RefreshFailureObservation::oauth_token_endpoint(
+            400,
+            Some("invalid_grant".into()),
+        ),
+        disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
+    })
+    .await;
+    assert!(
+        matches!(
+            permanent,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::UserReauthRequired
+            )
+        ),
+        "got {permanent:?}"
+    );
+}
+
 #[tokio::test]
 async fn openai_managed_chatgpt_oauth_rejects_marked_token_without_auth_lease() {
     let store = Arc::new(EphemeralTokenStore::new());

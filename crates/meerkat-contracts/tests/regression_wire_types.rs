@@ -1368,7 +1368,10 @@ fn tool_grant_results_pin_their_field_names() {
             family: "shell".to_string(),
             names: vec!["shell".to_string()],
         },
-        issuer: WireToolGrantIssuer::Operator { caller: None },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
         reason: None,
         status: WireToolGrantStatus::Active,
         issued_at_ms: 1_000,
@@ -1399,10 +1402,12 @@ fn tool_grant_results_pin_their_field_names() {
     let listed = serde_json::to_value(ListToolGrantsResult {
         grants: vec![grant],
         unreadable: Vec::new(),
+        gate: None,
     })
     .expect("serialize");
     assert_eq!(listed["grants"].as_array().map(Vec::len), Some(1));
     assert!(listed.get("unreadable").is_none(), "{listed}");
+    assert!(listed.get("gate").is_none(), "{listed}");
 
     let page = serde_json::to_value(ToolGrantAuditResult {
         rows: vec![WireToolGrantAuditRow {
@@ -1604,6 +1609,127 @@ fn a_session_create_grant_gate_refuses_an_unknown_field() {
         .is_err(),
         "a misspelled gate field must not yield an empty gate"
     );
+}
+
+/// A gate names MCP servers and the unconfigured-servers mode, which convert
+/// to the build's gate and are omitted when unset; a grant request targets
+/// an MCP server, optionally narrowed to its tools, as a record does; an
+/// identity grant answers `applies` and a list answers the member's `gate`,
+/// each omitted for a session subject.
+#[test]
+fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
+    use meerkat_contracts::{
+        GrantToolResult, ListToolGrantsResult, ToolGrantTargetRequest, WireGrantGatedTools,
+        WireMemberToolGrantGate, WireToolGrant, WireToolGrantApplies, WireToolGrantGateEntries,
+        WireToolGrantGateView, WireToolGrantIssuer, WireToolGrantStatus, WireToolGrantSubject,
+        WireToolGrantTarget,
+    };
+    let gate: WireGrantGatedTools = serde_json::from_value(serde_json::json!({
+        "mcp_servers": ["tickets"],
+        "unconfigured_mcp_servers": true,
+    }))
+    .expect("a server gate parses");
+    assert_eq!(
+        meerkat_core::tool_grant::GrantGatedTools::from(gate.clone()),
+        meerkat_core::tool_grant::GrantGatedTools::default()
+            .with_mcp_server("tickets")
+            .with_unconfigured_mcp_servers()
+    );
+    assert!(!gate.is_empty());
+    assert_eq!(
+        serde_json::to_value(WireGrantGatedTools {
+            families: vec!["shell".to_string()],
+            ..WireGrantGatedTools::default()
+        })
+        .expect("serialize"),
+        serde_json::json!({"families": ["shell"]}),
+        "no servers and an unset mode are omitted"
+    );
+
+    let narrowed: ToolGrantTargetRequest = serde_json::from_value(serde_json::json!({
+        "kind": "mcp_server",
+        "server": "tickets",
+        "tools": ["open_ticket"],
+    }))
+    .expect("a server target parses");
+    assert_eq!(
+        narrowed,
+        ToolGrantTargetRequest::McpServer {
+            server: "tickets".to_string(),
+            tools: Some(vec!["open_ticket".to_string()]),
+        }
+    );
+    assert!(
+        serde_json::from_value::<ToolGrantTargetRequest>(serde_json::json!({
+            "kind": "mcp_server",
+            "server": "tickets",
+            "names": ["open_ticket"],
+        }))
+        .is_err(),
+        "a server target refuses a field it does not know"
+    );
+
+    let grant = WireToolGrant {
+        grant_id: "0b6f9f5e-8f3d-4a51-9a52-3c1f6d1e2a10".to_string(),
+        subject: WireToolGrantSubject::Session {
+            session_id: "session-1".to_string(),
+        },
+        target: WireToolGrantTarget::McpServer {
+            server: "tickets".to_string(),
+            tools: None,
+        },
+        issuer: WireToolGrantIssuer::Operator {
+            caller: None,
+            decision_ref: None,
+        },
+        reason: None,
+        status: WireToolGrantStatus::Active,
+        issued_at_ms: 1_000,
+        expires_at_ms: 61_000,
+        ended_at_ms: None,
+    };
+    let granted = serde_json::to_value(GrantToolResult {
+        grant: grant.clone(),
+        applies: Some(WireToolGrantApplies::AtNextBuild),
+    })
+    .expect("serialize");
+    assert_eq!(
+        granted["grant"]["target"],
+        serde_json::json!({"kind": "mcp_server", "server": "tickets"})
+    );
+    assert_eq!(granted["applies"], "at_next_build");
+    let session_grant = serde_json::to_value(GrantToolResult {
+        grant: grant.clone(),
+        applies: None,
+    })
+    .expect("serialize");
+    assert!(session_grant.get("applies").is_none(), "{session_grant}");
+
+    let listed = serde_json::to_value(ListToolGrantsResult {
+        grants: vec![grant],
+        unreadable: Vec::new(),
+        gate: Some(WireMemberToolGrantGate {
+            running: None,
+            next_build: WireToolGrantGateView {
+                gated: WireToolGrantGateEntries {
+                    mcp_servers: vec!["tickets".to_string()],
+                    ..WireToolGrantGateEntries::default()
+                },
+                not_mounted: WireToolGrantGateEntries::default(),
+            },
+        }),
+    })
+    .expect("serialize");
+    assert_eq!(
+        listed["gate"],
+        serde_json::json!({
+            "running": null,
+            "next_build": {"gated": {"mcp_servers": ["tickets"]}, "not_mounted": {}},
+        })
+    );
+    let unknown: WireToolGrantApplies =
+        serde_json::from_value(serde_json::json!("later")).expect("a later value decodes");
+    assert_eq!(unknown, WireToolGrantApplies::Unknown);
 }
 
 /// The `tool_grants/*` params schemas require only what a request must

@@ -5535,6 +5535,17 @@ impl RuntimeLoopAuthorityBinding {
         self.store_self_fence().is_some_and(|fence| fence.lost())
     }
 
+    /// Whether the session's store refuses every later call that needs the
+    /// session's runtime until its realm is reopened (a batch of it left
+    /// unsettled poisoned its scope, or the realm lost its fence): nothing
+    /// this process writes for the session lands, and the store keeps its
+    /// inputs as it last committed them.
+    fn store_refuses_session_until_reopen(&self) -> bool {
+        self.machine
+            .upgrade()
+            .is_some_and(|machine| machine.store_refuses_session_until_reopen(&self.session_id))
+    }
+
     /// Whether the session store's fence reads closed with no other writer
     /// proven (a store fence gap, or the start of one): its writes wait for
     /// the writer's re-acquire.
@@ -6096,11 +6107,12 @@ async fn wait_out_store_fence_gap(fence: &dyn meerkat_core::host_store::SelfFenc
 
 /// Tell the local waiters of the session's inputs that the store keeps (every
 /// unfinished input but an ephemeral one) that their inputs stay queued
-/// (`RequeuedAcrossStop`): another writer holds the session store's fence, so
-/// nothing this process does for them lands, and the new owner runs them. An
-/// ephemeral input is in no store: the session's teardown ends it, and
-/// answers its waiters, as before.
-async fn answer_waiters_for_lost_store_fence(
+/// (`RequeuedAcrossStop`): another writer holds the session store's fence, or
+/// the store refuses the session's writes until its realm is reopened, so
+/// nothing this process does for them lands, and the new owner, or the next
+/// start, runs them. An ephemeral input is in no store: the session's
+/// teardown ends it, and answers its waiters, as before.
+async fn answer_waiters_for_store_kept_inputs(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) {
@@ -7576,6 +7588,24 @@ async fn admit_resumed_run(
     if held || waits_for_destination {
         return ResumedRunAdmissionLap::Exit(false);
     }
+    // A kept run past its stop's max age is settled as expired before its
+    // admission is asked: a run its admission could not decide, held across
+    // laps, ends here once that age passes.
+    if driver
+        .lock()
+        .await
+        .resumable_run_stop_requeue_expired(&run_id, chrono::Utc::now())
+    {
+        return settle_unresumed_run(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            &run_id,
+            UnresumedRun::Expired,
+        )
+        .await;
+    }
     let Some(machine) = authority_binding.machine.upgrade() else {
         return ResumedRunAdmissionLap::Exit(true);
     };
@@ -7606,6 +7636,17 @@ async fn admit_resumed_run(
     match crate::resumed_run_admission::ask_resumed_run_admission(Some(&admission), &request).await
     {
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Continue => {
+            // A run an earlier lap held because its admission could not
+            // decide is released before it resumes.
+            if let Err(error) = driver.lock().await.release_resumed_run_admission(&run_id) {
+                tracing::error!(
+                    session_id = %authority_binding.session_id,
+                    %run_id,
+                    %error,
+                    "the resumed run's admission hold could not be released"
+                );
+                return ResumedRunAdmissionLap::Exit(true);
+            }
             ResumedRunAdmissionLap::Resume(run_id)
         }
         crate::resumed_run_admission::ResumedRunAdmissionVerdict::Refused { detail } => {
@@ -7618,6 +7659,38 @@ async fn admit_resumed_run(
                 detail,
             )
             .await
+        }
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Undecided { detail } => {
+            // Neither resumed nor settled: the run stays marked, its inputs
+            // bound and none ended, and the machine holds it until a later
+            // answer. The next wake of the loop, or the session's next
+            // registration, asks again; nothing asks on a timer.
+            match driver.lock().await.hold_resumed_run_for_admission(&run_id) {
+                Ok(()) => {
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        attempts = crate::resumed_run_admission::RESUMED_RUN_ADMISSION_ATTEMPTS,
+                        %detail,
+                        "the resumed run's admission could not decide; the run stays marked and \
+                         is asked again at the next wake or registration"
+                    );
+                    ResumedRunAdmissionLap::Exit(false)
+                }
+                Err(error) => {
+                    // The machine refuses the hold of a run no longer marked,
+                    // or whose stop was asked meanwhile: the next lap settles
+                    // or serves what it finds.
+                    tracing::warn!(
+                        session_id = %authority_binding.session_id,
+                        %run_id,
+                        %error,
+                        "the resumed run's admission could not decide, and the run can no longer \
+                         be held; the loop goes round again"
+                    );
+                    ResumedRunAdmissionLap::Again
+                }
+            }
         }
     }
 }
@@ -7659,6 +7732,10 @@ enum UnresumedRun {
     /// while it was marked resumable (suspended by the gap, or left open by
     /// a restart).
     Stopped,
+    /// The graceful stop that kept it open outlived its max age: checked
+    /// before each admission ask, so a run its admission could not decide
+    /// ends here once that age passes.
+    Expired,
 }
 
 impl UnresumedRun {
@@ -7666,6 +7743,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => crate::input_state::InputAbandonReason::ResumeRefused,
             Self::Stopped => crate::input_state::InputAbandonReason::Cancelled,
+            Self::Expired => crate::input_state::InputAbandonReason::RequeueExpired,
         }
     }
 
@@ -7675,6 +7753,7 @@ impl UnresumedRun {
         match self {
             Self::Refused { .. } => "the resumed run was refused",
             Self::Stopped => STOPPED_RESUMABLE_RUN_TERMINATION_REASON,
+            Self::Expired => crate::meerkat_machine::EXPIRED_KEPT_RUN_TERMINATION_REASON,
         }
     }
 
@@ -7683,6 +7762,10 @@ impl UnresumedRun {
         match self {
             Self::Refused { detail } => format!("the resumed run was refused: {detail}"),
             Self::Stopped => "the suspended run was stopped before it resumed".to_string(),
+            Self::Expired => {
+                "the kept run outlived its stop's max age and was settled instead of resumed"
+                    .to_string()
+            }
         }
     }
 }
@@ -7723,6 +7806,12 @@ async fn settle_unresumed_run(
             %run_id,
             "the suspended run was stopped; it is settled without resuming"
         ),
+        UnresumedRun::Expired => tracing::info!(
+            session_id = %authority_binding.session_id,
+            %run_id,
+            "a run a graceful stop kept open outlived the stop's max age; it is settled instead \
+             of resumed"
+        ),
     }
     let mut runless_terminal = authority_binding.runless_terminal_announcement();
     let queue_authority_guard = match authority_binding
@@ -7735,14 +7824,16 @@ async fn settle_unresumed_run(
     // A stop of the run is staged under the session mutation gate this
     // guard holds: one recorded since the admission read the run is read
     // here, and the run is settled as stopped, never as a refused resume
-    // (the machine refuses that settlement of a stopped run).
-    let stopped_since = matches!(why, UnresumedRun::Refused { .. })
+    // (the machine refuses that settlement of a stopped run) or as expired
+    // (every settlement of a stopped run is a stop's).
+    let stopped_since = matches!(why, UnresumedRun::Refused { .. } | UnresumedRun::Expired)
         && driver.lock().await.resumable_run_stop_requested();
     let why = if stopped_since {
         tracing::info!(
             session_id = %authority_binding.session_id,
             %run_id,
-            "the run was stopped before its refused resume was settled; it is settled as stopped"
+            "the run was stopped before its refused or expired resume was settled; it is settled \
+             as stopped"
         );
         UnresumedRun::Stopped
     } else {
@@ -8237,6 +8328,22 @@ async fn process_queue(
                     )
                     .await
             };
+            // Kept governed work whose host supplies no controller client
+            // again ends as before the host was asked: with the kept-governed
+            // termination reason.
+            let ended_kept = if asks.refused_kept.is_empty() {
+                crate::meerkat_machine::SettledRefusedResumes::default()
+            } else {
+                driver
+                    .lock()
+                    .await
+                    .settle_refused_queued_resumes(
+                        &asks.refused_kept,
+                        crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+                        || refused_terminals.owe(),
+                    )
+                    .await
+            };
             drop(queue_authority_guard);
             let published = publish_refused_retained_resumes(
                 driver,
@@ -8246,13 +8353,27 @@ async fn process_queue(
                 REFUSED_RETAINED_RESUME_REASON,
             )
             .await;
+            let published_kept = publish_refused_retained_resumes(
+                driver,
+                completions,
+                &*executor,
+                &ended_kept.settled,
+                crate::meerkat_machine::KEPT_GOVERNED_INPUT_TERMINATION_REASON,
+            )
+            .await;
             refused_terminals.release();
-            if let Some(error) = ended.failure.or(published.err()) {
-                let reason = format!("refused retained-work resumes could not be settled: {error}");
-                tracing::error!(%error, "failed closed settling refused retained-work resumes");
+            if let Some(error) = ended
+                .failure
+                .or(published.err())
+                .or(ended_kept.failure)
+                .or(published_kept.err())
+            {
+                let reason = format!("refused kept inputs could not be settled: {error}");
+                tracing::error!(%error, "failed closed settling refused kept inputs");
                 if let Some(completions) = completions {
                     let mut completions = completions.lock().await;
                     fail_completion_waiters(&mut completions, &asks.refused, reason.clone());
+                    fail_completion_waiters(&mut completions, &asks.refused_kept, reason.clone());
                 }
                 return stop_runtime_loop_executor_from_dsl_effect(
                     driver,
@@ -8264,16 +8385,27 @@ async fn process_queue(
                 )
                 .await;
             }
-            if let Some(run_id) = asks.refused_run.clone() {
+            let refused_run = match (asks.refused_run.clone(), asks.refused_kept_run.clone()) {
+                (Some(run_id), _) => Some((
+                    run_id,
+                    "its host supplied no controller for the retained work an input of the run \
+                     resumes",
+                )),
+                (None, Some(run_id)) => Some((
+                    run_id,
+                    "its first input is kept governed work whose controller cannot be supplied \
+                     again",
+                )),
+                (None, None) => None,
+            };
+            if let Some((run_id, detail)) = refused_run {
                 match settle_refused_resumed_run(
                     driver,
                     completions,
                     executor,
                     authority_binding,
                     &run_id,
-                    "its host supplied no controller for the retained work an input of the run \
-                     resumes"
-                        .to_string(),
+                    detail.to_string(),
                 )
                 .await
                 {
@@ -8296,7 +8428,7 @@ async fn process_queue(
                     ResumedRunAdmissionLap::Exit(wake) => return wake,
                 }
             }
-            if asks.changed_plan(ended.settled.len()) {
+            if asks.changed_plan(ended.settled.len() + ended_kept.settled.len()) {
                 continue;
             }
         }
@@ -8334,7 +8466,7 @@ async fn process_queue(
                      resume in this process, the session's waiters are told their inputs stay \
                      queued for the new owner, and the session is torn down"
                 );
-                answer_waiters_for_lost_store_fence(driver, completions).await;
+                answer_waiters_for_store_kept_inputs(driver, completions).await;
                 handoff.disposition = RuntimeLoopTeardownDisposition::UnregisterRequired;
                 // As a teardown-required apply does: returning exits the
                 // loop, and the watcher starts the canonical unregister.
@@ -8708,26 +8840,27 @@ async fn process_queue(
                     input_ids: superseded,
                 };
             }
-            // No batch can select a kept resume of retained work still
+            // No batch can select a kept input (a resume of retained work, or
+            // governed work admitted under its own association) still
             // without its client, by construction: this lap's first step
             // asked every such row the machine did not hold (a client pins
             // it, a definite answer ends it, any other answer holds it), or,
             // while the registration drains for its unregister, held each
             // through the machine without asking; a released resumable run
-            // holds its requeued kept resumes again; and the machine's batch
+            // holds its requeued kept inputs again; and the machine's batch
             // filter never selects a held input. One here means the shell
             // and the machine disagree: fail closed instead of staging it
             // without its client.
             if let Some(unpinned) = batch
                 .input_ids()
                 .iter()
-                .find(|input_id| d.kept_retained_resume_without_client(input_id))
+                .find(|input_id| d.kept_input_without_client(input_id))
             {
                 break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
                     input_ids: batch.input_ids().to_vec(),
                     reason: format!(
-                        "the selected batch names kept retained-work resume {unpinned} without its \
-                         controller client"
+                        "the selected batch names kept input {unpinned} without its controller \
+                         client"
                     ),
                 };
             }
@@ -9992,6 +10125,17 @@ async fn process_queue(
                         // that it ended, so no caller resubmits work the new
                         // owner runs.
                         let store_fence_lost = authority_binding.store_fence_lost();
+                        // A run torn down because its store could not settle
+                        // one of its writes (a round commit whose outcome
+                        // stayed unknown: the teardown class) leaves the
+                        // session's scope refusing every write until the realm
+                        // is reopened. Nothing this teardown realizes for the
+                        // session's inputs lands either, and the store keeps
+                        // them as last committed, pending, for the next start:
+                        // their waiters are told so, as at a lost fence.
+                        let store_refuses_session = !store_fence_lost
+                            && e.requires_runtime_teardown()
+                            && authority_binding.store_refuses_session_until_reopen();
                         let teardown_required = e.requires_runtime_teardown()
                             || completed_terminal_before_failure
                             || store_fence_lost;
@@ -10007,7 +10151,16 @@ async fn process_queue(
                                  waiters are told their inputs stay queued for the new owner, and \
                                  the session is torn down"
                             );
-                            answer_waiters_for_lost_store_fence(driver, completions).await;
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
+                        } else if store_refuses_session {
+                            tracing::warn!(
+                                session_id = %authority_binding.session_id,
+                                %run_id,
+                                "the session store refuses the session's writes until its realm \
+                                 is reopened; the session's waiters are told their inputs stay \
+                                 queued for the next start, and the session is torn down"
+                            );
+                            answer_waiters_for_store_kept_inputs(driver, completions).await;
                         }
                         let terminal_authority_guard = match authority_binding
                             .lock_current_driver_authority(driver, "runtime loop terminal failure")

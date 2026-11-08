@@ -1885,6 +1885,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             read_only: tools.read_only,
             deny: tools.deny.clone(),
             mcp: tools.mcp.clone(),
+            grant_gated: (&tools.grant_gated).into(),
         },
         peer_description: profile.peer_description.clone(),
         external_addressable: profile.external_addressable,
@@ -2970,9 +2971,17 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::IdentityMember { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
+        // An approval branch's reserved identity or label: refused to every
+        // spawn but the branch's own opening, like an identity entry's name.
+        MobError::ApprovalBranchReserved { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
+        }
         // An identity change is not a spawn; its typed refusal is the same
-        // family as the machine refusing the requested transition.
-        MobError::IdentityChangeRefused { .. } | MobError::IdentityArchived { .. } => {
+        // family as the machine refusing the requested transition, and so is
+        // a plain unwire's refusal of an owned edge.
+        MobError::IdentityChangeRefused { .. }
+        | MobError::IdentityArchived { .. }
+        | MobError::OwnedIdentityEdge { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::InvalidTransition
         }
         MobError::NotExternallyAddressable(_) => {
@@ -6461,6 +6470,9 @@ pub struct MobHandle {
     /// composition has one: member binding history reads its journal and
     /// identity intent rows in one store transaction. Read-only here.
     pub(super) identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
+    /// The mob's identity intents: a member's grant gate reads its
+    /// identity's sealed declaration. Read-only here.
+    pub(super) identity: Arc<dyn crate::store::MobIdentityStore>,
     /// The member binding fold this handle and its clones keep between
     /// member binding history reads, so a read folds only the journal tail.
     pub(super) member_binding_fold: Arc<super::delivery_scope::MemberBindingFoldCache>,
@@ -6776,6 +6788,13 @@ pub(crate) struct RestoreFailureDiagnostic {
     /// carries it, so a host classifies the Broken member typed instead of
     /// parsing `reason`.
     pub(crate) hold: Option<meerkat_core::service::DurableResumeHold>,
+    /// The structured data of the failure that broke the restore
+    /// ([`MobError::structured_data`] of it: a session builder's typed
+    /// refusal of the member's build, a provider-auth refusal), when it had
+    /// some: every later `MemberRestoreFailed` minted from this record
+    /// carries it, so a host classifies the failure by its data instead of
+    /// parsing `reason`.
+    pub(crate) cause_data: Option<serde_json::Value>,
     /// The hook call that refused the member's registration when its boot
     /// restore was refused by its host, set only from the provision's
     /// refusal slot. It feeds only the MobMachine seed
@@ -7372,6 +7391,14 @@ pub struct SpawnMemberSpec {
     /// takes only that entry's name, never another's, and keeps its member a
     /// store-owned entry. An agent-lane request never carries it.
     pub(crate) created_custody: bool,
+    /// The decision whose approval branch this spawn seats: the member's
+    /// typed creation source, recorded on its `MemberSpawned` row and roster
+    /// entry. Set only by [`MobHandle::open_approval_branch`] (and by the
+    /// restore of a member that records it); never taken from
+    /// caller-supplied arguments. Every other spawn, ensure, respawn and
+    /// fork is refused the approval branch identity prefix and label
+    /// ([`crate::MobError::ApprovalBranchReserved`]).
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -7431,6 +7458,7 @@ impl std::fmt::Debug for SpawnMemberSpec {
                 "inherited_operator_authority_bound",
                 &self.inherited_operator_authority_bound,
             )
+            .field("approval_branch", &self.approval_branch)
             .finish()
     }
 }
@@ -7505,6 +7533,7 @@ impl SpawnMemberSpec {
             history_unavailable: None,
             fresh_life: false,
             created_custody: false,
+            approval_branch: None,
         }
     }
 
@@ -8059,6 +8088,7 @@ impl MobHandle {
             session_id: diag.bridge_session_id,
             reason: diag.reason,
             hold: diag.hold,
+            cause_data: diag.cause_data,
         }
     }
 
@@ -8537,6 +8567,33 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_exact_incarnation`] of the incarnation at `generation`
+    /// only (see [`Self::join_or_start_retirement_step`]'s pin).
+    async fn retire_exact_incarnation_at(
+        &self,
+        agent_identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let operation_deadline = Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT;
+        let Some((key, pending)) = self
+            .join_or_start_retirement_step(
+                agent_identity,
+                None,
+                operation_deadline,
+                true,
+                super::state::RetirementRedrive::Plain,
+                Some(generation),
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        // An unscoped slot re-checks no scope, so its step only ever runs.
+        self.wait_for_retirement_operation(&key, pending)
+            .await
+            .map(|_ran| ())
+    }
+
     async fn retire_exact_incarnation(
         &self,
         agent_identity: AgentIdentity,
@@ -8619,6 +8676,7 @@ impl MobHandle {
             operation_deadline,
             bound_admission,
             redrive,
+            None,
         )
         .await
     }
@@ -8628,6 +8686,14 @@ impl MobHandle {
     /// [`Self::retire_at_scope`] under its root scope. A scoped root step
     /// reads no roster entry: the actor resolves the incarnation only after
     /// MobMachine classified the scope in the step's own command.
+    ///
+    /// An unscoped step with a `pinned_generation` retires the identity's
+    /// incarnation only when the roster holds it at that generation: one
+    /// at another generation is refused before the step elects a slot
+    /// ([`MobError::LifecycleOperationPending`], retryable). The step then
+    /// retires the exact incarnation it read, which the actor checks again
+    /// in its own command, so an incarnation seated after the read is never
+    /// retired by it.
     async fn join_or_start_retirement_step(
         &self,
         agent_identity: AgentIdentity,
@@ -8635,6 +8701,7 @@ impl MobHandle {
         operation_deadline: Instant,
         bound_admission: bool,
         redrive: super::state::RetirementRedrive,
+        pinned_generation: Option<Generation>,
     ) -> Result<Option<(RetirementOperationKey, Arc<PendingRetirementOperation>)>, MobError> {
         // Retire's absent-member convergence is still an operator action.
         // Enter the serialized scope gate before any roster observation so a
@@ -8700,6 +8767,17 @@ impl MobHandle {
                 }
                 return Ok(None);
             };
+            if let Some(pinned) = pinned_generation
+                && entry.generation != pinned
+            {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "retire '{agent_identity}' at generation {pinned}: its current \
+                         incarnation is at generation {}",
+                        entry.generation
+                    ),
+                });
+            }
             let expected = super::state::RetireMemberIncarnation {
                 agent_identity: entry.agent_identity.clone(),
                 agent_runtime_id: entry.agent_runtime_id.clone(),
@@ -9507,6 +9585,27 @@ impl MobHandle {
         .await?
     }
 
+    /// Retry the build preparation this host asked to retry for a member:
+    /// the member's wake was refused
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]) because the
+    /// host's [`super::MemberBuildPreparer`] answered
+    /// [`super::MemberBuildPreparationRefusal::Retryable`], and MobMachine
+    /// holds the member's wakes for that cause until a retry ends it. This
+    /// ends it, so the member's next wake asks the preparer again; the mob
+    /// also ends it on its own retry timer, at the owed-wake backoff. A
+    /// member with no such cause is a no-op. Gated by
+    /// [`crate::ControlScope::SendCommand`]; the agent lane never runs it.
+    pub async fn resolve_member_build_preparation(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::ResolveMemberBuildPreparation {
+            agent_identity: agent_identity.clone(),
+            reply_tx,
+        })
+        .await?
+    }
+
     /// Current mob lifecycle state, read directly from the DSL authority
     /// via the actor command channel. There is no atomic shadow: the DSL
     /// authority is the single source of truth (dogma #1, #13, #17).
@@ -9952,6 +10051,7 @@ impl MobHandle {
         ) {
             spec.mark_agent_creation();
         }
+        let identity = spec.identity.clone();
         let plan = self
             .send_actor_command(|reply_tx| MobCommand::PlanMemberRotation {
                 spec: Box::new(spec),
@@ -9964,6 +10064,10 @@ impl MobHandle {
                 seated,
                 endpoint_source,
             } => {
+                if !seated {
+                    self.forget_archived_session_for_fresh_life(&identity)
+                        .await?;
+                }
                 let entry = super::dormant_seat::prepare_dormant_seat(
                     self.session_service.as_ref(),
                     endpoint_source.as_ref(),
@@ -9996,6 +10100,8 @@ impl MobHandle {
             // seat of it, which is a spawn; the commit step clears its host
             // preparation as it does for a seat chunk's spawn.
             super::dormant_seat::MemberRotationPlan::Embody(spec) => {
+                self.forget_archived_session_for_fresh_life(&identity)
+                    .await?;
                 let agent_identity = spec.identity.clone();
                 let member_ref = Box::pin(self.spawn_spec_internal(*spec)).await?;
                 let session_id = member_ref.bridge_session_id().cloned().ok_or_else(|| {
@@ -10022,6 +10128,40 @@ impl MobHandle {
             | super::DormantSeatOutcome::Embodied { session_id, .. } => Ok(session_id),
             other => Err(other.into_unseated_error()),
         }
+    }
+
+    /// The fresh life a rotation starts for an identity entry no member
+    /// holds takes a fresh session: the entry's archived session record, if
+    /// it has one, is let go first (`ForgetArchivedSession`,
+    /// `FreshLifeRequested`), as a declared apply's first-boot `Fresh`
+    /// request lets it go. A name that is no entry, or an entry with no
+    /// record, needs nothing.
+    async fn forget_archived_session_for_fresh_life(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let archived = {
+            let state = self.machine_state_watch_rx.borrow();
+            state
+                .identity_entry_archived_sessions
+                .get(&mob_dsl::AgentIdentity::from_domain(identity))
+                .map(|session| SessionId::parse(&session.0))
+                .transpose()
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "'{identity}' holds an invalid archived session record: {error}"
+                    ))
+                })?
+        };
+        if let Some(session_id) = archived {
+            self.forget_archived_session(
+                identity,
+                &session_id,
+                mob_dsl::ArchivedSessionForgetReason::FreshLifeRequested,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// One chunk of [`Self::seat_dormant_members`]: plan on the actor,
@@ -10602,6 +10742,47 @@ impl MobHandle {
         }
     }
 
+    /// Whether this mob's host holds `agent_identity`'s run starts for
+    /// `reason`: [`Self::members_holding_run_starts`] for one member, read
+    /// the same way (the published machine state and the runtime's hold
+    /// registry, with no actor command and no wake; the
+    /// [`crate::ControlScope::List`] scope) at the cost of that member
+    /// alone. A member this mob does not seat, a placed member (its session
+    /// lives on its host) and a mob without the runtime adapter hold none.
+    pub fn member_holds_run_starts(
+        &self,
+        agent_identity: &AgentIdentity,
+        reason: super::stop_report::HostRunStartHoldReason,
+    ) -> Result<bool, MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let session = self.read_published_machine_state(crate::ControlScope::List, |state| {
+            if state.member_placement.contains_key(&dsl_identity) {
+                return None;
+            }
+            state
+                .member_session_bindings
+                .get(&dsl_identity)
+                .map(|session| session.0.clone())
+        })?;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let (Some(session), Some(adapter)) = (session, self.runtime_adapter.as_ref()) else {
+                return Ok(false);
+            };
+            let session_id = SessionId::parse(&session).map_err(|error| {
+                MobError::Internal(format!(
+                    "member '{agent_identity}' holds an invalid session binding: {error}"
+                ))
+            })?;
+            Ok(adapter.registration_run_start_hold_staged(&session_id, reason.runtime()))
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = (session, reason);
+            Ok(false)
+        }
+    }
+
     /// One page of this mob's member lifecycle journal: the member
     /// lifecycle facts of the journal events after `after` (from the first
     /// with [`super::MobJournalCursor::START`]), reading at most `limit`
@@ -10675,6 +10856,25 @@ impl MobHandle {
         &self,
         identity: &AgentIdentity,
     ) -> Result<super::LegacyIdentityEntryAdoption, MobError> {
+        self.adopt_listed_legacy_member(identity)
+            .await
+            .map(|(adoption, _)| adoption)
+    }
+
+    /// [`Self::adopt_legacy_identity_entry`], with the observation
+    /// MobMachine decided the adoption on: `None` for a declared entry,
+    /// which answers without its spawn row being read. The declared apply
+    /// carries the observation into the identity's declaration.
+    pub(super) async fn adopt_listed_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<
+        (
+            super::LegacyIdentityEntryAdoption,
+            Option<super::identity_entry::ObservedLegacyMember>,
+        ),
+        MobError,
+    > {
         // The scope and the lane first: nothing is answered, not even from
         // the entry, to a caller the adoption is refused to.
         self.admit_control_scope_for(
@@ -10694,18 +10894,25 @@ impl MobHandle {
                     .contains(&mob_dsl::AgentIdentity::from_domain(identity))
         };
         if already_an_entry {
-            return Ok(super::LegacyIdentityEntryAdoption::AlreadyAnEntry);
+            return Ok((super::LegacyIdentityEntryAdoption::AlreadyAnEntry, None));
         }
         // The host names the identity: its member is observed as listed.
-        let (_, verdict) = self
+        let (generation, observation, verdict) = self
             .adopt_observed_legacy_member(identity, true, None)
             .await?;
-        super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
+        let adoption = super::identity_entry::legacy_adoption_answer(verdict).ok_or_else(|| {
             MobError::Internal(format!(
                 "MobMachine answered the adoption of member '{identity}' with no answer: \
                  {verdict:?}"
             ))
-        })
+        })?;
+        Ok((
+            adoption,
+            Some(super::identity_entry::ObservedLegacyMember {
+                generation,
+                marks: observation.marks,
+            }),
+        ))
     }
 
     /// The legacy adoption's observation and MobMachine's decision for an
@@ -10721,7 +10928,10 @@ impl MobHandle {
     /// them), and from a fresh read otherwise. An observation whose
     /// incarnation moved before MobMachine decided is observed again from a
     /// fresh read, a bounded number of times. The answer is MobMachine's
-    /// verdict, with the generation of the incarnation it decided on.
+    /// verdict, with the generation of the incarnation it decided on and the
+    /// observation the shell sent. MobMachine also decides on its step's own
+    /// store read of the identity's intent row, so the returned observation's
+    /// `intent_row` can differ from the one it decided from.
     pub(super) async fn adopt_observed_legacy_member(
         &self,
         identity: &AgentIdentity,
@@ -10730,6 +10940,7 @@ impl MobHandle {
     ) -> Result<
         (
             crate::ids::Generation,
+            super::identity_entry::LegacyMemberObservation,
             mob_dsl::LegacyIdentityEntryAdoptionKind,
         ),
         MobError,
@@ -10794,7 +11005,7 @@ impl MobHandle {
                 })
                 .await??;
             if super::identity_entry::legacy_adoption_answer(verdict).is_some() {
-                return Ok((generation, verdict));
+                return Ok((generation, observation, verdict));
             }
         }
         Err(MobError::LifecycleOperationPending {
@@ -12725,12 +12936,37 @@ impl MobHandle {
     /// List members currently eligible for runtime work dispatch.
     ///
     /// Excludes retiring, completed, broken, or unknown members even if they
-    /// still appear in the public operational projection.
+    /// still appear in the public operational projection, and every open
+    /// approval branch (by its recorded creation source): a branch runs only
+    /// its decision's approved work, so no role-addressed dispatch (a flow
+    /// step, its target provisioning, a supervisor escalation) selects it.
     pub(crate) async fn list_runnable_members(&self) -> Vec<MobMemberListEntry> {
-        self.list_members()
-            .await
+        // One read of the roster for the projection and the branches.
+        let (entries_by_identity, branches) = {
+            let roster = self.roster.read().await;
+            let branches: BTreeSet<AgentIdentity> = roster
+                .list_all()
+                .filter(|entry| entry.approval_branch().is_some())
+                .map(|entry| entry.agent_identity.clone())
+                .collect();
+            let entries: BTreeMap<AgentIdentity, RosterEntry> = roster
+                .list_all()
+                .cloned()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect();
+            (entries, branches)
+        };
+        // Watch-borrow discipline: the guard stays inside this block and
+        // never crosses an await.
+        let entries = {
+            let machine_state = self.machine_state_watch_rx.borrow();
+            self.project_member_list_entries_from_machine_state(entries_by_identity, &machine_state)
+        };
+        entries
             .into_iter()
-            .filter(|entry| entry.status == MobMemberStatus::Active)
+            .filter(|entry| {
+                entry.status == MobMemberStatus::Active && !branches.contains(&entry.agent_identity)
+            })
             .collect()
     }
 
@@ -15153,6 +15389,16 @@ impl MobHandle {
         if spec.entry_custody {
             return Err(worker_reconcile_refuses_entry_custody(&identity));
         }
+        // An approval branch is never ensured, open or not: only its opening
+        // takes its identity or label.
+        if spec.approval_branch.is_some()
+            || super::approval_branch::takes_approval_branch_reservation(
+                &identity,
+                spec.labels.as_ref(),
+            )
+        {
+            return Err(MobError::ApprovalBranchReserved { identity });
+        }
         // One ready-wait budget for the whole convergence, decisions included.
         let started = Instant::now();
         loop {
@@ -15301,6 +15547,19 @@ impl MobHandle {
         // identity entry is refused before anything is reconciled.
         if let Some(spec) = desired.iter().find(|spec| spec.entry_custody) {
             return Err(worker_reconcile_refuses_entry_custody(&spec.identity));
+        }
+        // Nor does it reconcile an approval branch: only its opening takes
+        // its identity or label.
+        if let Some(spec) = desired.iter().find(|spec| {
+            spec.approval_branch.is_some()
+                || super::approval_branch::takes_approval_branch_reservation(
+                    &spec.identity,
+                    spec.labels.as_ref(),
+                )
+        }) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: spec.identity.clone(),
+            });
         }
         // MobMachine owns the membership decision: `ReconcileRunning` recomputes
         // `members_to_spawn`/`members_to_retire`/`desired_members` from its own
@@ -17580,6 +17839,7 @@ impl MobHandle {
         {
             MobMachineCommandResult::Unit => {
                 self.reseat_owed_created_entries().await;
+                self.realize_owned_identity_edges().await;
                 Ok(())
             }
             _ => Err(MobError::Internal(
@@ -17630,6 +17890,16 @@ impl MobHandle {
     /// couldn't be cleanly dismantled) that the caller needs to see;
     /// `reset` by design avoids that regime and so has no equivalent
     /// data to surface.
+    ///
+    /// # Scoped tool grants
+    ///
+    /// A reset ends every identity the mob held, its identity entries
+    /// included, and keeps the mob's incarnation. Before its epoch marker
+    /// commits it ends the live scoped tool grants of each of them, so a
+    /// name declared again after the reset holds none of them. A failure to
+    /// end them fails the reset and leaves the mob Stopped: retry the reset.
+    /// A crash between the end of the grants and the epoch marker leaves
+    /// those identities without grants, which fails closed.
     ///
     /// # Dogma fit (B3)
     ///
@@ -18934,6 +19204,32 @@ impl MobHandle {
         .await
     }
 
+    /// Fork `source_identity` at an empty prefix and seat the child as a new
+    /// member through the ordinary resume pipeline: the child has none of
+    /// the source's messages and the build of the source's last committed
+    /// snapshot (its [`super::ForkBuildInheritance`]).
+    ///
+    /// The source is admitted as
+    /// [`meerkat_core::DurableForkSourceAdmission::EmptyPrefix`]: a source
+    /// whose turn is running is neither refused nor waited for, since an
+    /// empty prefix observes nothing that turn could extend, and the fork
+    /// never writes the source. The host has an activation window on the
+    /// child before its first turn, as for [`Self::fork_member`].
+    pub async fn fork_member_at_empty_prefix(
+        &self,
+        source_identity: &AgentIdentity,
+        member: SpawnMemberSpec,
+    ) -> Result<ForkMemberResult, MobError> {
+        self.fork_member_with_source_admission(
+            source_identity,
+            member,
+            Some(0),
+            meerkat_core::DurableForkSourceAdmission::EmptyPrefix,
+            meerkat_core::ActivationWindow::HostDriven,
+        )
+        .await
+    }
+
     /// [`Self::fork_member`] for a caller that can wait for a running source.
     ///
     /// The source is not refused while mid-turn: the persistent fork owner
@@ -19016,6 +19312,12 @@ impl MobHandle {
         if &member.identity == source_identity {
             return Err(MobError::MemberAlreadyExists(member.identity.clone()));
         }
+        // An approval branch's identity and label are its opening's: refused
+        // to every other fork before anything is forked.
+        super::approval_branch::admit_approval_branch_reservation(
+            member,
+            SpawnSource::PersistedForkResume,
+        )?;
         if member.fork_build_inheritance.is_some() {
             return Err(MobError::WiringError(
                 "a durable member fork resolves its own source's build inheritance; the spawn \
@@ -19399,12 +19701,15 @@ impl MobHandle {
         // verbatim), so the application context is then read back from the
         // committed child, under the same rule: a context the request states
         // wins.
-        let app_context_read =
-            if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn {
-                ForkSourceAppContextRead::SourceSessionOrForkChild
-            } else {
-                ForkSourceAppContextRead::SourceSession
-            };
+        let app_context_read = if matches!(
+            source_admission,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn
+                | meerkat_core::DurableForkSourceAdmission::EmptyPrefix
+        ) {
+            ForkSourceAppContextRead::SourceSessionOrForkChild
+        } else {
+            ForkSourceAppContextRead::SourceSession
+        };
         let context_requested = member.context.is_some();
         let (inheritance, app_context_from_fork_child) = self
             .resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)
@@ -21282,6 +21587,59 @@ impl MobHandle {
         }
     }
 
+    /// [`Self::retire_member_tree`] of `identity`'s incarnation at
+    /// `generation` only. Nothing is retired when the roster holds the
+    /// identity at another generation: the call answers
+    /// [`MobError::LifecycleOperationPending`], retryable. The member's own
+    /// step retires the exact incarnation it read, which the actor checks
+    /// again in its own command, so an incarnation a respawn seated after
+    /// that read is never retired here. An identity with no incarnation
+    /// retires nothing and answers `Ok(())`, as [`Self::retire`] does.
+    pub(super) async fn retire_at_generation(
+        &self,
+        identity: AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let current = self
+            .roster
+            .read()
+            .await
+            .get(&identity)
+            .map(|entry| entry.generation);
+        if let Some(current) = current
+            && current != generation
+        {
+            return Err(MobError::LifecycleOperationPending {
+                intent: format!(
+                    "retire '{identity}' at generation {generation}: its current incarnation \
+                     is at generation {current}"
+                ),
+            });
+        }
+        let handle = self.clone();
+        // Like `retire`, run the cascade off the caller's stack.
+        meerkat_runtime::stack_relief::relieve_caller_stack(move || async move {
+            let mut first_error = None;
+            let mut attempted = std::collections::BTreeSet::new();
+            handle
+                .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                .await;
+            let own = handle
+                .retire_exact_incarnation_at(identity.clone(), generation)
+                .await;
+            if own.is_ok() {
+                handle
+                    .retire_descendants_until_stable(&identity, &mut attempted, &mut first_error)
+                    .await;
+            }
+            match (own, first_error) {
+                (Err(error), _) | (Ok(()), Some(error)) => Err(error),
+                (Ok(()), None) => Ok(()),
+            }
+        })
+        .await
+    }
+
     async fn retire_descendants_until_stable(
         &self,
         ancestor: &AgentIdentity,
@@ -21437,6 +21795,7 @@ impl MobHandle {
                 operation_deadline,
                 true,
                 super::state::RetirementRedrive::Plain,
+                None,
             )
             .await?
         else {
@@ -23152,6 +23511,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
             direct_member_fence: None,
         }
     }

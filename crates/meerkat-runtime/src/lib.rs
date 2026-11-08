@@ -79,6 +79,8 @@ pub mod tokio {
 pub use ::tokio;
 
 pub mod accept;
+#[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
+pub mod approval_grants;
 pub mod auth_machine;
 pub mod bounded_submit;
 pub mod coalescing;
@@ -790,6 +792,59 @@ where
     .expect("test peer-comms authority thread should finish")
 }
 
+/// Executor contract check for
+/// [`CoreExecutor::cancel_after_boundary`](meerkat_core::lifecycle::CoreExecutor::cancel_after_boundary):
+/// a boundary cancel the runtime loop applies while no run is active is a
+/// no-op that returns `Ok`, so the loop keeps serving the session.
+///
+/// `session_id` must be registered on `machine` with the executor under test,
+/// attached with no run in flight, and the executor must be able to run a
+/// prompt to completion. The check issues a boundary cancel, then admits a
+/// prompt and requires that it completes. The loop realizes the cancel
+/// before it takes the prompt, so a refused cancel shows as a session that no
+/// longer admits or completes input. Every shipped executor's crate runs it
+/// once against its own executor.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+#[doc(hidden)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub async fn assert_idle_boundary_cancel_keeps_the_session_serving(
+    machine: &MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+) {
+    machine
+        .cancel_after_boundary(session_id)
+        .await
+        .expect("an idle session accepts a boundary cancel");
+    let (outcome, completion) = machine
+        .accept_input_with_completion(
+            session_id,
+            Input::Prompt(PromptInput::new("boundary cancel conformance", None)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the session still admits input after an idle boundary cancel: {error:?}")
+        });
+    assert!(
+        outcome.is_accepted(),
+        "the session still admits input after an idle boundary cancel: {outcome:?}"
+    );
+    let completion = completion.expect("the admitted prompt has a completion");
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), completion.wait())
+        .await
+        .expect("the prompt's completion arrives after an idle boundary cancel")
+        .unwrap_or_else(|error| {
+            panic!("the prompt completes after an idle boundary cancel: {error:?}")
+        });
+    assert!(
+        matches!(
+            outcome,
+            completion::CompletionOutcome::Completed(_)
+                | completion::CompletionOutcome::CompletedWithoutResult
+        ),
+        "the prompt completes after an idle boundary cancel: {outcome:?}"
+    );
+}
+
 /// Real MeerkatMachine authority for transport tests that must prove durable
 /// peer-ingress admission rather than merely echoing claim facts.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
@@ -1195,6 +1250,12 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::durable_decision_schema_metadata()
             .attach_to(crate::decision::dsl::DurableDecisionMachineState::schema())
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host_store_writer_fence_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::host_store_writer_fence_schema_metadata()
+            .attach_to(crate::store::spi::writer_fence::HostStoreWriterFenceMachineState::schema())
+    }
 }
 pub use instruction_activation_admission::{
     InstructionActivationRuntimeRefusal, instruction_activation_admission_for_session_error,
@@ -1232,7 +1293,7 @@ pub use store::{
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
     PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
-    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RefusedScope,
+    PreparedWholeBlobRunRebaseStoreParts, QuarantinedToolGrant, RecoveryCommitStatus, RefusedScope,
     RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,

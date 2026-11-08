@@ -24,6 +24,7 @@ from .generated.types import (
     MobRevokeHostResult,
     MobRouteInstallsResult,
     MobSpawnManyResult,
+    MobStreamCursor,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     RealtimeTurningMode,
@@ -812,9 +813,20 @@ class Mob:
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
 
-    async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
-        """Subscribe to events for a single mob member."""
-        return await self._client.subscribe_mob_member_events(self.id, agent_identity)
+    async def subscribe_member_events(
+        self,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
+    ) -> EventSubscription:
+        """Subscribe to events for a single mob member.
+
+        ``cursor`` resumes after a position, as
+        :meth:`MeerkatClient.subscribe_mob_member_events` describes.
+        """
+        return await self._client.subscribe_mob_member_events(
+            self.id, agent_identity, cursor=cursor
+        )
 
     async def subscribe_events(self) -> EventSubscription:
         """Subscribe to attributed mob-wide events."""

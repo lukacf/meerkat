@@ -719,6 +719,8 @@ fn direct_generated_child_rejects_foreign_parent_math_and_subject_substitution()
         represented_subject: parent.represented_subject.clone(),
         issued_revision: owner.state().revision + 1,
         restrictions: derived.effective().clone(),
+        child_approval: None,
+        approval: None,
     };
     let before = owner.state().clone();
     assert!(
@@ -728,7 +730,8 @@ fn direct_generated_child_rejects_foreign_parent_math_and_subject_substitution()
                 record: record.clone(),
                 derived,
                 chain: chain.clone(),
-                now_ms: 100
+                now_ms: 100,
+                terms_digest: meerkat_core::approval::decision::Sha256Digest::of(b"plain"),
             })
             .is_err()
     );
@@ -747,7 +750,8 @@ fn direct_generated_child_rejects_foreign_parent_math_and_subject_substitution()
                 record,
                 derived,
                 chain,
-                now_ms: 100
+                now_ms: 100,
+                terms_digest: meerkat_core::approval::decision::Sha256Digest::of(b"plain"),
             })
             .is_err()
     );
@@ -781,7 +785,10 @@ fn direct_generated_use_rejects_missing_revoked_and_substituted_ancestors() {
                     represented_subject: leaf.represented_subject.clone(),
                     leaf: leaf.clone(),
                     chain: supplied,
-                    now_ms: 100
+                    now_ms: 100,
+                    requester: None,
+                    work: None,
+                    operation: None,
                 })
                 .is_err()
         );
@@ -1032,6 +1039,9 @@ fn decoded_candidate_requires_actual_retained_issuance_and_exact_row() {
                     leaf: candidate.clone(),
                     chain: vec![candidate],
                     now_ms: 100,
+                    requester: None,
+                    work: None,
+                    operation: None,
                 })
                 .is_err(),
             "decoded {field} substitution is not retained issuance"
@@ -1050,6 +1060,9 @@ fn decoded_candidate_requires_actual_retained_issuance_and_exact_row() {
             leaf: decoded.clone(),
             chain: vec![decoded.clone()],
             now_ms: 100,
+            requester: None,
+            work: None,
+            operation: None,
         })
         .expect("exact retained issued row still resolves");
     assert!(resolved.effects().iter().any(|effect| {
@@ -1297,6 +1310,8 @@ fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
         represented_subject: current.represented_subject.clone(),
         issued_revision: owner.state().revision + 1,
         restrictions: derived.effective().clone(),
+        child_approval: None,
+        approval: None,
     };
     assert!(
         owner
@@ -1306,6 +1321,7 @@ fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
                 derived: derived.clone(),
                 chain: vec![current.clone()],
                 now_ms: 100,
+                terms_digest: meerkat_core::approval::decision::Sha256Digest::of(b"plain"),
             })
             .is_err()
     );
@@ -1322,6 +1338,9 @@ fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
                 leaf: current.clone(),
                 chain: vec![current.clone()],
                 now_ms: 100,
+                requester: None,
+                work: None,
+                operation: None,
             })
             .is_err()
     );
@@ -1336,6 +1355,9 @@ fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
             leaf: current.clone(),
             chain: vec![current.clone()],
             now_ms: 100,
+            requester: None,
+            work: None,
+            operation: None,
         })
         .expect("current incarnation use");
     assert_eq!(owner.state(), &before);
@@ -1348,6 +1370,7 @@ fn generated_owner_binds_root_child_use_and_revoke_to_its_incarnation() {
             derived,
             chain: vec![current],
             now_ms: 100,
+            terms_digest: meerkat_core::approval::decision::Sha256Digest::of(b"plain"),
         })
         .expect("same child with current incarnation");
 }

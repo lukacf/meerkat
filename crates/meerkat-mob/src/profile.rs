@@ -126,6 +126,24 @@ pub struct ToolConfig {
     /// included when it goes through one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<String>,
+    /// The member tool grant gate: the built-in tool families and tool
+    /// names members of this profile mount hidden and refused until a live
+    /// scoped tool grant (to the member's identity or its session) opens
+    /// them. At every build, resume included, a member's gate is this gate
+    /// (of the profile its build runs on) joined with its role's current
+    /// gate. A family of the member's own gate is mounted, closed by the
+    /// gate, whatever its switch: leave the switch off, so a binary that does
+    /// not know the gate keeps the family off. A role entry never fails the
+    /// build: a role tool name is gated from the moment it appears, a role
+    /// family is gated where the member mounts it, and a role family the
+    /// member does not mount is ignored. A member whose gate names anything
+    /// cannot be placed on another host. Omitted when empty, so an ungated
+    /// profile keeps its serialized bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "meerkat_core::tool_grant::GrantGatedTools::is_empty"
+    )]
+    pub grant_gated: meerkat_core::tool_grant::GrantGatedTools,
 }
 
 impl ToolConfig {
@@ -154,6 +172,7 @@ impl ToolConfig {
         "mcp_servers",
         "rust_bundles",
         "bundles",
+        "grant_gated",
     ];
 }
 
@@ -711,6 +730,7 @@ mod tests {
             mcp_servers: vec![],
             rust_bundles: vec!["custom-tools".to_string()],
             bundles: Vec::new(),
+            grant_gated: Default::default(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ToolConfig = serde_json::from_str(&json).unwrap();
@@ -734,6 +754,7 @@ mod tests {
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: Default::default(),
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: ToolConfig = toml::from_str(&toml_str).unwrap();
@@ -766,6 +787,7 @@ mod tests {
                 mcp_servers: vec![],
                 rust_bundles: vec![],
                 bundles: Vec::new(),
+                grant_gated: Default::default(),
             },
             peer_description: "Orchestrates worker agents".to_string(),
             external_addressable: true,
@@ -807,6 +829,7 @@ mod tests {
                 mcp_servers: vec![],
                 rust_bundles: vec!["custom".to_string()],
                 bundles: Vec::new(),
+                grant_gated: Default::default(),
             },
             peer_description: "Writes code".to_string(),
             external_addressable: false,

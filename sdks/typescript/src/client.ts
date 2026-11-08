@@ -355,6 +355,7 @@ import type {
   MobStatusResult as RpcMobStatusResult,
   MobStreamCloseParams as RpcMobStreamCloseParams,
   MobStreamCloseResult as RpcMobStreamCloseResult,
+  MobStreamCursor as RpcMobStreamCursor,
   MobStreamOpenParams as RpcMobStreamOpenParams,
   MobStreamOpenResult as RpcMobStreamOpenResult,
   MobSubmitWorkParams as RpcMobSubmitWorkParams,
@@ -724,6 +725,36 @@ export interface MobMemberLiveOpenOptions {
    * execution-identity authority, and a member local to that server.
    */
   executionIdentity?: RpcMobMemberLiveOpenParams["execution_identity"];
+}
+
+/**
+ * A mob member identity as the subject of its scoped tool grants: its grants
+ * apply to the member's builds in the mob's running incarnation.
+ */
+export interface ToolGrantMemberSubject {
+  mobId: string;
+  identity: string;
+}
+
+/** The `tool_grants/*` subject a session id or a member identity names. */
+function toolGrantSubject(
+  subject: string | ToolGrantMemberSubject,
+): RpcGrantToolParams["subject"] {
+  return typeof subject === "string"
+    ? { kind: "session", session_id: subject }
+    : { kind: "identity", mob_id: subject.mobId, identity: subject.identity };
+}
+
+/** Options for a mob member event subscription. */
+export interface MobMemberEventsOptions {
+  /**
+   * Resume after this position: the `epoch` and `seq` of the last event
+   * received (`subscription.lastEventEpoch` and `subscription.lastEventSeq`).
+   * The stream first replays the events the member still retains after it;
+   * a cursor of another sequence space replays the current space from its
+   * earliest retained event. Without a cursor the stream is live.
+   */
+  cursor?: RpcMobStreamCursor;
 }
 
 interface WireSkillKey {
@@ -2214,27 +2245,45 @@ export class MeerkatClient {
   }
 
   /**
-   * Grant one of a session's grant-gated tool names, or a gated built-in tool
-   * family, for a bounded window: `{ durationMs }` from the server's clock or
+   * Grant one of a subject's grant-gated tool names, a gated built-in tool
+   * family, or a gated MCP server (`{ mcpServer, serverTools? }`: every tool
+   * the server provides, or only the named ones), for a bounded window:
+   * `{ durationMs }` from the server's clock or
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
-   * session's build must gate the target (`SessionOptions.grantGatedTools`);
-   * a family grant's `target.names` are the names the server took for it.
-   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
-   * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
+   * subject is a session id, or a mob member identity
+   * (`{ mobId, identity }`), whose grant applies to the member's builds in
+   * the mob's running incarnation, across respawns. The session's build, or
+   * the member's gate (its profile's joined with its role's), must gate the
+   * target; a family grant's `target.names` are the names the server took
+   * for it, and an identity grant's `applies` says whether the member's
+   * running build gates the target. `options.decisionRef` records the host's
+   * reference to the decision it made before issuing, as attribution. Throws
+   * `INVALID_ARGS` unless the target names exactly one of `tool`, `family`
+   * and `mcpServer` (`serverTools` only with `mcpServer`), and the window
+   * exactly one of `durationMs` and `expiresAtMs`.
    */
   async grantTool(
-    sessionId: string,
-    target: { tool: string; family?: never } | { family: string; tool?: never },
+    subject: string | ToolGrantMemberSubject,
+    target:
+      | { tool: string; family?: never; mcpServer?: never; serverTools?: never }
+      | { family: string; tool?: never; mcpServer?: never; serverTools?: never }
+      | { mcpServer: string; serverTools?: string[]; tool?: never; family?: never },
     window:
       | { durationMs: number; expiresAtMs?: never }
       | { expiresAtMs: number; durationMs?: never },
-    options?: { reason?: string },
+    options?: { reason?: string; decisionRef?: string },
   ): Promise<RpcGrantToolResult> {
-    const { tool, family } = target as { tool?: string; family?: string };
-    if ((tool === undefined) === (family === undefined)) {
+    const { tool, family, mcpServer, serverTools } = target as {
+      tool?: string;
+      family?: string;
+      mcpServer?: string;
+      serverTools?: string[];
+    };
+    const named = [tool, family, mcpServer].filter((value) => value !== undefined).length;
+    if (named !== 1 || (serverTools !== undefined && mcpServer === undefined)) {
       throw new MeerkatError(
         "INVALID_ARGS",
-        "grantTool needs exactly one of target.tool and target.family",
+        "grantTool needs exactly one of target.tool, target.family and target.mcpServer",
       );
     }
     const { durationMs, expiresAtMs } = window as { durationMs?: number; expiresAtMs?: number };
@@ -2244,12 +2293,20 @@ export class MeerkatClient {
         "grantTool needs exactly one of window.durationMs and window.expiresAtMs",
       );
     }
+    let wireTarget: RpcGrantToolParams["target"];
+    if (tool !== undefined) {
+      wireTarget = { kind: "tool", name: tool };
+    } else if (family !== undefined) {
+      wireTarget = { kind: "family", family };
+    } else {
+      wireTarget =
+        serverTools === undefined
+          ? { kind: "mcp_server", server: mcpServer as string }
+          : { kind: "mcp_server", server: mcpServer as string, tools: [...serverTools] };
+    }
     const params: RpcGrantToolParams = {
-      subject: { kind: "session", session_id: sessionId },
-      target:
-        tool !== undefined
-          ? { kind: "tool", name: tool }
-          : { kind: "family", family: family as string },
+      subject: toolGrantSubject(subject),
+      target: wireTarget,
     };
     if (durationMs !== undefined) {
       params.duration_ms = durationMs;
@@ -2257,6 +2314,7 @@ export class MeerkatClient {
       params.expires_at_ms = expiresAtMs;
     }
     if (options?.reason !== undefined) params.reason = options.reason;
+    if (options?.decisionRef !== undefined) params.decision_ref = options.decisionRef;
     return this.request("tool_grants/grant", params);
   }
 
@@ -2274,34 +2332,40 @@ export class MeerkatClient {
   }
 
   /**
-   * List a session's scoped tool grants, each due grant settled as expired
-   * first. Ended (expired or revoked) grants are listed only with
-   * `includeEnded`; `unreadable` names any stored grant the server cannot
-   * read.
+   * List a subject's scoped tool grants (a session id, or a mob member
+   * identity `{ mobId, identity }`, whose retired history stays readable),
+   * each due grant settled as expired first. Ended (expired or revoked)
+   * grants are listed only with `includeEnded`; `unreadable` names any stored
+   * grant the server cannot read. For a member identity in the mob's roster
+   * the result also carries `gate`: `running`, what the member's live build
+   * gates and the names it ignored as not mounted (`null` when no build of it
+   * is live on the server), and `next_build`, the gate its next build
+   * resolves. The gate is advisory.
    */
   async listToolGrants(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { includeEnded?: boolean },
   ): Promise<RpcListToolGrantsResult> {
     const params: RpcListToolGrantsParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.includeEnded !== undefined) params.include_ended = options.includeEnded;
     return this.request("tool_grants/list", params);
   }
 
   /**
-   * Read a page of the audit log of a session's scoped tool grants, in
-   * sequence order. While the result carries `next_sequence`, pass it as the
-   * next page's `afterSequence`. A row the server cannot read is named in
+   * Read a page of the audit log of a subject's scoped tool grants (a
+   * session id, or a mob member identity `{ mobId, identity }`), in sequence
+   * order. While the result carries `next_sequence`, pass it as the next
+   * page's `afterSequence`. A row the server cannot read is named in
    * `unreadable`.
    */
   async toolGrantAudit(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { afterSequence?: number; limit?: number },
   ): Promise<RpcToolGrantAuditResult> {
     const params: RpcToolGrantAuditParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;
@@ -2383,9 +2447,11 @@ export class MeerkatClient {
   /**
    * Record what a host presenter showed of a durable decision: the audience,
    * the subject digest shown, the parts shown, the channel and message
-   * references and the host clock reading `at_ms`. It counts only when it
-   * shows every canonical part to the party that decides now. Needs a
-   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * references and the host clock reading `at_ms`; a summary a surface with
+   * a size limit showed adds the `link` it carried (`reference` and
+   * `served_digest`). It counts only when it shows every canonical part, or
+   * its link served the held rendering, to the party that decides now. Needs
+   * a Meerkat 0.9.11 or newer server: an older one answers method not found
    * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async presentDecision(
@@ -4444,10 +4510,18 @@ export class MeerkatClient {
     );
   }
 
-  async subscribeMobMemberEvents(mobId: string, agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
+  async subscribeMobMemberEvents(
+    mobId: string,
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    const params: RpcMobStreamOpenParams = { mob_id: mobId, agent_identity: agentIdentity };
+    if (options?.cursor != null) {
+      params.cursor = { epoch: options.cursor.epoch, seq: options.cursor.seq };
+    }
     return this.openEventSubscription(
       "mob/stream_open",
-      { mob_id: mobId, agent_identity: agentIdentity },
+      params,
       "mob/stream_close",
       MeerkatClient.parseAgentEventEnvelope,
     );
@@ -5598,10 +5672,12 @@ export class MeerkatClient {
             ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
             : rawEvent;
         const sequence = params.sequence;
+        const epoch = params.epoch;
         const delivery: SubscriptionEvent = {
           event,
           rpcSequence: typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
             ? sequence : undefined,
+          epoch: typeof epoch === "string" && epoch !== "" ? epoch : undefined,
         };
         if (queue && event) {
           queue.put(delivery);

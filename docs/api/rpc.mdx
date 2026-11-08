@@ -155,10 +155,10 @@ of this full catalog.
 | `approval/list` | Approval | `ApprovalListParams` | `ApprovalListResult` | List approval audit records |
 | `approval/get` | Approval | `ApprovalGetParams` | `ApprovalRecord` | Get one approval audit record |
 | `approval/decide` | Approval | `ApprovalDecideParams` | `ApprovalRecord` | Record an approval audit decision |
-| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's grant-gated tool name or built-in tool family for a bounded window |
+| `tool_grants/grant` | Tool grants | `GrantToolParams` | `GrantToolResult` | Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window |
 | `tool_grants/revoke` | Tool grants | `RevokeToolGrantParams` | `RevokeToolGrantResult` | Revoke a scoped tool grant; idempotent, the result says whether this revoke ended it |
-| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's scoped tool grants, each due grant settled as expired first |
-| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's scoped tool grants |
+| `tool_grants/list` | Tool grants | `ListToolGrantsParams` | `ListToolGrantsResult` | List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first |
+| `tool_grants/audit` | Tool grants | `ToolGrantAuditParams` | `ToolGrantAuditResult` | Read a page of the audit log of a session's or a mob member identity's scoped tool grants |
 | `decision/list` | Decisions | `DecisionListParams` | `DecisionListResult` | List a page of durable decisions, filtered by kind, phase, approver id or requester |
 | `decision/get` | Decisions | `DecisionGetParams` | `DecisionResult` | Get one durable decision, its expiry recorded when its deadline passed |
 | `decision/rendering` | Decisions | `DecisionRenderingParams` | `DecisionRenderingResult` | Get a durable decision's rendering and its canonical parts for a part size |
@@ -830,9 +830,12 @@ During execution, `session/event` notifications are emitted (see
 </ParamField>
 
 <ParamField body="grant_gated_tools" type="object | null" default="null">
-  Scoped tool grant gate, `{"families": [...], "tools": [...]}`: built-in tool
-  families and tool names the session mounts hidden and refuses at dispatch
-  until a live grant opens them (see [Scoped tool grants](#scoped-tool-grants)).
+  Scoped tool grant gate, `{"families": [...], "tools": [...], "mcp_servers": [...], "unconfigured_mcp_servers": true}`:
+  built-in tool families, tool names and MCP servers whose tools the session
+  mounts hidden and refuses at dispatch until a live grant opens them (see
+  [Scoped tool grants](#scoped-tool-grants)). `unconfigured_mcp_servers` gates
+  every MCP server the session does not configure, so a server a later
+  `mcp/add` attaches is gated too.
   The session records its gate. A field the gate does not know is an invalid
   parameter, and a gate no grant could honour (an unknown or disabled family,
   a name nothing mounts) fails the session's build with invalid params whose
@@ -1386,7 +1389,8 @@ Since 0.9.5, `"session_events": false` asks that the turn's events not be
 written as `session/event` notifications. A caller that reads them from a
 `session/stream_open` subscription, or reads only the run result, sends it so
 each event reaches it once. Absent or `true` keeps them. A turn that also
-carries the input of another request that wants them still writes them.
+carries the input of another request that wants them still writes them, to
+that request's connection (see [Notifications](#notifications)).
 `session/create` (for its first turn) and `mob/turn_start` take the same
 field. A server before 0.9.5 refuses it on `turn/start` and `mob/turn_start`,
 so the Python and TypeScript SDKs send it, from calls that do not stream
@@ -2133,11 +2137,18 @@ a decision on an approval the pipe never presented is refused.
 ## Scoped tool grants
 
 A session created with `grant_gated_tools` mounts its gated tool families and
-names hidden: the model is not shown them and every call is refused until a
+names hidden, and the tools of its gated MCP servers too, from the moment they
+appear: the model is not shown them and every call is refused until a
 live grant opens them (see [scoped tool grants](/concepts/tools#scoped-tool-grants)).
-`tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list` and
-`tool_grants/audit` manage a session's grants. They read and write grant rows
-only: no method loads, registers or wakes the session.
+A mob member's build gates what its profile's `tools.grant_gated` and its
+role's current gate name; a gated MCP server a member's profile configures
+starts no process until a live grant of that server covers it at the member's
+build (the build decides this as it composes the member's tools), so after
+such a grant the member connects it at its next build (a `mob/respawn`, for
+one). `tool_grants/grant`, `tool_grants/revoke`,
+`tool_grants/list` and `tool_grants/audit` manage the grants of a session or
+of a mob member identity. They read and write grant rows only: no method
+loads, registers or wakes the session or the member.
 
 ```json Request
 {
@@ -2172,34 +2183,101 @@ only: no method loads, registers or wakes the session.
 }
 ```
 
-- **`tool_grants/grant`** opens a `target` for the `subject` session: a tool
-  name (`{"kind": "tool", "name": ...}`) the session gates by name or through a
-  gated family, or a family the session gates (`{"kind": "family", "family":
-  ...}`; the server fills in `names` with the names the family can provide, so
-  omit them). Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms)
-  bounds the grant, at most the host's maximum lifetime (24 hours by default).
-  A session before or during its first turn is granted from its staged build.
-  A gate no grant could honour fails the session's build, which a deferred
-  create reports at its first `turn/start`.
+- **`tool_grants/grant`** opens a `target` for the `subject`: a tool name
+  (`{"kind": "tool", "name": ...}`) the subject's gate names or a gated family
+  provides, a family the gate names (`{"kind": "family", "family": ...}`;
+  the server fills in `names` with the names the family can provide, so omit
+  them), or an MCP server the gate gates (`{"kind": "mcp_server", "server":
+  ..., "tools": [...]}`): every tool that server provides when a boundary or
+  a call adjudicates the grant, or, with `tools` (a non-empty list), only those
+  of its tools named there. A server is gated when the gate names it, or when
+  the gate's `unconfigured_mcp_servers` is on and the subject's build does not
+  configure it; a grant of a server a session configured itself opens
+  nothing, since that server is not gated. A tool name only a gated server
+  provides is no `tool` target (`target_not_gated`, whose message names the
+  server form). The subject is a session (`{"kind": "session", "session_id": ...}`),
+  whose recorded gate the target must be in, or a mob member identity
+  (`{"kind": "identity", "mob_id": ..., "identity": ...}`), which must be in
+  the mob's roster and whose gate is the one its next build resolves: its
+  profile's gate joined with its role's current gate (the role's current gate
+  is the own gate of a store-owned identity declared with its role's named
+  profile). An identity grant is decided against the mob's live roster as it
+  commits, in order with the retirements that end an identity: a member
+  retired before the commit is refused `subject_unknown`, and a retirement
+  after the commit ends the grant. A grant between a respawn's retirement of
+  the old member and the seating of its replacement is refused
+  `subject_unknown` too, since the identity is out of the roster then: retry
+  it once the respawn answers. Exactly one of
+  `duration_ms` and `expires_at_ms` (UNIX ms) bounds the grant, at most the
+  host's maximum lifetime (24 hours by default). `decision_ref`, when given,
+  is the host's reference to the decision it made before issuing (non-empty,
+  at most 1024 bytes, no control character): the grant's `issuer` records it,
+  as attribution only. An identity grant answers `applies`, whether it
+  applies to the member's running build: `now` (that build gates the
+  target), `not_mounted` (that build, or with no live build the next one,
+  ignores the target as not mounted) or `at_next_build` (the member is not
+  live here, its live build predates the gate that names the target, or the
+  target is a gated MCP server the member's profile configures that its live
+  build left unattached, since no live grant covered it then). It
+  is advisory: the grant is issued either way. A session before or during its first turn is granted
+  from its staged build. A gate no grant could honour fails the session's
+  build, which a deferred create reports at its first `turn/start`.
 - **`tool_grants/revoke`** ends a grant before its deadline. It is idempotent:
   revoking a grant that already ended answers it as it stands, and `changed`
   says whether this revoke ended it. A revoke at or after the deadline records
   the expiry instead.
-- **`tool_grants/list`** answers the session's grants, each due one settled as
+- **`tool_grants/list`** answers the subject's grants, each due one settled as
   `expired` first. Ended grants (`expired`, `revoked`) are listed only with
   `include_ended`; `unreadable` names any stored grant this server cannot read
-  (written by a newer version, or damaged), which opens nothing.
-- **`tool_grants/audit`** answers a page of the session's audit log, `granted`,
+  (written by a newer version, or damaged), which opens nothing, and any grant
+  a host store quarantined (the store reports a conflict for its scope, so its
+  session and tools are unknown), whatever session it was granted to. For a member
+  identity in the roster it also answers the member's `gate`: `running`, what
+  its live build gates (its gated names under `tools`, with its gated servers
+  and `unconfigured_mcp_servers`) and the names it ignored as not mounted, or
+  `null` when no build of the member is live here; and `next_build`, the gate
+  its next build resolves, split the same way. Advisory, like `applies`.
+- **`tool_grants/audit`** answers a page of the subject's audit log, `granted`,
   `expired` (with the `driver` that observed it: `timer`, `boundary`,
-  `dispatch`, `read` or `revoke`), `revoked` and `refused` rows, in `sequence`
+  `dispatch`, `read`, `revoke` or `build`, a build reading which gated servers
+  a grant covers), `revoked` and `refused` rows, in `sequence`
   order after `after_sequence`. `limit` defaults to 100 rows and caps at 1000;
   a full page carries `next_sequence`, the next page's `after_sequence`. A row
   this server cannot read is named in `unreadable` with its `sequence`, and the
   rest of the page is served.
 
-List and audit read the session's grant rows without checking that the
-session exists: an archived session's grants stay listable and auditable, and
-a session id with no grants, or one no session has, answers empty.
+List and audit read the subject's grant rows without checking that the
+session or the member exists: an archived session's grants and a retired
+identity's grants stay listable and auditable, and a subject with no grants
+answers empty. An identity subject resolves its mob only, in the mob's running
+incarnation.
+
+A member identity's grant opens its names for the member's builds while the
+mob runs at the incarnation it was issued in, across respawns, restarts and
+upgrades; a mob destroyed and created again under the same id is a new
+incarnation, whose identities hold none of the old grants. A member's
+`tool_grant_required` refusals are audited under its identity. An identity's
+grants end, `revoked`, when the identity ends, and so do the grants of the
+session the mob holds for it then (its member's session, or an identity
+entry's archived session). The identity ends at the end of a plain retire
+of its member; at the end of a retirement that unlists or removes its
+identity entry; at the one-entry unlist of an unseated identity entry, or a
+complete roster's seal of one it does not list and no host's intent row
+names; at the removal of an unseated store-owned
+identity; when a respawn whose replacement fails after the old member's
+archive is abandoned, by its own step or by the resume after a stop; and at
+a reset of its mob, which ends every identity the mob held. A respawn keeps
+them, and so does a retirement an identity entry outlives (the entry stays
+unseated, and the next apply seats it on its own session), and so does a
+host's adoption of a declared identity, which ends the identity's entry,
+not the identity: the identity continues under the host's intent. A grant ended
+with its identity explains no later refusal: a name created or declared
+again, on a fresh session or on the old one, needs a grant of its own
+(`tool_grant_required`). The one exception is a session the mob no longer
+held for the identity when it ended (an archived session of an earlier
+fresh-session rotation, or the old session of a respawn abandoned after its
+old member's archive): its own session grants stay live until they expire,
+so revoke them before resuming that session (Known limitations).
 
 A grant's `status` is `active`, `expired` or `revoked`; `requested` and
 `declined` are reserved for grant requests. A request's `subject` and `target`
@@ -2209,14 +2287,28 @@ carries (subject and target kind, status, issuer, audit event kind, expiry
 driver, refusal reason) decodes a value a later version adds as `unknown`,
 which this server never sends.
 
-Errors use the standard codes: invalid params for a window that is past,
-empty, longer than the maximum or given twice or not at all, a target the
-session does not gate, family `names` in a request, and an unknown or
-malformed grant id; `SESSION_NOT_FOUND` for a grant to a session that does not
-exist or is archived; `SESSION_BUSY` when concurrent writers changed the grant
-under a grant or revoke twice, which a retry resolves; capability unavailable
-for an `identity` subject (this server grants to sessions only) or a store
-without grant support.
+Every refusal of a request that decodes answers invalid params with typed
+data, the request refusal under `tool_grant_request_refusal`:
+
+```json
+{"kind": "tool_grant_request_refused", "tool_grant_request_refusal": {"kind": "subject_unknown"}}
+```
+
+Its `kind` is `subject_unknown` (no such session, or no such mob or member
+identity; an unparseable session id included), `target_not_gated` (the
+subject's gate does not name the target), `invalid_window` (a window that is
+past, empty, longer than the maximum, or given twice or not at all),
+`empty_target`, `not_found` (an unknown or malformed grant id, with
+`grant_id`), `invalid_decision_ref` or `invalid_page_limit` (an audit `limit`
+of 0). `server_not_installed`, `no_live_grant` and `invalid_wait` are reserved
+for hosts that keep an installation list or attach a granted MCP server live;
+`rkat-rpc` never sends them. A request that does not decode (an unknown
+subject or target kind, an unknown field, a malformed value) is refused as
+plain invalid params, with no `data`. Other errors use the standard codes:
+`SESSION_BUSY` when concurrent writers changed the grant under a grant or
+revoke twice, which a retry resolves; capability unavailable for an
+`identity` subject on a server that runs no mobs, or a store without grant
+support.
 
 The stock governed stdio pipe serves a fixed method set: it does not serve the
 `tool_grants/*` methods, and its `session/create` refuses `grant_gated_tools`
@@ -2289,7 +2381,14 @@ with `data.kind = "no_decision_store"`.
   refused, never read as no filter.
 - **`decision/get`** reads one decision, and records its expiry when its
   deadline passed. `include_request: true` adds the held request. A row this
-  server cannot read answers `decision_unreadable`.
+  server cannot read answers `decision_unreadable`. An executed `grant.child`
+  decision carries `effect`, what its execution did: `{"grant_id": ...}`, the
+  id of the approval-carried grant it issued. A decision that is not
+  executed, and a decision of any other kind, carries no `effect`. Every
+  answer that carries a decision carries it alike: `decision/list`,
+  `decision/present`, `decision/withdraw` and the host adapter's
+  `decision/decide`. A later version may add fields to `effect`: read it
+  tolerantly.
 - **`decision/rendering`** returns the one canonical rendering of the held
   request, its renderer and subject digest, and its canonical parts for
   `max_part_bytes` (one part when absent): consecutive byte ranges on character
@@ -2300,9 +2399,14 @@ with `data.kind = "no_decision_store"`.
   `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
   "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
   size and the parts shown, the channel and message references, and the host
-  clock reading `at_ms`. It counts only when it shows every canonical part of
-  the held rendering to the party that decides now; a presentation at 0 is no
-  reading of when it was shown and is refused.
+  clock reading `at_ms`. A surface with a size limit that showed a summary
+  saying it is shortened records it with the `link` the summary carried to
+  the full presentation: `{"reference": ..., "served_digest": ...}`, the
+  digest of the rendering that link served. It counts only when it shows
+  every canonical part of the held rendering, or its link served the held
+  rendering (its served digest is the subject digest), to the party that
+  decides now; a presentation at 0 is no reading of when it was shown and is
+  refused. A decision's `presentations` carry each recorded link.
 - **`decision/withdraw`** withdraws an open decision as the host.
 
 A failed call is a JSON-RPC error. The answers the decision methods type
@@ -3645,6 +3749,22 @@ Inspect `params.event.payload.type` and (for text deltas)
 `source`, `seq`, and `timestamp_ms` belong to the envelope; optional `mob_id`
 is envelope metadata.
 
+A turn's `session/event` notifications go to the connection whose request
+started it (`turn/start`, `session/create`, `mob/turn_start`, `help/ask`),
+unless that request sent `"session_events": false`; a turn that carries the
+inputs of several requests goes to each of their connections. A turn no
+request waits on (queued work such as `session/external_event`, comms,
+schedules, a resumed run) goes to the connection that holds the session: the
+one that created it (`session/create`, `help/ask`) or forked it
+(`session/fork_at`, `session/fork_replace`) or, once that one is gone, the
+next one that starts a turn on it. While the holder is gone the notifications
+are written nowhere; read the turn back with `session/history`, or watch the
+session with `session/stream_open`. No other connection receives them. On a
+TCP server (`--tcp`), a session no connection holds (one the host or a mob
+created, or one from before a restart, that no connection has started a turn
+on) has its turns written to no connection; a stdio server writes them to its
+one client.
+
 Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema
 projection in `artifacts/schemas/events.json`. New variants must appear in
@@ -3843,7 +3963,10 @@ then raise `EventSubscriptionError` when the terminal contains an error. The
 error retains the raw terminal, including unknown server codes, and the last
 delivered RPC and envelope sequence values. Error-free `remote_end` and
 `explicit_close` still end iteration normally. Subscription failure does not
-itself establish that the agent's run failed or stopped.
+itself establish that the agent's run failed or stopped. On a mob member
+stream the subscription also reports the last event's `epoch`
+(`last_event_epoch`, `lastEventEpoch`); with its envelope sequence it is the
+`cursor` that resumes the stream (see `mob/stream_event` below).
 
 ### mob/stream_event notifications
 
@@ -3856,12 +3979,57 @@ When a mob event stream is open (via `mob/stream_open`), the server emits `mob/s
   "params": {
     "stream_id": "550e8400-e29b-41d4-a716-446655440000",
     "sequence": 1,
+    "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a",
     "event": { "...": "..." }
   }
 }
 ```
 
 For mob-wide streams the event is an `AttributedEvent` (`source` member identity + profile + envelope). For per-member streams the event is the raw `EventEnvelope<AgentEvent>`. Runtime incarnation ids and fence tokens are bridge-internal and are not part of public stream payloads.
+
+A member stream's events also carry `epoch`: the sequence space of the
+envelope's `event.seq`. `epoch` and `event.seq` together are the event's
+position in the member's event sequence. The epoch changes whenever the
+member's sequence space restarts: after a runtime restart, when the member
+moves to another session, or when a placed member moves to a new host
+binding. Mob-wide events interleave several members' sequences and carry no
+`epoch`.
+
+A member stream opened without `cursor` is live: it delivers only events
+published after it opens. To continue a member stream after a disconnect,
+open it again with `cursor` set to the position of the last event received:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "mob/stream_open",
+  "params": {
+    "mob_id": "team",
+    "agent_identity": "w1",
+    "cursor": { "epoch": "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", "seq": 19 }
+  }
+}
+```
+
+The new stream first replays the events the member still retains after that
+position (each member keeps its latest 1024 events and 4 MiB by default),
+then streams live, with nothing delivered twice or skipped between the two.
+If the member is live when the stream opens and its retained events no
+longer reach back to the position, the replay starts with a
+`stream_truncated` event (`reason: {"kind":"stream_lagged","dropped":N}`). A
+`stream_truncated` event does not move the position a client resumes from. A
+cursor of another sequence space, or one ahead of the space's newest event,
+replays the current space from its earliest retained event instead; its
+events carry the current `epoch`, so the client sees the change. A member
+that is dormant when the stream opens (seated, but not materialized in this
+runtime) is not woken by it: the stream attaches when the member wakes and
+replays from the woken member's first event, whatever the cursor. The events
+the member published after the cursor and before it went dormant are not
+replayed, and no `stream_truncated` event marks them: a client that resumes a
+dormant member reads them from its history (`mob/member_history`). A
+`cursor` without `agent_identity`, or one whose `epoch` is not a UUID, is
+refused with `-32602` (invalid params).
 
 ### mob/stream_end notifications
 
@@ -3887,7 +4055,9 @@ As with session streams, `outcome` is `"remote_end"`, `"terminal_error"`, or
 `"explicit_close"`; `mob/stream_close` selects explicit-close termination.
 Conditional `error` contains `code` (`"stream_queue_overflow"` or
 `"stream_receiver_gone"`) and `message`; it is absent without an error.
-Stop using the terminated handle and reopen/reconcile as appropriate.
+Stop using the terminated handle and reopen/reconcile as appropriate. A
+member stream reopened with the last event's `cursor` continues after it (see
+`mob/stream_event` above).
 Transport disconnection can prevent delivery of this final notification.
 Neither stream-end notification is a callable RPC method.
 
@@ -3963,7 +4133,7 @@ variant also carries a `message`.
 | `materialization_lost` | The member was woken, but its inbox was gone again before the hand-off | yes |
 | `non_authoritative_composition` | The member belongs to a candidate composition, which never materializes members | no |
 | `host_preparation_pending` | The member's host has preparation pending for it | yes |
-| `resume_gate_unavailable` | The member's durable resume gate was unavailable | yes |
+| `resume_gate_unavailable` | The member's durable resume gate was unavailable, or its session could not be built now for a cause that clears on its own (for example a provider credential whose source or store cannot answer: `source_unavailable`, `credential_store_unavailable`, `credential_access_pending`) | yes |
 | `host_owned` | The member is placed on a member host, which owns its materialization | no |
 | `lifecycle_origin_fenced` | The member's mob is quiescing its lifecycle | no |
 | `sender_waking` | The sender is itself being woken (it sent from inside its own build) and the recipient was not live; the send is refused instead of waiting on another wake | yes, once the sender is live |

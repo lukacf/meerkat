@@ -210,6 +210,10 @@ impl PreparedOperationAuthorization for Allowed {
     ) -> Result<(), OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// `session`'s dispatch context under actual bound work.

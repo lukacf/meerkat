@@ -795,6 +795,14 @@ pub struct InMemoryRuntimeStore {
     /// this cause and writes nothing.
     #[cfg(any(test, feature = "test-support"))]
     tool_grant_failure: Arc<StdMutex<Option<String>>>,
+    /// Test support: the scoped tool grant subjects whose every method fails,
+    /// each with its cause, writing nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    tool_grant_subject_failures: Arc<StdMutex<BTreeMap<String, String>>>,
+    /// Test support: how many more scoped tool grant compare-and-put calls
+    /// find the row changed by another writer.
+    #[cfg(any(test, feature = "test-support"))]
+    tool_grant_conflicts: Arc<StdMutex<usize>>,
     #[cfg(test)]
     auth_oauth_flow_store_calls: Arc<AtomicUsize>,
     #[cfg(test)]
@@ -955,6 +963,75 @@ impl InMemoryRuntimeStore {
         Ok(())
     }
 
+    /// Test support: while `cause` is set, every scoped tool grant method of
+    /// the subject `subject_key` fails with it (a read as `ReadFailed`, a
+    /// write as `WriteFailed`) and writes nothing, the other subjects' as
+    /// before; `None` ends that subject's failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_tool_grant_subject_for_test(&self, subject_key: &str, cause: Option<&str>) {
+        if let Ok(mut failures) = self.tool_grant_subject_failures.lock() {
+            match cause {
+                Some(cause) => {
+                    failures.insert(subject_key.to_string(), cause.to_string());
+                }
+                None => {
+                    failures.remove(subject_key);
+                }
+            }
+        }
+    }
+
+    /// Test support: each of the next `count` scoped tool grant
+    /// compare-and-put calls finds the row changed by another writer and
+    /// writes nothing, as a concurrent writer that won would; `0` ends them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conflict_tool_grant_writes_for_test(&self, count: usize) {
+        if let Ok(mut conflicts) = self.tool_grant_conflicts.lock() {
+            *conflicts = count;
+        }
+    }
+
+    /// The scripted failure of a scoped tool grant method of `subject_key`,
+    /// when one is set for that subject.
+    fn tool_grant_subject_failure(
+        &self,
+        subject_key: &str,
+        write: bool,
+    ) -> Result<(), RuntimeStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(cause) = self
+            .tool_grant_subject_failures
+            .lock()
+            .map_err(|_| RuntimeStoreError::ReadFailed("tool grant faults poisoned".into()))?
+            .get(subject_key)
+            .cloned()
+        {
+            return Err(if write {
+                RuntimeStoreError::WriteFailed(cause)
+            } else {
+                RuntimeStoreError::ReadFailed(cause)
+            });
+        }
+        let _ = (subject_key, write);
+        Ok(())
+    }
+
+    /// Whether a scripted conflict takes this compare-and-put, consuming it.
+    fn take_tool_grant_conflict(&self) -> Result<bool, RuntimeStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut conflicts = self
+                .tool_grant_conflicts
+                .lock()
+                .map_err(|_| RuntimeStoreError::WriteFailed("tool grant faults poisoned".into()))?;
+            if *conflicts > 0 {
+                *conflicts -= 1;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn lock_tool_grants(
         &self,
         write: bool,
@@ -1102,6 +1179,10 @@ impl InMemoryRuntimeStore {
             tool_grants: Arc::new(StdMutex::new(ToolGrantTables::default())),
             #[cfg(any(test, feature = "test-support"))]
             tool_grant_failure: Arc::new(StdMutex::new(None)),
+            #[cfg(any(test, feature = "test-support"))]
+            tool_grant_subject_failures: Arc::new(StdMutex::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "test-support"))]
+            tool_grant_conflicts: Arc::new(StdMutex::new(0)),
             #[cfg(test)]
             auth_oauth_flow_store_calls: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -3243,6 +3324,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         subject_key: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, false)?;
         let tables = self.lock_tool_grants(false)?;
         Ok(tables
             .grants
@@ -3259,6 +3341,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         record_json: &[u8],
         audit_rows: &[Vec<u8>],
     ) -> Result<bool, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
         if tables.grants.contains_key(grant_id) {
             return Ok(false);
@@ -3279,7 +3362,11 @@ impl RuntimeStore for InMemoryRuntimeStore {
         next_json: &[u8],
         audit_rows: &[Vec<u8>],
     ) -> Result<bool, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
+        if self.take_tool_grant_conflict()? {
+            return Ok(false);
+        }
         let matches = tables
             .grants
             .get(grant_id)
@@ -3302,6 +3389,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         subject_key: &str,
         audit_rows: &[Vec<u8>],
     ) -> Result<(), RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
         tables.append_audit(subject_key, audit_rows)
     }
@@ -3312,6 +3400,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, false)?;
         let tables = self.lock_tool_grants(false)?;
         let first = after.map_or(0, |after| after.saturating_add(1));
         Ok(tables

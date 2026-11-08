@@ -38,6 +38,7 @@ pub mod detached_job;
 pub mod durable_decision;
 pub mod forked_participant_lifecycle;
 pub mod grant_authority;
+pub mod host_store_writer_fence;
 pub mod meerkat_machine;
 pub mod mob_host_binding_authority;
 pub mod mob_machine;
@@ -186,6 +187,8 @@ pub const FORKED_PARTICIPANT_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::mob_store_restore_lifecycle";
+pub const HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_CRATE: &str = "meerkat-runtime";
+pub const HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_MODULE: &str = "store::spi::writer_fence";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-mob";
 pub const TEMPORARY_COUNCIL_LIFECYCLE_PRODUCTION_RUST_MODULE: &str =
     "machines::temporary_council_lifecycle";
@@ -3543,6 +3546,17 @@ runtime_internal_inputs!(
         // by `MeerkatMachine::settle_retained_run`, which answers the
         // machine's verdict.
         SettleRetainedRun,
+        // The run marked resumable whose resumed-run admission could not
+        // decide, held until a later answer releases it: the runtime loop
+        // applies them. No caller can ask for either.
+        HoldResumedRunForAdmission,
+        ReleaseResumedRunAdmission,
+        // The scoped tool grant gate's server gate: a model-request boundary
+        // extends the gate with a gated server's names, and a grant-time
+        // live attach stages a gated server through the surface owner. No
+        // caller can ask for either.
+        ExtendToolGrantGate,
+        SurfaceStageGatedAdd,
         // A host's compaction request, applied directly by
         // `MeerkatMachine::request_compaction`, which answers the machine's
         // verdict, and its consumption by the agent's compaction check
@@ -4512,6 +4526,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "GrantRevoked",
                     "MobNotRunning",
                     "StaleSpec",
+                    "RowsPurged",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4600,6 +4615,128 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Deferred",
                     "NotADeclaredEntry",
                     "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            // A host's adoption over a declared identity entry (0.9.11).
+            NamedTypeBinding::string_enum(
+                "HostAdoptionEntryVerdict",
+                &[
+                    "Adopting",
+                    "Ended",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            // Owned edges (0.9.11): why an owned edge ends, and the verdicts
+            // of a declaration, of an end and of a plain unwire's admission.
+            NamedTypeBinding::string_enum("OwnedEdgeEndCause", &["OwnerChange", "PolicyDenied"]),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeDeclareVerdict",
+                &[
+                    "Declared",
+                    "AlreadyOwned",
+                    "PeerUnknown",
+                    "OwnerInvalid",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeEndVerdict",
+                &[
+                    "Ended",
+                    "NotOwner",
+                    "Absent",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberUnwireAdmission",
+                &["Admitted", "OwnedIdentityEdge"],
+            ),
+            // Owned edges (0.9.11): the verdicts of an owned edge's
+            // realization and of an import's restoration of one.
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRealization",
+                &["Realize", "NotOwned", "EndNotAnIdentity"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRestoreVerdict",
+                &["Restored", "Skipped", "MobNotRunning"],
+            ),
+            // Adoption into store custody (0.9.11): its source, its verdict
+            // and why an identity is not adoptable.
+            NamedTypeBinding::string_enum("IdentityAdoptionSource", &["Roster", "Worker"]),
+            NamedTypeBinding::string_enum(
+                "IdentityAdoptionVerdict",
+                &[
+                    "Adopted",
+                    "NotAdoptable",
+                    "PredecessorMismatch",
+                    "AdmissionUnsettled",
+                    "DeclaredApplyOpen",
+                    "NameUnreadable",
+                    "NameTombstoned",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityNotAdoptableReason",
+                &[
+                    "StoreOwned",
+                    "NotAnIdentity",
+                    "RosterOwned",
+                    "NotAMember",
+                    "Placed",
+                    "NoSession",
+                    "HostedOnFirstUse",
+                    "AwaitingHeldCreation",
+                    "AwaitingHostPreparation",
+                    "ProfileOverride",
+                ],
+            ),
+            // The downgrade cycle (0.9.11): the purge's verdict, an imported
+            // record's kind and its name's row, and the record's verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityRowsPurgeVerdict",
+                &[
+                    "Purged",
+                    "NonAuthoritative",
+                    "Replayed",
+                    "OperationReused",
+                    "RowsPurged",
+                    "NotHostOperator",
+                    "ChangesNotHeld",
+                    "MobNotRunning",
+                    "NothingToPurge",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ImportedRecordKind",
+                &["Present", "PendingPreparation", "Archived", "Tombstone"],
+            ),
+            NamedTypeBinding::string_enum("ImportedRowState", &["Absent", "Same", "Other"]),
+            NamedTypeBinding::string_enum(
+                "IdentityImportVerdict",
+                &[
+                    "RestoredInPlace",
+                    "RestoredOwedSeat",
+                    "RestoredPending",
+                    "RestoredArchived",
+                    "RestoredTombstone",
+                    "RestoredByAdoption",
+                    "Unchanged",
+                    "NameTakenMeanwhile",
+                    "Unsettled",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "RowsPurged",
                     "MobNotRunning",
                 ],
             ),
@@ -5238,6 +5375,7 @@ runtime_internal_inputs!(
         ClassifyPeerNotice,
         CommitDormantSeat,
         ResolveMemberHostPreparation,
+        ResolveMemberBuildPreparation,
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,
@@ -5276,6 +5414,31 @@ runtime_internal_inputs!(
         // The one-entry unlist of a roster-owned identity, decided in the
         // actor's step for the handle's unlist. Not a surface command.
         UnlistIdentityEntry,
+        // A host's takeover of a declared entry, decided in the identity
+        // reconciler's step before it retires or materializes the member.
+        // Not a surface command.
+        TakeOverIdentityEntry,
+        // Owned edges (0.9.11): an identity change's declaration and end of
+        // an owned edge, a policy reload's end of one, decided in the
+        // actor's steps, and a plain unwire's admission, decided before the
+        // unwire. None is a surface command.
+        DeclareOwnedIdentityEdge,
+        EndOwnedIdentityEdge,
+        AdmitMemberUnwire,
+        // Adoption into store custody (0.9.11), decided in the actor's change
+        // step. Not a surface command.
+        AdoptIdentityIntoStore,
+        // The downgrade cycle (0.9.11): the purge and each imported record,
+        // decided in the actor's purge and import steps. Not surface
+        // commands.
+        PurgeIdentityRows,
+        ImportIdentityRecord,
+        // An owned edge's realization, a pure verdict a seat, a spawn and a
+        // realization pass read before their wire, and the import's
+        // restoration of an owned edge its restored record holds (0.9.11),
+        // decided in the actor's steps. Not surface commands.
+        AdmitOwnedEdgeRealization,
+        RestoreOwnedIdentityEdge,
     ]
 );
 
@@ -5680,6 +5843,112 @@ pub fn dsl_mob_store_restore_lifecycle_machine() -> MachineSchema {
         .attach_to(mob_store_restore_lifecycle::MobStoreRestoreLifecycleMachineState::schema())
 }
 
+pub fn dsl_host_store_writer_fence_machine() -> MachineSchema {
+    host_store_writer_fence_schema_metadata()
+        .attach_to(host_store_writer_fence::HostStoreWriterFenceMachineState::schema())
+}
+
+pub fn dsl_host_store_writer_fence_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_host_store_writer_fence_machine(),
+        HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_CRATE,
+        HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+/// Named-type bindings for the writer fence of one host store realm.
+pub fn host_store_writer_fence_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "HostStoreWriterFencePhase",
+                &[
+                    "Unopened",
+                    "Live",
+                    "Stopped",
+                    "Acquiring",
+                    "Proving",
+                    "Resuming",
+                    "WaitingOut",
+                    "Lost",
+                ],
+            ),
+            NamedTypeBinding::string_enum("WriterFenceAcquireStep", &["Exclusive", "TakeoverOwn"]),
+            NamedTypeBinding::string_enum(
+                "WriterFenceAcquireOutcome",
+                &["Granted", "Held", "Failed", "TimedOut"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceRenewOutcome",
+                &["Renewed", "FencedOut", "Failed", "TimedOut"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceListingOutcome",
+                &["Clean", "ForeignBatch", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceStopCause",
+                &[
+                    "RenewFailed",
+                    "RenewTimedOut",
+                    "WindowClosed",
+                    "WindowClosedBeforeRenew",
+                    "ReacquireFailed",
+                    "ReacquireTimedOut",
+                    "ListingFailed",
+                    "ResumeRenewFailed",
+                    "ResumeRenewTimedOut",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceLostCause",
+                &[
+                    "FencedOutRenew",
+                    "FencedOutCommit",
+                    "HeldByAnother",
+                    "HolderRenewed",
+                    "ForeignBatch",
+                    "FencedOutAfterReacquire",
+                    "TokenOrder",
+                    "AdapterRule",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "WriterFenceRefusal",
+                &[
+                    "NotOpened",
+                    "AlreadyOpened",
+                    "AlreadyLive",
+                    "AttemptInFlight",
+                    "WaitingOutHolder",
+                    "NotWaitingOut",
+                    "NotAcquiring",
+                    "NotProving",
+                    "NoRenewInFlight",
+                    "Lost",
+                    "OpenListingFailed",
+                    "Quarantined",
+                    "Poisoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ScopePoisonCause",
+                &[
+                    "PlanFailed",
+                    "Unsettled",
+                    "Refused",
+                    "Dropped",
+                    "PrepareFailed",
+                    "ImportFailed",
+                    "StrayTouch",
+                    "Adapter",
+                ],
+            ),
+        ],
+        vec![],
+    )
+}
+
 pub fn dsl_mob_store_restore_lifecycle_machine_production_schema() -> MachineSchema {
     with_production_rust_binding(
         dsl_mob_store_restore_lifecycle_machine(),
@@ -5800,8 +6069,14 @@ pub fn dsl_tool_grant_lifecycle_machine_production_schema() -> MachineSchema {
 pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
-            NamedTypeBinding::string_enum("ToolGrantEndReason", &["Deadline", "Revoked"]),
-            NamedTypeBinding::string_enum("ToolGrantUseRefusal", &["Expired", "Revoked"]),
+            NamedTypeBinding::string_enum(
+                "ToolGrantEndReason",
+                &["Deadline", "Revoked", "SubjectEnded"],
+            ),
+            NamedTypeBinding::string_enum(
+                "ToolGrantUseRefusal",
+                &["Expired", "Revoked", "SubjectEnded"],
+            ),
             NamedTypeBinding::string_enum(
                 "ToolGrantIssueRefusal",
                 &["InvalidWindow", "AlreadyIssued"],
@@ -6110,8 +6385,8 @@ pub fn dsl_durable_decision_machine_production_schema() -> MachineSchema {
 }
 
 /// Named-type bindings for the durable decision record machine: its two
-/// opaque key types, its stage, notice and review verdict vocabularies, and
-/// the typed refusal its verdict effect carries.
+/// opaque key types, its stage, notice, review verdict and cleanup
+/// vocabularies, and the typed refusal its verdict effect carries.
 pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
@@ -6125,6 +6400,10 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "DurableDecisionReviewVerdict",
                 &["Allow", "Deny", "Escalate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableDecisionCleanup",
+                &["NotOwed", "Owed", "Settled"],
             ),
             NamedTypeBinding::string_enum(
                 "DurableDecisionRefusal",
@@ -6166,8 +6445,10 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
 /// later touch, and a presentation before, at and after a decision's
 /// observed time (a carried presentation's time is sampled as `1`). Every
 /// arm is reached within six steps (the deepest: hold, approve, authorize,
-/// record, settle the notice, settle it again), so the CI run requires each
-/// of them to generate a state.
+/// record, settle the notice, settle it again; hold, approve, authorize,
+/// open the cleanup, end, settle it; hold, approve, authorize, record,
+/// settle the reply, settle it again), so the CI run requires each of them
+/// to generate a state.
 #[allow(clippy::expect_used)]
 fn durable_decision_tlc_model() -> crate::MachineTlcModel {
     let two_keys = || crate::MachineTlcProfile {

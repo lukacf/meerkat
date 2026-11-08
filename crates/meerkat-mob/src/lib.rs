@@ -169,12 +169,12 @@ pub use identity::{
     CallbackToolSetDeclaration, CreatedIdentityObservation, CreatedIdentityPresence,
     CreatedIdentityProvenance, CreatedIdentityRecord, CreatedIdentitySpec, DesiredExecution,
     DesiredExternalAddress, DesiredIdentityEdge, DesiredInitialDelivery, DesiredLocalCallbackTool,
-    DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec, DesiredSessionAuthorityPolicy,
-    DesiredSessionTarget, IDENTITY_CHANGE_BATCH_MAX, IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION,
-    IdentityActuationPermit, IdentityActuatorTarget, IdentityAddressability, IdentityAdoptedFrom,
-    IdentityAdoptionId, IdentityAdoptionOutcome, IdentityAdoptionPrecondition,
-    IdentityAdoptionReceipt, IdentityAuthorityCondition, IdentityChangeConsent,
-    IdentityChangeEntryOutcome, IdentityChangeKind, IdentityChangeReceipt,
+    DesiredMemberMaterial, DesiredMemberOverlay, DesiredMemberSpec, DesiredProfileSource,
+    DesiredSessionAuthorityPolicy, DesiredSessionTarget, IDENTITY_CHANGE_BATCH_MAX,
+    IDENTITY_CHANGE_RECEIPT_SCHEMA_VERSION, IdentityActuationPermit, IdentityActuatorTarget,
+    IdentityAddressability, IdentityAdoptedFrom, IdentityAdoptionId, IdentityAdoptionOutcome,
+    IdentityAdoptionPrecondition, IdentityAdoptionReceipt, IdentityAuthorityCondition,
+    IdentityChangeConsent, IdentityChangeEntryOutcome, IdentityChangeKind, IdentityChangeReceipt,
     IdentityChangeReceiptEntry, IdentityChangeReceiptObservation, IdentityChangeRequester,
     IdentityConvergenceCondition, IdentityConvergenceDirective, IdentityConvergenceMode,
     IdentityConvergenceResolutionId, IdentityConvergenceResolutionOutcome,
@@ -191,9 +191,15 @@ pub use identity::{
     IdentityRetirementPlan, IdentitySessionCondition, IdentitySessionObservation,
     IdentitySessionStoreAuthority, IdentitySourceEvidence, IdentityStoredObservation,
     IdentityTargetObservationVersion, MemberToolAccessConstraint, MemberToolAccessDeclaration,
-    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedIdentityEdge,
-    PendingRoleMigration, ResolveIdentityConvergenceBlock, ResolveIdentityConvergenceBlockResult,
-    classify_created_identity_row, classify_identity_reconciliation,
+    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedEdgeAdmission,
+    OwnedIdentityEdge, PendingRoleMigration, ResolveIdentityConvergenceBlock,
+    ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
+    classify_identity_reconciliation,
+};
+// The downgrade cycle's export (0.9.11).
+pub use identity::{
+    CREATED_IDENTITY_SET_SCHEMA, CreatedIdentitySetExport, ExportedIdentity,
+    ExportedSessionReference, ExportedSessionState, UnreadableIdentityRow,
 };
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
@@ -309,6 +315,7 @@ pub use runtime::DeliveryInputSettleTestRelease;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::FactoryChainSpawnBasePromptSource;
 pub use runtime::HeldSpawnDeadline;
+pub use runtime::MemberGrantGate;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::MemberInstructionActivationError;
 pub use runtime::RestoreIncompatible;
@@ -390,22 +397,24 @@ pub use runtime::{
     observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
     stored_realm_profile_to_wire,
 };
+pub use runtime::{
+    AdoptionSource, CreatedIdentityRequest, IdentityAdoption, IdentityArchiveChange,
+    IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome, IdentityChangeRefusal,
+    IdentityChangeRequesterInput, IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest,
+    IdentityImport, IdentityImportMode, IdentityNameHolder, IdentityOperation, IdentityRemoval,
+    IdentityRosterChange, IdentityRowsPurge, IdentityUpdateOutcome, MemberGrantMint,
+    MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
 };
 pub use runtime::{
-    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
-    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
-    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
-    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
-};
-pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
-    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    NotAdoptedReason, UnlistedEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{
@@ -466,6 +475,8 @@ pub use runtime::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook,
 };
 pub use runtime::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::{MemberToolGrant, MemberToolGrantError};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

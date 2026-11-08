@@ -26,11 +26,15 @@
 #   - after the expiry the clock rolls back before the deadline, and a call
 #     there is still refused (RollbackAfterExpiryStillRefused);
 #   - a revoked grant refuses a call (RevokedThenRefused);
+#   - a grant that ended with its subject refuses a call
+#     (EndedWithSubjectThenRefused);
 #   - a revoke at the deadline records expiry (RevokeAfterDeadlineRecordsExpiry);
+#   - the subject's end at the deadline records expiry
+#     (SubjectEndAfterDeadlineRecordsExpiry);
 #   - a dispatch refuses a call at the deadline and loses its expiry write,
 #     and after a clock rollback a call before the deadline is handed on
 #     (UnpersistedRefusalThenAdmitted).
-# With --mutants it seeds six defects and requires TLC to refuse each with
+# With --mutants it seeds seven defects and requires TLC to refuse each with
 # the property it targets. TLC reports only the first violated invariant of a
 # state, and one defect can break different properties in different states
 # of the same depth, so each mutant run checks the generated invariants and
@@ -45,6 +49,8 @@
 #     (action property AuditTerminalLatched);
 #   - revoked_admits: the dispatch hands on a call the revoked grant refused
 #     (AuditTerminalNeverAdmits);
+#   - subject_ended_admits: the dispatch hands on a call the grant that
+#     ended with its subject refused (AuditTerminalNeverAdmits);
 #   - boundary_trusts_durable_phase: the boundary shows the name because the
 #     stored row is still Active (AuditVisibleOnlyWhileLive).
 # An anchor this script expects but cannot find fails the run. Each TLC run
@@ -79,7 +85,9 @@ arms = [
     "Issue", "IssueRefusedWindow",
     "ExpireDue", "ExpireNotDue", "ExpireSettledExpired", "ExpireSettledRevoked",
     "RevokeActive", "RevokeAfterDeadline", "RevokeSettledExpired", "RevokeSettledRevoked",
-    "AdmitLive", "AdmitDue", "AdmitEndedExpired", "AdmitEndedRevoked",
+    "EndWithSubjectActive", "EndWithSubjectAfterDeadline", "EndWithSubjectSettledExpired",
+    "EndWithSubjectSettledRevoked",
+    "AdmitLive", "AdmitDue", "AdmitEndedExpired", "AdmitEndedRevoked", "AdmitEndedWithSubject",
 ]
 for arm in arms:
     count = text.count("\n" + arm + "(")
@@ -203,7 +211,8 @@ fi
 
 for witness in ExpiredByTimer ExpiredAtDispatch ExpiredWhileDownSettledOnRead \
   AdmittedOneTickBeforeDeadline RollbackAfterExpiryStillRefused RevokedThenRefused \
-  RevokeAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted; do
+  EndedWithSubjectThenRefused RevokeAfterDeadlineRecordsExpiry \
+  SubjectEndAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" none "" "
   NotAuditWitness${witness}"
@@ -275,6 +284,8 @@ PY
     AuditTerminalLatched restart_reactivates_terminal
   mutate revoked_admits "Invariant AuditTerminalNeverAdmits" AuditTerminalNeverAdmits \
     revoked_admits
+  mutate subject_ended_admits "Invariant AuditTerminalNeverAdmits" AuditTerminalNeverAdmits \
+    subject_ended_admits
   mutate boundary_trusts_durable_phase "Invariant AuditVisibleOnlyWhileLive" \
     AuditVisibleOnlyWhileLive boundary_trusts_durable_phase
 fi

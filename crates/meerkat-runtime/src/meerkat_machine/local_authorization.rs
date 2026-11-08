@@ -69,6 +69,24 @@ pub type NativeRetainedResumeCheck = dyn Fn(
     + Send
     + Sync;
 
+/// Host-installed owner of a kept governed input's controller (an input
+/// admitted with an authority association of its own, kept across a stop or
+/// a restart, whose client did not survive the store). It re-attests the
+/// original through the custody that admitted it, decides the invocation
+/// again through its existing owners, and returns the usable controller
+/// client it supplies itself for the association's stored selection; the
+/// stored selection is data, never a client. It must not fabricate a
+/// replacement original. Verdicts are typed exactly as
+/// [`NativeWorkAuthorizationHost::authenticate_kept_original`] documents.
+pub type NativeKeptOriginalCheck = dyn Fn(
+        &LogicalRuntimeId,
+        &Input,
+        &InputAuthorityAssociation,
+    )
+        -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    + Send
+    + Sync;
+
 /// Host-installed provider of the configured MCP attachment authority for
 /// each session registration, and, for a per-agent host, of the agent
 /// selection conjunct of its MCP attachment controls.
@@ -146,6 +164,12 @@ pub struct NativeGrantWorkConfiguration {
     /// Owner of governed retained-work resume. Without it, this composition
     /// admits no retained resume (`UnsupportedScope`).
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// Owner of a kept governed input's controller. Without it, every kept
+    /// governed input whose controller client did not survive the store ends
+    /// as a refused resume (`UnsupportedScope`).
+    /// [`super::ScopedGrantComposition::with_retained_resume`] installs it
+    /// with the retained-resume owner.
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
     /// Every governed input must name the session document's bound scoped
     /// destination (see `NativeWorkAuthorizationHost::requires_scoped_destination`).
     pub require_scoped_destination: bool,
@@ -225,6 +249,7 @@ pub(super) fn local_grant_host(
     Arc::new(NativeGrantWorkAuthorizationHost {
         ingress: configuration.ingress,
         retained_resume: configuration.retained_resume,
+        kept_original: configuration.kept_original,
         require_scoped_destination: configuration.require_scoped_destination,
         configured_mcp_attachment: configuration.configured_mcp_attachment,
         policy,
@@ -238,6 +263,7 @@ pub(super) fn local_grant_host(
 struct NativeGrantWorkAuthorizationHost {
     ingress: Arc<NativeIngressCheck>,
     retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    kept_original: Option<Arc<NativeKeptOriginalCheck>>,
     require_scoped_destination: bool,
     configured_mcp_attachment: Option<Arc<dyn ConfiguredMcpAttachmentProvider>>,
     policy: Arc<GrantBackedWorkPolicy>,
@@ -483,6 +509,59 @@ impl NativeWorkAuthorizationHost for NativeGrantWorkAuthorizationHost {
                 .validate_controller_admission(original.association(), &facts)
                 .map_err(RetainedResumeError::from)?;
         }
+        Ok(client)
+    }
+
+    fn authenticate_kept_original(
+        &self,
+        runtime: &LogicalRuntimeId,
+        input: &Input,
+        association: &InputAuthorityAssociation,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    {
+        use crate::retained_work::RetainedResumeError;
+        use crate::traits::ControllerReadinessFailure;
+        let check = self
+            .kept_original
+            .as_ref()
+            .ok_or(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::UnsupportedScope,
+            ))?;
+        let machine = self
+            .machine
+            .upgrade()
+            .ok_or(RetainedResumeError::Readiness(
+                ControllerReadinessFailure::PolicyUnavailable,
+            ))?;
+        machine.require_governed_execution_custody().map_err(|_| {
+            RetainedResumeError::Readiness(ControllerReadinessFailure::PolicyUnavailable)
+        })?;
+        // The stored association must name this runtime and the selection
+        // its controller is reacquired for.
+        let selection = association
+            .candidate()
+            .controller_model
+            .as_ref()
+            .ok_or(RetainedResumeError::Refused(malformed()))?;
+        if association.candidate().target.logical_runtime.as_str() != runtime.to_string() {
+            return Err(RetainedResumeError::Refused(malformed()));
+        }
+        // The installed owner re-attests the original through its custody,
+        // decides the invocation again and supplies the actual client.
+        let client = check(runtime, input, association)?;
+        if client.selection() != selection
+            || client.client().controller_model_selection().as_ref() != Some(client.selection())
+        {
+            return Err(RetainedResumeError::Refused(malformed()));
+        }
+        // Current controller grant, account, model and ceilings, through the
+        // same owner as fresh admission.
+        let facts = client.plain_facts().map_err(|_| {
+            RetainedResumeError::Readiness(ControllerReadinessFailure::FactsUnavailable)
+        })?;
+        self.policy
+            .validate_controller_admission(association, &facts)
+            .map_err(RetainedResumeError::from)?;
         Ok(client)
     }
 
@@ -927,6 +1006,10 @@ impl PreparedOperationAuthorization for NativePreparedAuthorization {
         // became unavailable after entry. Never reauthorize historical outcome.
         self.prepared.observe(binding, observation)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.prepared.spend_at_entry()
+    }
 }
 
 fn malformed() -> OperationRefused {
@@ -1257,6 +1340,7 @@ mod tests {
         (
             NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -3244,5 +3328,9 @@ impl PreparedOperationAuthorization for NativeControlDecision {
         observation: OperationObservation,
     ) -> Result<(), OperationObservationError> {
         self.inner.observe(binding, observation)
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        self.inner.spend_at_entry()
     }
 }

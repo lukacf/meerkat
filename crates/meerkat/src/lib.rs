@@ -411,7 +411,11 @@ pub use meerkat_workgraph::{
 #[cfg(not(target_arch = "wasm32"))]
 mod command_hook_confinement;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_source_trust;
+#[cfg(not(target_arch = "wasm32"))]
 mod host_confinement;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hook_source_trust::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
 #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 mod skill_stdio_confinement;
 #[cfg(not(target_arch = "wasm32"))]
@@ -460,7 +464,8 @@ pub use factory::{
     GrantGateBuildError, LlmIdentityPreflightError, PreparedAgent, PreparedCatalogEntry,
     PreparedToolCatalog, PreparedToolSurface, decode_llm_client_override_from_service,
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
-    resolve_create_session_model, resolve_provider_catalog_default_model, tool_family_names,
+    resolve_create_session_model, resolve_grant_target, resolve_provider_catalog_default_model,
+    tool_family_names,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use factory::{

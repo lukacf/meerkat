@@ -69,6 +69,8 @@ const NATIVE_MACHINE_HELPERS: &[&str] = &[
     "mob_machine_wiring_contains_pair",
     "mob_machine_wiring_edge_matches_members",
     "mob_machine_wiring_edges_without_identity",
+    "mob_machine_wiring_edge_other",
+    "mob_machine_owned_edges_without_identity",
     "mob_machine_run_step_status_after_set",
     "mob_machine_run_step_status_after_cancel_unfinished",
     "mob_machine_run_step_bool_after_set",

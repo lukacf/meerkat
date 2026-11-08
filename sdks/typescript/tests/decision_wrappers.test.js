@@ -170,6 +170,32 @@ describe("durable decision wrappers", () => {
     assert.equal(read.decision.phase, "archived");
   });
 
+  it("keeps a decision's effect as the server wrote it", async () => {
+    // An executed decision may name its effect: a decision without one, one
+    // with one, and one whose effect carries a field this SDK does not know
+    // all reach the caller unchanged.
+    const executed = {
+      ...DECISION,
+      kind: "grant.child",
+      phase: "executed",
+      effect: { grant_id: `${DECISION_ID}/approval-grant` },
+    };
+    const later = { ...executed, effect: { ...executed.effect, issued_at_ms: 3000 } };
+    for (const decision of [DECISION, executed, later]) {
+      const { client } = fakeClient({
+        "decision/list": { decisions: [decision], unreadable: [] },
+        "decision/get": { decision },
+      });
+
+      const listing = await client.listDecisions();
+      const read = await client.getDecision(DECISION_ID);
+
+      assert.deepEqual(listing, { decisions: [decision], unreadable: [] });
+      assert.deepEqual(read, { decision });
+      assert.deepEqual(read.decision.effect, decision.effect);
+    }
+  });
+
   const DECISION_CALLS = [
     ["decision/list", (client) => client.listDecisions()],
     ["decision/get", (client) => client.getDecision(DECISION_ID)],

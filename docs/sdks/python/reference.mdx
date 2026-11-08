@@ -382,8 +382,9 @@ await client.withdraw_decision(decision_id)
 ```
 
 `present_decision` records what a host presenter showed; the presentation
-counts only when it shows every canonical part of the rendering to the party
-that decides now. No SDK method decides a durable decision: a host's trusted
+counts only when it shows every canonical part of the rendering, or is a
+summary whose `link` served the held rendering, to the party that decides
+now. No SDK method decides a durable decision: a host's trusted
 adapter decides one with the human's authenticated event. See
 [durable decisions](/api/rpc#durable-decisions).
 

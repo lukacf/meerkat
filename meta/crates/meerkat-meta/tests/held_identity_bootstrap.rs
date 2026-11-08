@@ -91,6 +91,7 @@ fn host_configuration() -> NativeGrantWorkConfiguration {
         invocation_owner: Arc::new(RefusingOwner),
         operation_owner: Arc::new(RefusingOwner),
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: true,
         configured_mcp_attachment: None,
     }
@@ -802,29 +803,13 @@ async fn an_aborted_held_roster_member_leaves_no_binding_and_is_held_again() {
     let _ = runtime.shutdown().await;
 }
 
-/// The held-completion mark outlives its runtime. Core holds nothing for an
-/// aborted held member (no binding), so only the durable mark keeps it owed:
-/// an ordinary bootstrap of the next runtime over the same state directory
-/// refuses it typed and publishes nothing, a reset refuses it too and a
-/// delete finds nothing to delete, so no binding is minted, and a held pass
-/// then publishes it and removes the mark.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_aborted_held_member_stays_owed_across_a_restart() {
-    let identity = AgentIdentity::parse("held-owed-restart").unwrap();
-    let roster = vec![member(&identity)];
-    let dir = tempfile::tempdir().unwrap();
-    let mob = mob_id("held-owed-restart");
-    let marks = dir
-        .path()
-        .join("state")
-        .join(meerkat_meta::identity_first::HELD_COMPLETION_OWED_DIR);
-    let marked = || std::fs::read_dir(&marks).map(Iterator::count).unwrap_or(0);
-
-    let mut runtime =
-        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+/// Hold `roster` with a held bootstrap whose host refuses its completion:
+/// the pass aborts, its members are never published (Core binds none of
+/// them), and the failed bootstrap shuts the runtime down.
+async fn abort_held_bootstrap(runtime: &mut UnifiedRuntime, roster: &[DurableAgentSpec]) {
     runtime
         .bootstrap_installed_identity_first_context_held(
-            &roster,
+            roster,
             tokio::time::Instant::now() + Duration::from_mins(1),
             Box::new(|_members, _completion| {
                 Box::pin(async { Err("the application bundle failed".to_string()) })
@@ -832,128 +817,18 @@ async fn an_aborted_held_member_stays_owed_across_a_restart() {
         )
         .await
         .expect_err("an aborted held bootstrap fails");
-    assert_eq!(marked(), 1, "the aborted member's mark is on disk");
-    let _ = runtime.shutdown().await;
-    drop(runtime);
-
-    // An ordinary bootstrap over the same directory: the member is fresh in
-    // Core, and the mark still refuses it.
-    let mut runtime =
-        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
-    let mut restored = runtime
-        .bootstrap_installed_identity_first_context(&roster)
-        .await
-        .expect("the ordinary bootstrap runs");
-    let outcome = restored.outcomes.remove(&identity);
-    assert!(
-        matches!(
-            &outcome,
-            Some(meerkat_meta::identity_first::RestoreOutcome::Refused(error))
-                if matches!(
-                    **error,
-                    meerkat_meta::identity_first::IdentityRuntimeError::HeldCompletionOwed { .. }
-                )
-        ),
-        "{outcome:?}"
-    );
-    assert!(
-        runtime.mob_handle().list_members().await.is_empty(),
-        "the ordinary bootstrap published nothing"
-    );
-    assert!(
-        core_last_binding(&runtime, &identity).await.is_none(),
-        "Core never spawned the owed member"
-    );
-    assert_eq!(marked(), 1, "the mark stays until a held pass publishes it");
-
-    // Neither reset nor delete starts a fresh life for the owed member: Core
-    // would bind a member its host's completion never saw, and the next
-    // restart would read that binding as the pass's publication.
-    let identities = runtime.identity_runtime().expect("the identity runtime");
-    let reset = identities.reset(&identity).await;
-    assert!(
-        matches!(
-            reset,
-            Err(meerkat_meta::identity_first::IdentityRuntimeError::HeldCompletionOwed { .. })
-        ),
-        "{reset:?}"
-    );
-    let deleted = identities.delete_identity(&identity).await;
-    assert!(
-        matches!(deleted, Ok(None)),
-        "delete finds nothing Core spawned: {deleted:?}"
-    );
-    drop(identities);
-    assert!(
-        core_last_binding(&runtime, &identity).await.is_none(),
-        "neither reset nor delete minted a binding"
-    );
-    assert_eq!(marked(), 1, "the mark stays");
-
-    // A held pass covers the owed member: it is held, published, and its
-    // mark is removed.
-    let held = Arc::new(AtomicUsize::new(0));
-    let counted = Arc::clone(&held);
-    runtime
-        .bootstrap_installed_identity_first_context_held(
-            &roster,
-            tokio::time::Instant::now() + Duration::from_mins(1),
-            Box::new(move |members, _completion| {
-                Box::pin(async move {
-                    counted.store(members.len(), Ordering::SeqCst);
-                    Ok(())
-                })
-            }),
-        )
-        .await
-        .expect("a held pass publishes the owed member");
-    assert_eq!(held.load(Ordering::SeqCst), 1);
-    assert!(
-        core_binds_live(&runtime, &identity).await,
-        "Core's member history binds the published member"
-    );
-    assert_eq!(marked(), 0, "publishing the member removed its mark");
-    let _ = runtime.shutdown().await;
 }
 
-/// A held add owes its host the same completion a held roster pass does:
-/// the aborted added member's mark outlives the runtime, so the next
-/// runtime's ordinary bootstrap over the same state directory refuses the
-/// listed member typed, publishes nothing for it and keeps the mark.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_aborted_held_add_stays_owed_across_a_restart() {
-    let running = AgentIdentity::parse("held-add-owed-running").unwrap();
-    let added = AgentIdentity::parse("held-add-owed-added").unwrap();
-    let roster = vec![member(&running)];
-    let dir = tempfile::tempdir().unwrap();
-    let mob = mob_id("held-add-owed-restart");
-    let marks = dir
-        .path()
-        .join("state")
-        .join(meerkat_meta::identity_first::HELD_COMPLETION_OWED_DIR);
-    let marked = || std::fs::read_dir(&marks).map(Iterator::count).unwrap_or(0);
-
-    let mut runtime =
-        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
-    runtime
-        .bootstrap_installed_identity_first_context_held(
-            &roster,
-            tokio::time::Instant::now() + Duration::from_mins(1),
-            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
-        )
-        .await
-        .expect("the running member is published");
-    assert_eq!(
-        marked(),
-        0,
-        "publishing the running member removed its mark"
-    );
-    let context = runtime
-        .identity_first_context()
-        .expect("the identity context");
+/// Add `spec` held to the running roster of `context`, with a host that
+/// refuses its completion: the add aborts, and its member is never
+/// published.
+async fn abort_held_add(
+    context: &meerkat_meta::identity_first::PublicIdentityFirstContext,
+    spec: DurableAgentSpec,
+) {
     let start = context
         .add_member_held(
-            member(&added),
+            spec,
             tokio::time::Instant::now() + Duration::from_mins(1),
             |_members, _completion| async { Err("the application bundle failed".to_string()) },
         )
@@ -970,13 +845,299 @@ async fn an_aborted_held_add_stays_owed_across_a_restart() {
             panic!("the refused add activated: {:?}", result.outcomes)
         }
     }
-    drop(context);
-    assert_eq!(marked(), 1, "the aborted added member's mark is on disk");
+}
+
+/// Whether `error` is the typed refusal of an identity that owes its host a
+/// held completion.
+fn owes_held_completion(error: &meerkat_meta::identity_first::IdentityRuntimeError) -> bool {
+    matches!(
+        error,
+        meerkat_meta::identity_first::IdentityRuntimeError::HeldCompletionOwed { .. }
+    )
+}
+
+/// A held pass that never published its member leaves Core no binding of
+/// it, and its mark only as the rollback mirror: written for a rollback to
+/// 0.9.10, never read here. Held creation follows the host's hold in each
+/// process, so an ordinary bootstrap of the next runtime over the same state
+/// directory holds nothing: the identity is seated and created as any other
+/// identity, and the mark stays as it was.
+///
+/// RED before the marks stopped being read: the ordinary bootstrap refused
+/// the identity from its mark (`HeldCompletionOwed`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_held_member_is_seated_normally_after_an_ordinary_restart() {
+    let identity = AgentIdentity::parse("held-ordinary-restart").unwrap();
+    let roster = vec![member(&identity)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-ordinary-restart");
+    let marks = dir
+        .path()
+        .join("state")
+        .join(meerkat_meta::identity_first::HELD_COMPLETION_OWED_DIR);
+    let marked = || std::fs::read_dir(&marks).map(Iterator::count).unwrap_or(0);
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    abort_held_bootstrap(&mut runtime, &roster).await;
+    assert_eq!(marked(), 1, "the rollback mirror marks the aborted member");
     let _ = runtime.shutdown().await;
     drop(runtime);
 
-    // The host had listed the added member: an ordinary bootstrap of the
-    // next runtime over the same directory refuses it typed.
+    // An ordinary bootstrap over the same directory: its host holds nothing.
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    let mut restored = runtime
+        .bootstrap_installed_identity_first_context(&roster)
+        .await
+        .expect("the ordinary bootstrap runs");
+    let outcome = restored.outcomes.remove(&identity);
+    assert!(
+        matches!(
+            &outcome,
+            Some(
+                meerkat_meta::identity_first::RestoreOutcome::Created { .. }
+                    | meerkat_meta::identity_first::RestoreOutcome::Dormant { .. }
+            )
+        ),
+        "{outcome:?}"
+    );
+    let identities = runtime.identity_runtime().expect("the identity runtime");
+    identities
+        .materialize(&identity)
+        .await
+        .expect("the identity is created as any other");
+    drop(identities);
+    assert!(
+        core_binds_live(&runtime, &identity).await,
+        "Core binds the created member"
+    );
+    assert_eq!(
+        marked(),
+        1,
+        "nothing here reads or removes the rollback mirror"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A held pass that never published its member, and a restart whose host
+/// holds the identity again through its held bootstrap: the identity is
+/// still owed to its host's held protocol. The restart's pass holds it
+/// again, fresh (Core never created it), and Core binds nothing for it until
+/// that pass publishes it. The publication removes the member's mark from
+/// the rollback mirror, as 0.9.10 removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_held_member_stays_owed_to_a_restart_whose_bootstrap_holds_it_again() {
+    let identity = AgentIdentity::parse("held-bootstrap-again").unwrap();
+    let roster = vec![member(&identity)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-bootstrap-again");
+    let marks = dir
+        .path()
+        .join("state")
+        .join(meerkat_meta::identity_first::HELD_COMPLETION_OWED_DIR);
+    let marked = || std::fs::read_dir(&marks).map(Iterator::count).unwrap_or(0);
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    abort_held_bootstrap(&mut runtime, &roster).await;
+    assert_eq!(marked(), 1, "the rollback mirror marks the aborted member");
+    let _ = runtime.shutdown().await;
+    drop(runtime);
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    let mob_handle = runtime.mob_handle();
+    let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&held);
+    let unbound_while_held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let unbound = Arc::clone(&unbound_while_held);
+    let held_identity = identity.clone();
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(move |members, _completion| {
+                Box::pin(async move {
+                    *seen.lock().unwrap() = members
+                        .iter()
+                        .map(|member| member.identity.clone())
+                        .collect::<Vec<_>>();
+                    let binding = MobSessionBridge::new(mob_handle)
+                        .last_member_binding(&held_identity)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    unbound.store(binding.is_none(), Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .expect("the restart's held pass publishes the member");
+    assert_eq!(
+        held.lock().unwrap().clone(),
+        vec![identity.clone()],
+        "the restart's pass held the identity again"
+    );
+    assert!(
+        unbound_while_held.load(Ordering::SeqCst),
+        "Core bound nothing for the identity before its held pass published it"
+    );
+    assert!(
+        core_binds_live(&runtime, &identity).await,
+        "the held pass published the member"
+    );
+    assert_eq!(
+        marked(),
+        0,
+        "publishing the member removed its mark from the rollback mirror"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A held add the host's completion refuses never publishes its member.
+/// Within the add's process the identity stays owed to its host's held
+/// protocol: every other wake and the reset are refused typed
+/// (`HeldCompletionOwed`), a delete finds nothing Core spawned, and Core
+/// binds nothing for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_held_add_stays_owed_within_its_process() {
+    let running = AgentIdentity::parse("held-add-process-running").unwrap();
+    let added = AgentIdentity::parse("held-add-process-added").unwrap();
+    let roster = vec![member(&running)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-add-process");
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .expect("the running member is published");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&added)).await;
+
+    let identities = runtime.identity_runtime().expect("the identity runtime");
+    let woken = identities.materialize(&added).await;
+    assert!(
+        woken.as_ref().is_err_and(owes_held_completion),
+        "a wake outside a held pass is refused: {woken:?}"
+    );
+    let sent = identities
+        .send(
+            &added,
+            &meerkat_core::ContentInput::Text("a delivery outside a held pass".to_string()),
+        )
+        .await;
+    assert!(
+        sent.as_ref().is_err_and(owes_held_completion),
+        "a delivery outside a held pass is refused: {sent:?}"
+    );
+    let reset = identities.reset(&added).await;
+    assert!(
+        reset.as_ref().is_err_and(owes_held_completion),
+        "the reset is refused: {reset:?}"
+    );
+    let deleted = identities.delete_identity(&added).await;
+    assert!(
+        matches!(deleted, Ok(None)),
+        "a delete finds nothing Core spawned: {deleted:?}"
+    );
+    drop(identities);
+    drop(context);
+    assert!(
+        core_last_binding(&runtime, &added).await.is_none(),
+        "Core never spawned the owed member"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// A name the host declares held is reserved while its held creation is
+/// owed: a raw spawn under it (a host's spawn without the identity entry's
+/// custody) is refused typed (`IdentityMember`), and Core holds no member of
+/// it. The reservation is Core's held creation entry, which stands from the
+/// declaration on; a host must not raw-spawn under a name it declares held.
+/// A pin of Core's entry guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raw_spawn_under_a_held_name_is_refused_while_its_held_creation_is_owed() {
+    let running = AgentIdentity::parse("held-name-running").unwrap();
+    let held = AgentIdentity::parse("held-name-reserved").unwrap();
+    let roster = vec![member(&running)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-name");
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .expect("the running member is published");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&held)).await;
+
+    let raw = runtime
+        .mob_handle()
+        .spawn_spec(meerkat_mob::SpawnMemberSpec::host_root(
+            "worker",
+            meerkat_meta::member_comms_id::roster_member_id_for_identity(held.as_str()),
+        ))
+        .await;
+    assert!(
+        matches!(raw, Err(meerkat_mob::MobError::IdentityMember { .. })),
+        "a raw spawn under the held name is refused typed: {raw:?}"
+    );
+    drop(context);
+    assert!(
+        core_last_binding(&runtime, &held).await.is_none(),
+        "Core holds no member of the held name"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// An aborted held add, and a restart whose ordinary bootstrap lists the
+/// added identity: its host no longer holds it, so the identity is seated
+/// and created as any other identity.
+///
+/// RED before the marks stopped being read: the ordinary bootstrap refused
+/// the identity from its mark (`HeldCompletionOwed`).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_held_add_is_seated_normally_after_an_ordinary_restart() {
+    let running = AgentIdentity::parse("held-add-ordinary-running").unwrap();
+    let added = AgentIdentity::parse("held-add-ordinary-added").unwrap();
+    let roster = vec![member(&running)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-add-ordinary-restart");
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .expect("the running member is published");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&added)).await;
+    drop(context);
+    let _ = runtime.shutdown().await;
+    drop(runtime);
+
     let listed = vec![member(&running), member(&added)];
     let mut runtime =
         installed_runtime(&dir, &mob, &listed, Arc::new(SelectingHook::default())).await;
@@ -988,27 +1149,87 @@ async fn an_aborted_held_add_stays_owed_across_a_restart() {
     assert!(
         matches!(
             &outcome,
-            Some(meerkat_meta::identity_first::RestoreOutcome::Refused(error))
-                if matches!(
-                    **error,
-                    meerkat_meta::identity_first::IdentityRuntimeError::HeldCompletionOwed { .. }
-                )
+            Some(
+                meerkat_meta::identity_first::RestoreOutcome::Created { .. }
+                    | meerkat_meta::identity_first::RestoreOutcome::Dormant { .. }
+            )
         ),
         "{outcome:?}"
     );
+    let identities = runtime.identity_runtime().expect("the identity runtime");
+    identities
+        .materialize(&added)
+        .await
+        .expect("the added identity is created as any other");
+    drop(identities);
     assert!(
-        core_last_binding(&runtime, &added).await.is_none(),
-        "Core never spawned the owed added member"
+        core_binds_live(&runtime, &added).await,
+        "Core binds the created member"
     );
     assert!(
         core_binds_live(&runtime, &running).await,
         "the running member resumes"
     );
-    assert_eq!(marked(), 1, "the mark stays until a held pass publishes it");
     let _ = runtime.shutdown().await;
 }
 
-/// After an eager roster pass, an owed member the host had listed reads
+/// An aborted held add, and a restart whose host adds the identity held
+/// again: that add's process holds it, so when the re-add aborts too the
+/// identity stays owed there. Its wake is refused typed
+/// (`HeldCompletionOwed`) and Core binds nothing for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_held_add_stays_owed_after_a_restart_that_adds_it_held_again() {
+    let running = AgentIdentity::parse("held-add-again-running").unwrap();
+    let added = AgentIdentity::parse("held-add-again-added").unwrap();
+    let roster = vec![member(&running)];
+    let dir = tempfile::tempdir().unwrap();
+    let mob = mob_id("held-add-again");
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context_held(
+            &roster,
+            tokio::time::Instant::now() + Duration::from_mins(1),
+            Box::new(|_members, _completion| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .expect("the running member is published");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&added)).await;
+    drop(context);
+    let _ = runtime.shutdown().await;
+    drop(runtime);
+
+    let mut runtime =
+        installed_runtime(&dir, &mob, &roster, Arc::new(SelectingHook::default())).await;
+    runtime
+        .bootstrap_installed_identity_first_context(&roster)
+        .await
+        .expect("the ordinary bootstrap runs");
+    let context = runtime
+        .identity_first_context()
+        .expect("the identity context");
+    abort_held_add(&context, member(&added)).await;
+    let identities = runtime.identity_runtime().expect("the identity runtime");
+    let woken = identities.materialize(&added).await;
+    assert!(
+        woken.as_ref().is_err_and(owes_held_completion),
+        "a wake outside a held pass is refused: {woken:?}"
+    );
+    drop(identities);
+    drop(context);
+    assert!(
+        core_last_binding(&runtime, &added).await.is_none(),
+        "Core never spawned the owed member"
+    );
+    let _ = runtime.shutdown().await;
+}
+
+/// After an eager roster pass in the held add's process, an owed member the
+/// host lists reads
 /// `broken` in the bootstrap status, and its restore progress names the
 /// refusal typed (the internal-error code with kind `held_completion_owed`),
 /// so a host reads an admission still owed without parsing the error text.
@@ -1034,38 +1255,16 @@ async fn an_owed_listed_member_reads_broken_with_its_typed_restore_refusal() {
     let context = runtime
         .identity_first_context()
         .expect("the identity context");
-    let start = context
-        .add_member_held(
-            member(&added),
-            tokio::time::Instant::now() + Duration::from_mins(1),
-            |_members, _completion| async { Err("the application bundle failed".to_string()) },
-        )
-        .await
-        .expect("the held add starts");
-    match start {
-        meerkat_meta::identity_first::HeldBootstrapStart::Unsettled(settlement) => {
-            settlement
-                .settled()
-                .await
-                .expect_err("the host's refusal aborts the add");
-        }
-        meerkat_meta::identity_first::HeldBootstrapStart::Activated(result) => {
-            panic!("the refused add activated: {:?}", result.outcomes)
-        }
-    }
-    drop(context);
-    let _ = runtime.shutdown().await;
-    drop(runtime);
+    abort_held_add(&context, member(&added)).await;
 
-    // The host had listed the added member: the next runtime's eager pass
-    // refuses it, and the member's bootstrap status entry says why, typed.
+    // The host lists the added member while its add's process still holds
+    // it: the context's next eager pass refuses it, and the member's
+    // bootstrap status entry says why, typed.
     let listed = vec![member(&running), member(&added)];
-    let mut runtime =
-        installed_runtime(&dir, &mob, &listed, Arc::new(SelectingHook::default())).await;
-    runtime
-        .bootstrap_installed_identity_first_context(&listed)
+    context
+        .bootstrap_roster(&listed)
         .await
-        .expect("the ordinary bootstrap runs");
+        .expect("the eager pass runs");
     let status = runtime
         .identity_runtime()
         .expect("the identity runtime")
@@ -1095,6 +1294,7 @@ async fn an_owed_listed_member_reads_broken_with_its_typed_restore_refusal() {
         !status.ready,
         "an owed member keeps the bootstrap from ready"
     );
+    drop(context);
     let _ = runtime.shutdown().await;
 }
 

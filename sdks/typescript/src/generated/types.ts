@@ -885,7 +885,13 @@ export interface ToolGrantTargetFamily {
   kind: "family";
 }
 
-export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+export interface ToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer;
 
 export interface WireToolGrantSubjectSession {
   kind: "session";
@@ -915,14 +921,21 @@ export interface WireToolGrantTargetFamily {
   names?: string[];
 }
 
+export interface WireToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
 export interface WireToolGrantTargetUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown;
 
 export interface WireToolGrantIssuerOperator {
   caller?: string | null;
+  decision_ref?: string | null;
   kind: "operator";
 }
 
@@ -939,7 +952,7 @@ export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIss
 
 export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
 
-export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "build" | "unknown";
 
 export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
 
@@ -982,6 +995,8 @@ export interface WireToolGrantAuditEventUnknown {
 }
 
 export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+
+export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
 
 export interface DecisionAudienceApprover {
   approver_id: string;
@@ -1765,7 +1780,25 @@ export interface WireUnreadableToolGrantAuditRow {
   sequence: number;
 }
 
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
+export interface WireToolGrantGateView {
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
+}
+
+export interface WireMemberToolGrantGate {
+  next_build: WireToolGrantGateView;
+  running?: WireToolGrantGateView | null;
+}
+
 export interface GrantToolParams {
+  decision_ref?: string | null;
   duration_ms?: number | null;
   expires_at_ms?: number | null;
   reason?: string | null;
@@ -1774,6 +1807,7 @@ export interface GrantToolParams {
 }
 
 export interface GrantToolResult {
+  applies?: WireToolGrantApplies | null;
   grant: WireToolGrant;
 }
 
@@ -1793,6 +1827,7 @@ export interface ListToolGrantsParams {
 }
 
 export interface ListToolGrantsResult {
+  gate?: WireMemberToolGrantGate | null;
   grants: WireToolGrant[];
   unreadable?: WireUnreadableToolGrant[];
 }
@@ -1815,10 +1850,16 @@ export interface WireCanonicalPart {
   part_digest: string;
 }
 
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
 export interface WirePresentationRecord {
   at_ms: number;
   audience: WirePresentationAudience;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -1830,12 +1871,17 @@ export interface WireDecisionOutcome {
   tier: WireDecisionTier;
 }
 
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
 export interface WireDecision {
   approver_id: string;
   created_at_ms: number;
   deadline_at_ms: number;
   decided_at_ms?: number | null;
   decision_id: string;
+  effect?: WireDecisionEffect | null;
   ended_at_ms?: number | null;
   execution_refusal?: string | null;
   first_presented_to_approver_at_ms?: number | null;
@@ -1866,6 +1912,7 @@ export interface DecisionPresentationRequest {
   at_ms: number;
   audience: DecisionAudienceRequest;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -2402,10 +2449,18 @@ export interface WireMemberCustodyDeferral {
   restore: WireMemberCustodyRestore;
 }
 
+export interface WireGrantGatedTools {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2988,6 +3043,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -3333,6 +3389,7 @@ export interface MobToolConfigInput {
   bundles?: string[];
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -3565,6 +3622,11 @@ export interface WireProviderParamsOverride {
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
+}
+
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
 }
 
 export interface AttentionBindingRequest {
@@ -4078,7 +4140,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -7513,7 +7575,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 

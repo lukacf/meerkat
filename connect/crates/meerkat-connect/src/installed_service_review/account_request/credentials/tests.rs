@@ -336,6 +336,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for CredentialR
         }
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 async fn credential_operation_dispatch(

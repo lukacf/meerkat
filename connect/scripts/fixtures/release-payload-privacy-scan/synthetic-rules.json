@@ -1,0 +1,11 @@
+{
+  "schema": "release-evidence-privacy-scan/rules/1",
+  "rules_id": "synthetic-test-rules",
+  "categories": {
+    "synthetic_marker": {
+      "rules": [
+        {"id": "synthetic-marker-1", "kind": "token", "value": "zq-synthetic-marker-7f3a"}
+      ]
+    }
+  }
+}

@@ -7848,16 +7848,84 @@ where
         ctx.tool_call_count += 1;
         Ok(Some(async_ops))
     }
-    /// Boundary step: the grant gate opens the gated names a live grant
-    /// admits now. A gate that cannot read its grants, or whose open set the
-    /// visibility owner refuses, closes every gated name and warns; the run
-    /// goes on with the gated names hidden until the next boundary.
+    /// The boundary's extension of the grant gate: for every MCP server among
+    /// the dispatcher's tools that the gate gates and whose names it does not
+    /// all gate yet, gate them (`ExtendToolGrantGate`). Answers the view the
+    /// grants are adjudicated over (the machine's gated names after the
+    /// extension, and each gated server's names now, less those of a server
+    /// whose extension the owner refused) and the last refused server.
+    fn extend_tool_grant_gate_at_boundary(
+        &self,
+        dispatcher_tools: &[Arc<ToolDef>],
+    ) -> (crate::tool_grant::GatedToolView, Option<String>) {
+        let Ok(visibility_state) = self.tool_scope.visibility_state() else {
+            return (crate::tool_grant::GatedToolView::default(), None);
+        };
+        let mut server_names: BTreeMap<String, BTreeSet<crate::types::ToolName>> = BTreeMap::new();
+        for tool in dispatcher_tools {
+            let Some(provenance) = tool.provenance.as_ref() else {
+                continue;
+            };
+            if provenance.kind == crate::types::ToolSourceKind::Mcp
+                && visibility_state.tool_grant_gates_server(provenance.source_id.as_str())
+            {
+                server_names
+                    .entry(provenance.source_id.as_str().to_owned())
+                    .or_default()
+                    .insert(tool.name.clone());
+            }
+        }
+        let mut refused = None;
+        server_names.retain(|server, names| {
+            if names
+                .iter()
+                .all(|name| visibility_state.tool_grant_gated_names.contains(name))
+            {
+                return true;
+            }
+            match self
+                .tool_scope
+                .extend_tool_grant_gate(server, names.clone())
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        server = server.as_str(),
+                        "the visibility owner refused to gate a gated MCP server's tools"
+                    );
+                    refused = Some(server.clone());
+                    false
+                }
+            }
+        });
+        let gated = self
+            .tool_scope
+            .visibility_state()
+            .map(|visibility_state| visibility_state.tool_grant_gated_names)
+            .unwrap_or_default();
+        (
+            crate::tool_grant::GatedToolView::new(gated, server_names),
+            refused,
+        )
+    }
+
+    /// Boundary step: the grant gate gates the names each gated MCP server
+    /// provides now (`ExtendToolGrantGate`), then opens the gated names a
+    /// live grant admits now. An extension the visibility owner refuses
+    /// leaves that server's names out of what the boundary opens (they stay
+    /// hidden and gated by their provenance) and warns. A gate that cannot
+    /// read its grants, or whose open set the visibility owner refuses,
+    /// closes every gated name and warns. The run goes on, and the next
+    /// boundary tries again.
     async fn apply_tool_grant_open_set_at_boundary(
         &mut self,
         ctx: &mut CallingLlmTurnCtx<'_>,
         gate: &crate::tool_grant::ToolGrantGate,
+        dispatcher_tools: &[Arc<ToolDef>],
     ) {
-        let failure = match gate.open_names().await {
+        let (view, refused_extension) = self.extend_tool_grant_gate_at_boundary(dispatcher_tools);
+        let failure = match gate.open_names(&view).await {
             Ok(open) => self
                 .tool_scope
                 .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -7867,23 +7935,29 @@ where
                         error = %error,
                         "the visibility owner refused the tool grant open set"
                     );
-                    "the tool grant open set was refused"
+                    "the tool grant open set was refused".to_string()
                 }),
             Err(refusal) => {
                 tracing::warn!(
                     error = %refusal,
                     "tool grants could not be read at the model-request boundary"
                 );
-                Some(refusal.code())
+                Some(refusal.code().to_string())
             }
         };
-        let Some(failure) = failure else {
-            return;
+        let failure = match (failure, refused_extension) {
+            (Some(failure), _) => {
+                // The empty set is within every gate.
+                if let Err(error) = self.tool_scope.apply_tool_grant_open_set(BTreeSet::new()) {
+                    tracing::warn!(error = %error, "failed to close the tool grant gate");
+                }
+                failure
+            }
+            (None, Some(server)) => {
+                format!("the tool grant gate could not gate the MCP server '{server}'")
+            }
+            (None, None) => return,
         };
-        // The empty set is within every gate.
-        if let Err(error) = self.tool_scope.apply_tool_grant_open_set(BTreeSet::new()) {
-            tracing::warn!(error = %error, "failed to close the tool grant gate");
-        }
         let status_info = ToolConfigChangeStatus::warning_failed_closed(format!(
             "tool grants unavailable ({failure}); tools available by grant stay closed"
         ));
@@ -7946,11 +8020,13 @@ where
                 catalog_mode,
             );
             let previous_visibility_state = self.tool_scope.visibility_state().ok();
-            // The grant gate opens the gated names a live grant admits before
-            // the staged visibility promotes, so the projected set and its
-            // change event include them.
+            // The grant gate gates each gated server's names and opens the
+            // gated names a live grant admits before the staged visibility
+            // promotes, so the projected set and its change event include
+            // them.
             if let Some(gate) = self.tool_grant_gate.clone() {
-                self.apply_tool_grant_open_set_at_boundary(ctx, &gate).await;
+                self.apply_tool_grant_open_set_at_boundary(ctx, &gate, &dispatcher_tools)
+                    .await;
             }
             let apply_result = match self.tool_scope.promote_staged_visibility() {
                 Ok(visibility_state) => {
@@ -8020,26 +8096,43 @@ where
                             // A gated name its closed grant gate hides cannot
                             // be loaded from the deferred catalog, so the
                             // notice never offers it; it appears once a live
-                            // grant opens it.
-                            let closed_grant_gated_names = self
-                                .tool_scope
-                                .visibility_state()
-                                .map(|visibility_state| {
-                                    visibility_state.closed_tool_grant_gated_names()
-                                })
-                                .unwrap_or_default();
+                            // grant opens it. A tool of a gated MCP server is
+                            // gated by its provenance from the moment it
+                            // appears.
+                            let visibility_state = self.tool_scope.visibility_state().ok();
                             current_catalog
                                 .as_ref()
                                 .map(|catalog| {
+                                    let closed_by_grant_gate: BTreeSet<crate::types::ToolName> =
+                                        visibility_state
+                                            .as_ref()
+                                            .map(|visibility_state| {
+                                                catalog
+                                                    .iter()
+                                                    .filter(|entry| {
+                                                        visibility_state
+                                                            .tool_is_closed_by_grant_gate(
+                                                                entry.tool.name.as_str(),
+                                                                entry.tool.provenance.as_ref(),
+                                                            )
+                                                    })
+                                                    .map(|entry| entry.tool.name.clone())
+                                                    .chain(
+                                                        visibility_state
+                                                            .closed_tool_grant_gated_names(),
+                                                    )
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
                                     hidden_deferred_catalog_names(
                                         catalog.as_ref(),
                                         &visible_names_set,
                                     )
+                                    .into_iter()
+                                    .filter(|name| !closed_by_grant_gate.contains(name))
+                                    .collect()
                                 })
                                 .unwrap_or_default()
-                                .into_iter()
-                                .filter(|name| !closed_grant_gated_names.contains(name))
-                                .collect()
                         } else {
                             BTreeSet::new()
                         };
@@ -22211,7 +22304,7 @@ mod tests {
         impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
             async fn open_names(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
+                _view: &crate::tool_grant::GatedToolView,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
@@ -22219,7 +22312,6 @@ mod tests {
 
             async fn admit_call(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
                 _call: crate::tool_grant::ToolGrantCall<'_>,
             ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
                 Err(crate::tool_grant::ToolGrantRefusal::Required)
@@ -22235,12 +22327,9 @@ mod tests {
             })),
             ..Default::default()
         };
-        let gate = crate::tool_grant::ToolGrantGate::new(
+        let gate = crate::tool_grant::gate_over_names(
             Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
-            crate::tool_grant::GatedToolTable::new(
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::from([crate::types::ToolName::from("web_search")]),
-            ),
+            &["web_search"],
         );
         let dispatcher = Arc::new(
             crate::ExecutionPolicyGatedDispatcher::new(
@@ -24152,7 +24241,7 @@ mod tests {
         impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
             async fn open_names(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
+                _view: &crate::tool_grant::GatedToolView,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
@@ -24160,19 +24249,15 @@ mod tests {
 
             async fn admit_call(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
                 _call: crate::tool_grant::ToolGrantCall<'_>,
             ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
                 Err(crate::tool_grant::ToolGrantRefusal::Required)
             }
         }
 
-        let gate = crate::tool_grant::ToolGrantGate::new(
+        let gate = crate::tool_grant::gate_over_names(
             Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
-            crate::tool_grant::GatedToolTable::new(
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
-            ),
+            &["deploy"],
         );
 
         let refused = with_test_turn_state_handle(AgentBuilder::new())
@@ -24231,7 +24316,7 @@ mod tests {
         impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
             async fn open_names(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
+                _view: &crate::tool_grant::GatedToolView,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 *self.boundaries.lock().unwrap() += 1;
@@ -24240,7 +24325,6 @@ mod tests {
 
             async fn admit_call(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
                 call: crate::tool_grant::ToolGrantCall<'_>,
             ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
                 self.adjudicated
@@ -24361,12 +24445,9 @@ mod tests {
             boundaries: Mutex::new(0),
             adjudicated: Mutex::new(Vec::new()),
         });
-        let gate = crate::tool_grant::ToolGrantGate::new(
+        let gate = crate::tool_grant::gate_over_names(
             Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
-            crate::tool_grant::GatedToolTable::new(
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::from([crate::types::ToolName::from("deploy")]),
-            ),
+            &["deploy"],
         );
         let dispatcher = Arc::new(
             crate::ExecutionPolicyGatedDispatcher::new(
@@ -24450,6 +24531,365 @@ mod tests {
         assert_eq!(payload["error"], "policy_denied");
         assert_eq!(payload["data"]["code"], "tool_grant_required");
         assert!(!follow_up_results[1].is_error);
+    }
+
+    /// A generated visibility owner that refuses every extension of the grant
+    /// gate and applies everything else as its inner owner does.
+    #[cfg(feature = "workspace-tests")]
+    struct ExtendRefusingOwner(Arc<dyn crate::ToolVisibilityOwner>);
+
+    #[cfg(feature = "workspace-tests")]
+    impl crate::ToolVisibilityOwner for ExtendRefusingOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.0.visibility_state()
+        }
+
+        fn replace_visibility_state(
+            &self,
+            visibility_state: crate::SessionToolVisibilityState,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_visibility_state(visibility_state)
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            filter: crate::ToolFilter,
+            witnesses: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.stage_persistent_filter(filter, witnesses)
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            names: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.stage_requested_deferred_names(names)
+        }
+
+        fn request_deferred_tools(
+            &self,
+            authorities: Vec<crate::DeferredToolLoadAuthority>,
+        ) -> Result<crate::ToolScopeRevision, crate::ToolScopeStageError> {
+            self.0.request_deferred_tools(authorities)
+        }
+
+        fn replace_deferred_tool_authority_catalog(
+            &self,
+            catalog: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_deferred_tool_authority_catalog(catalog)
+        }
+
+        fn replace_filter_tool_authority_catalog(
+            &self,
+            catalog: std::collections::BTreeMap<
+                crate::types::ToolName,
+                crate::ToolVisibilityWitness,
+            >,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_filter_tool_authority_catalog(catalog)
+        }
+
+        fn set_turn_overlay(
+            &self,
+            allow: Option<std::collections::BTreeSet<crate::types::ToolName>>,
+            deny: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<crate::tool_scope::ToolScopeTurnOverlay, crate::ToolScopeStageError> {
+            self.0.set_turn_overlay(allow, deny)
+        }
+
+        fn clear_turn_overlay(
+            &self,
+        ) -> Result<crate::tool_scope::ToolScopeTurnOverlay, crate::ToolScopeStageError> {
+            self.0.clear_turn_overlay()
+        }
+
+        fn replace_tool_grant_gate(
+            &self,
+            gate: crate::tool_grant::InstalledToolGrantGate,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.replace_tool_grant_gate(gate)
+        }
+
+        fn extend_tool_grant_gate(
+            &self,
+            _server: &str,
+            _gated: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            Err(crate::ToolScopeApplyError::Owner {
+                message: "the fixture refuses every extension".to_string(),
+            })
+        }
+
+        fn apply_tool_grant_open_set(
+            &self,
+            open: std::collections::BTreeSet<crate::types::ToolName>,
+        ) -> Result<(), crate::ToolScopeApplyError> {
+            self.0.apply_tool_grant_open_set(open)
+        }
+
+        fn requires_filter_witnesses(&self) -> bool {
+            self.0.requires_filter_witnesses()
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<crate::SessionToolVisibilityState, crate::ToolScopeApplyError> {
+            self.0.boundary_applied()
+        }
+    }
+
+    /// A model-request boundary gates the names a gated MCP server provides
+    /// now before it adjudicates the grants: the grants see the extended gate
+    /// and the server's names, and a server grant opens them for that same
+    /// request. An extension the visibility owner refuses leaves the server's
+    /// names out of what the boundary opens: its tools stay hidden, a call is
+    /// refused at the dispatch gate by its provenance, and the boundary warns
+    /// failed-closed; the run goes on.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_boundary_gates_a_gated_servers_names_before_it_adjudicates() {
+        /// Grants of the server `tickets`, when `granted`. It records the
+        /// view of each boundary.
+        struct ServerGrant {
+            granted: bool,
+            views: Mutex<Vec<crate::tool_grant::GatedToolView>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl crate::tool_grant::SessionToolGrants for ServerGrant {
+            async fn open_names(
+                &self,
+                view: &crate::tool_grant::GatedToolView,
+            ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
+            {
+                self.views.lock().unwrap().push(view.clone());
+                Ok(if self.granted {
+                    view.covered_by(&crate::tool_grant::ToolGrantTarget::McpServer {
+                        server: "tickets".to_string(),
+                        tools: None,
+                    })
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect()
+                } else {
+                    crate::types::ToolNameSet::new()
+                })
+            }
+
+            async fn admit_call(
+                &self,
+                call: crate::tool_grant::ToolGrantCall<'_>,
+            ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
+                if self.granted && call.server == Some("tickets") {
+                    Ok(())
+                } else {
+                    Err(crate::tool_grant::ToolGrantRefusal::Required)
+                }
+            }
+        }
+
+        struct TicketTools;
+
+        #[async_trait]
+        impl AgentToolDispatcher for TicketTools {
+            fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+                vec![
+                    Arc::new(
+                        ToolDef::new(
+                            "open_ticket",
+                            "open a ticket",
+                            serde_json::json!({ "type": "object" }),
+                        )
+                        .with_provenance(crate::types::ToolProvenance {
+                            kind: crate::types::ToolSourceKind::Mcp,
+                            source_id: "tickets".into(),
+                            artifact: None,
+                        }),
+                    ),
+                    Arc::new(ToolDef::new(
+                        "read_file",
+                        "read a file",
+                        serde_json::json!({ "type": "object" }),
+                    )),
+                ]
+                .into()
+            }
+
+            async fn dispatch(
+                &self,
+                call: ToolCallView<'_>,
+            ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+                Ok(crate::ops::ToolDispatchOutcome::from(ToolResult::new(
+                    call.id.to_string(),
+                    "ok".to_string(),
+                    false,
+                )))
+            }
+        }
+
+        /// Calls `open_ticket` once, then ends; records each request's tools.
+        struct TicketCallClient {
+            calls: Mutex<u32>,
+            offered: Mutex<Vec<Vec<String>>>,
+            results: Mutex<Vec<String>>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl AgentLlmClient for TicketCallClient {
+            async fn stream_response(
+                &self,
+                messages: &[Message],
+                tools: &[Arc<ToolDef>],
+                _max_tokens: u32,
+                _temperature: Option<f32>,
+                _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+            ) -> Result<super::LlmStreamResult, AgentError> {
+                self.offered
+                    .lock()
+                    .unwrap()
+                    .push(tools.iter().map(|tool| tool.name.to_string()).collect());
+                // The call's result, which a boundary's warning notice may
+                // follow in the request.
+                if let Some(results) = messages.iter().rev().find_map(|message| match message {
+                    Message::ToolResults { results, .. } => Some(results),
+                    _ => None,
+                }) {
+                    self.results.lock().unwrap().extend(
+                        results
+                            .iter()
+                            .map(|result| crate::types::text_content(&result.content)),
+                    );
+                }
+                let mut calls = self.calls.lock().unwrap();
+                let response = if *calls == 0 {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::ToolUse {
+                            id: "call-ticket".to_string(),
+                            name: "open_ticket".into(),
+                            args: serde_json::value::RawValue::from_string("{}".to_string())
+                                .expect("static raw value should parse"),
+                            meta: None,
+                        }],
+                        StopReason::ToolUse,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                } else {
+                    super::LlmStreamResult::new(
+                        vec![AssistantBlock::Text {
+                            text: "done".to_string(),
+                            meta: None,
+                        }],
+                        StopReason::EndTurn,
+                        normalized_test_usage(self, Usage::default()),
+                    )
+                };
+                *calls += 1;
+                Ok(response)
+            }
+
+            fn provider(&self) -> crate::provider::Provider {
+                crate::provider::Provider::Other
+            }
+
+            fn model(&self) -> &'static str {
+                "mock-model"
+            }
+        }
+
+        for (granted, refusing) in [(true, false), (false, true)] {
+            let grants = Arc::new(ServerGrant {
+                granted,
+                views: Mutex::new(Vec::new()),
+            });
+            let gate = crate::tool_grant::gate_over_install(
+                Arc::clone(&grants) as Arc<dyn crate::tool_grant::SessionToolGrants>,
+                crate::tool_grant::InstalledToolGrantGate {
+                    gated_servers: std::collections::BTreeSet::from(["tickets".to_string()]),
+                    ..Default::default()
+                },
+            );
+            let dispatcher = Arc::new(
+                crate::ExecutionPolicyGatedDispatcher::new(
+                    Arc::new(TicketTools),
+                    crate::tool_execution_policy::ToolExecutionPolicy::unrestricted(),
+                )
+                .with_tool_grant_gate(gate.clone()),
+            );
+            let owner = if refusing {
+                let inner: Arc<dyn crate::ToolVisibilityOwner> =
+                    Arc::new(crate::tool_scope::GeneratedTestToolVisibilityOwner::new());
+                crate::tool_scope::generated_test_tool_visibility_owner_from(Arc::new(
+                    ExtendRefusingOwner(inner),
+                ))
+            } else {
+                explicit_test_visibility_owner()
+            };
+            let client = Arc::new(TicketCallClient {
+                calls: Mutex::new(0),
+                offered: Mutex::new(Vec::new()),
+                results: Mutex::new(Vec::new()),
+            });
+            let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+                .with_tool_visibility_owner(owner)
+                .with_tool_grant_gate(gate)
+                .build_standalone(client.clone(), dispatcher, Arc::new(NoopStore))
+                .await;
+            let (tx, mut rx) = mpsc::channel(256);
+            let result = agent
+                .run_with_events("open a ticket".to_string().into(), tx)
+                .await
+                .expect("the run goes on");
+            assert_eq!(result.text, "done");
+            let mut warned = false;
+            while let Ok(event) = rx.try_recv() {
+                if let crate::event::AgentEvent::ToolConfigChanged { payload } = event {
+                    warned |= payload.target == "tool_grants"
+                        && payload
+                            .status_text()
+                            .contains("could not gate the MCP server 'tickets'");
+                }
+            }
+
+            let views = grants.views.lock().unwrap();
+            let offered = client.offered.lock().unwrap();
+            let results = client.results.lock().unwrap();
+            if granted {
+                assert!(
+                    views[0].is_gated("open_ticket"),
+                    "the grants see the extended gate: {views:?}"
+                );
+                assert!(
+                    offered[0].iter().any(|name| name == "open_ticket"),
+                    "the grant opens the server's names at that boundary: {offered:?}"
+                );
+                assert_eq!(results.as_slice(), ["ok"], "the call runs");
+                assert!(!warned);
+            } else {
+                assert!(!views[0].is_gated("open_ticket"), "{views:?}");
+                assert!(
+                    offered
+                        .iter()
+                        .all(|tools| tools.iter().all(|name| name != "open_ticket")),
+                    "{offered:?}"
+                );
+                assert!(
+                    results[0].contains("tool_grant_required"),
+                    "the dispatch gate refuses it by its provenance: {results:?}"
+                );
+                assert!(warned, "the refused extension warns failed-closed");
+            }
+        }
     }
 
     /// A model call naming a tool absent from every catalog is typed
@@ -28449,7 +28889,7 @@ mod tests {
         impl crate::tool_grant::SessionToolGrants for NoLiveGrant {
             async fn open_names(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
+                _view: &crate::tool_grant::GatedToolView,
             ) -> Result<crate::types::ToolNameSet, crate::tool_grant::ToolGrantRefusal>
             {
                 Ok(crate::types::ToolNameSet::new())
@@ -28457,21 +28897,15 @@ mod tests {
 
             async fn admit_call(
                 &self,
-                _gated: &crate::tool_grant::GatedToolTable,
                 _call: crate::tool_grant::ToolGrantCall<'_>,
             ) -> Result<(), crate::tool_grant::ToolGrantRefusal> {
                 Err(crate::tool_grant::ToolGrantRefusal::Required)
             }
         }
 
-        let gate = crate::tool_grant::ToolGrantGate::new(
+        let gate = crate::tool_grant::gate_over_names(
             Arc::new(NoLiveGrant) as Arc<dyn crate::tool_grant::SessionToolGrants>,
-            crate::tool_grant::GatedToolTable::new(
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::from([crate::types::ToolName::from(
-                    "deferred_tool_two",
-                )]),
-            ),
+            &["deferred_tool_two"],
         );
         let tools = Arc::new(
             crate::ExecutionPolicyGatedDispatcher::new(
@@ -38387,6 +38821,10 @@ mod tests {
                     Err(OperationRefused::new(OperationRefusalKind::MalformedFacts).into())
                 }
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         struct FixtureClient {
@@ -41364,6 +41802,10 @@ mod tests {
                 }
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
+            }
         }
 
         /// The R3 action, whose review its dispatcher consumes at entry; it
@@ -41849,6 +42291,10 @@ mod tests {
                     {
                         return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
                     }
+                    Ok(())
+                }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
                     Ok(())
                 }
             }
@@ -43667,6 +44113,10 @@ mod tests {
                         }
                         _ => Ok(()),
                     }
+                }
+
+                fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                    Ok(())
                 }
             }
 

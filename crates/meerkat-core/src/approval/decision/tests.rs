@@ -199,6 +199,135 @@ fn a_presentation_missing_a_part_is_incomplete() {
     assert!(!complete.shows_every_part_of(&self::rendering("another rendering")));
 }
 
+/// A summary presentation that shows no canonical part, with a link to the
+/// full presentation of `rendering` that served the rendering whose digest
+/// is `served_digest`.
+fn linked_presentation(
+    rendering: &DecisionRendering,
+    served_digest: Sha256Digest,
+) -> PresentationRecord {
+    PresentationRecord::linked(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        PresentationLink::new(reference("decision-page:7"), served_digest),
+        reference("chat"),
+        reference("message-1"),
+        5,
+    )
+}
+
+/// A summary with a link is a complete presentation exactly when the link
+/// served the whole, unchanged rendering: its served digest is the
+/// rendering's subject digest. A record that shows every part stays
+/// complete.
+#[test]
+fn a_link_presentation_counts_complete_only_when_its_served_digest_equals_the_subject_digest() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(linked.parts_shown.is_empty(), "a summary shows no part");
+    assert_eq!(linked.subject_digest, rendering.subject_digest());
+    assert!(!linked.shows_every_part_of(&rendering));
+    assert!(
+        linked.is_complete_for(&rendering),
+        "the link served the whole, unchanged rendering"
+    );
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(shown.is_complete_for(&rendering));
+}
+
+/// A summary without a link shows only some parts, or none: incomplete.
+#[test]
+fn a_summary_without_a_link_is_incomplete() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let complete = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(complete.parts_shown.len() > 1);
+
+    let mut summary = complete.clone();
+    summary.parts_shown.truncate(1);
+    assert!(!summary.is_complete_for(&rendering));
+
+    let mut nothing = complete;
+    nothing.parts_shown.clear();
+    assert!(!nothing.is_complete_for(&rendering));
+}
+
+/// A link that served another rendering (the request changed after the
+/// summary was sent) completes nothing, and a link that served this
+/// rendering completes no presentation of another.
+#[test]
+fn a_link_to_a_changed_rendering_is_incomplete() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let changed = self::rendering("Release build 8 to the stable channel.");
+
+    let stale = linked_presentation(&rendering, changed.subject_digest());
+    assert!(!stale.is_complete_for(&rendering));
+
+    let served = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(!served.is_complete_for(&changed));
+}
+
+/// The link is part of the record's closed form: it round-trips, a field it
+/// does not know is refused, and a record without a link writes none, so
+/// its stored bytes are those of a record from before links.
+#[test]
+fn a_linked_presentation_record_round_trips_and_refuses_unknown_fields() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    let value = serde_json::to_value(&linked).expect("encode the record");
+    assert_eq!(
+        value["link"],
+        serde_json::json!({
+            "reference": "decision-page:7",
+            "served_digest": rendering.subject_digest().as_str(),
+        })
+    );
+    let back: PresentationRecord =
+        serde_json::from_value(value.clone()).expect("decode the record");
+    assert_eq!(back, linked);
+
+    let mut later = value;
+    later["link"]["a_later_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<PresentationRecord>(later).is_err());
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        None,
+        reference("console"),
+        reference("message-1"),
+        5,
+    );
+    assert!(
+        serde_json::to_value(&shown)
+            .expect("encode the record")
+            .get("link")
+            .is_none()
+    );
+}
+
 #[test]
 fn decision_id_derives_from_kind_and_subject_key() {
     let kind = DecisionKind::new("identity.create").expect("kind");
@@ -514,6 +643,8 @@ fn stored(
         permit_issued: false,
         executed_request_digest: None,
         notice,
+        cleanup: DecisionCleanup::NotOwed,
+        reply_digest: None,
     };
     StoredDecision::held(descriptor, state)
 }
@@ -1113,5 +1244,98 @@ fn a_core_before_0911_reads_new_human_evidence_as_torn() {
         digest_before_0911(&read),
         evidence.digest().expect("digest"),
         "an older Core's digest of the new evidence is not the row's: the row is torn"
+    );
+}
+
+/// The bytes of an executed, noticed row that carries neither fact of an
+/// executed decision (a cleanup owed, a reply settled): what a 0.9.10
+/// reader decodes. A kind that never opens the facts writes exactly these.
+const EXECUTED_ROW_WITHOUT_FACTS: &str = concat!(
+    r#"{"decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""descriptor":{"kind":"release","subject_key":"subject-a","operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"team:owners","deadline_at_ms":100,"created_at_ms":10,"#,
+    r#""request":{"build":7},"rendering":"Release build 7.","renderer":"render.v1","#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"},"#,
+    r#""state":{"phase":"executed","#,
+    r#""decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""deadline_at_ms":100,"#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"approver:team:owners","reviewer":null,"stage":"human","#,
+    r#""first_presented_to_approver_at_ms":null,"presented_to_reviewer":false,"#,
+    r#""evidence_digest":null,"decided_at_ms":null,"ended_at_ms":50,"permit_issued":false,"#,
+    r#""executed_request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""notice":"delivered"},"revision":1}"#,
+);
+
+#[test]
+fn a_row_without_the_executed_decisions_facts_keeps_its_bytes() {
+    let mut row = stored(
+        "subject-a",
+        DecisionPhase::Executed,
+        DecisionNotice::Delivered,
+        100,
+    );
+    row.state.executed_request_digest = Some(row.state.request_digest.clone());
+    row.state.ended_at_ms = Some(50);
+    assert_eq!(
+        serde_json::to_string(&row).expect("the row encodes"),
+        EXECUTED_ROW_WITHOUT_FACTS
+    );
+}
+
+/// What sealing a hold of `kind` in a reviewer's review stage answers.
+fn sealed_with_a_reviewer(kind: &str) -> Result<DecisionDescriptor, DecisionContractError> {
+    let mut request = hold_request(rendering("Approve the held operation."), None)
+        .with_reviewer(key(PrincipalKind::SharedAgent, "reviewer"));
+    request.kind = DecisionKind::new(kind).expect("kind");
+    DecisionDescriptor::seal(request, 10)
+}
+
+/// `kind` is decided by people only: a hold of it that names a reviewer is
+/// refused, and nothing is sealed.
+fn assert_decided_by_people_only(kind: &str) {
+    let parsed = DecisionKind::new(kind).expect("kind");
+    assert!(decided_by_people_only(&parsed), "{kind} is listed");
+    assert_eq!(
+        sealed_with_a_reviewer(kind).expect_err("a review stage is refused"),
+        DecisionContractError::ReviewStageNotAllowed { kind: parsed }
+    );
+}
+
+#[test]
+fn a_grant_child_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("grant.child");
+}
+
+#[test]
+fn a_tool_grant_issue_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("tool_grant.issue");
+}
+
+#[test]
+fn a_route_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("route.release");
+}
+
+#[test]
+fn a_gating_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("gating.release");
+}
+
+/// The control: a kind a reviewer may decide keeps its review stage.
+#[test]
+fn a_release_decision_keeps_its_review_stage() {
+    assert!(!decided_by_people_only(
+        &DecisionKind::new("release").expect("kind")
+    ));
+    let sealed = sealed_with_a_reviewer("release").expect("sealed with its review stage");
+    assert_eq!(
+        sealed.reviewer,
+        Some(key(PrincipalKind::SharedAgent, "reviewer"))
     );
 }

@@ -78,6 +78,7 @@ fn canonical_machine_slug_snapshot() {
             "DurableDecisionMachine".to_string(),
             "ForkedParticipantLifecycleMachine".to_string(),
             "GrantAuthorityMachine".to_string(),
+            "HostStoreWriterFenceMachine".to_string(),
             "MeerkatMachine".to_string(),
             "MobMachine".to_string(),
             "MobStoreRestoreLifecycleMachine".to_string(),

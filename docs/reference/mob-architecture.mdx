@@ -190,8 +190,21 @@ name.
   apply seats it again there (see [The declared apply](#the-declared-apply));
   an archive's retirement leaves it archived (`Archived`) instead, until its
   unarchive. Only the end of a retirement the apply's seal or a one-entry
-  unlist started (the host's roster unlisted the identity), a removal, the
-  destroy and the mob's reset end an entry.
+  unlist started (the host's roster unlisted the identity), a removal, a
+  host's adoption, the destroy and the mob's reset end an entry.
+- A host's adoption of a declared entry
+  (`adopt_member_identity_declaration`) takes the entry over: the identity
+  reconciler marks the entry, retires its member with the cause
+  `HostAdopted` (`MemberRetirementCause`) and materializes the member again
+  under the host's intent on its own session, as no entry; the end of that
+  retirement ends the entry. A declared apply answers the identity
+  host-adopted (`DeclaredEntryRefusal::HostAdopted`) from the mark on, and
+  its seal neither marks nor unmarks it.
+- A rotation (`rotate_member`) of an entry no member holds is its fresh
+  life, a seat of its name: without the entry's custody it is refused
+  `MobError::IdentityMember` before anything is created, and with it the
+  entry's archived session record is let go and the member is seated on a
+  fresh session.
 - A placed member is an entry only when the declared apply hosts the entry on
   its first use: a placed spawn with entry custody of any other name is
   refused `MobError::WiringError` before anything is created.
@@ -419,7 +432,7 @@ seats); the agent lane is refused `MobError::ScopeDenied`.
 | A worker holds the name, the identity store manages it (a host adoption), declared twice, or a first-boot request for an undeclared identity | Refused for that identity alone (`Refused`, `DeclaredEntryRefusal`). |
 | A created (store-owned) entry holds the name | Left as it is (`Noted`, `DeclaredEntryNote::OwnedByStore`): a quiet steady state. The listing changes nothing and retires nothing, so a roster that keeps listing an identity after its adoption into store custody (a rollback to an earlier roster generation included) is harmless. |
 | The name is removed or unreadable | Refused for that identity alone (`DeclaredEntryRefusal::NameTombstoned`, `NameUnreadable`): the apply never declares over a reserved name. |
-| Any, in a candidate composition | Refused `NonAuthoritative`: a candidate declares nothing and writes nothing. |
+| Any, in a candidate composition | Refused `NonAuthoritative { would_be }`: a candidate declares nothing and writes nothing. `would_be` is the verdict an authoritative composition would give the same declaration over the same state, decided by the same verdict rule (`DeclaredEntryVerdict`); it is advisory and never applied. A member a host seated before identity entries existed is decided on the basis the authoritative apply's adoption of it would give, so a member that apply would adopt is answered as its entry. |
 
 A legacy member listed under its own name is adopted first
 (`adopt_legacy_identity_entry`) and then declared as the entry it is. A
@@ -439,14 +452,15 @@ never an entry: it is retired without its adoption (`RetireUnadopted`),
 through the ordinary retirement at the incarnation MobMachine decided on (at
 its delivery scope when it is bound to a session), with no cause recorded,
 and its name is left free. One bound to no session is retired at the
-incarnation current in the retirement's own step, once a check found it still
-the one decided on, so a respawn between the two is retired in its place; a
-later roster that lists the identity seats it again. One whose retirement
-started already is answered `NotAdopted` (`NotAdoptedReason::Retiring`), and
-its own retirement ends it. A member with one mark only, or one a host
-adopted, is left as it is, and a partial roster offers no member it does not
-list. A dormant seat never takes an identity hosted on its first use or
-awaiting its held creation (`MobError::WiringError`).
+generation MobMachine decided on: the retirement's own step retires the exact
+incarnation it read, so a respawn seated after the verdict is never retired by
+it, and the next complete apply decides that member again. One whose
+retirement started already is answered `NotAdopted`
+(`NotAdoptedReason::Retiring`), and its own retirement ends it. A member with
+one mark only, or one a host adopted, is left as it is, and a partial roster
+offers no member it does not list. A dormant seat never takes an identity
+hosted on its first use or awaiting its held creation
+(`MobError::WiringError`).
 
 A complete roster is sealed after its last chunk (`SealDeclaredRoster`):
 every Declared entry it does not list is unlisted (never a created entry, nor
@@ -674,6 +688,91 @@ composition without the built-in identity and member store commits no change
   session with the notice when that session is gone from the store.
   A roster-owned identity's archive is refused `OwnerReadOnly`: its host
   unlists it (`unlist_declared_identity`) and lists it again.
+- **Owned edges (0.9.11).** A create's peers
+  (`CreatedIdentityRequest::with_peers`) and an update's
+  (`StoreOwnedIdentityUpdate::with_peers_add`, `with_peers_remove`) declare
+  and end edges owned by the identity whose change lists them, each to an
+  identity of either custody (the requester when it is one, or another
+  identity of the same create) with how it entered
+  (`OwnedIdentityEdge`, `OwnedEdgeAdmission`: the peer rule that admitted
+  it, or `adopted`, which only an adoption declares). The owner's row holds
+  its edges, written in the change's transaction, and MobMachine keeps the
+  one custody map of the mob's edges (`identity_edge_owners`): a peer that is
+  no identity is refused `PeerUnknown`, and a second declaration of an owned
+  edge gives no custody. An edge is in force while both its ends are
+  identity entries, as MobMachine decides it; an edge in force is wired once
+  both its ends are seated, by the change's own step or by the seat of the
+  end that was not (a create's seat, an unarchive, a re-listing, a start),
+  and it enables nothing: a member reaches its peers only with the tools its
+  profile grants. An archive of an end leaves the edge declared and unwired,
+  and the end's next seat wires it again. An unlisting of an end leaves the
+  edge declared and out of force: a worker that takes the end's free name is
+  no end of it (the edge wires nothing for it, and the worker's own wiring
+  takes a plain unwire), and the end's re-listing brings the edge back in
+  force; no record of the unlisting is kept, since the owner's row holds the
+  edge. The edge belongs to the end's name: an identity created or adopted
+  under a name that was unlisted brings that name's owned edges back in
+  force too, so end the edge (its owner's change) when that is not wanted.
+  An owned edge ends only by its
+  owner's change (another identity's change ending it is refused
+  `InvalidRequest`), by the host's policy reload that denies it
+  (`MobHandle::end_denied_identity_edge`, naming its owner:
+  `OwnedEdgeEndOutcome`), by the removal of either end (in the removal's own
+  transaction, with its tombstone, which owns no edge) and by the mob's reset
+  or destroy. A plain unwire of an owned edge in force is refused
+  `MobError::OwnedIdentityEdge`. A start recovers each edge from its owner's
+  row and wires those a crash left unwired; an import restores the edges of
+  the rows it restores the same way, and a restored row keeps only the edges
+  it restored (an edge another identity owns meanwhile stays that
+  identity's), so they are the edges the next start recovers.
+- **Adoption into store custody (0.9.11).** `MobHandle::adopt_identity`
+  moves an existing member into store custody as one change (receipt kind
+  `adopt`): a roster-owned identity (`AdoptionSource::roster`, with its
+  roster's spec) or a worker member (`AdoptionSource::worker`, at the
+  generation its host observed; its row's spec is its member's role, labels
+  and runtime mode). The member keeps its runtime, generation, session and
+  history; its row (provenance `adopted`, with its former spawner), its
+  binding row with the Created origin and the receipt are written in one
+  transaction. The binding row makes the member a host root, live and on
+  replay: its former spawner's retirement no longer reaches it, and the
+  agent lane answers `identity_member` for it. Its current edges to other
+  identities become its owned edges (`OwnedEdgeAdmission::Adopted`), and its
+  edges to members that are no identity stay plain wiring; the receipt names
+  both. A member step in flight (`admission_unsettled`) and an open declared
+  apply (`declared_apply_open`) are retryable refusals; a stale generation is
+  refused `predecessor_mismatch`, and a shape no adoption takes
+  `not_adoptable` with its reason (`NotAdoptableReason`: a placed member or
+  one bound to no session, a roster-owned identity awaiting its host, a
+  worker spawned with a profile or model override, and others), retryable
+  for a roster-owned identity its host still settles: one hosted on its
+  first use waits for that first use, one awaiting its held creation for
+  the held creation's release, and one awaiting its host's preparation for
+  that preparation. Only the host's own action settles each, so a caller
+  retries after it and bounds its retries. An identity placed on a member
+  host is the exception: its first use seats a placed member, whose
+  adoption is refused `not_adoptable` (`placed`), which is not retryable.
+  No start,
+  reconcile or declared apply adopts; a roster that keeps listing an adopted
+  identity gets the quiet `OwnedByStore` note.
+- **The downgrade cycle (0.9.11).** A release before 0.9.9 does not read a
+  mob's rows of schema version 2 and later, so a downgrade to one runs the
+  cycle `docs/guides/upgrading.mdx` states.
+  `MobHandle::export_created_identities` exports every row, each with its
+  session reference, sealed with a digest (`CreatedIdentitySetExport`).
+  `MobHandle::purge_created_identities` (the host operator, under held
+  identity changes, of a mob that holds such rows: none is refused
+  `purge_refused`, `nothing_to_purge`) removes the rows in one transaction
+  when their digest is the export's, and nothing else; the mob then refuses
+  identity changes (`purged`) until it restarts. A purge or an import
+  commits at most 256 identities (`batch_too_large` above).
+  A start that reads no row of a store-owned
+  identity's name reserves the name (it reads unreadable, and nothing seats
+  it). `MobHandle::import_created_identities` (the host operator, imported
+  consent) restores each record and re-binds its session in one
+  transaction: in place (a plain member only on the session its record
+  names), Dormant on its archived session (fresh, with the history
+  unavailable notice, when that session is gone), or as recorded; a name
+  another holder keeps is reported (`name_taken_meanwhile`).
 
 An update, removal, archive or unarchive of an identity whose spawn, wake,
 retirement, removal, archive or accepted activation is in flight is refused
@@ -838,8 +937,9 @@ the start and its own re-drives use. A same-session rotation is the mob's
 own: the restart finishes it whatever the host-pending set says, and a
 host-pending member keeps its mark through it. Its successor is seated
 Dormant, and its wakes are refused `HostPreparationPending` until the host's
-seat step for it (a `seat_dormant_members` of the identity on its kept
-session, which answers `AlreadySeated`) ends the mark: the host wakes first.
+declaration of it ends the mark (a declared apply that carries the identity's
+first-boot `Resume` request of its kept session, which keeps the member and
+names the request carried out): the host wakes first.
 Re-issued while its rotation stands, `rotate_member` re-drives that rotation;
 re-issued after it finished, it rotates the member again. So a host that does
 not mark the member host-pending reads the member once after a restart (the

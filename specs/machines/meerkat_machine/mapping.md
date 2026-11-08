@@ -3227,6 +3227,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SurfaceStageAddRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SurfaceStageGatedAddIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageRemoveIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6383,6 +6392,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReplaceToolGrantGateStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyToolGrantOpenSetChangedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8354,6 +8393,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SettleRetainedRunInertDestroyed`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RequestCompactionRecordedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9214,6 +9283,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetainedRunSettleResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExactRunBoundaryCancel`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompactionRequestResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9390,6 +9462,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `resumed_run_admission_hold_names_the_marked_run`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `live_boundary_delivery_only_for_queued_steer`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9451,6 +9526,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `tool_grant_open_names_are_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_not_mounted_are_not_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_ungated_servers_are_not_gated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

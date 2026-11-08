@@ -55,7 +55,7 @@ fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse 
 /// (-32026), StaleCursor (-32027), StaleFence (-32028) — each with its
 /// typed BARE detail struct as `data`. Everything else keeps the
 /// `invalid_params` string rendering byte-identical.
-trait MobWireErrorSource: std::fmt::Display {
+pub(crate) trait MobWireErrorSource: std::fmt::Display {
     fn wire_detail(&self) -> Option<meerkat_contracts::wire::WireMobErrorDetail>;
     fn wire_error_code(&self) -> Option<meerkat_contracts::ErrorCode> {
         self.wire_detail().map(|detail| detail.code())
@@ -113,7 +113,7 @@ impl MobWireErrorSource for MobAppendSystemContextError {
     }
 }
 
-fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcResponse {
+pub(crate) fn mob_call_error<E: MobWireErrorSource>(id: Option<RpcId>, err: &E) -> RpcResponse {
     match err.wire_detail() {
         Some(detail) => match detail.detail_value() {
             Ok(data) => RpcResponse::error_with_data(
@@ -285,6 +285,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
             mcp_servers: vec![],
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: tools.grant_gated.into(),
         },
         peer_description: profile.peer_description,
         external_addressable: profile.external_addressable,

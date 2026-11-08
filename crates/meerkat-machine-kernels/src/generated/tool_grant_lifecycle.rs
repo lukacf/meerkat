@@ -33,12 +33,15 @@ pub enum ToolGrantEndReason {
     Deadline,
     #[serde(rename = "Revoked")]
     Revoked,
+    #[serde(rename = "SubjectEnded")]
+    SubjectEnded,
 }
 impl ToolGrantEndReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Deadline => "Deadline",
             Self::Revoked => "Revoked",
+            Self::SubjectEnded => "SubjectEnded",
         }
     }
 }
@@ -48,6 +51,7 @@ impl std::convert::TryFrom<&str> for ToolGrantEndReason {
         match value {
             "Deadline" => Ok(Self::Deadline),
             "Revoked" => Ok(Self::Revoked),
+            "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantEndReason value `{other}`")),
         }
     }
@@ -133,12 +137,15 @@ pub enum ToolGrantUseRefusal {
     Expired,
     #[serde(rename = "Revoked")]
     Revoked,
+    #[serde(rename = "SubjectEnded")]
+    SubjectEnded,
 }
 impl ToolGrantUseRefusal {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Expired => "Expired",
             Self::Revoked => "Revoked",
+            Self::SubjectEnded => "SubjectEnded",
         }
     }
 }
@@ -148,6 +155,7 @@ impl std::convert::TryFrom<&str> for ToolGrantUseRefusal {
         match value {
             "Expired" => Ok(Self::Expired),
             "Revoked" => Ok(Self::Revoked),
+            "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantUseRefusal value `{other}`")),
         }
     }
@@ -214,6 +222,10 @@ pub mod inputs {
     pub struct AdmitUse {
         pub now_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndWithSubject {
+        pub now_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -222,6 +234,7 @@ pub enum Input {
     Expire(inputs::Expire),
     Revoke(inputs::Revoke),
     AdmitUse(inputs::AdmitUse),
+    EndWithSubject(inputs::EndWithSubject),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -230,6 +243,7 @@ impl Input {
             Self::Expire(_) => InputKind::Expire,
             Self::Revoke(_) => InputKind::Revoke,
             Self::AdmitUse(_) => InputKind::AdmitUse,
+            Self::EndWithSubject(_) => InputKind::EndWithSubject,
         }
     }
 }
@@ -239,6 +253,7 @@ pub enum InputKind {
     Expire,
     Revoke,
     AdmitUse,
+    EndWithSubject,
 }
 
 pub mod effects {
@@ -314,6 +329,11 @@ pub enum TransitionId {
     AdmitDue,
     AdmitEndedExpired,
     AdmitEndedRevoked,
+    EndWithSubjectActive,
+    EndWithSubjectAfterDeadline,
+    EndWithSubjectSettledExpired,
+    EndWithSubjectSettledRevoked,
+    AdmitEndedWithSubject,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

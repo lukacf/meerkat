@@ -9442,7 +9442,7 @@ def test_hook_failed_preserves_unknown_future_causes(reason):
     ("unsupported_requirement", "required execution confinement is unsupported by this backend"),
     ("backend_unavailable", "required execution confinement backend is unavailable"),
     ("preparation_failed", "confined process preparation failed"),
-    ("untrusted_configuration_source", "launch configuration comes from a source a confined process can write"),
+    ("untrusted_configuration_source", "launch configuration comes from a source the host does not trust"),
 ])
 def test_hook_failed_displays_each_known_confinement_cause_exactly(refusal, message):
     from meerkat.events import HookFailed

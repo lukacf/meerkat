@@ -11,7 +11,9 @@ use super::terminalization::{FlowFailureCause, TerminalizationOutcome, Terminali
 use super::transaction::LifecycleRollback;
 use super::*;
 
+mod adoption;
 pub(super) mod boot_lift;
+mod created_set;
 mod declared_apply;
 mod dormant_kickoff;
 mod dormant_seat;
@@ -30,6 +32,7 @@ pub(super) mod member_wake;
 #[cfg(feature = "runtime-adapter")]
 pub(super) mod member_wake_turn;
 mod operator_instructions;
+mod owned_edges;
 mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
@@ -475,6 +478,128 @@ pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::Ses
                     )
                 })
     )
+}
+
+/// The mob's answer to a failure to end `identity`'s scoped tool grants: a
+/// concurrent writer that changed one of them twice meanwhile answers the
+/// busy class ([`MobError::LifecycleOperationPending`], `SESSION_BUSY` on
+/// the wire); any other failure is internal. A respawn abandonment retries
+/// the busy class within its bound ([`ABANDONMENT_GRANT_END_ATTEMPTS`]); the
+/// other steps that end an identity answer it to their caller, which may
+/// retry the step.
+#[cfg(feature = "runtime-adapter")]
+pub(super) fn tool_grant_end_failure(
+    identity: &AgentIdentity,
+    error: meerkat_runtime::tool_grant::ToolGrantServiceError,
+) -> MobError {
+    match error {
+        meerkat_runtime::tool_grant::ToolGrantServiceError::Conflict { grant_id } => {
+            MobError::LifecycleOperationPending {
+                intent: format!(
+                    "end the tool grants of the identity '{identity}': another writer changed \
+                     grant {grant_id} twice meanwhile (retry)"
+                ),
+            }
+        }
+        error => MobError::Internal(format!(
+            "ending the tool grants of the identity '{identity}' failed: {error}"
+        )),
+    }
+}
+
+/// The sessions `state` holds for `identity`: its member's session binding
+/// and its identity entry's archived session record.
+pub(super) fn held_sessions_of(
+    state: &mob_dsl::MobMachineState,
+    identity: &mob_dsl::AgentIdentity,
+) -> Result<BTreeSet<SessionId>, MobError> {
+    state
+        .member_session_bindings
+        .get(identity)
+        .into_iter()
+        .chain(state.identity_entry_archived_sessions.get(identity))
+        .map(|session| {
+            SessionId::parse(&session.0).map_err(|error| {
+                MobError::Internal(format!(
+                    "'{}' holds an invalid session: {error}",
+                    identity.0
+                ))
+            })
+        })
+        .collect()
+}
+
+/// How many times a respawn abandonment attempts the end of an identity's
+/// scoped tool grants while it answers the busy class (a concurrent writer
+/// changed one of the grants twice meanwhile; each attempt already retries a
+/// conflict once itself). Only another failure, or a busy class that
+/// outlasts the bound, fails the abandonment's step.
+pub(super) const ABANDONMENT_GRANT_END_ATTEMPTS: usize = 3;
+
+/// Run a respawn abandonment's grant end, `attempt_end`, retrying a busy
+/// answer ([`MobError::LifecycleOperationPending`]) within
+/// [`ABANDONMENT_GRANT_END_ATTEMPTS`]. A repeated end changes nothing it
+/// already made: a grant already ended is left as it stands.
+pub(super) async fn end_within_abandonment_bound<Fut>(
+    mut attempt_end: impl FnMut() -> Fut,
+) -> Result<(), MobError>
+where
+    Fut: std::future::Future<Output = Result<(), MobError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match attempt_end().await {
+            Ok(()) => return Ok(()),
+            Err(MobError::LifecycleOperationPending { .. })
+                if attempt < ABANDONMENT_GRANT_END_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// End every live scoped tool grant of `identity` in the mob `mob_id`'s
+/// `incarnation`, and of each of `sessions` (the sessions MobMachine held for
+/// it when it ended), recording `reason`: its identity ended. Each grant ends
+/// with its subject, so it explains no later refusal; a grant that already
+/// ended is left as it stands, so an end repeated changes nothing.
+///
+/// # Errors
+/// As [`tool_grant_end_failure`] maps them: a concurrent writer that changed
+/// one of the grants twice answers the busy class, any other failure is
+/// internal.
+#[cfg(feature = "runtime-adapter")]
+pub(super) async fn end_member_identity_tool_grants(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    mob_id: &str,
+    incarnation: &meerkat_core::service::LiveMobIncarnation,
+    identity: &AgentIdentity,
+    sessions: &BTreeSet<SessionId>,
+    reason: &str,
+) -> Result<(), MobError> {
+    let identity_subject =
+        meerkat_core::tool_grant::ToolGrantSubject::member(mob_id, incarnation, identity.as_str());
+    let subjects = std::iter::once(identity_subject).chain(
+        sessions
+            .iter()
+            .cloned()
+            .map(meerkat_core::tool_grant::ToolGrantSubject::session),
+    );
+    for subject in subjects {
+        runtime
+            .end_tool_grants_of(
+                &subject,
+                meerkat_runtime::tool_grant::ToolGrantRevocation {
+                    actor: None,
+                    reason: Some(reason.to_string()),
+                },
+            )
+            .await
+            .map_err(|error| tool_grant_end_failure(identity, error))?;
+    }
+    Ok(())
 }
 
 /// Whether a member's session is still present, live or durable, as read by
@@ -5691,6 +5816,30 @@ pub(super) fn startup_registration_takeovers_for_test(
         .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
         .unwrap_or_default()
 }
+
+/// How many times a start recorded each member's recovery failure (a member
+/// it left out, then could not recover), per mob.
+#[cfg(test)]
+static STARTUP_RECOVERY_FAILURES_FOR_TEST: std::sync::Mutex<BTreeMap<(MobId, AgentIdentity), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_startup_recovery_failure_for_test(mob_id: &MobId, member: &AgentIdentity) {
+    if let Ok(mut counts) = STARTUP_RECOVERY_FAILURES_FOR_TEST.lock() {
+        *counts.entry((mob_id.clone(), member.clone())).or_default() += 1;
+    }
+}
+
+/// Test read: how many times a start of `mob_id` recorded `member`'s
+/// recovery failure.
+#[cfg(test)]
+pub(super) fn startup_recovery_failures_for_test(mob_id: &MobId, member: &AgentIdentity) -> u64 {
+    STARTUP_RECOVERY_FAILURES_FOR_TEST
+        .lock()
+        .ok()
+        .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
+        .unwrap_or_default()
+}
 #[cfg(test)]
 static FAIL_AFTER_DESTROY_MEMBER_ARCHIVE_FOR_IDENTITY: std::sync::Mutex<Option<AgentIdentity>> =
     std::sync::Mutex::new(None);
@@ -7101,6 +7250,9 @@ pub(super) struct PendingSpawn {
     /// no member held: its row names the incarnation it follows, read from
     /// the machine state before its membership step.
     pub(super) fresh_life: bool,
+    /// The decision whose approval branch the spawn seats: its row and
+    /// roster entry record it as the member's typed creation source.
+    pub(super) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     /// Objective causality inherited from the spawning turn.
     pub(super) objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     /// Per-spawn external-tool overlay carried to the finalize commit so the
@@ -8032,6 +8184,9 @@ struct SpawnFinalizeCtx {
     /// no member held: its row names the incarnation it follows, read from
     /// the machine state before its membership step.
     fresh_life: bool,
+    /// The decision whose approval branch the spawn seats: its row and
+    /// roster entry record it as the member's typed creation source.
+    approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     authorized_profile_material: AuthorizedSpawnProfileMaterial,
@@ -8098,6 +8253,9 @@ struct SpawnActivateState {
     /// Whether the definition's wiring rules apply to the member, for its
     /// roster entry (MobMachine's own fact decides its wiring).
     definition_wiring: crate::DefinitionWiring,
+    /// The decision whose approval branch the member is, for its roster
+    /// entry (its typed creation source).
+    approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
     objective_id: Option<meerkat_core::interaction::ObjectiveId>,
     per_spawn_external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     remote: Option<Box<RemoteSpawnFinalize>>,
@@ -8150,6 +8308,7 @@ impl SpawnActivateState {
             // Recorded on the spawn's row at its admission.
             history_unavailable: _,
             fresh_life: _,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material: _,
@@ -8203,6 +8362,7 @@ impl SpawnActivateState {
             fork_source,
             fork_overlay,
             definition_wiring,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             remote,
@@ -13180,6 +13340,7 @@ impl MobActor {
                         .error
                         .unwrap_or_else(|| "member restore failed".to_string()),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             );
@@ -13195,6 +13356,7 @@ impl MobActor {
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
                 hold: diag.hold,
+                cause_data: diag.cause_data,
             });
         }
         Ok(())
@@ -14797,6 +14959,7 @@ impl MobActor {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
+                                cause_data: None,
                                 registration_refusal: None,
                             },
                         )
@@ -15162,7 +15325,7 @@ impl MobActor {
                         %agent_identity,
                         bridge_session_id = %session_id,
                         error = %refusal,
-                        "member status session view read refused until the host store realm is reopened; later status reads answer from this refusal"
+                        "member status session view read refused by the host store (the error says what lifts it); later status reads answer from this refusal"
                     );
                 }
                 observation.preview_unavailable =
@@ -15612,6 +15775,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15685,6 +15849,7 @@ impl MobActor {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15822,6 +15987,7 @@ impl MobActor {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
+                        cause_data: None,
                         registration_refusal: None,
                     },
                 )
@@ -15838,6 +16004,7 @@ impl MobActor {
                     session_id: Some(bridge_session_id),
                     reason: classify_reason,
                     hold: None,
+                    cause_data: None,
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
@@ -15888,6 +16055,7 @@ impl MobActor {
                     }
                     Err(error) => {
                         let hold = error.durable_resume_hold();
+                        let cause_data = error.structured_data();
                         let failure_reason = format!(
                             "machine-authorized placed revival of '{agent_identity}' on host '{}' failed: {error}",
                             host.as_str()
@@ -15906,6 +16074,7 @@ impl MobActor {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
+                                cause_data: cause_data.clone(),
                                 registration_refusal: None,
                             },
                         )
@@ -15922,6 +16091,7 @@ impl MobActor {
                             session_id: Some(bridge_session_id),
                             reason: failure_reason,
                             hold,
+                            cause_data,
                         })
                     }
                 }
@@ -16696,6 +16866,7 @@ impl MobActor {
             definition: self.definition.clone(),
             events: self.events.clone(),
             identity_member: self.identity_member.clone(),
+            identity: Arc::clone(&self.identity),
             member_binding_fold: self.member_binding_fold.clone(),
             run_store: self.run_store.clone(),
             runtime_metadata: self.runtime_metadata.clone(),
@@ -23409,6 +23580,7 @@ impl MobActor {
                 bridge_session_id: Some(session_id.clone()),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -28678,6 +28850,35 @@ impl MobActor {
         }
     }
 
+    /// Whether the host's adoption has taken `identity`'s declared entry
+    /// over, so the identity reconciler may act on its member
+    /// (`TakeOverIdentityEntry`): a seated entry is marked adopting, an
+    /// unseated one ended, and a name that is no Declared entry needs
+    /// nothing. An entry with a member step in flight, or one a candidate
+    /// composition holds, is left as it is: the reconcile waits and asks
+    /// again.
+    fn identity_entry_taken_over(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_record: &crate::identity::IdentityIntentRecord,
+    ) -> Result<bool, MobError> {
+        match self.take_over_identity_entry(identity)? {
+            mob_dsl::HostAdoptionEntryVerdict::Adopting
+            | mob_dsl::HostAdoptionEntryVerdict::Ended
+            | mob_dsl::HostAdoptionEntryVerdict::NotADeclaredEntry => Ok(true),
+            mob_dsl::HostAdoptionEntryVerdict::Deferred
+            | mob_dsl::HostAdoptionEntryVerdict::NonAuthoritative
+            | mob_dsl::HostAdoptionEntryVerdict::MobNotRunning => {
+                self.schedule_identity_reconcile_wait(
+                    identity,
+                    IdentityReconcileAuthorityKey::from_intent(intent_record),
+                    Duration::from_millis(100),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     async fn reconcile_identity_pass(
         &mut self,
         identity: &AgentIdentity,
@@ -29281,6 +29482,14 @@ impl MobActor {
                 }
                 IdentityReconcileDecision::RetireMemberMaterialization => {
                     if !self.retirements.contains_key(identity) {
+                        // The host's adoption takes the identity's declared
+                        // entry over first: the end of this retirement ends
+                        // the entry, so the member the reconcile materializes
+                        // is the host's. An entry with a member step in flight
+                        // waits for it.
+                        if !self.identity_entry_taken_over(identity, &intent_record)? {
+                            return Ok(false);
+                        }
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
@@ -29505,6 +29714,12 @@ impl MobActor {
                         .map_err(MobError::from)?;
                     let completion_authority =
                         IdentityReconcileCompletionAuthority::from_permit(&permit);
+                    // An identity no member holds whose declared entry the
+                    // host's adoption has not taken over yet: the entry ends
+                    // now, so the host's member takes the name as no entry.
+                    if !self.identity_entry_taken_over(identity, &intent_record)? {
+                        return Ok(false);
+                    }
                     let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
                         identity,
                         session,
@@ -29899,6 +30114,17 @@ impl MobActor {
                 MobCommand::RetryOwedMemberWake { agent_identity } => {
                     self.inline_step_watchdog.set_step("retry_owed_member_wake");
                     boxed_arm_future(|| self.retry_owed_member_wake(agent_identity)).await;
+                }
+                MobCommand::RetryMemberBuildPreparation { agent_identity } => {
+                    self.inline_step_watchdog
+                        .set_step("retry_member_build_preparation");
+                    boxed_arm_future(|| self.retry_member_build_preparation(agent_identity)).await;
+                }
+                MobCommand::ResolveMemberBuildPreparation {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.resolve_member_build_preparation(&agent_identity));
                 }
                 MobCommand::RepairOwedEdge { edge } => {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
@@ -31540,6 +31766,15 @@ impl MobActor {
                     let result = self.revoke_operator_instruction(slot, revision).await;
                     let _ = reply_tx.send(result);
                 }
+                #[cfg(feature = "runtime-adapter")]
+                MobCommand::GrantMemberTool {
+                    identity,
+                    grant,
+                    reply_tx,
+                } => {
+                    let result = self.grant_member_tool(&identity, *grant).await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::PrepareMemberInstructionDelivery {
                     agent_identity,
                     reply_tx,
@@ -31815,6 +32050,13 @@ impl MobActor {
                 } => {
                     self.dispatch_wake_member_from_effect_for_test(agent_identity);
                     let _ = reply_tx.send(Ok(()));
+                }
+                #[cfg(test)]
+                MobCommand::OwedMemberWakeRetryArmedForTest {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
                 }
                 #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
@@ -32106,8 +32348,12 @@ impl MobActor {
                         Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::SealDeclaredRoster { desired, reply_tx } => {
-                    let result = self.seal_declared_roster(desired);
+                MobCommand::SealDeclaredRoster {
+                    desired,
+                    intent_named,
+                    reply_tx,
+                } => {
+                    let result = Box::pin(self.seal_declared_roster(desired, intent_named)).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::OpenDeclaredApply { reply_tx } => {
@@ -36062,10 +36308,13 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: error.durable_resume_hold(),
+                cause_data: error.restore_cause_data(),
                 registration_refusal: None,
             },
         )
         .await;
+        #[cfg(test)]
+        record_startup_recovery_failure_for_test(&self.definition.id, &entry.agent_identity);
     }
 
     /// Whether MobMachine records `agent_identity` Broken: its restore failed.
@@ -36315,6 +36564,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: entry.approval_branch,
             objective_id: None,
             per_spawn_external_tools: None,
             authorized_profile_material,
@@ -36594,6 +36844,16 @@ impl MobActor {
                 ))
             );
         }
+        // An approval branch's identity and label belong to the branch's own
+        // opening (`MobHandle::open_approval_branch`, whose spec records the
+        // decision as the member's typed creation source) and to the restore
+        // of the member that records it. Checked after the host's customizer,
+        // so no customizer plants them either.
+        if let Err(error) =
+            super::approval_branch::admit_approval_branch_reservation(&spec, spawn_source)
+        {
+            reject_spawn_before_custody!("approval_branch_reservation", error);
+        }
         // A held spawn stops at the local provisioner's hold point: placed,
         // resumed and identity-reconciled members never reach it.
         if held.is_some()
@@ -36714,6 +36974,9 @@ impl MobActor {
             // spawn of a store-owned identity that owes a kickoff, and its
             // seat's embodiment.
             created_custody,
+            // Admitted above: the decision whose approval branch this spawn
+            // seats, recorded on its row and roster entry.
+            approval_branch,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -36958,11 +37221,25 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             owner_bridge_session_id: owner_bridge_session_id.clone(),
             ops_registry: ops_registry.clone(),
             held,
         };
         let preparation = spawn_preparation::typed_preparation(async move {
+            // The profile the member's build runs on: a store-owned identity
+            // declared with its role's named profile takes its role's current
+            // tool grant gate as its own, as a worker of the role does.
+            let profile = super::member_grant_gate::member_build_profile(
+                preparation_context.identity.as_ref(),
+                &preparation_context.definition,
+                preparation_context.realm_profile_store.as_ref(),
+                &agent_identity,
+                &profile_name,
+                &profile,
+            )
+            .await?
+            .into_owned();
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
             // straight to finalization. The bridge session must already exist
@@ -37590,6 +37867,7 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             owner_bridge_session_id,
             ops_registry,
             held,
@@ -37807,6 +38085,7 @@ impl MobActor {
                 created_custody,
                 history_unavailable,
                 fresh_life,
+                approval_branch: approval_branch.clone(),
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -38027,6 +38306,7 @@ impl MobActor {
             created_custody,
             history_unavailable,
             fresh_life,
+            approval_branch,
             objective_id,
             per_spawn_external_tools,
             authorized_profile_material,
@@ -39050,6 +39330,9 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
+            // A placed spawn never seats an approval branch: the reservation
+            // admission refused one before a placed spawn is taken.
+            approval_branch: _,
             created_custody,
         } = spec;
         let Some(host) = placement else {
@@ -39969,6 +40252,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: None,
             objective_id,
             authorized_profile_material,
             continuity_intent,
@@ -40267,6 +40551,7 @@ impl MobActor {
                 created_custody,
                 history_unavailable,
                 fresh_life,
+                approval_branch,
                 objective_id,
                 per_spawn_external_tools,
                 authorized_profile_material,
@@ -40474,6 +40759,7 @@ impl MobActor {
                                 created_custody,
                                 history_unavailable,
                                 fresh_life,
+                                approval_branch: approval_branch.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40561,6 +40847,7 @@ impl MobActor {
                                 created_custody,
                                 history_unavailable,
                                 fresh_life,
+                                approval_branch: approval_branch.clone(),
                                 objective_id,
                                 per_spawn_external_tools,
                                 authorized_profile_material,
@@ -40711,6 +40998,9 @@ impl MobActor {
             fresh_session_id: _,
             history_unavailable: _,
             fresh_life: _,
+            // A policy auto-spawn is fresh: `SpawnMemberSpec::new` records no
+            // approval branch.
+            approval_branch: _,
             // A policy auto-spawn is a worker's.
             created_custody: _,
         } = member_spec;
@@ -40719,6 +41009,16 @@ impl MobActor {
             return Err(MobError::WiringError(format!(
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
+        }
+        // Work routed to an approval branch's identity never spawns one: only
+        // the branch's opening takes it.
+        if super::approval_branch::takes_approval_branch_reservation(
+            agent_identity,
+            labels.as_ref(),
+        ) {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: agent_identity.clone(),
+            });
         }
         self.probe_member_admission(agent_identity, false, false)?;
         {
@@ -40800,11 +41100,20 @@ impl MobActor {
         let external_tools =
             self.external_tools_for_profile(&profile, per_spawn_external_tools.clone())?;
         let labels = labels.unwrap_or_default();
+        let build_profile = super::member_grant_gate::member_build_profile(
+            self.identity.as_ref(),
+            &self.definition,
+            self.realm_profile_store.as_ref(),
+            agent_identity,
+            &profile_name,
+            &profile,
+        )
+        .await?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
             agent_identity,
-            profile: &profile,
+            profile: &build_profile,
             definition: &self.definition,
             realm_profile_store: self.realm_profile_store.as_ref(),
             external_tools,
@@ -40952,6 +41261,7 @@ impl MobActor {
             created_custody: false,
             history_unavailable: None,
             fresh_life: false,
+            approval_branch: None,
             objective_id: None,
             per_spawn_external_tools: per_spawn_external_tools.clone(),
             authorized_profile_material: authorized_profile_material.clone(),
@@ -41895,6 +42205,7 @@ impl MobActor {
             spawned.fork_source = ctx.fork_source.clone();
             spawned.fork_overlay = ctx.fork_overlay;
             spawned.definition_wiring = ctx.definition_wiring;
+            spawned.approval_branch = ctx.approval_branch.clone();
             // Durable: the identity entry MobMachine recorded for the placed
             // member in its membership commit (a spawn holding the entry's
             // custody), so replay records the entry again after the carrier.
@@ -42059,6 +42370,10 @@ impl MobActor {
         // Durable: replay records an exempt member in MobMachine again, and
         // its roster entry keeps it for its respawn.
         spawned_event.definition_wiring = ctx.definition_wiring;
+        // Durable: the approval branch's typed creation source, which replay
+        // records on its roster entry, so its opening adopts it and nothing
+        // wires, unwires or respawns it after a restart either.
+        spawned_event = spawned_event.with_approval_branch(ctx.approval_branch.clone());
         // Durable: the identity entry MobMachine records for the member in
         // the membership commit's own step (a spawn with entry custody), so
         // replay records the entry again.
@@ -47577,6 +47892,8 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
+            .await?;
         match self
             .prepare_member_wire(local, target)
             .await?
@@ -47587,6 +47904,41 @@ impl MobActor {
                 self.dispatch_prepared_wiring(*prepared, None),
             )),
         }
+    }
+
+    /// The members a wire or unwire command between `local` and `target`
+    /// names: `local`, and the target when it is a member.
+    fn wiring_endpoints<'a>(
+        local: &'a AgentIdentity,
+        target: &'a super::handle::PeerTarget,
+    ) -> impl Iterator<Item = &'a AgentIdentity> {
+        let peer = match target {
+            super::handle::PeerTarget::Local(peer) => Some(peer),
+            _ => None,
+        };
+        std::iter::once(local).chain(peer)
+    }
+
+    /// Refuse a wire, unwire or respawn command that names an open approval
+    /// branch (a member whose typed creation source records a decision's
+    /// branch): only its opening seats it, wired to nobody, and nothing
+    /// changes its wiring or seats it again. Nothing is changed.
+    async fn refuse_approval_branch_control<'a>(
+        &self,
+        identities: impl IntoIterator<Item = &'a AgentIdentity>,
+    ) -> Result<(), MobError> {
+        let roster = self.roster.read().await;
+        for identity in identities {
+            if roster
+                .get(identity)
+                .is_some_and(|entry| entry.approval_branch().is_some())
+            {
+                return Err(MobError::ApprovalBranchReserved {
+                    identity: identity.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// D-wire-handler (#26) + #31 D-trust-reconciliation (Wave D): forward a
@@ -48743,6 +49095,7 @@ impl MobActor {
                 },
             )));
         }
+        self.refuse_approval_branch_control(&endpoint_ids).await?;
 
         let broken_members = self
             .dsl_authority
@@ -49720,6 +50073,13 @@ impl MobActor {
         local: AgentIdentity,
         target: super::handle::PeerTarget,
     ) -> Result<wiring_io::WireHandled, MobError> {
+        self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
+            .await?;
+        // An owned edge takes no plain unwire (0.9.11): MobMachine's
+        // admission refuses it before the unwire touches anything.
+        if let super::handle::PeerTarget::Local(peer) = &target {
+            self.admit_member_unwire(&local, peer)?;
+        }
         match self
             .prepare_member_unwire(local, target, None, false)
             .await?
@@ -51935,6 +52295,11 @@ impl MobActor {
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
+        // An open approval branch is never seated again: refused before
+        // anything is retired or read.
+        self.refuse_approval_branch_control(std::iter::once(&agent_identity))
+            .await
+            .map_err(MobRespawnError::from)?;
         // A member whose startup custody restore was deferred gets it
         // re-attempted before the respawn reads the member's session (its
         // retained tool restrictions) or retires it.
@@ -52458,6 +52823,19 @@ impl MobActor {
             // machine no-ops and must not append another journal carrier.
             return Ok(());
         }
+        // An abandonment after the old member's archive ends the identity
+        // the respawn hold kept (MobMachine names it, `IdentityEnded`): its
+        // scoped tool grants end before the step's journal row. A busy answer
+        // (a concurrent writer) is retried within the abandonment's bound;
+        // another failure fails the step, which stops the actor for cold
+        // recovery, and the resume that abandons the respawn ends them.
+        end_within_abandonment_bound(|| {
+            self.end_tool_grants_of_ended_identities(
+                prepared.transition.effects(),
+                "its respawn was abandoned",
+            )
+        })
+        .await?;
 
         let cursor_floor = self.events.latest_cursor().await?;
         let append = self
@@ -54380,6 +54758,42 @@ impl MobActor {
         let prepared = self
             .prepare_dsl_signal_transition(terminal_signal, "dispose_member_archive_completed")?;
         if !final_event_exists {
+            // An identity's tool grants end with the identity: a retirement
+            // that ends it ends them here, before its terminal row, with the
+            // grants of the session the retirement archives, so a name
+            // created again later inherits none (a resume of that session
+            // included). A failure fails the step, which keeps the
+            // retirement for its retry.
+            #[cfg(feature = "runtime-adapter")]
+            {
+                if super::identity_entry::retirement_ends_identity(
+                    self.dsl_authority.state(),
+                    &ctx.entry.agent_identity,
+                    &ctx.entry.agent_runtime_id,
+                ) {
+                    let sessions = if is_peer_only {
+                        std::collections::BTreeSet::new()
+                    } else {
+                        session_id
+                            .iter()
+                            .map(|session| {
+                                SessionId::parse(&session.0).map_err(|error| {
+                                    MobError::Internal(format!(
+                                        "'{}' retires an invalid session: {error}",
+                                        ctx.entry.agent_identity
+                                    ))
+                                })
+                            })
+                            .collect::<Result<_, _>>()?
+                    };
+                    self.end_identity_tool_grants(
+                        &ctx.entry.agent_identity,
+                        &sessions,
+                        format!("the identity '{}' left the mob", ctx.entry.agent_identity),
+                    )
+                    .await?;
+                }
+            }
             let journal_session = if is_peer_only { None } else { session_id };
             Self::require_member_lifecycle_journal_effect(
                 &prepared.transition,
@@ -61308,6 +61722,19 @@ impl MobActor {
             "reset_to_running",
         )?;
 
+        // The reset ends every identity the mob held, its identity entries
+        // included, and keeps the mob's incarnation, so a name declared
+        // again after it would match their scoped tool grants: they end here,
+        // after the member retirements and before the epoch marker commits.
+        // A failure fails the reset (retry it; the mob is left Stopped). A
+        // crash between the two leaves those identities without grants,
+        // which fails closed.
+        #[cfg(feature = "runtime-adapter")]
+        if let Err(error) = self.end_reset_identity_tool_grants().await {
+            self.fail_reset_to_stopped().await;
+            return Err(error);
+        }
+
         // --- Event rewrite phase: append the new epoch marker. ---
         // Append-only epoch model: projections clear on MobReset; the original
         // MobCreated definition remains the durable resume authority for this
@@ -65231,6 +65658,174 @@ impl MobActor {
         let key = Self::retire_event_key(agent_identity, generation);
         let index = self.retired_event_index.read().await;
         Ok(index.contains(&key))
+    }
+
+    /// Issue a scoped tool grant to `identity`, decided against the live
+    /// roster as it commits: the identity is in the roster and bound to a
+    /// member in MobMachine, and the grant's subject names this incarnation.
+    /// It runs in the actor's command order, so a retirement that ends the
+    /// identity's grants commits wholly before or after it: before, and the
+    /// identity is unbound here, refused as an unknown member, as a grant
+    /// read finds it; after, and the retirement's end revokes this grant.
+    /// The commit awaits the runtime's grant service only, never this actor
+    /// or a handle of it; its caller arms the deadline once it returns.
+    #[cfg(feature = "runtime-adapter")]
+    async fn grant_member_tool(
+        &self,
+        identity: &AgentIdentity,
+        grant: super::member_grant_gate::MemberToolGrant,
+    ) -> Result<
+        meerkat_runtime::tool_grant::StoredToolGrant,
+        super::member_grant_gate::MemberToolGrantError,
+    > {
+        use super::member_grant_gate::MemberToolGrantError;
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Err(MemberToolGrantError::NoRuntime);
+        };
+        let bound = self
+            .dsl_authority
+            .state()
+            .identity_to_runtime
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity));
+        if !bound || self.roster.read().await.get(identity).is_none() {
+            return Err(MemberToolGrantError::Mob(MobError::MemberNotFound(
+                identity.clone(),
+            )));
+        }
+        let request = meerkat_runtime::tool_grant::ToolGrantRequest {
+            subject: meerkat_core::tool_grant::ToolGrantSubject::member(
+                self.definition.id.as_str(),
+                &self.incarnation,
+                identity.as_str(),
+            ),
+            target: grant.target,
+            issuer: grant.issuer,
+            reason: grant.reason,
+            window: grant.window,
+        };
+        runtime
+            .tool_grant_service()
+            .grant(request)
+            .await
+            .map_err(MemberToolGrantError::Grant)
+    }
+
+    /// End every live scoped tool grant of `identity` in this mob
+    /// incarnation, and of each of `sessions` (the sessions MobMachine held
+    /// for it when it ended), recording `reason`: its identity ended. Each
+    /// grant ends with its subject, so it explains no later refusal. Without
+    /// a runtime there are no grants.
+    ///
+    /// # Errors
+    /// As [`tool_grant_end_failure`] maps them: a concurrent writer that
+    /// changed one of the grants twice answers the busy class
+    /// ([`MobError::LifecycleOperationPending`]), any other failure is
+    /// internal.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_identity_tool_grants(
+        &self,
+        identity: &AgentIdentity,
+        sessions: &std::collections::BTreeSet<SessionId>,
+        reason: String,
+    ) -> Result<(), MobError> {
+        let Some(runtime) = self.runtime_adapter.as_ref() else {
+            return Ok(());
+        };
+        end_member_identity_tool_grants(
+            runtime,
+            self.definition.id.as_str(),
+            &self.incarnation,
+            identity,
+            sessions,
+            &reason,
+        )
+        .await
+    }
+
+    /// The sessions `state` holds for `identity`: its member's session
+    /// binding and its identity entry's archived session record.
+    #[cfg(feature = "runtime-adapter")]
+    fn sessions_held_for(
+        state: &mob_dsl::MobMachineState,
+        identity: &mob_dsl::AgentIdentity,
+    ) -> Result<std::collections::BTreeSet<SessionId>, MobError> {
+        held_sessions_of(state, identity)
+    }
+
+    /// End the scoped tool grants of every identity a prepared MobMachine
+    /// step ends (its `IdentityEnded` effects), before the step commits:
+    /// each identity's grants and those of the sessions MobMachine holds for
+    /// it before the step (its member's session, its identity entry's
+    /// archived session record). `cause` says what ended it, for the audit.
+    /// A failure fails the step, which then commits nothing.
+    async fn end_tool_grants_of_ended_identities(
+        &self,
+        effects: &[mob_dsl::MobMachineEffect],
+        cause: &str,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let ended = {
+                let state = self.dsl_authority.state();
+                effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        mob_dsl::MobMachineEffect::IdentityEnded { agent_identity } => {
+                            Some(agent_identity)
+                        }
+                        _ => None,
+                    })
+                    .map(|agent_identity| {
+                        Ok((
+                            AgentIdentity::from(agent_identity.0.as_str()),
+                            Self::sessions_held_for(state, agent_identity)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, MobError>>()?
+            };
+            for (identity, sessions) in ended {
+                self.end_identity_tool_grants(
+                    &identity,
+                    &sessions,
+                    format!("the identity '{identity}' ended: {cause}"),
+                )
+                .await?;
+            }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        let _ = (effects, cause);
+        Ok(())
+    }
+
+    /// End the live scoped tool grants of every identity MobMachine holds as
+    /// a reset commits: each identity an incarnation held since the last
+    /// reset (its members', the retired ones included) and each identity
+    /// entry, seated or not, with the grants of the sessions MobMachine holds
+    /// for each (an entry's archived session record). The reset ends them all
+    /// and keeps the mob's incarnation.
+    #[cfg(feature = "runtime-adapter")]
+    async fn end_reset_identity_tool_grants(&self) -> Result<(), MobError> {
+        let identities = {
+            let state = self.dsl_authority.state();
+            state
+                .identity_runtime_generations
+                .keys()
+                .chain(state.identity_entry_origins.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|identity| {
+                    Ok((
+                        AgentIdentity::from(identity.0.as_str()),
+                        Self::sessions_held_for(state, identity)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, MobError>>()?
+        };
+        for (identity, sessions) in &identities {
+            self.end_identity_tool_grants(identity, sessions, "the mob was reset".to_string())
+                .await?;
+        }
+        Ok(())
     }
 
     /// Append the terminal `MemberRetired` row of `entry`'s retirement.

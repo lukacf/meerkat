@@ -1010,6 +1010,9 @@ pub(super) enum MobCommand {
     },
     /// Internal: the retry of a member whose boot work is still owed is due.
     RetryOwedMemberWake { agent_identity: AgentIdentity },
+    /// Internal: the retry timer of a member's build preparation the host
+    /// asked to retry (BuildPreparationRetry) is due.
+    RetryMemberBuildPreparation { agent_identity: AgentIdentity },
     /// An owed edge repair's timer fired (the actor's own self-send).
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
@@ -1477,6 +1480,13 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: whether `agent_identity`'s owed-boot wake retry timer is
+    /// armed now.
+    #[cfg(test)]
+    OwedMemberWakeRetryArmedForTest {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -1530,6 +1540,12 @@ pub(super) enum MobCommand {
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
+    },
+    /// The host retries the build preparation it asked to retry for a member
+    /// ([`super::MobHandle::resolve_member_build_preparation`]).
+    ResolveMemberBuildPreparation {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// Release a host's run-start hold on a member (#1500).
     ReleaseMemberRunStarts {
@@ -1589,9 +1605,12 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
     },
     /// Seal a complete declared roster in one MobMachine step: `desired` is
-    /// every identity the roster lists.
+    /// every identity the roster lists, and `intent_named` every identity a
+    /// host's identity intent row names, readable or not, which the seal
+    /// leaves as it is.
     SealDeclaredRoster {
         desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        intent_named: std::collections::BTreeSet<crate::ids::AgentIdentity>,
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
     },
     /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
@@ -1993,6 +2012,20 @@ pub(super) enum MobCommand {
             >,
         >,
     },
+    /// Issue a scoped tool grant to a member identity, decided against the
+    /// live roster as it commits: the identity must be in the roster and
+    /// bound to a member, and the grant's subject names the mob's live
+    /// incarnation. Ordered with the retirement, identity-entry end and
+    /// reset that end an identity's grants, so a grant never outlives a
+    /// retirement. Host verb (`AdminHost`), never an agent tool.
+    #[cfg(feature = "runtime-adapter")]
+    GrantMemberTool {
+        identity: AgentIdentity,
+        grant: Box<super::member_grant_gate::MemberToolGrant>,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_runtime::tool_grant::StoredToolGrant, super::member_grant_gate::MemberToolGrantError>,
+        >,
+    },
     /// The mob's delivery owner asks MobMachine to prepare one owed member's
     /// operator-instruction delivery (internal).
     PrepareMemberInstructionDelivery {
@@ -2350,6 +2383,7 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2420,6 +2454,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2433,6 +2469,7 @@ impl MobCommand {
             Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReleaseMemberRunStarts { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveMemberBuildPreparation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2488,6 +2525,8 @@ impl MobCommand {
             Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SetOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RevokeOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2563,6 +2602,8 @@ impl MobCommand {
             Self::WakeMember { .. } => "WakeMember",
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
+            Self::RetryMemberBuildPreparation { .. } => "RetryMemberBuildPreparation",
+            Self::ResolveMemberBuildPreparation { .. } => "ResolveMemberBuildPreparation",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
             Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
@@ -2660,6 +2701,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
             #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"
             }
@@ -2718,6 +2761,8 @@ impl MobCommand {
             Self::Grants { .. } => "Grants",
             Self::SetOperatorInstruction { .. } => "SetOperatorInstruction",
             Self::RevokeOperatorInstruction { .. } => "RevokeOperatorInstruction",
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => "GrantMemberTool",
             Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
             Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
             Self::PollEvents { .. } => "PollEvents",

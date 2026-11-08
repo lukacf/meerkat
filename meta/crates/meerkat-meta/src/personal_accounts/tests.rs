@@ -1819,8 +1819,8 @@ impl crate::SessionHook for SeenBuilds {
 /// member factory with the owner check: the private side chat a person
 /// opens keeps the personal server and carries its owner's source, and the
 /// side chat's MCP adapter composition takes the owner its build
-/// established. The agent it was forked from, shared, gets no personal
-/// server.
+/// established, within the row's own bound. The agent it was forked from,
+/// shared, gets no personal server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_unified_runtime_composes_the_owner_check_on_its_member_factory() {
     let dir = tempfile::tempdir().expect("dir");
@@ -1885,47 +1885,60 @@ oauth_account_selection = "discover"
         .await
         .expect("the turn settled");
     let owner = private_owner_key(ISSUER, "alice");
-    let mut forked = None;
-    for _ in 0..50 {
-        match crate::side_chat::fork_side_chat(
-            mob,
-            None,
-            "alpha",
-            "alpha-side",
-            None,
-            Some("alice@example.test"),
-            Some(owner.as_str()),
-        )
-        .await
-        {
-            Ok(fork) => {
-                forked = Some(fork);
-                break;
+    // The side chat's fork and its first turn, bounded: a build whose
+    // personal server's credential waits on a plan no composition takes
+    // waits out its connection's deadline (the connect timeout and the
+    // sign-in window), so the row fails here, naming that, well before.
+    let side_chat = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut forked = None;
+        for _ in 0..50 {
+            match crate::side_chat::fork_side_chat(
+                mob,
+                None,
+                "alpha",
+                "alpha-side",
+                None,
+                Some("alice@example.test"),
+                Some(owner.as_str()),
+            )
+            .await
+            {
+                Ok(fork) => {
+                    forked = Some(fork);
+                    break;
+                }
+                Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
+                    meerkat_mob::MobError::ForkSourceUnavailable { .. },
+                ))) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(error) => panic!("the side chat fork: {error:?}"),
             }
-            Err(crate::side_chat::SideChatError::Fork(crate::fork::ForkMemberError::Mob(
-                meerkat_mob::MobError::ForkSourceUnavailable { .. },
-            ))) => tokio::time::sleep(Duration::from_millis(100)).await,
-            Err(error) => panic!("the side chat fork: {error:?}"),
         }
-    }
-    let fork = forked.expect("the side chat was forked");
-    let side_chat = fork.outcome.result.session_id.clone();
-    // A turn in the side chat builds it, if the seat left it unbuilt.
-    mob.handle()
-        .member(&fork.outcome.result.agent_identity)
-        .await
-        .expect("the side chat")
-        .start_turn(
-            meerkat_core::ContentInput::Text("What is the code word?".to_string()),
-            meerkat_core::HandlingMode::Queue,
-            meerkat_mob::MemberTurnOptions::new(),
-            None,
+        let fork = forked.expect("the side chat was forked");
+        // A turn in the side chat builds it, if the seat left it unbuilt.
+        mob.handle()
+            .member(&fork.outcome.result.agent_identity)
+            .await
+            .expect("the side chat")
+            .start_turn(
+                meerkat_core::ContentInput::Text("What is the code word?".to_string()),
+                meerkat_core::HandlingMode::Queue,
+                meerkat_mob::MemberTurnOptions::new(),
+                None,
+            )
+            .await
+            .expect("a turn in the side chat")
+            .wait()
+            .await
+            .expect("the side chat's turn settled");
+        fork.outcome.result.session_id.clone()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the side chat did not build within 60 s: its personal server's credential \
+             waited on a plan no composition took"
         )
-        .await
-        .expect("a turn in the side chat")
-        .wait()
-        .await
-        .expect("the side chat's turn settled");
+    });
 
     let builds = seen.builds.lock().expect("builds").clone();
     let (private, shared): (Vec<_>, Vec<_>) = builds

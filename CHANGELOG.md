@@ -296,25 +296,35 @@ them.
   reserved unreadable, `NotExternallyAddressable` for a member whose
   runtime admits no external work, where it committed a continuation that
   reached the member's session. Nothing is committed (the key's status
-  stays not committed). Its delivery asks again: a keyed send committed
-  before its member became an identity entry, or before its member's
-  runtime stopped admitting external work, settles `refused` with reason
-  `authority_denied`, final, and nothing is admitted. A replay of a
+  stays not committed). A profile's `external_addressable` defaults to
+  false, so a keyed send to a member of a profile that leaves it unset is
+  now refused `NotExternallyAddressable`, as the unkeyed send to it was,
+  where 0.9.10 committed and delivered it; `external_addressable: true` on
+  the profile admits keyed sends to its members again. Its delivery asks
+  again: a keyed send committed before its member became an identity
+  entry, or before its name became reserved unreadable, settles `refused`
+  with reason `authority_denied`, final, and nothing is admitted. A
+  member's runtime stops admitting external work only as a new incarnation
+  (a respawn or a rotation, onto a profile that admits none included),
+  which a send committed to the earlier one never reaches: such a send
+  settles `stranded`, final, as for any replaced incarnation. A replay of a
   committed key still answers its first receipt and its status.
+  Behaviour-only: the signatures keep their shape.
 
 - `meerkat-mob-mcp`, `meerkat-rpc`, `meerkat-web-runtime`: the doors that
   act on a member's session as its host (`mob/turn_start`,
   `mob/append_system_context`, `meerkat_mob_append_system_context`, the web
-  runtime's `mob_append_system_context`, `mob/member_live_open` and
-  `mob/member_live_control`) reach an identity entry, or a member whose name
-  is reserved unreadable, only for a principal that holds
-  `ControlScope::AdminHost`. Any other caller is refused
-  `MobError::IdentityMember` (`identity_member`) before anything runs, where
-  a `SendCommand` or `Live` principal reached the entry's session. On every
-  other member the doors are unchanged, and the owner holds every scope, so
-  a local console is unchanged. `mob/append_system_context` now renders a
-  mob refusal with its structured data (`data.kind`), as the other mob doors
-  do.
+  runtime's `mob_append_system_context`, `mob/member_live_open`,
+  `mob/member_live_control` and `mob/member_live_close`) reach an identity
+  entry, or a member whose name is reserved unreadable, only for a
+  principal that holds `ControlScope::AdminHost`. Any other caller is
+  refused `MobError::IdentityMember` (`identity_member`) before anything
+  runs, where a `SendCommand` or `Live` principal reached the entry's
+  session. On every other member the doors are unchanged, and the owner
+  holds every scope, so a local console is unchanged.
+  `mob/append_system_context` now renders a mob refusal with its structured
+  data (`data.kind`), as the other mob doors do. Behaviour-only: the
+  signatures keep their shape.
 
 - `meerkat-mob-mcp`, `meerkat-rpc`: `mob/submit_work` with
   `origin: internal` acts as the mob's host and needs
@@ -322,6 +332,7 @@ them.
   (`required: admin_host`) before anything is submitted, where any
   `SendCommand` principal could choose the internal origin. The default
   `external` origin is unchanged, and the owner holds every scope.
+  Behaviour-only: the signatures keep their shape.
 
 ### Fixed
 

@@ -22,6 +22,10 @@ const WAIT: Duration = Duration::from_secs(30);
 /// How long a test waits for a step the row says must happen soon (a stop
 /// landing while a wake is held).
 const STEP: Duration = Duration::from_secs(5);
+/// The wake retry backoff of the build preparation retry rows: long enough
+/// that a row's steps run while the retry stands, short enough to wait for
+/// its timer.
+const PREPARATION_RETRY: Duration = Duration::from_secs(5);
 
 type Service = meerkat_session::PersistentSessionService<meerkat::FactoryAgentBuilder>;
 
@@ -443,11 +447,27 @@ impl WakeFixture {
         Self::build(label, |_| {}, |_| {}, true).await
     }
 
+    /// [`Self::new`], with the mob's wake retry backoff (the owed-boot retry
+    /// and the build preparation retry) at `initial`, doubling up to `max`.
+    async fn with_wake_retry_backoff(label: &str, initial: Duration, max: Duration) -> Self {
+        Self::build_with_backoff(label, |_| {}, |_| {}, false, Some((initial, max))).await
+    }
+
     async fn build(
         label: &str,
         configure: impl FnOnce(&mut meerkat::Config),
         edit: impl FnOnce(&mut MobDefinition),
         member_seats: bool,
+    ) -> Self {
+        Self::build_with_backoff(label, configure, edit, member_seats, None).await
+    }
+
+    async fn build_with_backoff(
+        label: &str,
+        configure: impl FnOnce(&mut meerkat::Config),
+        edit: impl FnOnce(&mut MobDefinition),
+        member_seats: bool,
+        wake_retry_backoff: Option<(Duration, Duration)>,
     ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("meerkat-member-wake-")
@@ -497,6 +517,9 @@ impl WakeFixture {
             .with_default_llm_client(Arc::new(client.clone()))
             .with_member_build_preparer(preparer.clone())
             .with_spawn_member_customizer(customizer.clone());
+        if let Some((initial, max)) = wake_retry_backoff {
+            mob = mob.with_member_wake_retry_backoff(initial, max);
+        }
         if member_seats {
             mob = mob.with_member_comms_identity_root(
                 meerkat::canonical_session_comms_identity_root(Some(&root_path.join("config")))
@@ -576,6 +599,38 @@ impl WakeFixture {
             .member_materialization
             .get(&mob_dsl::AgentIdentity::from_domain(identity))
             .copied()
+    }
+
+    /// The host preparation MobMachine records `identity` owing.
+    fn host_preparation(&self, identity: &AgentIdentity) -> Option<mob_dsl::HostPreparationCause> {
+        self.handle
+            .machine_state_watch_rx
+            .borrow()
+            .member_host_preparation_causes
+            .get(&mob_dsl::AgentIdentity::from_domain(identity))
+            .copied()
+    }
+
+    /// Wait until MobMachine records `identity` owing `expected`.
+    async fn wait_host_preparation(
+        &self,
+        identity: &AgentIdentity,
+        expected: Option<mob_dsl::HostPreparationCause>,
+    ) {
+        let key = mob_dsl::AgentIdentity::from_domain(identity);
+        let mut state = self.handle.machine_state_watch_rx.clone();
+        let reached = tokio::time::timeout(
+            WAIT,
+            state.wait_for(|state| {
+                state.member_host_preparation_causes.get(&key).copied() == expected
+            }),
+        )
+        .await;
+        assert!(
+            matches!(reached, Ok(Ok(_))),
+            "member {identity} never owed host preparation {expected:?}; it owes {:?}",
+            self.host_preparation(identity)
+        );
     }
 
     async fn wait_residency(
@@ -742,6 +797,19 @@ impl WakeFixture {
         self.preparer.open_gate();
         let _ = tokio::time::timeout(WAIT, self.handle.shutdown()).await;
     }
+}
+
+/// Whether `woken` is the typed wake refusal for a build preparation the
+/// host asked to retry ([`crate::MemberWakeRefusal::BuildPreparationRetry`]),
+/// whose token on the wire is `host_preparation_pending`.
+pub(super) fn refused_for_build_preparation_retry(woken: &Result<(), MobError>) -> bool {
+    matches!(
+        woken,
+        Err(MobError::MemberWakeRefused {
+            refusal: refusal @ crate::MemberWakeRefusal::BuildPreparationRetry,
+            ..
+        }) if refusal.as_str() == "host_preparation_pending"
+    )
 }
 
 fn token(label: &str) -> String {
@@ -1643,31 +1711,65 @@ async fn a_wake_prepares_the_member_build_once_and_reports_it_built() {
     fixture.finish().await;
 }
 
-/// A retryable build preparation refusal leaves the member dormant until
-/// its next delivery.
+/// A retryable build preparation refusal is the typed
+/// `BuildPreparationRetry` wake refusal, and MobMachine records it
+/// (`HostPreparationCause::BuildPreparationRetry`): the member stays Dormant
+/// and its wakes meanwhile are refused for it without asking the host
+/// again. The retry timer ends the cause at the wake retry backoff and
+/// wakes nothing, since the member owes no work; the next delivery asks the
+/// host again and wakes the member.
+///
+/// RED before MobMachine recorded the retry: the refusal was
+/// `HostPreparationPending`, typed from the wake's own answer, and the next
+/// delivery asked the host again at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_next_delivery() {
-    let fixture = WakeFixture::new("wake-r112").await;
+async fn a_retryable_preparation_refusal_holds_the_members_wakes_until_its_retry() {
+    let fixture =
+        WakeFixture::with_wake_retry_backoff("wake-r112", PREPARATION_RETRY, PREPARATION_RETRY)
+            .await;
     let member = fixture.spawn("r112-member").await;
     fixture.release(&member).await;
 
     fixture.preparer.answer_with(PreparerAnswer::Retryable);
     let refused = fixture.ensure_live(&member).await;
     assert!(
-        matches!(
-            refused,
-            Err(MobError::MemberWakeRefused {
-                refusal: crate::MemberWakeRefusal::HostPreparationPending,
-                ..
-            })
-        ),
-        "a retryable refusal is the typed retryable wake refusal: {refused:?}"
+        refused_for_build_preparation_retry(&refused),
+        "a retryable refusal is the typed build preparation retry: {refused:?}"
     );
     fixture
-        .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
+        .wait_host_preparation(
+            &member,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
         .await;
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant)
+    );
 
+    // The host would prepare the build now; the retry still stands.
     fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    let held = fixture.ensure_live(&member).await;
+    assert!(
+        refused_for_build_preparation_retry(&held),
+        "a wake while the retry stands is refused for it: {held:?}"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "the host is not asked again while the retry stands"
+    );
+
+    // The retry timer ends the cause and wakes nothing: no work is owed.
+    fixture.wait_host_preparation(&member, None).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the retry wakes no member that is owed no work"
+    );
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
     fixture
         .ensure_live(&member)
         .await
@@ -1680,6 +1782,125 @@ async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_nex
     fixture.finish().await;
 }
 
+/// A member reached only by peer messages, whose host asked to retry its
+/// build preparation: MobMachine records the retry and refuses the member's
+/// wakes for it, so a sender's message meanwhile is refused
+/// `host_preparation_pending` and the host is not asked again. The retry
+/// timer ends the cause at the wake retry backoff and wakes nothing (a
+/// refused message is the sender's, no work the member owes); once the
+/// host's preparation succeeds, the sender's retry wakes the member and is
+/// delivered once.
+///
+/// RED before MobMachine recorded the retry: no cause was recorded, and the
+/// next message asked the host again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_only_member_whose_host_asked_to_retry_its_build_is_delivered_after_the_retry() {
+    let fixture = WakeFixture::with_wake_retry_backoff(
+        "wake-preparation-retry-peer",
+        PREPARATION_RETRY,
+        PREPARATION_RETRY,
+    )
+    .await;
+    let sender = fixture.spawn("preparation-retry-sender").await;
+    let recipient = fixture.spawn("preparation-retry-recipient").await;
+    fixture.wire(&sender, &recipient).await;
+    fixture.release(&recipient).await;
+
+    fixture.preparer.answer_with(PreparerAnswer::Retryable);
+    let first = fixture
+        .raw_peer_send(&sender, &recipient, &token("preparation-retry-first"))
+        .await;
+    assert!(
+        matches!(
+            first,
+            Err(SendError::PeerWakeRefused {
+                refusal: meerkat_core::comms::PeerWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "the host asked to retry: the message is refused host_preparation_pending: {first:?}"
+    );
+    fixture
+        .wait_host_preparation(
+            &recipient,
+            Some(mob_dsl::HostPreparationCause::BuildPreparationRetry),
+        )
+        .await;
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
+    // The host would prepare the build now; the retry still stands.
+    fixture.preparer.answer_with(PreparerAnswer::Prepared);
+    let second = fixture
+        .raw_peer_send(&sender, &recipient, &token("preparation-retry-second"))
+        .await;
+    assert!(
+        matches!(
+            second,
+            Err(SendError::PeerWakeRefused {
+                refusal: meerkat_core::comms::PeerWakeRefusal::HostPreparationPending,
+                ..
+            })
+        ),
+        "a message while the retry stands is refused for it: {second:?}"
+    );
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "the host is not asked again while the retry stands"
+    );
+
+    // The retry timer ends the cause and wakes nothing: no work is owed.
+    fixture.wait_host_preparation(&recipient, None).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.residency(&recipient),
+        Some(mob_dsl::MemberMaterializationPhase::Dormant),
+        "the retry wakes no member that is owed no work"
+    );
+    assert_eq!(fixture.preparer.prepared_count(), 1);
+
+    let body = token("preparation-retry-retried");
+    fixture
+        .raw_peer_send(&sender, &recipient, &body)
+        .await
+        .expect("the sender's retry is delivered");
+    assert_eq!(fixture.delivered_count(&recipient, &body).await, 1);
+    assert_eq!(fixture.preparer.prepared_count(), 2);
+    fixture.finish().await;
+}
+
+/// A wake whose build preparation the host carries out records no build
+/// preparation retry and arms no retry timer: MobMachine records no cause
+/// for the member, and long past the wake retry backoff nothing asks the
+/// host again or moves the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_healthy_wake_records_no_build_preparation_retry() {
+    let backoff = Duration::from_millis(20);
+    let fixture =
+        WakeFixture::with_wake_retry_backoff("wake-preparation-healthy", backoff, backoff).await;
+    let member = fixture.spawn("preparation-healthy").await;
+    fixture.release(&member).await;
+
+    fixture
+        .ensure_live(&member)
+        .await
+        .expect("the member wakes");
+    assert_eq!(fixture.host_preparation(&member), None);
+    tokio::time::sleep(backoff * 20).await;
+    fixture.handle.status().await.expect("the mob answers");
+    assert_eq!(
+        fixture.preparer.prepared_count(),
+        1,
+        "nothing asks the host again"
+    );
+    assert_eq!(
+        fixture.residency(&member),
+        Some(mob_dsl::MemberMaterializationPhase::Live)
+    );
+    assert_eq!(fixture.host_preparation(&member), None);
+    fixture.finish().await;
+}
+
 /// The host's build preparer reads through the mob's own read-only view on
 /// a wake, as on a boot restore: the authority the mob's launch minted (the
 /// owner's), never the agent lane of the member tools the wake builds. A
@@ -1687,7 +1908,7 @@ async fn a_retryable_preparation_refusal_leaves_the_member_dormant_until_the_nex
 /// the member is answered, so the member's on-demand wake goes ahead. On the
 /// agent lane that read is refused (it needs the List scope), the preparer
 /// answers retryable, and every wake of the member is refused
-/// `HostPreparationPending` again: the member never wakes.
+/// `BuildPreparationRetry` again: the member never wakes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wake_hands_the_build_preparer_the_mobs_own_read_view() {
     let fixture = WakeFixture::new("wake-preparer-read-view").await;
@@ -2835,6 +3056,14 @@ async fn a_late_binding_refusal_of_an_abandoned_attempt_leaves_the_newer_wake_ru
     fixture
         .wait_residency(&member, Some(mob_dsl::MemberMaterializationPhase::Dormant))
         .await;
+    // MobMachine holds the member's wakes for the build preparation its
+    // host asked to retry; the host retries it, so the newer wake asks
+    // again.
+    fixture
+        .handle
+        .resolve_member_build_preparation(&member)
+        .await
+        .expect("the host retries the build preparation");
 
     // The newer wake is held in its build preparation.
     fixture.preparer.close_gate();
@@ -3885,6 +4114,13 @@ async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
         .await
         .expect("the first wake builds the member");
     let session = fixture.session(&identity).await;
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: nothing holds the seated member"
+    );
 
     // A run in flight, then the role move held: the member's run starts are
     // held, and the run goes on.
@@ -3984,6 +4220,23 @@ async fn a_held_live_member_keeps_its_actor_through_an_explicit_resume() {
     );
     assert_eq!(fixture.session(&identity).await, session);
     assert!(holding(), "its run starts stay held");
+    assert!(
+        fixture
+            .handle
+            .member_holds_run_starts(&identity, HostRunStartHoldReason::HostPreparation)
+            .expect("the member's hold reads"),
+        "one member's read answers as the list read: the held member's run starts are held"
+    );
+    assert!(
+        !fixture
+            .handle
+            .member_holds_run_starts(
+                &AgentIdentity::from("no-such-member"),
+                HostRunStartHoldReason::HostPreparation,
+            )
+            .expect("an unseated member's hold reads"),
+        "a member the mob does not seat holds nothing"
+    );
     match fixture
         .handle
         .identity_entry(&identity)

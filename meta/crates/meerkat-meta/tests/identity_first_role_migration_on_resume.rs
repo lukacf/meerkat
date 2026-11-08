@@ -553,15 +553,15 @@ async fn a_declared_role_migration_is_applied_when_the_mob_restores_the_member()
 
 /// A declared role migration of a member whose session no wake has created
 /// yet: boot 1 seats it and never wakes it, so Core holds the session unborn.
-/// There is no session to restamp, so the move is Core's rotation onto the
-/// declared profile, on a fresh session that no wake has created either.
-/// Nothing is resumed and nothing is refused. Before, the migration resumed
-/// the never-created session, its collision repair found no resume source
-/// and refused, and the identity read broken. A migration of a session a
-/// wake created keeps that session
+/// Core's declared apply restamps the member under the declared profile on
+/// its own session, which stays unborn: the restamp builds nothing. Nothing
+/// is resumed and nothing is refused. Before, the migration resumed the
+/// never-created session, its collision repair found no resume source and
+/// refused, and the identity read broken. A migration of a session a wake
+/// created keeps that session too
 /// (`a_declared_role_migration_is_applied_when_the_mob_restores_the_member`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_declared_role_migration_of_a_seat_never_woken_rotates_it_onto_the_new_profile() {
+async fn a_declared_role_migration_of_a_seat_never_woken_moves_it_onto_the_new_profile() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let state_path = temp.path().join("state");
     let mob_id = "role-migration-unborn-seat";
@@ -590,10 +590,13 @@ async fn a_declared_role_migration_of_a_seat_never_woken_rotates_it_onto_the_new
     )
     .await;
     let moved = materialized_session(booted.result.as_ref().expect("boot 2 restores"));
-    assert_ne!(moved, seated, "the move is a rotation onto a fresh session");
+    assert_eq!(
+        moved, seated,
+        "the move restamps the member on its own session"
+    );
     assert!(
         booted.unified.mob_handle().session_unborn(&moved),
-        "the rotation builds nothing: the fresh session is unborn too"
+        "the restamp builds nothing: the session is still unborn"
     );
     assert_eq!(
         roster_role(&booted.unified).await.as_str(),

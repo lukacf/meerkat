@@ -4502,7 +4502,7 @@ export type WireReachability = "reachable" | "stale" | "unreachable" | "unknown"
 
 export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_tools" | "mob_default_external_tools" | "default_llm_client_override" | "host_surface_mcp_allowlist" | "workgraph_tools";
 
-export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
+export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring" | "store_refused";
 
 export type WireMemberRegistrationHookCall = "select_destination" | "select_agent_mandate" | "prepare_member_surface" | "verify_member_surface";
 

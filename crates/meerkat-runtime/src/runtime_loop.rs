@@ -7795,12 +7795,23 @@ async fn settle_unresumed_run(
     // the transcript, and the session layer resynchronizes the seeded actor
     // from the repaired boundary at its next step. A tail the repair leaves
     // standing would refuse the next run's first round commit, so then the
-    // session reloads at once, before any run, and the lap exits.
+    // session reloads at once, before any run, and the lap exits. The reload
+    // is required before the gate is released: a host's settle waits for
+    // this gate to read the settlement, and must find the registration
+    // degraded, never the run settled while its tail stands.
     let reload = driver
         .lock()
         .await
         .repair_settled_run_tail(&authority_binding.session_id, run_id)
         .await;
+    if reload {
+        authority_binding
+            .require_session_durability_reload(
+                "settled_resumable_run_tail_repair",
+                format!("settled run {run_id}'s provisional tail still stands"),
+            )
+            .await;
+    }
     drop(queue_authority_guard);
     if let Some(terminal) = settled_terminal.as_ref() {
         crate::control_plane::publish_settled_run_terminal(
@@ -7810,12 +7821,6 @@ async fn settle_unresumed_run(
         .await;
     }
     if reload {
-        authority_binding
-            .require_session_durability_reload(
-                "settled_resumable_run_tail_repair",
-                format!("settled run {run_id}'s provisional tail still stands"),
-            )
-            .await;
         return ResumedRunAdmissionLap::Exit(true);
     }
     if !abandoned.is_empty()

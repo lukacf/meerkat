@@ -448,6 +448,41 @@ on its sign-in page, not your API key or your provider website password. The
 sign-in form asks only for that password; the installation applies your configured
 user identity automatically.
 
+An application Forge builds has named Console accounts, so its sign-in page
+also asks for an account name. Leave it empty to use the installation's own
+account (the Console user and password above). Everyone else signs in with the
+account name and password the operator set up for them: after the private
+settings, `.venv/bin/python setup.py` asks for named accounts to add, give a
+new password or remove (`:remove NAME`), and keeps only password hashes on the
+deployment computer. Changes apply at the next start. An installation built
+earlier with one shared Console password moves to named accounts at its next
+update: the update's Build declares named accounts and keeps the Console user
+and password. An application on the older ordinary route, or on the MobKit
+runtime, keeps the shared password. After that move the installation's
+own account is the operator's personal account and the first administrator:
+if others know its Console password, change it with **Change private
+settings** and give each of them a named account. A single shared Console
+password lets everyone who knows it chat, but approvals (frontend changes, the
+controller review and setup prompts) need a person's own account.
+
+An application can instead sign people in at its organization's identity
+provider (OIDC). Forge's normal build route always produces named accounts, so
+OIDC must come from the application's own source (its
+`application/console.json`). Its setup then asks for the operator's email as the
+Console user, the OIDC client secret (or the application reads it from a private
+file), and optionally the email addresses of the further people who may sign
+in. Register the Console's sign-in callback with the identity provider as a
+redirect URI: `http://127.0.0.1:<port>/login/callback` for the local Console,
+or the same path on its public address. People then choose **Continue to sign
+in** and sign in at the provider; only a verified email that is the
+operator's or on the list opens the Console, each person as themselves. A
+provider that does not mark the email as verified (`email_verified`) signs
+nobody in. The Console keeps none of the provider's tokens. Keep the
+installation's `.mobkit/` folder in its backups, including
+`console-oidc-issuer`, by which the Console knows each person, and the
+signing key `console-oidc-signing.pem`. Keep those backups private: that key
+signs the Console tokens of every person, administrators included.
+
 Follow the installation action and its checks. **Install and start** starts an
 ordinary supported package. **Install application** checks the selected
 Meta/Toolkit runtime and leaves the application stopped. Its **Application setup
@@ -748,8 +783,15 @@ Console may open without a separate sign-in. Signing in does not send a job.
 
 **Sign out** in the password-protected Console ends your current Console login
 without stopping the application or deleting its saved state. Successful sign-out
-returns to the password screen. If that screen does not appear, treat sign-out
-as unconfirmed; closing the tab is not confirmation.
+returns to the password screen. If the Console did not confirm the sign-out, the
+page says so: you are signed out of that browser, and the tokens the Console
+already holds for that login expire within three minutes. If neither page appears,
+treat sign-out as unconfirmed; closing the tab is not confirmation.
+
+With OIDC sign-in, **Sign out** ends the Console login but not your session at
+the identity provider. On a shared computer, **Continue to sign in** can then
+open the previous person's Console again without asking for anything, until
+they also sign out at the provider.
 
 To add another conversation channel to a custom application, return to the same
 saved setup. Tell the guide which people should use it and whether it should

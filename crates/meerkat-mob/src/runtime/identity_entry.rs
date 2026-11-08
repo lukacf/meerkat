@@ -29,9 +29,15 @@
 //! retirement (a seated entry the declared apply's seal or one-entry unlist
 //! marked); the one-entry unlist of an unseated entry, which a complete
 //! roster's seal runs, on its own step, for each unseated entry it does not
-//! list; the identity's removal ([`super::MobHandle::remove_identity`], which
-//! tombstones its name: at once for an unseated entry, at its member's
-//! retirement end for a seated one); the mob's destroy and the mob's reset.
+//! list and no host's intent row names; the identity's removal
+//! ([`super::MobHandle::remove_identity`], which tombstones its name: at once
+//! for an unseated entry, at its member's retirement end for a seated one); a
+//! host's adoption of the identity
+//! ([`super::MobHandle::adopt_member_identity_declaration`]), which takes the
+//! entry over (at once for an unseated entry, at the end of its member's
+//! retirement with the cause [`MemberRetirementCause::HostAdopted`] for a
+//! seated one) and ends the entry, not the identity; the mob's destroy and
+//! the mob's reset.
 //! An unseated roster-owned entry is not journaled: after a restart, the next
 //! apply declares it again.
 //!
@@ -48,7 +54,10 @@
 //! unlisted or removed entry's retirement: `retirement_ends_identity`) and
 //! the mob's reset, which ends every identity the mob held, read MobMachine's
 //! state before their step. A destroy needs nothing: the next create mints a
-//! new incarnation, whose identities hold none of the old grants.
+//! new incarnation, whose identities hold none of the old grants. A host's
+//! adoption ends no identity: the identity continues under the host's intent
+//! and keeps its grants, so the takeover names no end, and the terminal of a
+//! `HostAdopted` retirement keeps the identity.
 //!
 //! A created entry ([`IdentityEntryOrigin::Created`]) has its desired record
 //! in the mob's identity store: its created entry row. Every start recovers
@@ -270,6 +279,14 @@ pub enum MemberRetirementCause {
     /// ([`super::MobHandle::archive_identity`]): the end of the retirement
     /// leaves the entry unseated, archived, on its archived session.
     Archived,
+    /// A host's identity intent adopted the identity
+    /// ([`super::MobHandle::adopt_member_identity_declaration`]) and took its
+    /// declared entry over: the end of the retirement ends the entry, and
+    /// the identity reconciler materializes the member again under the
+    /// host's intent, as no entry. The adoption ends the identity's entry,
+    /// not the identity: the identity continues under the host's intent and
+    /// keeps its scoped tool grants.
+    HostAdopted,
 }
 
 impl MemberRetirementCause {
@@ -279,6 +296,7 @@ impl MemberRetirementCause {
             Self::Unlisted => "unlisted",
             Self::Removed => "removed",
             Self::Archived => "archived",
+            Self::HostAdopted => "host_adopted",
         }
     }
 
@@ -291,6 +309,7 @@ impl MemberRetirementCause {
             "unlisted" => Some(Self::Unlisted),
             "removed" => Some(Self::Removed),
             "archived" => Some(Self::Archived),
+            "host_adopted" => Some(Self::HostAdopted),
             _ => None,
         }
     }
@@ -1022,6 +1041,10 @@ pub enum MemberLifecycleEvent {
 pub struct MemberLifecycleRecord {
     /// The event's journal cursor.
     pub cursor: MobJournalCursor,
+    /// When the event was appended to the journal ([`MobEvent::timestamp`]):
+    /// stored with the event, so a later read of the journal reads the same
+    /// time again.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
     /// The lifecycle fact.
     pub event: MemberLifecycleEvent,
 }
@@ -1434,6 +1457,7 @@ pub(crate) fn member_lifecycle_page(
         if let Some(lifecycle) = member_lifecycle_event(&event.kind) {
             records.push(MemberLifecycleRecord {
                 cursor: MobJournalCursor::new(event.cursor),
+                timestamp: event.timestamp,
                 event: lifecycle,
             });
         }
@@ -1503,6 +1527,19 @@ impl LegacyMemberObservation {
             ..Self::default()
         }
     }
+}
+
+/// The legacy adoption's observation of one listed member, as the declared
+/// apply's adoption decided on it: the generation of the member's
+/// incarnation and the legacy marks on that incarnation's spawn row. The
+/// identity's declaration carries it (`DeclareIdentityEntry`): a candidate
+/// composition adopts nothing, and MobMachine decides the verdict it
+/// reports an authoritative composition would give on the basis that
+/// composition's adoption of the member gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObservedLegacyMember {
+    pub(crate) generation: crate::ids::Generation,
+    pub(crate) marks: LegacyRosterMarks,
 }
 
 /// The shell's raw observation of a legacy roster member: whether the spawn
@@ -1602,11 +1639,12 @@ pub(crate) fn machine_entry_origin(
 /// it, read from `state`, MobMachine's state before the step that writes the
 /// row: [`MemberRetirementCause::Unlisted`] while the declared apply's seal,
 /// or the one-entry unlist, marks the identity's entry
-/// (`identity_entry_retiring`). Either marks only a member whose retirement
-/// has not started and whose spawn is not in flight, and the seal never
-/// drops the mark of one whose retirement has, so the
-/// start row and the end's row read the same mark, and the end of a marked
-/// retirement ends the entry. The one reader of the mark for the journal:
+/// (`identity_entry_retiring`), and [`MemberRetirementCause::HostAdopted`]
+/// while a host's adoption takes it over (`identity_entry_adopting`). Each
+/// marks only a member whose retirement has not started and whose spawn is
+/// not in flight, and nothing drops the mark of one whose retirement has, so
+/// the start row and the end's row read the same mark, and the end of a
+/// marked retirement ends the entry. The one reader of the marks for the journal:
 /// the start row and the plain terminal row read it here. A rotation's
 /// terminal keeps the identity's standing and records no cause.
 pub(crate) fn stored_retirement_cause(
@@ -1616,6 +1654,8 @@ pub(crate) fn stored_retirement_cause(
     let identity = mob_dsl::AgentIdentity::from_domain(identity);
     if state.identity_entry_retiring.contains(&identity) {
         Some(MemberRetirementCause::Unlisted)
+    } else if state.identity_entry_adopting.contains(&identity) {
+        Some(MemberRetirementCause::HostAdopted)
     } else if state.identity_entry_removing.contains(&identity) {
         Some(MemberRetirementCause::Removed)
     } else if state.identity_entry_archiving.contains(&identity) {
@@ -2328,21 +2368,28 @@ mod tests {
         assert!(!census.is_complete());
     }
 
-    /// A retirement cause round-trips through its stored token, and a token
-    /// this build does not know reads as no cause.
+    /// Every retirement cause round-trips through its stored token, and a
+    /// token this build does not know reads as no cause: the reading a
+    /// release that predates a cause gives its rows (0.9.10 reads
+    /// `host_adopted` so, and replays the retirement as one the seal did not
+    /// start; see the upgrading guide's rollback to 0.9.10).
     #[test]
     fn a_retirement_cause_round_trips_through_its_stored_token() {
-        assert_eq!(MemberRetirementCause::Unlisted.as_stored(), "unlisted");
-        assert_eq!(
-            MemberRetirementCause::from_stored("unlisted"),
-            Some(MemberRetirementCause::Unlisted)
-        );
+        for (cause, token) in [
+            (MemberRetirementCause::Unlisted, "unlisted"),
+            (MemberRetirementCause::Removed, "removed"),
+            (MemberRetirementCause::Archived, "archived"),
+            (MemberRetirementCause::HostAdopted, "host_adopted"),
+        ] {
+            assert_eq!(cause.as_stored(), token);
+            assert_eq!(MemberRetirementCause::from_stored(token), Some(cause));
+        }
         assert_eq!(MemberRetirementCause::from_stored("a_later_cause"), None);
     }
 
     /// The lifecycle page keeps the mob's member lifecycle facts in journal
-    /// order and answers the cursor of the last event it read, a lifecycle
-    /// fact or not.
+    /// order, each with the time its event was appended, and answers the
+    /// cursor of the last event it read, a lifecycle fact or not.
     #[test]
     fn the_lifecycle_page_keeps_the_mobs_lifecycle_facts() {
         let mob = MobId::from("lifecycle-mob");
@@ -2356,9 +2403,14 @@ mod tests {
             ProfileName::from("worker"),
         )
         .with_identity_entry(Some(IdentityEntryOrigin::Declared));
+        // Each event appended at its own time: the page carries it.
+        let appended_at = |cursor: u64| {
+            chrono::DateTime::from_timestamp_millis(1_790_000_000_000 + cursor as i64 * 1_000)
+                .expect("a representable time")
+        };
         let event = |cursor: u64, mob_id: &MobId, kind: MobEventKind| MobEvent {
             cursor,
-            timestamp: chrono::Utc::now(),
+            timestamp: appended_at(cursor),
             mob_id: mob_id.clone(),
             kind,
         };
@@ -2383,9 +2435,13 @@ mod tests {
         assert_eq!(
             page.records
                 .iter()
-                .map(|record| record.cursor)
+                .map(|record| (record.cursor, record.timestamp))
                 .collect::<Vec<_>>(),
-            vec![MobJournalCursor::new(3), MobJournalCursor::new(6)]
+            vec![
+                (MobJournalCursor::new(3), appended_at(3)),
+                (MobJournalCursor::new(6), appended_at(6))
+            ],
+            "each record carries its event's cursor and the time it was appended"
         );
         assert!(matches!(
             &page.records[0].event,

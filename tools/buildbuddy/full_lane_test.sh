@@ -410,7 +410,12 @@ case "${lane}" in
   security-audit)
     configure_rust "${host_rust_toolchain}"
     configure_cargo_deny
+    # `make audit`'s three graphs: the workspace's default features, Meta's
+    # (meta/deny.toml, every Meta feature) and Connect's shipped features.
     "${CARGO_DENY}" check
+    "${CARGO_DENY}" --manifest-path meta/crates/meerkat-meta/Cargo.toml check
+    "${CARGO_DENY}" --manifest-path connect/crates/meerkat-connect/Cargo.toml \
+      --features console,toolkit-mobkit/native-host check
     ;;
   # The Native unit and integration-fast lanes: the same nextest invocations
   # scripts/pre-push-unit.sh runs (default features, kind(lib) for units,

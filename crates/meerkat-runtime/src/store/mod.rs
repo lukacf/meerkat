@@ -3009,6 +3009,20 @@ pub enum RuntimeStoreError {
         /// Why the realm was poisoned.
         cause: String,
     },
+    /// A host store write stopped settling its batch when the self-fence
+    /// window of the fence token the batch carries closed: the host store
+    /// sends no batch past that window, since that token's lease at the
+    /// store may have ended by then. The batch may or may not have landed.
+    /// The scopes it touched are poisoned: a later call that needs one of
+    /// them is refused ([`Self::ScopeRefused`]) until the realm is reopened,
+    /// and the reopened realm shows the batch if it landed. The realm keeps
+    /// its fence.
+    #[error("Store write left unsettled when its fence window closed: {cause}")]
+    UnsettledAtFenceWindow {
+        /// The batch's account: its token, the attempts sent and the last
+        /// answer.
+        cause: String,
+    },
 }
 
 impl RuntimeStoreError {
@@ -10266,6 +10280,26 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "list_runtimes_with_recovery_work".into(),
         ))
+    }
+
+    /// Whether one runtime's durable state holds recovery work, by
+    /// the predicate [`Self::list_runtimes_with_recovery_work`] applies: the
+    /// per-runtime read a host asks of one session it holds dormant
+    /// ([`crate::MeerkatMachine::session_work_state`]). It loads no runtime
+    /// body. A runtime the store never held holds none.
+    ///
+    /// The default answers through the store-wide scan, so a store or a
+    /// decorator that implements the scan answers this too, and one that
+    /// does not answers [`RuntimeStoreError::Unsupported`]. A store answers
+    /// it for the one runtime when it can, with the same predicate.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        Ok(self
+            .list_runtimes_with_recovery_work()
+            .await?
+            .contains(runtime_id))
     }
 
     /// The store's durable delivery generation (#1813): incremented in the

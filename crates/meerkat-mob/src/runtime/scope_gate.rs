@@ -97,6 +97,9 @@ impl MobCommand {
             | Self::SpawnAttachedForkedParticipant { .. }
             // Releasing a host's run-start hold lets the member start runs.
             | Self::ReleaseMemberRunStarts { .. }
+            // Retrying a build preparation the host asked to retry lets the
+            // member's next wake be built.
+            | Self::ResolveMemberBuildPreparation { .. }
             // A dormant seat creates members (and spawns the fresh ones that
             // owe a kickoff): the authority class of a spawn.
             | Self::PlanDormantSeats { .. }
@@ -117,6 +120,8 @@ impl MobCommand {
             | Self::ForceCancel { .. }
             | Self::HardCancelMember { .. }
             | Self::StopMemberRun { .. }
+            // Settling a member's retained run ends that run's work.
+            | Self::SettleMemberRetainedRun { .. }
             // Revoking a capability terminalizes outstanding delegated work
             // authority without retiring any member.
             | Self::RevokeForkedParticipant { .. }
@@ -246,6 +251,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
             // The release of a held member is the actor's own self-send.
@@ -347,6 +353,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -450,7 +457,8 @@ impl MobCommand {
             | Self::ReleaseMemberRunStarts { agent_identity, .. }
             | Self::ForceCancel { agent_identity, .. }
             | Self::HardCancelMember { agent_identity, .. }
-            | Self::StopMemberRun { agent_identity, .. } => {
+            | Self::StopMemberRun { agent_identity, .. }
+            | Self::SettleMemberRetainedRun { agent_identity, .. } => {
                 AgentLaneAdmission::Members(vec![agent_identity])
             }
             Self::CancelAllWork { runtime_id, .. } => {
@@ -488,7 +496,9 @@ impl MobCommand {
             | Self::OpenDeclaredApply { .. }
             // Operator instructions are the host's; no agent writes them.
             | Self::SetOperatorInstruction { .. }
-            | Self::RevokeOperatorInstruction { .. } => AgentLaneAdmission::HostOnly,
+            | Self::RevokeOperatorInstruction { .. }
+            // The build preparation the host asked to retry is the host's.
+            | Self::ResolveMemberBuildPreparation { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -558,6 +568,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
@@ -647,6 +658,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -703,6 +715,7 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
@@ -755,6 +768,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ReleaseMemberRunStarts { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveMemberBuildPreparation { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::PlanDormantSeats { reply_tx, .. } => {
@@ -848,6 +864,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::StopMemberRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::SettleMemberRetainedRun { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {
@@ -999,6 +1018,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]

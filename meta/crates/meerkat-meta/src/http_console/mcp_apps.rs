@@ -889,7 +889,8 @@ mcp_apps_sandbox_url = " "
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let scope = owner
             .materialize(&identity)
             .await?
@@ -990,7 +991,8 @@ mcp_apps_sandbox_url = " "
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let scope = owner
             .materialize(&identity)
             .await?

@@ -374,8 +374,8 @@ pub enum MemberWakeRefusal {
     LifecycleOriginFenced,
     /// The mob is a candidate composition, which never materializes members.
     NonAuthoritativeComposition,
-    /// The member's host has preparation pending for it (a first-boot row,
-    /// or its build preparation asked to be retried).
+    /// The member's host has preparation pending for it: a first-boot row
+    /// it has not carried out, or a role move it has not declared.
     HostPreparationPending,
     /// The member's restore could not proceed now and keeps its authority:
     /// its durable resume gate was unavailable, a lifecycle operation on its
@@ -392,6 +392,14 @@ pub enum MemberWakeRefusal {
     AdmissionClosed,
     /// The mob's actor exited while the wake waited.
     MobUnavailable,
+    /// The member's host asked to retry its build preparation
+    /// ([`crate::MemberBuildPreparationRefusal::Retryable`]): its wakes are
+    /// refused until the host retries it
+    /// ([`crate::MobHandle::resolve_member_build_preparation`]) or the mob's
+    /// own retry timer does. On the wire (its token, the peer-message
+    /// refusal) it is `host_preparation_pending`, as before.
+    #[serde(rename = "host_preparation_pending", skip_deserializing)]
+    BuildPreparationRetry,
 }
 
 impl MemberWakeRefusal {
@@ -401,6 +409,7 @@ impl MemberWakeRefusal {
         match self {
             Self::MobNotRunning
             | Self::HostPreparationPending
+            | Self::BuildPreparationRetry
             | Self::ResumeGateUnavailable
             | Self::WakeTimedOut
             | Self::AdmissionClosed
@@ -420,7 +429,9 @@ impl MemberWakeRefusal {
             Self::MobNotRunning => "mob_not_running",
             Self::LifecycleOriginFenced => "lifecycle_origin_fenced",
             Self::NonAuthoritativeComposition => "non_authoritative_composition",
-            Self::HostPreparationPending => "host_preparation_pending",
+            Self::HostPreparationPending | Self::BuildPreparationRetry => {
+                "host_preparation_pending"
+            }
             Self::ResumeGateUnavailable => "resume_gate_unavailable",
             Self::WakeTimedOut => "wake_timed_out",
             Self::AdmissionClosed => "admission_closed",
@@ -437,7 +448,9 @@ impl MemberWakeRefusal {
             Self::MobNotRunning => PeerWakeRefusal::MobNotRunning,
             Self::LifecycleOriginFenced => PeerWakeRefusal::LifecycleOriginFenced,
             Self::NonAuthoritativeComposition => PeerWakeRefusal::NonAuthoritativeComposition,
-            Self::HostPreparationPending => PeerWakeRefusal::HostPreparationPending,
+            Self::HostPreparationPending | Self::BuildPreparationRetry => {
+                PeerWakeRefusal::HostPreparationPending
+            }
             Self::ResumeGateUnavailable => PeerWakeRefusal::ResumeGateUnavailable,
             Self::WakeTimedOut => PeerWakeRefusal::WakeTimedOut,
             Self::AdmissionClosed => PeerWakeRefusal::AdmissionClosed,
@@ -940,6 +953,15 @@ pub enum MobError {
     /// evidence): the session is intact and withheld, and the hold class says
     /// what clears it. Hosts classify on it (or on
     /// [`MobError::durable_resume_hold`]) instead of parsing `reason`.
+    ///
+    /// `cause_data` is the structured data of the failure that broke the
+    /// restore ([`MobError::structured_data`] of it: a session builder's
+    /// typed refusal of the member's build, a provider-auth refusal), when it
+    /// had some. Every later answer for the Broken member carries the same
+    /// data, so a host in the same process classifies the failure by its
+    /// data, never by `reason`. It is this Rust error's only: the RPC, REST
+    /// and MCP surfaces do not project it, and a wire client sees the
+    /// error's kind alone. `None` for a failure without structured data.
     #[error(
         "member {member_id} failed to restore {}: {reason}",
         format_member_restore_target(.session_id.as_ref())
@@ -949,6 +971,7 @@ pub enum MobError {
         session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        cause_data: Option<serde_json::Value>,
     },
 
     /// Member `member_id` is seated but was not materialized in this
@@ -1973,9 +1996,10 @@ pub enum MobError {
         input_id: meerkat_core::InputId,
     },
 
-    /// An input a graceful Shutdown kept queued was older than its requeue
-    /// bound when the mob's next start recovered it, so it ended without
-    /// running. Resubmitting it is now correct.
+    /// A graceful Shutdown kept this input queued, and more than its requeue
+    /// bound had passed since that Shutdown when the mob's next start
+    /// recovered it, so it ended without running. Resubmitting it is now
+    /// correct.
     #[error(
         "input {input_id} in session {session_id} was requeued across a stop but expired before it ran; resubmit it"
     )]
@@ -2805,6 +2829,23 @@ impl MobError {
         data
     }
 
+    /// The structured data a member's restore failure keeps of this error,
+    /// the failure that broke the restore: the cause data a restore failure
+    /// already carries (read through the shared failure wrappers), and
+    /// otherwise this error's own [`Self::structured_data`]. A step that
+    /// records a restore failure for an error a member's own restore
+    /// answered keeps that restore's cause, which `structured_data` of a
+    /// restore failure (none without a hold) would drop.
+    pub(crate) fn restore_cause_data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::MemberRestoreFailed { cause_data, .. } => cause_data.clone(),
+            Self::SharedLifecycleFailure(inner) | Self::SharedRetirementFailure(inner) => {
+                inner.restore_cause_data()
+            }
+            _ => self.structured_data(),
+        }
+    }
+
     /// Structured data carried by an underlying domain error.
     ///
     /// Session materialization failures use this to preserve typed
@@ -3383,6 +3424,7 @@ impl MobError {
                         meerkat_contracts::ErrorCode::CapabilityUnavailable
                     }
                     MemberWakeRefusal::HostPreparationPending
+                    | MemberWakeRefusal::BuildPreparationRetry
                     | MemberWakeRefusal::ResumeGateUnavailable
                     | MemberWakeRefusal::WakeTimedOut
                     | MemberWakeRefusal::AdmissionClosed
@@ -4909,6 +4951,7 @@ mod tests {
                 session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
                 hold: None,
+                cause_data: None,
             },
             MobError::MemberStartupRecoveryFailed {
                 member_id: AgentIdentity::from("m"),

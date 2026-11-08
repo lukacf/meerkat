@@ -154,6 +154,9 @@ struct ReviewingHost {
     budget: Arc<Mutex<Option<Duration>>>,
     /// The input id each bind was handed, in order.
     ids: Arc<Mutex<Vec<meerkat_core::lifecycle::InputId>>>,
+    /// The injected context each bind was handed (the sender label row), in
+    /// order.
+    injected: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl ReviewingHost {
@@ -172,6 +175,7 @@ impl ReviewingHost {
             held: Arc::default(),
             budget: Arc::default(),
             ids: Arc::default(),
+            injected: Arc::default(),
         })
     }
 
@@ -223,6 +227,7 @@ impl ConsoleGovernedIngress for ReviewingHost {
             held: Arc::clone(&self.held),
             budget: *self.budget.lock().unwrap(),
             ids: Arc::clone(&self.ids),
+            injected: Arc::clone(&self.injected),
         }))
     }
 }
@@ -237,6 +242,22 @@ struct ReviewedBinder {
     held: Arc<AtomicBool>,
     budget: Option<Duration>,
     ids: Arc<Mutex<Vec<meerkat_core::lifecycle::InputId>>>,
+    injected: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+/// The injected context rows of a Console prompt, as text.
+fn injected_texts(input: &meerkat_runtime::Input) -> Vec<String> {
+    match input {
+        meerkat_runtime::Input::Prompt(prompt) => prompt
+            .injected_context
+            .iter()
+            .map(|row| match row {
+                ContentInput::Text(text) => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect(),
+        _ => vec!["not a prompt".to_string()],
+    }
 }
 
 #[async_trait::async_trait]
@@ -247,6 +268,7 @@ impl GovernedInputBinder for ReviewedBinder {
         input: meerkat_runtime::Input,
     ) -> Result<BoundGovernedInput, crate::identity_first::GovernedBindError> {
         self.ids.lock().unwrap().push(input.id().clone());
+        self.injected.lock().unwrap().push(injected_texts(&input));
         if self.held.load(Ordering::SeqCst) {
             let header = input.header();
             self.seen.lock().unwrap().push(SeenAtBind {
@@ -369,9 +391,21 @@ async fn send(
     host: &Arc<ReviewingHost>,
     request: ConsoleSendRequest,
 ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
+    send_as(aggregator, runtime, host, request, None).await
+}
+
+/// [`send`] by the Console caller `sender`, which the send's frame records.
+async fn send_as(
+    aggregator: &MetaConsoleAggregator,
+    runtime: &Arc<IdentityRuntime>,
+    host: &Arc<ReviewingHost>,
+    request: ConsoleSendRequest,
+    sender: Option<crate::console_aggregator::ConsoleSender>,
+) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
     let governance = super::ConsoleSendGovernance {
         ingress: Some(host.clone()),
         human: Some(super::console_human_input_tests::current_console_human()),
+        sender,
         ..Default::default()
     };
     super::console_send_governed_with_identity_first_fallback(
@@ -782,6 +816,95 @@ async fn console_human_governed_send_held_past_its_budget_is_held_then_replayed_
             .iter()
             .all(|seen| seen.input_key == stock_key(&accepted)),
         "every bind saw the send's own key"
+    );
+}
+
+/// A Console caller who signed in as `name`: their requester and the sender
+/// label a send of theirs records.
+fn console_sender(name: &str) -> crate::console_aggregator::ConsoleSender {
+    crate::console_aggregator::ConsoleSender {
+        kind: crate::console_aggregator::ConsoleActorKind::Person,
+        assurance: crate::console_aggregator::ConsoleActorKind::Person.assurance(),
+        display_name: Some(format!("{name}@example.test")),
+        caller_scope: format!("{name}-caller-scope"),
+        requester: Some(principal(name)),
+        model_label: Some(format!("Message from {name}@example.test")),
+    }
+}
+
+/// A held governed send replayed by another caller of its scope is
+/// dispatched again as the send its frame recorded: the same input id, and
+/// the sender label of the caller the frame recorded as the input's
+/// injected context, byte for byte, never the replaying caller's.
+///
+/// RED against a held-send redispatch that carries the live caller's
+/// attribution: the replay's bind is handed the replaying caller's label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_send_replayed_by_another_caller_carries_the_sender_its_frame_recorded() {
+    let fixture = Arc::new(Fixture::new().await);
+    let (runtime, _identity) = governed_identity_runtime(&fixture).await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "held-sender"));
+    host.hold(HOLD_BUDGET);
+    let recorded_label = vec!["Message from alice@example.test".to_string()];
+
+    let accepted = send_as(
+        &aggregator,
+        &runtime,
+        &host,
+        request("held-sender", HUMAN),
+        Some(console_sender("alice")),
+    )
+    .await
+    .expect("accepted for the verified human");
+    let held = answered_frame(&aggregator, &accepted).await;
+    assert_eq!(held.status, ConsoleFrameStatus::Accepted, "{held:?}");
+    assert!(held.payload.get("delivery_hold").is_some(), "{held:?}");
+    let held_binds = bind_count(&host);
+    assert!(held_binds >= 1, "the held dispatch bound");
+    assert!(
+        host.injected
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|seen| *seen == recorded_label),
+        "the held dispatch carried its sender's label: {:?}",
+        host.injected.lock().unwrap()
+    );
+
+    // The source clears; another caller of the send's scope sends the same
+    // key again.
+    host.release();
+    let replayed = send_as(
+        &aggregator,
+        &runtime,
+        &host,
+        request("held-sender", HUMAN),
+        Some(console_sender("mallory")),
+    )
+    .await
+    .expect("the replay is accepted");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered
+    );
+    let admitted = host.admitted.lock().unwrap().clone();
+    assert_eq!(admitted.len(), 1, "admitted once: {admitted:?}");
+    let ids = host.ids.lock().unwrap().clone();
+    assert!(
+        ids.len() > held_binds && ids.iter().all(|id| *id == ids[0]),
+        "the redispatch was handed the held send's input id: {ids:?}"
+    );
+    assert_eq!(admitted[0].input_id, ids[0]);
+    let injected = host.injected.lock().unwrap().clone();
+    assert_eq!(injected.len(), ids.len());
+    assert!(
+        injected[held_binds..]
+            .iter()
+            .all(|seen| *seen == recorded_label),
+        "the redispatched input carries the label its frame recorded, never the replaying \
+         caller's: {injected:?}"
     );
 }
 

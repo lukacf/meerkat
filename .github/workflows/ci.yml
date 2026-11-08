@@ -1777,6 +1777,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
+      # A row builds up to about 50 test binaries, each against the whole
+      # workspace, and three rows of the 40 push runs before 2026-11-07 ran
+      # the runner's root disk out of space ("No space left on device"; the
+      # runner died with the row's step unfinished). No step here uses these
+      # preinstalled toolchains; removing them takes the free root disk from
+      # 86 GB to 104 GB (Meta CI's jobs, which free it the same way).
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
 
@@ -1883,6 +1895,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # As in the first wave: the runner's root disk is the limit.
+      - name: Free runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust-ci
@@ -3154,13 +3173,26 @@ jobs:
           PRODUCT: ${{ matrix.product }}
         run: echo "::warning title=Published floor::${PRODUCT} is not releasable against its published dependencies (advisory here; required on release/${PRODUCT}-* and at its release)."
 
+      # The floor compiles the product's published dependency graph in a
+      # scratch workspace whose objects only earlier floor runs cached: about
+      # 150 s when they did, 1529 to 2513 s when a new release or lock entry
+      # left them cold. The statistics name the hit rate of this run.
+      - name: Report the floor's sccache statistics
+        if: ${{ always() }}
+        # Diagnostics can never fail a lane.
+        continue-on-error: true
+        run: sccache --show-stats
+
       - name: Upload the floor report
         if: ${{ always() }}
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: published-floor-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+          path: |
+            ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+            ${{ runner.temp }}/floor-${{ matrix.product }}/logs/
+            /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 7
 

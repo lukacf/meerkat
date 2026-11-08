@@ -51,16 +51,17 @@ name: Nightly
 #        release-packaging (143-304 min) > meta-docs-lag (2)
 #        e2e-system (47-360) > sdk-web (4-29) > audit (1) >
 #          machine-verify-deep (3-8)
-#        feature-matrix (170-267) > workspace-int (134-180)
+#        feature-matrix (170-267) > workspace-int (134-240)
 #        release-stack-budget (86-148) > minimal-and-modularity (13-72) >
 #          e2e-fast (3-34) > sdk-host (3-52)
 #        machine-verify (30-43) > workspace-unit (117-173) > clippy-full
-#          (30-63) > dense-topology (24-31) > wasm-contract (4-26)
+#          (30-63) > dense-topology (24-70) > wasm-contract (4-26)
 # Minutes are the range over the 2026-11-01 to 11-07 runs, a job that ran
 # out of time counted at its limit and a run that lost its runner left
 # out; most jobs swing several-fold from night to night. machine-verify's
-# and workspace-unit's are estimates for their current settings. The
-# longest chain, feature-matrix > workspace-int, takes up to about seven
+# and workspace-unit's are estimates for their current settings, and
+# workspace-int's and dense-topology's upper ends are their limits. The
+# longest chain, feature-matrix > workspace-int, takes up to about eight
 # and a half hours, and nightly took 4 h 46 min to 7 h 23 min. A new job
 # joins the shortest chain; a new chain is a new slot.
 #
@@ -104,6 +105,16 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (ci.yml's lanes do the same). sccache's idle clock
+  # restarts only on a new compile request, and at the default 600 s the
+  # server exits under a compile still running (it waits 10 s for it): a
+  # crate whose rustc ran that long with nothing else compiling was cut off
+  # and compiled again from the start without the cache ("The server looks
+  # like it shut down unexpectedly, compiling locally instead"). The system
+  # e2e lane printed that 90 times on 2026-11-07 and compiled for 343 of its
+  # 346.6 minutes, and 36 times on 11-04, when it ran out of its 360; it
+  # took 184 and 201 minutes in all on 10-28 and 11-03, which printed none.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # A failed sccache install never fails a job either: each Setup sccache
   # step continues on error (so does the action's post step, which reads
   # the stats), and the step after it then sets an empty RUSTC_WRAPPER,
@@ -177,8 +188,13 @@ jobs:
     needs: feature-matrix
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
-    # Two Cargo jobs build for up to about twice as long as four.
-    timeout-minutes: 180
+    # Two Cargo jobs build for up to about twice as long as four. On
+    # 2026-11-07 `make test-int` compiled for 79 minutes and ran its 23968
+    # tests in 81, all passing, then ran out of the former 180 minutes 19
+    # minutes into the HeadCanonical kill window's own build (a feature
+    # graph of its own, meerkat-mob with test-support), which still had
+    # meerkat-runtime and meerkat-mob to compile.
+    timeout-minutes: 240
     env:
       RUSTC_WRAPPER: sccache
       # At four Cargo jobs the 16 GB runner lost this job mid-build (exit 143

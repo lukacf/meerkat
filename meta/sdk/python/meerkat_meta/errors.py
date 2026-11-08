@@ -71,6 +71,50 @@ SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: frozenset[str] = frozenset(
 # (JSON-RPC invalid params, ``-32602``); nothing was written. The error data is
 # ``{"kind": TRANSCRIPT_REVISION_CONFLICT_KIND, "expected", "actual"}``.
 TRANSCRIPT_REVISION_CONFLICT_KIND: str = "transcript_revision_conflict"
+# ``meta/tool_grants/*`` refused a request (JSON-RPC invalid params,
+# ``-32602``); nothing was granted or revoked. The error data is
+# ``{"kind": TOOL_GRANT_REQUEST_REFUSED_KIND, "tool_grant_request_refusal": {"kind", ...}}``.
+TOOL_GRANT_REQUEST_REFUSED_KIND: str = "tool_grant_request_refused"
+# The grant request refusal kinds, a closed vocabulary: a new kind is a
+# breaking change.
+TOOL_GRANT_REQUEST_REFUSAL_KINDS: frozenset[str] = frozenset(
+    {
+        "subject_unknown",
+        "target_not_gated",
+        "server_not_installed",
+        "no_live_grant",
+        "invalid_wait",
+        "invalid_window",
+        "empty_target",
+        "not_found",
+        "invalid_decision_ref",
+        "invalid_page_limit",
+    }
+)
+# ``meta/realm_mcp/*`` refused a request (JSON-RPC invalid params,
+# ``-32602``); nothing was written. The error data is
+# ``{"kind": REALM_MCP_REFUSED_KIND, "realm_mcp_refusal": {"kind", ...}}``.
+REALM_MCP_REFUSED_KIND: str = "realm_mcp_refused"
+# The realm MCP refusal kinds, a closed vocabulary: a new kind is a breaking
+# change.
+REALM_MCP_REFUSAL_KINDS: frozenset[str] = frozenset(
+    {
+        "no_document",
+        "server_exists",
+        "server_not_found",
+        "generation_conflict",
+        "invalid_server",
+        "invalid_secret_update",
+        "definition_changed",
+        "still_current",
+    }
+)
+# The realm's document or its credential owner could not be held now, or
+# the launch's credential store did not open (``-32004``); nothing was
+# written.
+REALM_MCP_UNAVAILABLE_KIND: str = "realm_mcp_unavailable"
+# A realm MCP write began and its result is not known (``-32603``).
+REALM_MCP_OUTCOME_UNKNOWN_KIND: str = "realm_mcp_outcome_unknown"
 # The refusal kinds, a closed vocabulary: a new kind is a breaking change.
 FLOW_ROLE_TARGET_REFUSAL_KINDS: frozenset[str] = frozenset(
     {
@@ -750,6 +794,110 @@ class TranscriptRevisionConflictError(RpcError):
         )
         self.expected = _data_str(data, "expected")
         self.actual = _data_str(data, "actual")
+
+
+class ToolGrantRequestRefusedError(RpcError):
+    """Raised when a ``meta/tool_grants/*`` request was refused; nothing changed.
+
+    The gateway answers invalid params (``-32602``) with data ``kind``
+    ``"tool_grant_request_refused"``; both must match, and any other
+    ``-32602`` answer stays a plain :class:`RpcError`. ``refusal`` is
+    Meerkat's typed refusal: its ``kind`` is one of
+    :data:`TOOL_GRANT_REQUEST_REFUSAL_KINDS` (for example
+    ``subject_unknown``, ``target_not_gated``, ``invalid_window`` or
+    ``not_found`` with its ``grant_id``). ``refusal_kind`` is that ``kind``,
+    ``None`` when the gateway sent none.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            -32602,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        payload = data if isinstance(data, dict) else {}
+        refusal = payload.get("tool_grant_request_refusal")
+        self.refusal: dict[str, Any] = dict(refusal) if isinstance(refusal, dict) else {}
+        kind = self.refusal.get("kind")
+        self.refusal_kind: str | None = kind if isinstance(kind, str) else None
+
+
+class RealmMcpRefusedError(RpcError):
+    """Raised when a ``meta/realm_mcp/*`` request was refused; nothing was written.
+
+    The stdio gateway answers invalid params (``-32602``) with data ``kind``
+    ``"realm_mcp_refused"``; both must match, and any other ``-32602``
+    answer stays a plain :class:`RpcError`. ``refusal`` is the typed
+    refusal: its ``kind`` is one of :data:`REALM_MCP_REFUSAL_KINDS` (for
+    example ``generation_conflict`` with ``expected`` and ``current``, or
+    ``definition_changed``). ``refusal_kind`` is that ``kind``, ``None`` when
+    the gateway sent none. A secret value never appears in it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            -32602,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
+        payload = data if isinstance(data, dict) else {}
+        refusal = payload.get("realm_mcp_refusal")
+        self.refusal: dict[str, Any] = dict(refusal) if isinstance(refusal, dict) else {}
+        kind = self.refusal.get("kind")
+        self.refusal_kind: str | None = kind if isinstance(kind, str) else None
+
+
+class RealmMcpUnavailableError(CapabilityUnavailableError):
+    """Raised when a ``meta/realm_mcp/*`` write could not be made now.
+
+    The installation realm's config document or its credential owner could
+    not be held (retry), or the launch's provider credential store did not
+    open (the secret methods). Nothing was written. ``-32004`` with data
+    ``kind`` ``"realm_mcp_unavailable"``.
+    """
+
+
+class RealmMcpOutcomeUnknownError(RpcError):
+    """Raised when a ``meta/realm_mcp/*`` write began and its result is unknown.
+
+    Read ``meta/realm_mcp/servers`` again after an install; repeat the same
+    ``set_secret`` or ``remove_secret``, which settles it. ``-32603`` with
+    data ``kind`` ``"realm_mcp_outcome_unknown"``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str = "",
+        method: str = "",
+        data: Any | None = None,
+    ):
+        super().__init__(
+            -32603,
+            message,
+            request_id=request_id,
+            method=method,
+            data=data,
+        )
 
 
 class FlowRunIdempotencyConflictError(RpcError):

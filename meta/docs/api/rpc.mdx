@@ -286,7 +286,7 @@ errors. SDKs surface it on `RpcError.data`.
 | `-32044` | A mob announcement method on a gateway that did not enable mob announcements (see [Mob announcements](#mob-announcements-optional)). `MobAnnouncementsUnavailableError` in both SDKs. | `{kind: "mob_announcements_unavailable"}` |
 | `-32045` | Mob announcement conflict: a source key already bound to other content, a stale subscription or source revision, a collector step from a cursor version another step already moved, a reused operation id, a batch that moved. `AnnouncementConflictError` in both SDKs; a source's stale revision is `SourceStaleRevisionError` and a moved cursor `SourceVersionConflictError`, both carrying the source's current position. | `{kind: "announcement_conflict", existing}`, `{kind: "stale_revision", current_revision}` (a subscription), `{kind: "stale_revision", current_revision, current_version, generation, cursor}` (a source), `{kind: "source_version_conflict", current_version, cursor, state, revision}`, `{kind: "operation_reused"}` or `{kind: "batch_moved", current}` |
 | `-32046` | `meta/mob_announcements/subscriptions/put` start frontier outside a mob's announcements: older than what is retained, or beyond its head (a mob that has announced nothing yet is at head 0). `AnnouncementFrontierError` in both SDKs. | `{kind: "gap", mob_id, earliest_retained}` or `{kind: "frontier_beyond_head", mob_id, head}` |
-| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
+| `-32047` | Mob announcement typed refusal. `AnnouncementRefusedError` in both SDKs. | `{kind}`: `governed_runtime`, `unknown_member` (with `member`), `unusable_member`, `unusable_peer`, `subscription_cancelled`, `subscription_ended` (with `end`), `member_mismatch`, `unrelated_mob` (with `mob_id`; member tools only), `ambiguous_mob` (with `mob_id`, or `kept_route`), `child_member_limit` (with `limit`, and `mob_id` for the bound per mob), `native_unavailable`, `not_held` (with `batch_id`; see [Delivery handling](#delivery-handling)) or `candidate_launch` (a change on a candidate launch; see [Mob announcements](#mob-announcements-optional)). A candidate launch also answers `candidate_launch` for `meta/retire`, `meta/retire_member`, `meta/respawn`, `meta/respawn_member`, `meta/reset`, `meta/reset_all`, `meta/delete_identity`, `meta/reconcile_identity`, `meta/rediscover`, `meta/cross_mob/wire`, `meta/cross_mob/unwire`, `meta/cross_mob/wire_local`, `meta/cross_mob/unwire_local` and `meta/topology/apply`, whose stored roster and wiring are the authoritative launch's to change (`meta/reconcile_edges` answers a dry run instead), for `meta/gating/decide`, whose decision resumes the authoritative launch's work, for the methods that create a session (`meta/spawn_member`, `meta/ensure_member`, `meta/spawn_helper`, `meta/fork_helper`, `meta/attach_existing_session` and, on the Console, `meta/fork_member`), and for member input and member run control: `meta/send`, `meta/send_message`, `meta/interact`, `meta/dispatch`, `meta/delivery/send`, `meta/cross_mob/send`, `meta/run_flow`, `meta/reload_member`, `meta/identity/warm`, `meta/stop_member_run`, `meta/force_cancel_member`, `meta/compact_member`, `meta/bound_member_transcript`, `meta/prune_member_system_rows`, `meta/member_activate_instruction` and `meta/live/open`, and on the Console `meta/console/send`, `meta/console/voice/open`, `meta/console/recover_send` and the console schedule writes (`meta/schedule/create`, `meta/schedule/update`, `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete`); for the member declaration mutations `mob/adopt_member_identity_declaration` and `mob/apply_member_tool_declaration`; and for the operator changes, each of which writes state the authoritative launch reads, runs a tool or a host process, or sends: the WorkGraph writes (every `meta/workgraph/*` method that changes the graph), the scoped tool grant writes (`meta/tool_grants/grant` and `meta/tool_grants/revoke`), the realm MCP writes (`meta/realm_mcp/install`, `meta/realm_mcp/set_secret` and `meta/realm_mcp/remove_secret`), `meta/call_tool`, `meta/routing/routes/add`, `meta/routing/routes/delete`, `meta/memory/index`, `meta/memory/quarantine/decide`, `meta/agent_memory/remember`, `meta/agent_memory/update`, `meta/agent_memory/forget`, `meta/mob_labels/set`, `meta/mob_labels/delete`, `meta/run_labels/set`, `meta/run_labels/delete`, `meta/access/set`, `meta/access/enable`, `meta/access/rules/upsert`, `meta/access/rules/delete`, `meta/access/groups/set`, `meta/access/groups/delete`, `meta/console/revoke_sessions`, `meta/console/sign_out`, `meta/blob/upload`, `meta/cancel_flow`, `jobs/cancel`, `jobs/retry`, `monitors/start`, the live channel verbs (`meta/live/close`, `meta/live/refresh`, `meta/live/send_input`, `meta/live/commit_input`, `meta/live/interrupt`, `meta/live/truncate`, `meta/live/playback_complete`, `meta/live/replacement_required`, `meta/live/playback_owner/register`, `meta/live/playback_owner/revoke` and `live/webrtc/answer`), a `meta/mobpacks/deploy` with `execute`, a `meta/mobpacks/validate` with `rkat_validate`, a Flow Editor draft write (`meta/mobpacks/create`, `meta/mobpacks/save`, `meta/mobpacks/delete`, `meta/mobpacks/undo` and `meta/mobpacks/redo`) except to a `store_path` the caller names outside the state directory and the gateway home that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names, a `meta/session_store/bigquery` row insert, a `meta/gating/evaluate` of an R3 action that names an approval route (`approval_recipient` and `approval_channel`), every call passed through to a loaded module, and `meta/reconcile`. It answers on the stdio gateway and on `POST /console/rpc`, before anything is read or written; `POST /console/send`, `POST /console/send/recover` and `POST /console/mcp-apps/call-tool` answer HTTP `409` `candidate_launch` (see `mob_composition` in [SDK and gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)); for sources (see [Mob announcement sources](#mob-announcement-sources)) `source_paused`, `source_ended`, `principal_changed` (with `pinned_digest`, `offered_digest`), `baseline_required`, `stream_not_baselined` (with `streams`), `backfill_bound_exceeded` (with `remaining`, and `stream` for a stream's bound), `deletions_unobservable`, `topic_owned` and `topic_owned_by_source` (with `topic`, `source_id`), `source_identity_taken` (with `source_id`), `identity_immutable`, `principal_not_allowed` (with `principal_kind`), `audience_not_covered` and `no_direct_route` (with `source_id`, `topic`), `route_overlap` (with `source_id`, `member`), `route_conflict` (with `conflict: "conversation"`, `source_id`), `route_selector_unsupported` (with `selector`) or `source_limit` (with `limit`, and `mob_id`, `null` for the gateway's bound); for declarations (see [Mob announcement declarations](#mob-announcement-declarations)) `declaration_rollback` (with `applied`), `declaration_digest_conflict` (with `revision`), `role_template_limit` (with `limit`) or `subscription_id_taken` (with `subscription_id`) |
 | `-32048` | A mob announcement method names a subscription, delivery, source or mob that does not exist here. `AnnouncementNotFoundError` in both SDKs. | `{kind: "unknown_subscription"}`, `{kind: "unknown_delivery"}`, `{kind: "unknown_source"}` or `{kind: "unknown_mob", mobs}` |
 
 `meta/init` refuses the members' native realm and auth binding
@@ -2372,6 +2372,190 @@ state, or `{}` when the session holds no such input. The target checks are
 `error.data` `{"kind": "session_not_held_by_identity", "identity",
 "session_id"}`: the read is never a free session read. The console serves
 it as an identity read, behind the `agent.view` grant on the identity.
+
+---
+
+## Scoped tool grants
+
+A member's profile can gate tools (`[profiles.<name>.tools] grant_gated`,
+see [Mob profile tools](/reference/configuration#mob-profile-tools-profilestools)):
+each build of the member, a resume included, mounts the gated tools closed,
+and a call to a closed tool is refused `tool_grant_required` while the turn
+continues. A grant to the member's identity opens a gated tool, tool family or
+MCP server for a fixed window, across the member's respawns and the gateway's
+restarts, in the mob's running incarnation: a mob destroyed and created again
+under the same id holds none of the old grants. Meerkat keeps the grants, the
+gate and every check; Meta keeps no grant state.
+
+The methods serve the identities the gateway's identity runtime knows, on the
+stdio gateway (to its SDK host, the operator) and on `POST /console/rpc`.
+
+### `meta/tool_grants/grant`
+
+```json
+{
+  "identity": "agent-a",
+  "target": { "kind": "tool", "name": "datetime" },
+  "duration_ms": 600000,
+  "reason": "approved for the release check",
+  "decision_ref": "approval-7"
+}
+```
+
+- `target`: `{kind: "tool", name}`, `{kind: "family", family}` (a built-in
+  tool family; the grant opens the names the family has when it is issued)
+  or `{kind: "mcp_server", server, tools?}` (every tool the server provides,
+  or with `tools` only those named; a gated server the member's profile
+  configures connects at the member's next build). The gate the member's
+  next build resolves must name it: the member's own profile gate joined
+  with its role's current gate. A server is also gated when the gate's
+  `unconfigured_mcp_servers` is on and the member's profile does not
+  configure it.
+- Exactly one of `duration_ms` and `expires_at_ms` (UNIX ms) bounds the
+  grant, at most the gateway's maximum lifetime: 24 hours unless the launch
+  sets `runtime_options.tool_grants.max_lifetime_ms` (see
+  [SDK and Gateway runtime options](/reference/configuration#sdk-and-gateway-runtime-options)).
+  A grant's deadline never moves: to keep a tool open longer, issue a new
+  grant before the old one ends (both are listed as `active` until the old
+  deadline passes).
+- `decision_ref`: the host's own reference to the decision it made before
+  issuing, for example a person's approval in its records. Non-empty, at most
+  1024 bytes, no control character. Recorded in the grant's issuer as
+  attribution; nothing resolves or trusts it.
+
+Answers `{grant}`, Meerkat's `WireToolGrant`. The issuer is
+`{kind: "operator", caller?, decision_ref?}`: `caller` is the signed-in
+principal on the Console and absent for the stdio host. Meta's grant answers
+do not report `applies` or the gate yet: Meerkat's own `tool_grants/grant`
+and `tool_grants/list` report them, Meta's answers leave them out.
+
+A grant wakes nothing. It opens the tool at the member's next model request,
+and a revoke or the deadline closes it there and refuses the next call at
+once. When Core holds no member of the identity (its member was retired),
+the grant seats the identity first, as a delivery does: Core seats it
+Dormant, on its archived session or a fresh one, and builds nothing, and its
+first delivery builds it with the grant.
+
+The grant commits through the mob, which decides it against its live roster
+in order with the retirements that end an identity's grants: an identity no
+longer on the roster then (it retired, or a respawn is replacing its member)
+is `subject_unknown` and nothing is issued, and a retirement after the
+commit ends the grant. Retry a grant refused during a respawn once the
+respawn answers.
+
+### `meta/tool_grants/revoke`
+
+`{grant_id, reason?}` answers `{grant, changed}`. A revoke is idempotent:
+revoking a grant that already ended answers it as it stands with `changed`
+`false`. Only an identity grant of this gateway's mob is revoked; any other id
+is `not_found`, answered as an unknown id is. The `revoked` audit row names the
+Console's signed-in principal as its `actor` (none for the stdio host).
+
+### `meta/tool_grants/list`
+
+`{identity, include_ended?}` answers `{grants, unreadable?}`: the identity's
+active grants, every one whose deadline passed settled as `expired` first, and
+the ended ones too with `include_ended`. `unreadable` names a stored grant row
+this version cannot read; it opens nothing. A retired identity's grants stay
+readable.
+
+### `meta/tool_grants/audit`
+
+`{identity, after_sequence?, limit?}` answers one page of the identity's
+grant audit log, `{rows, unreadable?, next_sequence?}`: `granted` (with the
+issuer), `expired`, `revoked` and `refused` (a call refused for want of a
+grant). `limit` defaults to 100 and is capped at 1000; a full page names its
+last sequence as `next_sequence`.
+
+### Access
+
+On the Console, `agent.tool_grants.manage` on the identity gates grant and
+revoke (a revoke on the identity its grant names), and `agent.view` gates list
+and audit. A revoke tells a caller that may not view the grant's identity
+nothing: it answers `not_found` with the message an unknown grant id gets. A
+caller that may view the identity but not manage its grants is refused
+`-32030` naming it. A read-only Console refuses grant and revoke (`-32010`),
+and so does a candidate launch (`-32047` `candidate_launch`). The stdio gateway
+serves its host as the operator.
+
+### Refusals
+
+Every refusal of a request is `-32602` with
+`{kind: "tool_grant_request_refused", tool_grant_request_refusal: {kind, ...}}`
+(`ToolGrantRequestRefusedError` in both SDKs):
+
+| Kind | When |
+|------|------|
+| `subject_unknown` | No identity the gateway serves; an identity created at runtime (Meta's grant methods do not act on store-owned identities); an identity Core still holds no member of after the seat, one placed on a member host or bound to an external runtime, whose host creates its member at its first use; or an identity no longer on the mob's roster when the grant commits |
+| `target_not_gated` | The gate the member's next build resolves does not name the target |
+| `invalid_window` | Not exactly one of `duration_ms` and `expires_at_ms`, or a window that is past, empty or longer than the maximum lifetime |
+| `empty_target` | A target that names no tool or server, or an empty `tools` list |
+| `invalid_decision_ref` | A `decision_ref` that is empty, longer than 1024 bytes or holds a control character |
+| `not_found` | An unknown or unparseable grant id, a grant of another mob, or on the Console a grant of an identity the caller may not view, with its `grant_id` |
+| `invalid_page_limit` | An audit page `limit` of 0 |
+
+The refusal kinds are a closed vocabulary; the SDKs' list also holds
+`server_not_installed`, `no_live_grant` and `invalid_wait`, which these
+methods do not answer. Besides the refusals: a seat Core refuses answers the
+identity runtime's typed error, as a delivery to the identity does (for
+example `-32052`); `-32002` means two writers changed the grant row at once
+(repeat the call); `-32004` a runtime that keeps no grants; `-32603` a store
+fault.
+
+---
+
+## Realm MCP administration (stdio gateway)
+
+The stdio gateway serves its SDK host, as the operator, the installation
+realm's own MCP servers: the `[[tools.mcp_servers]]` of the realm's own config
+document (never the ones it inherits) and the service secrets of their stdio
+servers (`secret_env` slots), kept in the credential store of the launch's
+member factory (the one `runtime_options.provider_credentials_root` or the
+native host names, else the default store), where the members' launches read
+them. Each
+method is one call of the gateway's realm MCP installation, which the Rust
+`GatewayRealmMcpInstallation` serves a host composition too. The Console
+never serves these methods (`-32601`), and no agent tool, mob tool or callback
+reaches them.
+
+| Method | Params | Answer |
+|--------|--------|--------|
+| `meta/realm_mcp/servers` | `{}` | `{servers, generation}` |
+| `meta/realm_mcp/install` | `{server, expected_generation}` | `{generation}` |
+| `meta/realm_mcp/set_secret` | `{server, env, value}` | `{}` |
+| `meta/realm_mcp/remove_secret` | `{server, env, removal}` | `{}` |
+
+- `servers` lists the definitions and the document's generation. A
+  definition names its secret slots and holds no value.
+- `install` adds `server` (a definition, as `servers` lists one) only while
+  the document is still at `expected_generation` and lists no server of that
+  name, and answers the next generation.
+- `set_secret` stores `value` for slot `env` of `server`, the definition as
+  the host reviewed it: the value binds to exactly that definition, and is
+  refused `definition_changed` once the document no longer lists it. Setting
+  again replaces the value. `remove_secret` removes it: `removal` is
+  `"current"` (the document still lists exactly the definition) or
+  `"obsolete"` (cleanup after the definition was replaced or removed, refused
+  `still_current` while the document lists a definition that launches as this
+  one did).
+- A write is admitted while the stdio connection that sent it is open, checked
+  after the document's locks and the credential owner's exclusion,
+  immediately before the write; once the connection closed it is refused
+  `-32030` `access_denied` with `refusal: "not_authenticated"`. A candidate
+  launch refuses the writes (`-32047` `candidate_launch`) and serves
+  `servers`.
+- The value appears only in the `set_secret` request: no answer, error or log
+  line carries it, and a malformed `set_secret` is refused `-32602` without
+  quoting its request.
+
+Typed outcomes, by `error.data.kind` (nothing written unless marked):
+
+| Code | `data` | When |
+|------|--------|------|
+| `-32602` | `{kind: "realm_mcp_refused", realm_mcp_refusal: {kind, ...}}` | `no_document` (the realm has no config document of its own), `server_exists` and `server_not_found` (with `name`), `generation_conflict` (with `expected` and `current`), `invalid_server` (an environment reference, an access ceiling or a working directory Meerkat refuses), `invalid_secret_update`, `definition_changed`, `still_current` (with `name`). `RealmMcpRefusedError` in both SDKs; the kinds are a closed vocabulary |
+| `-32030` | `{kind: "access_denied", refusal}` | The stdio connection closed (`not_authenticated`) |
+| `-32004` | `{kind: "realm_mcp_unavailable"}` | The document or the credential owner could not be held now (retry), or the launch's provider credential store did not open (the secret methods). `RealmMcpUnavailableError` |
+| `-32603` | `{kind: "realm_mcp_outcome_unknown"}` | Written or not: the write began and its result is not known. Read `servers` again after `install`; repeat the same `set_secret` or `remove_secret`, which settles it. `RealmMcpOutcomeUnknownError` |
 
 ---
 

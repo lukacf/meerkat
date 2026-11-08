@@ -251,6 +251,49 @@ export const SYSTEM_ROW_PRUNE_REFUSAL_CAUSES: ReadonlySet<string> = new Set([
  * `{kind: TRANSCRIPT_REVISION_CONFLICT_KIND, expected, actual}`.
  */
 export const TRANSCRIPT_REVISION_CONFLICT_KIND = "transcript_revision_conflict" as const;
+/**
+ * `meta/tool_grants/*` refused a request (JSON-RPC invalid params, `-32602`);
+ * nothing was granted or revoked. The error data is
+ * `{kind: TOOL_GRANT_REQUEST_REFUSED_KIND, tool_grant_request_refusal: {kind, ...}}`.
+ */
+export const TOOL_GRANT_REQUEST_REFUSED_KIND = "tool_grant_request_refused" as const;
+/** The grant request refusal kinds, a closed vocabulary: a new kind is a breaking change. */
+export const TOOL_GRANT_REQUEST_REFUSAL_KINDS: ReadonlySet<string> = new Set([
+  "subject_unknown",
+  "target_not_gated",
+  "server_not_installed",
+  "no_live_grant",
+  "invalid_wait",
+  "invalid_window",
+  "empty_target",
+  "not_found",
+  "invalid_decision_ref",
+  "invalid_page_limit",
+]);
+/**
+ * `meta/realm_mcp/*` refused a request (JSON-RPC invalid params, `-32602`);
+ * nothing was written. The error data is
+ * `{kind: REALM_MCP_REFUSED_KIND, realm_mcp_refusal: {kind, ...}}`.
+ */
+export const REALM_MCP_REFUSED_KIND = "realm_mcp_refused" as const;
+/** The realm MCP refusal kinds, a closed vocabulary: a new kind is a breaking change. */
+export const REALM_MCP_REFUSAL_KINDS: ReadonlySet<string> = new Set([
+  "no_document",
+  "server_exists",
+  "server_not_found",
+  "generation_conflict",
+  "invalid_server",
+  "invalid_secret_update",
+  "definition_changed",
+  "still_current",
+]);
+/**
+ * The realm's document or its credential owner could not be held now, or the
+ * launch's credential store did not open (`-32004`); nothing was written.
+ */
+export const REALM_MCP_UNAVAILABLE_KIND = "realm_mcp_unavailable" as const;
+/** A realm MCP write began and its result is not known (`-32603`). */
+export const REALM_MCP_OUTCOME_UNKNOWN_KIND = "realm_mcp_outcome_unknown" as const;
 /** The refusal kinds, a closed vocabulary: a new kind is a breaking change. */
 export const FLOW_ROLE_TARGET_REFUSAL_KINDS: ReadonlySet<string> = new Set([
   "role_not_in_flow",
@@ -732,6 +775,114 @@ export class TranscriptRevisionConflictError extends RpcError {
         : {};
     this.expected = typeof payload.expected === "string" ? payload.expected : null;
     this.actual = typeof payload.actual === "string" ? payload.actual : null;
+  }
+}
+
+/**
+ * A `meta/tool_grants/*` request was refused; nothing changed.
+ *
+ * The gateway answers invalid params (`-32602`) with data `kind`
+ * `"tool_grant_request_refused"`; both must match, and any other `-32602`
+ * answer stays a plain {@link RpcError}. `refusal` is Meerkat's typed
+ * refusal: its `kind` is one of {@link TOOL_GRANT_REQUEST_REFUSAL_KINDS} (for
+ * example `subject_unknown`, `target_not_gated`, `invalid_window` or
+ * `not_found` with its `grant_id`). `refusalKind` is that `kind`, `null` when
+ * the gateway sent none.
+ */
+export class ToolGrantRequestRefusedError extends RpcError {
+  readonly refusal: Record<string, unknown>;
+  readonly refusalKind: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "ToolGrantRequestRefusedError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    const refusal = payload.tool_grant_request_refusal;
+    this.refusal =
+      typeof refusal === "object" && refusal !== null && !Array.isArray(refusal)
+        ? { ...(refusal as Record<string, unknown>) }
+        : {};
+    this.refusalKind = typeof this.refusal.kind === "string" ? this.refusal.kind : null;
+  }
+}
+
+/**
+ * A `meta/realm_mcp/*` request was refused; nothing was written.
+ *
+ * The stdio gateway answers invalid params (`-32602`) with data `kind`
+ * `"realm_mcp_refused"`; both must match, and any other `-32602` answer
+ * stays a plain {@link RpcError}. `refusal` is the typed refusal: its `kind`
+ * is one of {@link REALM_MCP_REFUSAL_KINDS} (for example
+ * `generation_conflict` with `expected` and `current`, or
+ * `definition_changed`). `refusalKind` is that `kind`, `null` when the
+ * gateway sent none. A secret value never appears in it.
+ */
+export class RealmMcpRefusedError extends RpcError {
+  readonly refusal: Record<string, unknown>;
+  readonly refusalKind: string | null;
+
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32602, message, requestId, method, data);
+    this.name = "RealmMcpRefusedError";
+    const payload =
+      typeof data === "object" && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)
+        : {};
+    const refusal = payload.realm_mcp_refusal;
+    this.refusal =
+      typeof refusal === "object" && refusal !== null && !Array.isArray(refusal)
+        ? { ...(refusal as Record<string, unknown>) }
+        : {};
+    this.refusalKind = typeof this.refusal.kind === "string" ? this.refusal.kind : null;
+  }
+}
+
+/**
+ * A `meta/realm_mcp/*` write could not be made now: the installation realm's
+ * config document or its credential owner could not be held (retry), or the
+ * launch's provider credential store did not open (the secret methods).
+ * Nothing was written. `-32004` with data `kind` `"realm_mcp_unavailable"`.
+ */
+export class RealmMcpUnavailableError extends CapabilityUnavailableError {
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(message, requestId, method, data);
+    this.name = "RealmMcpUnavailableError";
+  }
+}
+
+/**
+ * A `meta/realm_mcp/*` write began and its result is not known: read
+ * `meta/realm_mcp/servers` again after an install, and repeat the same
+ * `set_secret` or `remove_secret`, which settles it. `-32603` with data
+ * `kind` `"realm_mcp_outcome_unknown"`.
+ */
+export class RealmMcpOutcomeUnknownError extends RpcError {
+  constructor(
+    message: string,
+    requestId = "",
+    method = "",
+    data?: unknown,
+  ) {
+    super(-32603, message, requestId, method, data);
+    this.name = "RealmMcpOutcomeUnknownError";
   }
 }
 

@@ -4,6 +4,28 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `MetaRuntime.grant_tool(identity, *, tool=None, family=None,
+  duration_ms=None, expires_at_ms=None, reason=None, decision_ref=None)`,
+  `revoke_tool_grant(grant_id, *, reason=None)`,
+  `list_tool_grants(identity, *, include_ended=False)` and
+  `tool_grant_audit(identity, *, after_sequence=None, limit=None)` call
+  `meta/tool_grants/{grant, revoke, list, audit}`: the scoped tool grants of
+  the identities a gateway serves. A grant names exactly one of `tool` and
+  `family` (a `ValueError` otherwise, nothing sent). A refused request
+  raises `ToolGrantRequestRefusedError` (`refusal`, `refusal_kind`; the
+  constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
+  `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+- `MetaRuntime.realm_mcp_servers()`,
+  `realm_mcp_install(server, *, expected_generation)`,
+  `realm_mcp_set_secret(server, env, value)` and
+  `realm_mcp_remove_secret(server, env, *, removal="current")` call the stdio
+  gateway's `meta/realm_mcp/{servers, install, set_secret, remove_secret}`.
+  A removal other than `"current"` or `"obsolete"` is a `ValueError`, nothing
+  sent. The outcomes raise `RealmMcpRefusedError` (`refusal`, `refusal_kind`;
+  the closed `REALM_MCP_REFUSAL_KINDS`), `RealmMcpUnavailableError` (a
+  `CapabilityUnavailableError`) and `RealmMcpOutcomeUnknownError`; a secret
+  value appears in none of them and in no log record.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

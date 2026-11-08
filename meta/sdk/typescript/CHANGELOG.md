@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- `MetaRuntime.grantTool(identity, { tool | family, durationMs |
+  expiresAtMs, reason, decisionRef })` (options type `GrantToolOptions`),
+  `revokeToolGrant(grantId, { reason })`,
+  `listToolGrants(identity, { includeEnded })` and
+  `toolGrantAudit(identity, { afterSequence, limit })` call
+  `meta/tool_grants/{grant, revoke, list, audit}`: the scoped tool grants of
+  the identities a gateway serves. A grant names exactly one of `tool` and
+  `family` (a `TypeError` otherwise, nothing sent). A refused request
+  rejects with `ToolGrantRequestRefusedError` (`refusal`, `refusalKind`; the
+  constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
+  `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+- `MetaRuntime.realmMcpServers()`,
+  `realmMcpInstall(server, { expectedGeneration })`,
+  `realmMcpSetSecret(server, env, value)` and
+  `realmMcpRemoveSecret(server, env, { removal })` call the stdio gateway's
+  `meta/realm_mcp/{servers, install, set_secret, remove_secret}`. A removal
+  other than `"current"` or `"obsolete"` is a `TypeError`, nothing sent. The
+  outcomes reject with `RealmMcpRefusedError` (`refusal`, `refusalKind`; the
+  closed `REALM_MCP_REFUSAL_KINDS`), `RealmMcpUnavailableError` (a
+  `CapabilityUnavailableError`) and `RealmMcpOutcomeUnknownError`; a secret
+  value appears in none of them.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

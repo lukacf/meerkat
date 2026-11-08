@@ -225,9 +225,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Console changes accept `expected_caller_scope` (the `caller_scope` read
   from `meta/console/whoami`), and a change made for another caller is
   refused with `caller_changed`.
+
 - An access admin releases anyone's WorkGraph claim from the console. The
   release is bound to its revision, and the work graph's Released event
   records the admin and the claim released (`break_glass`).
+
+- A console side chat records who opened it: `meta/fork_member` writes the
+  caller's console principal (the one `meta/console/whoami` reports) into
+  the side chat's `side_chat_creator` label and answers it as `creator`
+  (`null` for an anonymous caller of an open console). The label counts
+  only on a side chat Meerkat's roster verifies; a `side_chat_creator`
+  label set any other way, or copied from the forked agent, is dropped on
+  every surface. It records the creator and grants nothing, and the
+  console shows it only to the creator and to the admins of an enforced
+  access policy.
+
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
+  change (a draft store write, a deploy with `execute`, a validation with
+  `rkat_validate`), a refusal included, writes a row naming the actor
+  (kind, principal, a person's verified issuer and subject, assurance and a
+  digest of the login, never the token), the method, its target
+  identifiers, the outcome and the owner's receipt; sends, voice and live
+  media are left out, and a request the console cannot authenticate writes
+  none. A row is bounded (at most 16 identifiers each way beyond the
+  change's known ones, which it keeps first, and 4 KiB in all) and says
+  when it left anything out (`truncated`), and the change and its row run
+  on the server, so a caller that goes away cuts neither short. A tool call
+  answered with an error after it reached the member's app is `failed`,
+  not `refused`. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), in two record sets each bounded by
+  count and age, the changes and the MCP app tool calls, so tool calls
+  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
+  and `console_tool_call_audit_limits`), and read with
+  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
+  `audit.view` access action. Its reads, and `meta/gating/audit`, report
+  `retention`: `durable` where the records survive a restart, `process`
+  where the gateway keeps them in memory. A read leaves out the rows that
+  name a member hidden from the reader by its private owner (another
+  person's private side chat, or a member one created).
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
+  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
+  gating state.
+- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
+  `supersede_by`, which write on behalf of a named author (the default
+  ignores the author and writes as `remember`, `forget` and `supersede`
+  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
+  who revoked.
 
 - The console experience's side chat rows carry `side_chat_audience`:
   `private_to_you`, `private_to_creator` (an access admin viewing another
@@ -365,53 +413,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A Console WorkGraph action acts on the revision its card or row showed,
   never on one read at the click; an action whose card showed none changes
   nothing, says so, and reads the item again.
-
-- A console side chat records who opened it: `meta/fork_member` writes the
-  caller's console principal (the one `meta/console/whoami` reports) into
-  the side chat's `side_chat_creator` label and answers it as `creator`
-  (`null` for an anonymous caller of an open console). The label counts
-  only on a side chat Meerkat's roster verifies; a `side_chat_creator`
-  label set any other way, or copied from the forked agent, is dropped on
-  every surface. It records the creator and grants nothing, and the
-  console shows it only to the creator and to the admins of an enforced
-  access policy.
-
-- A console audit log: each console change on `POST /console/rpc` and
-  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
-  change (a draft store write, a deploy with `execute`, a validation with
-  `rkat_validate`), a refusal included, writes a row naming the actor
-  (kind, principal, a person's verified issuer and subject, assurance and a
-  digest of the login, never the token), the method, its target
-  identifiers, the outcome and the owner's receipt; sends, voice and live
-  media are left out, and a request the console cannot authenticate writes
-  none. A row is bounded (at most 16 identifiers each way beyond the
-  change's known ones, which it keeps first, and 4 KiB in all) and says
-  when it left anything out (`truncated`), and the change and its row run
-  on the server, so a caller that goes away cuts neither short. A tool call
-  answered with an error after it reached the member's app is `failed`,
-  not `refused`. The log is kept in the realm's metadata store (a console
-  without a local runtime keeps none), in two record sets each bounded by
-  count and age, the changes and the MCP app tool calls, so tool calls
-  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
-  and `console_tool_call_audit_limits`), and read with
-  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
-  `audit.view` access action. A read leaves out the rows that name a member
-  hidden from the reader by its private owner (another person's private
-  side chat, or a member one created). Its reads, and `meta/gating/audit`,
-  report `retention`: `durable` where the records survive a restart,
-  `process` where the gateway keeps them in memory.
-- Rust: `PersistentMetadataStore` gains provided realm-document methods
-  (`realm_document_retention`, `realm_document`, `set_realm_document`,
-  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
-  no realm documents unless it implements them, so it has no console audit
-  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
-  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
-  gating state.
-- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
-  `supersede_by`, which write on behalf of a named author (the default
-  ignores the author and writes as `remember`, `forget` and `supersede`
-  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
-  who revoked.
 
 - The Approvals panel's Audit tab shows who decided and with what
   assurance ("Decided by alice@example.test (as Release manager) - person

@@ -1616,8 +1616,8 @@ fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
     use meerkat_contracts::{
         GrantToolResult, ListToolGrantsResult, ToolGrantTargetRequest, WireGrantGatedTools,
         WireMemberToolGrantGate, WireToolGrant, WireToolGrantApplies, WireToolGrantGateEntries,
-        WireToolGrantGateView, WireToolGrantIssuer, WireToolGrantStatus, WireToolGrantSubject,
-        WireToolGrantTarget,
+        WireToolGrantGateView, WireToolGrantIssuer, WireToolGrantScope, WireToolGrantStatus,
+        WireToolGrantSubject, WireToolGrantTarget,
     };
     let gate: WireGrantGatedTools = serde_json::from_value(serde_json::json!({
         "mcp_servers": ["tickets"],
@@ -1682,6 +1682,7 @@ fn tool_grant_server_targets_and_member_gates_pin_their_field_names() {
         issued_at_ms: 1_000,
         expires_at_ms: 61_000,
         ended_at_ms: None,
+        scope: WireToolGrantScope::Window,
     };
     let granted = serde_json::to_value(GrantToolResult {
         grant: grant.clone(),
@@ -1871,6 +1872,7 @@ fn a_0910_reader_reads_run_scope_and_run_ended_as_unknown() {
     let listed = serde_json::to_value(ListToolGrantsResult {
         grants: vec![grant],
         unreadable: Vec::new(),
+        gate: None,
     })
     .expect("serialize");
     assert_eq!(listed["grants"][0]["status"], "run_ended", "{listed}");

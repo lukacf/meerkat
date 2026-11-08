@@ -62,6 +62,10 @@ fn end_run(run_id: &str, now_ms: u64) -> Input {
     }
 }
 
+fn end_with_subject(now_ms: u64) -> Input {
+    Input::EndWithSubject { now_ms }
+}
+
 /// A grant issued for the run `run-1`.
 fn scoped() -> Authority {
     let mut authority = Authority::new();
@@ -288,6 +292,63 @@ fn a_run_ended_grant_is_terminal_and_latched() {
     ));
 }
 
+/// A run-scoped grant whose subject ends before its run does ends with the
+/// subject, as any grant does: revoked, its end reason `SubjectEnded`, its
+/// run scope kept. Every later use, one of its own run included, is refused
+/// as ended with its subject (which the owner service answers as no live
+/// grant), and the end of its run then settles without a change.
+#[test]
+fn a_run_scoped_grant_ends_with_its_subject_and_refuses_its_own_run() {
+    let mut authority = scoped();
+    let ended = apply(&mut authority, end_with_subject(DEADLINE - 1));
+    assert_eq!(
+        ended.effects(),
+        &[Effect::Revoked {
+            grant_id: GRANT.to_owned(),
+            observed_at_ms: DEADLINE - 1,
+        }]
+    );
+    let after = authority.state().clone();
+    assert_eq!(after.lifecycle_phase, Phase::Revoked);
+    assert_eq!(after.end_reason, Some(ToolGrantEndReason::SubjectEnded));
+    assert_eq!(after.ended_at_ms, Some(DEADLINE - 1));
+    assert_eq!(after.run_scope, Some(run("run-1")), "the scope never moves");
+    for run_id in [Some("run-1"), Some("run-2"), None] {
+        let refused_use = apply(&mut authority, admit(DEADLINE - 1, run_id));
+        assert_eq!(
+            refused_use.effects(),
+            &[refused(ToolGrantUseRefusal::SubjectEnded)],
+            "a use from {run_id:?} is refused as ended with the subject"
+        );
+    }
+    let settled = apply(&mut authority, end_run("run-1", DEADLINE - 1));
+    assert!(settled.effects().is_empty(), "the run's end settles");
+    assert_eq!(authority.state(), &after, "and changes nothing");
+}
+
+/// A grant whose run already ended settles the end of its subject without a
+/// change, at any clock reading: it stays run-ended, and its uses stay
+/// refused as run-ended, never as ended with its subject.
+#[test]
+fn a_run_ended_grant_settles_its_subjects_end_unchanged() {
+    let mut authority = scoped();
+    apply(&mut authority, end_run("run-1", DEADLINE - 1));
+    let before = authority.state().clone();
+    for now_ms in [ISSUED_AT, DEADLINE - 1, DEADLINE, DEADLINE + 1] {
+        let settled = apply(&mut authority, end_with_subject(now_ms));
+        assert!(
+            settled.effects().is_empty(),
+            "nothing is emitted at {now_ms}"
+        );
+        assert_eq!(authority.state(), &before, "nothing changes at {now_ms}");
+    }
+    let refused_use = apply(&mut authority, admit(DEADLINE - 1, Some("run-1")));
+    assert_eq!(
+        refused_use.effects(),
+        &[refused(ToolGrantUseRefusal::RunEnded)]
+    );
+}
+
 #[test]
 fn recover_from_state_rejects_torn_run_scope_rows() {
     let mut ended = scoped();
@@ -375,6 +436,8 @@ fn the_explicit_tlc_model_explores_two_runs_and_every_run_scope_arm() {
         "IssueRefusedIssuedRunEnded",
         "ExpireSettledRunEnded",
         "RevokeSettledRunEnded",
+        // The end with its subject of a grant whose run ended.
+        "EndWithSubjectSettledRunEnded",
     ] {
         assert!(
             schema

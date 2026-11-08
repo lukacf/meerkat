@@ -3243,3 +3243,71 @@ async fn a_grant_ended_with_its_subject_explains_no_refusal() {
         );
     }
 }
+
+/// A run-scoped grant to a member identity whose identity ends before the
+/// grant's run does ends with the identity: revoked, ended with its subject,
+/// its run scope kept. A call of its own run is then refused as needing a
+/// grant, citing none, the run's boundary shows nothing, and the run's end
+/// changes nothing.
+#[tokio::test]
+async fn a_run_scoped_identity_grant_ends_with_its_identity() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let served = serve_member(&machine, &member_session, &member).await;
+        let run = RunId::new();
+        let grant = machine
+            .grant_tool(
+                ToolGrantRequest {
+                    run_scope: Some(run.clone()),
+                    ..member_shell_grant(&member, Duration::from_mins(10))
+                },
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        served.boundary_in(Some(&run)).await.unwrap();
+        assert_eq!(served.visible(), OPEN, "{backend:?}");
+
+        clock.set(T0 + 1_000);
+        assert_eq!(
+            machine
+                .end_tool_grants_of(&member, ToolGrantRevocation::default())
+                .await
+                .unwrap(),
+            1,
+            "{backend:?}: the identity's end ends its run-scoped grant"
+        );
+        let store = durable.open();
+        let ended = stored(&*store, &grant).await;
+        assert_eq!(ended.status, ToolGrantStatus::Revoked, "{backend:?}");
+        assert!(
+            ended.subject_ended,
+            "{backend:?}: it ended with its subject"
+        );
+        assert_eq!(ended.ended_at_ms, Some(T0 + 1_000), "{backend:?}");
+        assert_eq!(ended.run_scope, Some(run.clone()), "{backend:?}");
+
+        let refusal = served
+            .call_in("shell", "call-of-its-run-after-the-end", Some(&run))
+            .await
+            .expect_err("a grant ended with its subject admits nothing");
+        assert_eq!(
+            refusal,
+            ToolGrantRefusal::Required,
+            "{backend:?}: no grant is cited"
+        );
+        served.boundary_in(Some(&run)).await.unwrap();
+        assert_eq!(served.visible(), CLOSED, "{backend:?}");
+
+        served.gate.end_run(&run).await.unwrap();
+        assert_eq!(
+            stored(&*store, &grant).await,
+            ended,
+            "{backend:?}: the run's end changes nothing"
+        );
+    }
+}

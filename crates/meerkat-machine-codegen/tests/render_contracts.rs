@@ -16,6 +16,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
     dsl_schedule_lifecycle_machine as schedule_lifecycle,
     dsl_session_document_machine as session_document_machine,
+    dsl_tool_grant_lifecycle_machine as tool_grant_lifecycle_machine,
     dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
@@ -767,6 +768,138 @@ fn session_document_transition_enum_keeps_the_published_order() {
         SESSION_DOCUMENT_TRANSITIONS_0_9_8.to_vec(),
         "0.9.8's TransitionId order must stay a prefix of the rendered order"
     );
+}
+
+/// ToolGrantLifecycleMachine's `TransitionId` variants as 0.9.10 published
+/// them, in order.
+const TOOL_GRANT_LIFECYCLE_TRANSITIONS_0_9_10: [&str; 17] = [
+    "Issue",
+    "IssueRefusedWindow",
+    "IssueRefusedIssuedActive",
+    "IssueRefusedIssuedExpired",
+    "IssueRefusedIssuedRevoked",
+    "ExpireDue",
+    "ExpireNotDue",
+    "ExpireSettledExpired",
+    "ExpireSettledRevoked",
+    "RevokeActive",
+    "RevokeAfterDeadline",
+    "RevokeSettledExpired",
+    "RevokeSettledRevoked",
+    "AdmitLive",
+    "AdmitDue",
+    "AdmitEndedExpired",
+    "AdmitEndedRevoked",
+];
+
+/// The variants of a rendered kernel's `pub enum NAME`, in order, each
+/// without its fields.
+fn enum_variants(rendered: &str, name: &str) -> Vec<String> {
+    let head = format!("pub enum {name} {{");
+    let start = rendered
+        .find(&head)
+        .expect("the kernel renders the named enum")
+        + head.len();
+    let body = &rendered[start..];
+    let end = body.find("\n}").expect("the enum closes");
+    body[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+        .filter_map(|line| line.split(['(', ',', ' ']).next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// ToolGrantLifecycleMachine's public `TransitionId` keeps 0.9.10's order as
+/// its prefix, then the run-scope arms in catalog order, then the machine's
+/// late tail: the arms of a grant's end with its subject, and last the end
+/// with its subject of a grant whose run ended.
+#[test]
+fn tool_grant_lifecycle_transition_enum_keeps_the_published_order() {
+    let rendered = render_machine_kernel_module(&tool_grant_lifecycle_machine());
+    let expected: Vec<&str> = TOOL_GRANT_LIFECYCLE_TRANSITIONS_0_9_10
+        .into_iter()
+        .chain([
+            "AdmitEndedRunEnded",
+            "AdmitOtherRun",
+            "AdmitOutsideRun",
+            "EndRunMatching",
+            "EndRunAfterDeadline",
+            "EndRunOther",
+            "EndRunSettledExpired",
+            "EndRunSettledRevoked",
+            "EndRunSettledRunEnded",
+            "IssueRefusedIssuedRunEnded",
+            "ExpireSettledRunEnded",
+            "RevokeSettledRunEnded",
+            "EndWithSubjectActive",
+            "EndWithSubjectAfterDeadline",
+            "EndWithSubjectSettledExpired",
+            "EndWithSubjectSettledRevoked",
+            "AdmitEndedWithSubject",
+            "EndWithSubjectSettledRunEnded",
+        ])
+        .collect();
+    assert_eq!(
+        transition_id_variants(&rendered),
+        expected,
+        "0.9.10's TransitionId order stays a prefix, the run scope's arms follow it, \
+         and the end with its subject is the late tail"
+    );
+}
+
+/// ToolGrantLifecycleMachine's vocabularies keep 0.9.10's variants first,
+/// then the run scope's, then the end with its subject's.
+#[test]
+fn tool_grant_lifecycle_vocabularies_keep_the_published_order() {
+    let rendered = render_machine_kernel_module(&tool_grant_lifecycle_machine());
+    let expected: [(&str, &[&str]); 5] = [
+        (
+            "ToolGrantEndReason",
+            &["Deadline", "Revoked", "RunEnded", "SubjectEnded"],
+        ),
+        (
+            "ToolGrantUseRefusal",
+            &[
+                "Expired",
+                "Revoked",
+                "RunEnded",
+                "OutsideRun",
+                "SubjectEnded",
+            ],
+        ),
+        (
+            "Phase",
+            &["Unissued", "Active", "Expired", "Revoked", "RunEnded"],
+        ),
+        (
+            "InputKind",
+            &[
+                "Issue",
+                "Expire",
+                "Revoke",
+                "AdmitUse",
+                "EndRun",
+                "EndWithSubject",
+            ],
+        ),
+        (
+            "EffectKind",
+            &[
+                "Issued",
+                "Expired",
+                "Revoked",
+                "UseAdmitted",
+                "UseRefused",
+                "IssueRefused",
+                "RunEnded",
+            ],
+        ),
+    ];
+    for (name, variants) in expected {
+        assert_eq!(enum_variants(&rendered, name), variants, "{name}");
+    }
 }
 
 /// An input appended after the appended-input section

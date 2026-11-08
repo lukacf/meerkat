@@ -1078,8 +1078,9 @@ async fn linux_resolves_a_host_name_through_a_symlinked_resolv_conf() {
     // The fixture link and its target sit beside `work` (granted roots are
     // disjoint). A link is granted only where nobody else can retarget it,
     // so no directory from the fixture's root down to the link's may be
-    // group- or other-writable, whatever the umask.
+    // group- or other-writable.
     let root = fixture.work.parent().unwrap();
+    // tempdir() follows the umask: under 002 the root is 0775 and the grant refuses the link.
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let etc = root.join("etc");
     let run = root.join("run");

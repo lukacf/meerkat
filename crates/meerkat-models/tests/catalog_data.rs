@@ -24,7 +24,7 @@ use meerkat_models::catalog::{
 use meerkat_models::profile::{inline_video_support_for, profile_for};
 use std::collections::HashSet;
 
-const IMAGE_DEFAULT_OPENAI: &str = "gpt-image-2";
+const IMAGE_DEFAULT_OPENAI: &str = "gpt-image-2.6-sunburst";
 const IMAGE_DEFAULT_GEMINI: &str = "gemini-nano-banana-2.1";
 
 fn provider_from_catalog(provider: &str) -> Provider {
@@ -938,6 +938,84 @@ fn gemini_nano_banana_21_owns_the_gemini_image_default() {
             image_size_parameter: ImageGenerationSizeParameter::Supported,
         }
     ));
+}
+
+#[test]
+fn gpt_image_26_sunburst_owns_the_openai_image_default() {
+    let default = default_image_generation_model(Provider::OpenAI)
+        .expect("OpenAI must have an image-generation default");
+    assert_eq!(default.model_id, "gpt-image-2.6-sunburst");
+    assert_eq!(default.display_name, "GPT Image 2.6 Sunburst");
+    assert_eq!(default.tier, ModelTier::Recommended);
+    // The default runs on the hosted Responses image tool: the catalog's host
+    // model makes the call and the tool runs the image model.
+    assert_eq!(
+        default.route,
+        ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some("gpt-5.4"),
+            tool_model_id: "gpt-image-2.6-sunburst",
+        }
+    );
+
+    // OpenAI text models that generate images run the default image model.
+    let via_text = image_generation_model(Provider::OpenAI, "gpt-5.4")
+        .expect("OpenAI text catalog model admitted through the hosted tool");
+    assert_eq!(
+        via_text.route,
+        ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: None,
+            tool_model_id: "gpt-image-2.6-sunburst",
+        }
+    );
+
+    // The previous default stays selectable by model, on its own tool model.
+    let previous = image_generation_model(Provider::OpenAI, "gpt-image-2")
+        .expect("the previous OpenAI image default must stay cataloged");
+    assert_eq!(previous.tier, ModelTier::Supported);
+    assert_eq!(
+        previous.route,
+        ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some("gpt-5.4"),
+            tool_model_id: "gpt-image-2",
+        }
+    );
+}
+
+#[test]
+fn gpt_image_26_flare_is_selectable_by_model() {
+    let flare = image_generation_model(Provider::OpenAI, "gpt-image-2.6-flare")
+        .expect("GPT Image 2.6 Flare must be cataloged");
+    assert_eq!(flare.display_name, "GPT Image 2.6 Flare");
+    assert_eq!(flare.tier, ModelTier::Supported);
+    assert_eq!(
+        flare.route,
+        ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some("gpt-5.4"),
+            tool_model_id: "gpt-image-2.6-flare",
+        }
+    );
+    assert_eq!(
+        image_generation_provider_for_model("gpt-image-2.6-flare"),
+        Some(Provider::OpenAI)
+    );
+}
+
+/// OpenAI shut these image models down (`dall-e-2` and `dall-e-3` on
+/// 2026-05-12, `gpt-image-1` on 2026-10-23), so the catalog does not offer
+/// them.
+#[test]
+fn shut_down_openai_image_models_are_not_cataloged() {
+    for model in ["gpt-image-1", "dall-e-3", "dall-e-2"] {
+        assert!(
+            image_generation_model(Provider::OpenAI, model).is_none(),
+            "{model} must not be a cataloged OpenAI image model"
+        );
+        assert_eq!(
+            image_generation_provider_for_model(model),
+            None,
+            "{model} must not infer an image-generation provider"
+        );
+    }
 }
 
 #[test]

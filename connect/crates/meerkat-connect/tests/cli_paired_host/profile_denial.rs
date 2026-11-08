@@ -15,6 +15,39 @@ const PACKAGE_TOOLS: &[&str] = &[
     "setup_reconcile",
 ];
 
+// Only fixed catalog labels and typed scalar observations enter panic output.
+// Never dump provider headers, descriptions, raw error text or the transcript.
+fn catalog_wait_observation(activation: &Value, last: Option<&Value>, offered: &[&str]) -> Value {
+    let status = |value: &Value| match value.as_str() {
+        Some("loaded") => "loaded",
+        Some("deferred") => "deferred",
+        Some("blocked_by_filter") => "blocked_by_filter",
+        Some("pending_source") => "pending_source",
+        Some("temporarily_unavailable") => "temporarily_unavailable",
+        _ => "unrecognized_or_missing",
+    };
+    let last = last.unwrap_or(&Value::Null);
+    let rows = last["results"].as_array();
+    let pending = last["pending_sources"].as_array();
+    json!({
+        "activation_requested":activation["state"] == "requested",
+        "activation_changed":activation["changed"].as_bool(),
+        "activation_pending_sources":activation["native_pending_sources"].as_u64(),
+        "catalog_exact":last["catalog_exact"].as_bool(),
+        "total_matches":last["total_matches"].as_u64(),
+        "returned_rows":rows.map(Vec::len),
+        "pending_count":pending.map(Vec::len),
+        "setup_pending":pending.is_some_and(|items| items.iter().any(|v| v == "toolkit-setup")),
+        "empty_result_status":status(&last["empty_result_status"]),
+        "required":PACKAGE_TOOLS.iter().map(|name| {
+            let row = rows.and_then(|items| items.iter().find(|row| row["name"] == *name));
+            json!({"name":name,"offered":offered.contains(name),"found":row.is_some(),
+                "visibility":row.map(|row| status(&row["visibility_status"])),
+                "currently_callable":row.and_then(|row| row["currently_callable"].as_bool())})
+        }).collect::<Vec<_>>()
+    })
+}
+
 fn selection() -> Value {
     json!({"family":"services","profile":"slack","operations":["auth_test"],
         "values":{"token_env":"CONNECT_UNUSED_SLACK_TOKEN","timeout_seconds":2,"max_response_bytes":65536}})
@@ -91,6 +124,63 @@ pub(super) fn package_response_scoped<F>(
 where
     F: FnOnce(&Request, &str, &str) -> String,
 {
+    package_response_selected(
+        request,
+        phase,
+        prompt,
+        selected,
+        operation,
+        native_entry,
+        prefix,
+        false,
+        true,
+        continuation,
+    )
+}
+
+/// Actual private lazy startup performs its one native Add in the model turn.
+/// The smoke stops after owner help; installation uses the identical job oracle.
+pub(super) fn private_package_response<F>(
+    request: &Request,
+    phase: usize,
+    prompt: &str,
+    selected: Value,
+    operation: &str,
+    install: bool,
+    continuation: F,
+) -> String
+where
+    F: FnOnce(&Request, &str, &str) -> String,
+{
+    package_response_selected(
+        request,
+        phase,
+        prompt,
+        selected,
+        operation,
+        false,
+        "",
+        true,
+        install,
+        continuation,
+    )
+}
+
+fn package_response_selected<F>(
+    request: &Request,
+    phase: usize,
+    prompt: &str,
+    selected: Value,
+    operation: &str,
+    native_entry: bool,
+    prefix: &str,
+    lazy_add: bool,
+    install: bool,
+    continuation: F,
+) -> String
+where
+    F: FnOnce(&Request, &str, &str) -> String,
+{
     assert_eq!(request.method, "POST");
     assert_eq!(request.path, "/v1/chat/completions");
     assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
@@ -112,12 +202,9 @@ where
     for secret in [TOKEN, CODE, DEVICE, PAIR] {
         assert!(!body.to_string().contains(secret));
     }
-    let names = body["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool["function"]["name"].as_str())
-        .collect::<Vec<_>>();
+    let names = body["tools"].as_array().expect(
+        "scripted setup requires a tool-catalog request; compaction summaries are outside this fixture").iter()
+        .filter_map(|tool| tool["function"]["name"].as_str()).collect::<Vec<_>>();
     let id = |suffix: &str| format!("{prefix}{suffix}");
     let call = |suffix: &str, name: &str, args: Value| {
         assert!(
@@ -132,8 +219,8 @@ where
     let activation = tool_result(body, &id("activate-services"));
     assert_eq!(activation["state"], "requested");
     assert_eq!(
-        activation["changed"], false,
-        "native setup already owns the adapter; service preparation must not perform a second handoff (call-ID prefix: {prefix:?})"
+        activation["changed"], lazy_add,
+        "the actual composition selects one lazy Add or an already-owned adapter (call-ID prefix: {prefix:?})"
     );
     if PACKAGE_TOOLS.iter().any(|name| !names.contains(name)) {
         let searches = messages
@@ -147,7 +234,13 @@ where
             .collect::<Vec<_>>();
         assert!(
             searches.len() < 10,
-            "native catalog did not expose the supplied setup owner"
+            "native catalog did not expose the supplied setup owner: {}",
+            {
+                let last = searches.last().and_then(|message| {
+                    serde_json::from_str::<Value>(message["content"].as_str()?).ok()
+                });
+                catalog_wait_observation(&activation, last.as_ref(), &names)
+            }
         );
         let ready = searches.last().is_some_and(|message| {
             let found: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
@@ -220,6 +313,9 @@ where
             .iter()
             .any(|row| row["id"] == operation)
     );
+    if !install {
+        return continuation(request, prepare_id, operation);
+    }
     if optional_result(body, &id("checked-install")).is_none() {
         return call("checked-install", "setup_check", selected.clone());
     }
@@ -654,6 +750,34 @@ pub(super) async fn run() {
     let outcome: CompletionOutcome =
         serde_json::from_value(stored["terminal_completion"]["outcome"].clone()).unwrap();
     assert!(matches!(outcome, CompletionOutcome::Completed(_)));
+}
+
+#[test]
+fn catalog_wait_diagnostics_keep_status_and_exclude_untrusted_text() {
+    let activation = json!({"state":"requested","changed":true,"native_pending_sources":1,
+        "private":"must-not-appear"});
+    let last = json!({"catalog_exact":true,"total_matches":51,"pending_sources":["toolkit-setup","must-not-appear"],
+        "empty_result_status":"must-not-appear","error":"must-not-appear",
+        "results":[{"name":"setup_prepare","visibility_status":"blocked_by_filter",
+            "currently_callable":false,"description":"must-not-appear"},
+            {"name":"setup_help","visibility_status":"must-not-appear"}]});
+    let observed = catalog_wait_observation(&activation, Some(&last), &["setup_job"]);
+    assert_eq!(observed["activation_pending_sources"], 1);
+    assert_eq!(observed["total_matches"], 51);
+    assert_eq!(observed["pending_count"], 2);
+    assert_eq!(observed["setup_pending"], true);
+    assert_eq!(observed["required"][0]["visibility"], "blocked_by_filter");
+    assert_eq!(
+        observed["required"][1]["visibility"],
+        "unrecognized_or_missing"
+    );
+    assert_eq!(observed["required"][4]["offered"], true);
+    assert_eq!(observed["required"][4]["found"], false);
+    let rendered = observed.to_string();
+    assert!(rendered.len() < 4096 && !rendered.contains("must-not-appear"));
+    let missing = catalog_wait_observation(&Value::Null, None, &[]);
+    assert_eq!(missing["catalog_exact"], Value::Null);
+    assert!(missing.to_string().len() < 4096);
 }
 
 #[test]

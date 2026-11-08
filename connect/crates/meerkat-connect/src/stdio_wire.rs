@@ -258,6 +258,22 @@ struct InitializeV3 {
     #[serde(default, deserialize_with = "present")]
     connector_auth: Option<ConnectorProfiles>,
 }
+// V5 selects the native realm client-profile owner. Transient initializer
+// profiles are deliberately absent: the post-close finalizer rereads the realm.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitializeV5 {
+    protocol_version: u8,
+    adapter: Adapter,
+    application: Application,
+    viewer: Viewer,
+    realm: Realm,
+    #[serde(default, deserialize_with = "present")]
+    model: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    auth_binding: Option<Auth>,
+    services: ServiceResources,
+}
 // A distinct closed mode: previous frontend/service schemas do not acquire
 // generic application policy inputs or change their existing interpretation.
 #[derive(Deserialize)]
@@ -278,7 +294,23 @@ struct InitializeV4 {
 impl<'de> Deserialize<'de> for Initialize {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        if value["protocol_version"] == 4 {
+        if matches!(value["protocol_version"].as_u64(), Some(5..=7)) {
+            let v: InitializeV5 =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            Ok(Self {
+                protocol_version: v.protocol_version,
+                adapter: v.adapter,
+                application: v.application,
+                viewer: v.viewer,
+                realm: v.realm,
+                model: v.model,
+                auth_binding: v.auth_binding,
+                paired_host: None,
+                services: Some(v.services),
+                connector_auth: None,
+                forge: None,
+            })
+        } else if value["protocol_version"] == 4 {
             let v: InitializeV4 =
                 serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Self {
@@ -455,7 +487,7 @@ impl Initialize {
                     })
             }
             Adapter::ForgeServices | Adapter::Services => {
-                self.protocol_version == 3
+                matches!(self.protocol_version, 3 | 5 | 6 | 7)
                     && (if self.adapter == Adapter::ForgeServices {
                         port.is_some()
                     } else {
@@ -472,7 +504,7 @@ impl Initialize {
                     })
             }
         };
-        matches!(self.protocol_version, 1..=4)
+        matches!(self.protocol_version, 1..=7)
             && targets_valid
             && composition_valid
             && opaque(&self.application.application_id)
@@ -557,17 +589,45 @@ pub(super) struct AnswerEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Answer {
-    ForgeRecovery { choice: Choice },
-    ForgeOrigin { origin: String },
-    ForgePassword { password: String },
-    Approval { decision: Decision },
-    PairedHostTarget { target_id: String },
-    PairedHostPairingMethod { method: PairingMethod },
-    PairedHostPairingCode { code: String },
-    PairedHostNotice { dismiss: bool },
-    ProviderTarget { choice_id: String },
-    ProviderAction { action: ProviderAction },
-    ProviderApiKey { key: String },
+    ForgeRecovery {
+        choice: Choice,
+    },
+    ForgeOrigin {
+        origin: String,
+    },
+    ForgePassword {
+        password: String,
+    },
+    Approval {
+        decision: Decision,
+    },
+    PairedHostTarget {
+        target_id: String,
+    },
+    PairedHostPairingMethod {
+        method: PairingMethod,
+    },
+    PairedHostPairingCode {
+        code: String,
+    },
+    PairedHostNotice {
+        dismiss: bool,
+    },
+    ProviderTarget {
+        choice_id: String,
+    },
+    ProviderAction {
+        action: ProviderAction,
+    },
+    ProviderApiKey {
+        key: String,
+    },
+    ServiceSecret {
+        job_id: String,
+        service: String,
+        slot: String,
+        value: String,
+    },
     Cancel,
 }
 #[derive(Clone, Copy, serde::Serialize, Deserialize, PartialEq, Eq)]
@@ -620,6 +680,22 @@ pub(super) fn valid_answer(prompt: &Value, answer: &Answer) -> bool {
                     .as_array()
                     .is_some_and(|actions| actions.contains(&action))
             })
+        }
+        (
+            Some("service_secret"),
+            Answer::ServiceSecret {
+                job_id,
+                service,
+                slot,
+                value,
+            },
+        ) => {
+            prompt["job_id"].as_str() == Some(job_id)
+                && prompt["service"].as_str() == Some(service)
+                && prompt["slot"].as_str() == Some(slot)
+                && !value.is_empty()
+                && value.len() <= 16 * 1024
+                && !value.contains('\0')
         }
         (Some("provider_api_key"), Answer::ProviderApiKey { key }) => {
             !key.trim().is_empty() && key.len() <= 8192 && !key.chars().any(char::is_control)
@@ -677,4 +753,28 @@ pub(super) fn failed(id: &str, code: &str) -> Value {
 }
 pub(super) fn result(id: &str, value: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":value})
+}
+
+/// Only opaque preselected profile and actual finalized job correlation cross
+/// this transport. No operation, argument, resource, caller or root can be set.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Probe {
+    pub scope: String,
+    pub job_id: String,
+    pub profile_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Collect {
+    pub scope: String,
+    pub job_id: String,
+    pub source_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OpenCollectionService {
+    pub scope: String,
+    pub service_id: String,
 }

@@ -33,6 +33,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FAMILIES = ("agno", "services", "activepieces")
 OFFICIAL_FAMILY = "official-github"
+GHE_PROFILE = "enterprise-selected-reads"
+GITHUB_PROFILES = ("selected-reads", GHE_PROFILE)
 PLAYWRIGHT_FAMILY = "official-playwright"
 OFFICIAL_FAMILIES = (OFFICIAL_FAMILY, PLAYWRIGHT_FAMILY)
 SCOPE = "Configuration and local software installation only; account access, host attachment, credentials and MCP launch are not performed."
@@ -2221,7 +2223,7 @@ def retained_request_summary(root, entry):
     else:
         selection = record.get("selection", {})
         family, profile = selection.get("family"), selection.get("profile")
-        if family not in ("agno", "services", "activepieces"):
+        if family not in ("agno", "services", "activepieces") and not (family == OFFICIAL_FAMILY and profile in GITHUB_PROFILES):
             return None
         if not isinstance(profile, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", profile):
             raise SetupError("invalid_recovery_request")
@@ -2871,7 +2873,11 @@ class Controller:
             self.operation_lock.release()
 
     def state(self):
-        build_planning = self.selected_build_planning()
+        return self._state_projection(self.selected_build_planning())
+
+    def _state_projection(self, build_planning=None):
+        # Shared callers omit build planning from their response. Reuse these
+        # fields without running a toolchain probe whose result they discard.
         with self.lock:
             return copy.deepcopy({"families": list(self.families.values()), "job": self.job,
                                   "scope": self.scope(),
@@ -3788,10 +3794,11 @@ class Controller:
     def official_route_component(self, family, component):
         """Check a declared separate delivery without enabling or executing it."""
         keys(component, ("path", "sha256", "profiles", "contents_sha256", "installer_sha256"))
-        name, profile, path = (("github", "selected-reads", "github/github-mcp-server")
+        name, profiles, path = (("github", GITHUB_PROFILES, "github/github-mcp-server")
                                if family == OFFICIAL_FAMILY else
-                               ("playwright", "isolated-chrome", "playwright/package-lock.json"))
-        if (component["path"] != path or component["profiles"] != [profile]
+                               ("playwright", ("isolated-chrome",), "playwright/package-lock.json"))
+        if (component["path"] != path or not isinstance(component["profiles"], list)
+                or len(component["profiles"]) != 1 or component["profiles"][0] not in profiles
                 or any(not isinstance(component[k], str) or not HEX.fullmatch(component[k])
                        for k in ("sha256", "contents_sha256", "installer_sha256"))):
             raise SetupError("invalid_catalog_routes")
@@ -3815,6 +3822,8 @@ class Controller:
                 total += len(data)
                 if total > 128 * 1024 * 1024 or digest(data) != metadata["sha256"]:
                     raise SetupError("catalog_route_artifact_mismatch")
+        if family == OFFICIAL_FAMILY and component["profiles"] != [self.official_github_profile()]:
+            raise SetupError("catalog_route_artifact_mismatch")
 
     def route_options(self, index, entry):
         options = []
@@ -3829,7 +3838,7 @@ class Controller:
                                 "artifact": copy.deepcopy({k: index["components"][route["family"]][k] for k in ("path", "sha256")})})
         return options
 
-    def catalog_route(self, value):
+    def catalog_route(self, value, *, observed_preparations=None):
         keys(value, ("publisher", "name", "version", "strategy_id", "routes_sha256"))
         if any(not isinstance(v, str) or not 1 <= len(v) <= 256 for v in value.values()):
             raise SetupError("invalid_request")
@@ -3851,6 +3860,8 @@ class Controller:
                           "artifact": {k: index["components"][route["family"]][k] for k in ("path", "sha256")}}
                 if state["status"] == "unprepared":
                     return {**result, "status": "preparation_required"}
+                if observed_preparations is not None and state.get("preparation_job_id") not in observed_preparations:
+                    raise SetupError("shared_preparation_unavailable", 409)
                 if state["status"] != "prepared":
                     raise SetupError("catalog_route_preparation_unconfirmed", 409)
                 return {**result, "status": "prepared", "help": self.help_locked(route["family"], route["profile"])}
@@ -4866,9 +4877,37 @@ class Controller:
         value = decode(raw)
         if value.get("family") != family or value.get("contents_sha256") != self.official_contents_sha256 or value.get("scope") != "official_metadata_only":
             raise SetupError("official_metadata_unavailable", 500)
+        if family == OFFICIAL_FAMILY:
+            profile = self.official_github_profile()
+            if ([row.get("profile") for row in value.get("profiles", [])] != [profile]
+                    or value.get("help", {}).get("profile") != profile):
+                raise SetupError("official_metadata_unavailable", 500)
         return value
 
-    def official_mcp(self, family, destination, server):
+    def official_github_file(self, name):
+        """Read exact selected delivery bytes, never a package-defined command."""
+        raw = read_file(self.official_bundle, "CONTENTS.json")
+        if digest(raw) != self.official_contents_sha256:
+            raise SetupError("frozen_official_changed", 500)
+        item = decode(raw).get("files", {}).get(name)
+        data = read_file(self.official_bundle, name, 64 * 1024 * 1024)
+        if (not isinstance(item, dict) or item.get("sha256") != digest(data)
+                or type(item.get("bytes")) is not int or item["bytes"] != len(data)):
+            raise SetupError("frozen_official_changed", 500)
+        return data
+
+    def official_github_profile(self):
+        delivery = decode(self.official_github_file("delivery.json"))
+        rows = delivery.get("components")
+        if (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)
+                or len(selected := [row for row in rows if row.get("catalog_id") == "github"]) != 1):
+            raise SetupError("invalid_official_selection")
+        profile = selected[0].get("profile", "selected-reads")
+        if profile not in GITHUB_PROFILES:
+            raise SetupError("invalid_official_selection")
+        return profile
+
+    def official_mcp(self, family, destination, server, configuration=None):
         if family == PLAYWRIGHT_FAMILY:
             self.playwright_arguments(family)
             profile = decode(read_file(self.workspace, "playwright-host.json", MAX_BODY))
@@ -4880,14 +4919,39 @@ class Controller:
             entry.update(command=self.node, args=[replacements.get(a, a) for a in entry["args"]], cwd=str(root / "workspace"),
                 env={"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"), "PWTEST_SOCKETS_DIR": str(root / "sockets")})
             return {"mcpServers": {server: entry}}
-        template = decode(read_file(self.official_bundle, "github/mcp.template.json"))
-        entry = copy.deepcopy(template["mcpServers"]["github-selected-reads"])
+        profile = self.official_github_profile()
+        template = decode(self.official_github_file("github/mcp.template.json"))
+        if profile == GHE_PROFILE:
+            if configuration is None:
+                raise SetupError("configuration_required")
+            raw = read_file(configuration["path"].parent, configuration["path"].name, MAX_BODY)
+            if digest(raw) != configuration["sha256"]:
+                raise SetupError("configuration_changed", 409)
+            value = decode(raw)
+            keys(value, ("profile", "operations", "config"))
+            keys(value["config"], ("token_env", "github_host"))
+            # The pinned installer validates host and operation semantics. This
+            # projection uses the same hash-bound input, never a template default.
+            operations, host = value["operations"], value["config"]["github_host"]
+            if (value["profile"] != profile or not isinstance(host, str) or not host
+                    or not isinstance(operations, list) or not operations
+                    or any(not isinstance(op, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", op) for op in operations)):
+                raise SetupError("invalid_configuration")
+            expected = {"mcpServers": {"github-enterprise-reads": {
+                "command": "ABS_GITHUB_INSTALL/github-mcp-server", "cwd": "ABS_GITHUB_INSTALL", "env": {},
+                "args": ["stdio", "--read-only", "--gh-host", "SELECTED_GHE_HTTPS_ORIGIN", "--toolsets=", "--tools", "SELECTED_READ_TOOLS"]}}}
+            if template != expected:
+                raise SetupError("invalid_official_selection")
+            entry = copy.deepcopy(template["mcpServers"]["github-enterprise-reads"])
+            entry["args"] = ["stdio", "--read-only", "--gh-host", host, "--toolsets=", "--tools", ",".join(operations)]
+        else:
+            entry = copy.deepcopy(template["mcpServers"]["github-selected-reads"])
         entry.update(command=str(destination / "github-mcp-server"), cwd=str(destination))
         return {"mcpServers": {server: entry}}
 
-    def expected_command(self, family: str, destination: Path):
+    def expected_command(self, family: str, destination: Path, configuration=None):
         if family in OFFICIAL_FAMILIES:
-            entry = self.official_mcp(family, destination, "selected")["mcpServers"]["selected"]
+            entry = self.official_mcp(family, destination, "selected", configuration)["mcpServers"]["selected"]
             return [entry["command"], *entry["args"]]
         if family == "activepieces":
             return [self.node, str(destination / "node_modules/@rkat/toolkit-activepieces/dist/mcp-cli.js")]
@@ -4919,10 +4983,12 @@ class Controller:
     def receipt(self, family: str, destination: Path, configuration=None):
         name = "ready/installed.json" if configuration else "installed.json"
         receipt = decode(read_file(destination, name, 16 * 1024 * 1024))
-        command = self.expected_command(family, destination)
+        command = self.expected_command(family, destination, configuration)
         if (receipt.get("family") != family or receipt.get("destination") != str(destination)
                 or receipt.get("contents_sha256") != self.input_binding(family)[0]
                 or receipt.get("scope") != "observed_software_installation_only"):
+            raise SetupError("receipt_unconfirmed", 500)
+        if family == OFFICIAL_FAMILY and receipt.get("profile") != self.official_github_profile():
             raise SetupError("receipt_unconfirmed", 500)
         if configuration:
             path = destination / "configuration/selected.json"
@@ -4933,7 +4999,7 @@ class Controller:
             if receipt.get("configuration") != expected or digest(read_file(destination, "configuration/selected.json", MAX_BODY)) != expected["sha256"]:
                 raise SetupError("receipt_unconfirmed", 500)
             mcp = decode(read_file(destination, "ready/mcp.json"))
-            expected_mcp = self.official_mcp(family, destination, expected["server_name"]) if family in OFFICIAL_FAMILIES else {"mcpServers": {expected["server_name"]: {"command": command[0], "args": command[1:]}}}
+            expected_mcp = self.official_mcp(family, destination, expected["server_name"], configuration) if family in OFFICIAL_FAMILIES else {"mcpServers": {expected["server_name"]: {"command": command[0], "args": command[1:]}}}
             if mcp != expected_mcp or receipt.get("mcp_configuration") != mcp:
                 raise SetupError("receipt_unconfirmed", 500)
         if receipt.get("command") != command:
@@ -5485,7 +5551,7 @@ class Controller:
                     declaration[name] = copy.deepcopy(effect["request"][name])
             return {"kind": "selected", "declaration": declaration}
         family = intent["family"]
-        if family not in ("agno", "services", "activepieces"):
+        if family not in ("agno", "services", "activepieces", OFFICIAL_FAMILY):
             raise SetupError("retained_metadata_unavailable")
         anchor = intent["recovery_anchor"]
         raw = read_file(anchor["root"], "requests/" + anchor["id"] + ".json", MAX_BODY * 2)
@@ -5496,18 +5562,27 @@ class Controller:
         data = read_file(configuration["path"].parent, configuration["path"].name, MAX_BODY)
         if digest(data) != configuration["sha256"] or configuration_bytes(selection) != data:
             raise SetupError("configuration_changed")
-        command = self.expected_command(family, intent["destination"])
-        code, raw_help = self._run(command + ["config-help", "--profile", selection["profile"]], capture=True)
-        if code:
-            raise SetupError("retained_metadata_unavailable")
-        guide = read_file(self.bundle, family + "/PROFILE-GUIDE.md")
-        if digest(guide) != self.guide_hashes[family]:
-            raise SetupError("frozen_bundle_changed", 500)
-        help_value = package_help(family, selection["profile"], decode(raw_help), guide.decode("utf-8"))
+        if family == OFFICIAL_FAMILY:
+            # The pinned installer owns metadata/checks; never ask the acquired
+            # GitHub executable to inspect itself or read a credential.
+            description = self.official_description(family)["help"]
+            help_value = package_help(family, selection["profile"], description, description["guide_text"])
+            check_command = self.official_command(["--check-config-only", "--config", str(configuration["path"]),
+                "--config-sha256", configuration["sha256"], "--server-name", configuration["server_name"]], family=family)
+        else:
+            command = self.expected_command(family, intent["destination"])
+            code, raw_help = self._run(command + ["config-help", "--profile", selection["profile"]], capture=True)
+            if code:
+                raise SetupError("retained_metadata_unavailable")
+            guide = read_file(self.bundle, family + "/PROFILE-GUIDE.md")
+            if digest(guide) != self.guide_hashes[family]:
+                raise SetupError("frozen_bundle_changed", 500)
+            help_value = package_help(family, selection["profile"], decode(raw_help), guide.decode("utf-8"))
+            check_command = command + ["check-config", "--config", str(configuration["path"])]
         allowed = {row["id"] for row in help_value["operations"]}
         if not set(selection["operations"]) <= allowed:
             raise SetupError("retained_metadata_unavailable")
-        code, raw_check = self._run(command + ["check-config", "--config", str(configuration["path"])], capture=True)
+        code, raw_check = self._run(check_command, capture=True)
         if code:
             raise SetupError("retained_metadata_unavailable")
         checked = decode(raw_check)
@@ -5561,7 +5636,7 @@ class Controller:
         if code:
             raise SetupError("reconciliation_unconfirmed", 500)
         proof = decode(raw)
-        command = self.expected_command(family, destination)
+        command = self.expected_command(family, destination, configuration)
         if family not in OFFICIAL_FAMILIES:
             command += ["serve", "--config", str(destination / "configuration/selected.json")]
         expected = {"schema_version": 1, "scope": READBACK_SCOPE, "verified": True,

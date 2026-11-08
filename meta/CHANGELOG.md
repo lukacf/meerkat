@@ -509,6 +509,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   deprecated in favour of operator instructions (`meta/set_instruction`).
   The method keeps working.
 
+- The incident command center example generates images with
+  `gpt-image-2.6-sunburst`, Core 0.9.11's OpenAI image default, unless
+  `RKAT_INCIDENT_IMAGE_MODEL` names another model (was `gpt-image-2`).
+
 ### Fixed
 
 - `meerkat_schedule_list` called by an agent of a Meta gateway now returns the
@@ -630,6 +634,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the front cannot use (none, a timeout, a malformed answer or another
   error) still opens nothing.
 
+- Release notes: Forge 0.3.1 ships for Linux x86_64; macOS arm64 follows in
+  Forge 0.3.2. The 0.9.10 notes named both targets.
+
 ### Known limitations
 
 - Forge: an application on the legacy ordinary route keeps one shared
@@ -662,6 +669,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sign-out, or a new sign-in in the same browser), the review stays open
   but nobody can read or answer it, and a new one starts only after the
   application restarts.
+
+- Forge 0.3.1 installs the Meta 0.9.10 runtime. With it, named Console
+  accounts, the move to named accounts at an update, the Console's own
+  access copy (`.mobkit/console-access.toml`), OIDC sign-in, the sign-in
+  limits, the forwarding of native consent and the controller review work
+  as described above. Two of the Forge changes above need Meta 0.9.11:
+  - signing out ends the front's login and drops the Console tokens the
+    front holds; with Meta 0.9.11 the Console itself also refuses them at
+    once;
+  - with Meta 0.9.11 the Console itself also refuses a shared account's
+    answers in the native Toolkit setup panel; with Meta 0.9.10 only the
+    front refuses its frontend approvals, controller review answers and
+    setup bridge answers.
 
 ## [0.9.10] - 2026-11-04
 

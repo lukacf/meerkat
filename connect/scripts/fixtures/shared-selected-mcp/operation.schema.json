@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "left": {"type": "integer", "minimum": -1000000, "maximum": 1000000},
+    "right": {"type": "integer", "minimum": -1000000, "maximum": 1000000}
+  },
+  "required": ["left", "right"],
+  "additionalProperties": false
+}

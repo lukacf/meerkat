@@ -204,6 +204,15 @@ impl CheckedInstalls {
         session: &SessionId,
         job_id: &str,
     ) -> Result<PublicServiceSelection, ConnectorSelectionError> {
+        self.public_selection_for(realm, session, job_id, None)
+    }
+    pub(crate) fn public_selection_for(
+        self: &Arc<Self>,
+        realm: &RealmLocator,
+        session: &SessionId,
+        job_id: &str,
+        acquisition: Option<&toolkit_package::Id>,
+    ) -> Result<PublicServiceSelection, ConnectorSelectionError> {
         // A known remote job never falls back to an installation interpretation.
         let remote = self
             .state
@@ -212,12 +221,15 @@ impl CheckedInstalls {
             .remote
             .contains_key(job_id);
         if remote {
+            if acquisition.is_some() {
+                return Err(ConnectorSelectionError::Unconfirmed);
+            }
             Ok(PublicServiceSelection::Remote {
                 selected: self.remote_selection(realm, session, job_id)?,
                 owner: self.clone(),
             })
         } else {
-            self.connector_selection(realm, session, job_id)
+            self.connector_selection_for(realm, session, job_id, acquisition)
                 .map(Into::into)
         }
     }

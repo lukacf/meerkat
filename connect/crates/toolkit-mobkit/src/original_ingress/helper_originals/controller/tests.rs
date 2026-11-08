@@ -393,6 +393,38 @@ impl Fixture {
     }
 }
 
+// The helper recovery observation runs outside any owner change of the shared
+// publication: a short hold of the source collection is contention, waited
+// out within the bound, not an unavailable answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_observation_waits_for_a_held_source_collection_instead_of_refusing() {
+    let fixture = Fixture::new().await;
+    fixture
+        .owner
+        .retain_helper_controller_intent(&fixture.store, &fixture.admitted, fixture.candidate())
+        .await
+        .unwrap();
+    let owner = fixture.owner.clone();
+    let (held, holding) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let originals = owner.originals.lock().unwrap();
+        held.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(originals);
+    });
+    holding.recv().unwrap();
+    let observed = fixture
+        .owner
+        .observe_helper_binding(&fixture.store, &fixture.admitted)
+        .await;
+    holder.join().unwrap();
+    assert!(
+        observed.as_ref().is_ok_and(Option::is_none),
+        "a held source collection is waited for, not answered unavailable: {:?}",
+        observed.err()
+    );
+}
+
 #[tokio::test]
 async fn pending_intent_freezes_route_and_complete_intent_without_source_custody() {
     let fixture = Fixture::new().await;

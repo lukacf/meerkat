@@ -32,6 +32,7 @@ pub struct PrivateHostStartup {
     frame: Vec<u8>,
     request_id: u64,
     intent: PrivateHostStartupIntent,
+    hosted_mcp: HostedMcpAuthEndpoint,
     lost: bool,
 }
 
@@ -62,12 +63,20 @@ impl PrivateHostStartup {
             frame,
             request_id: 1,
             intent,
+            hosted_mcp: HostedMcpAuthEndpoint::default(),
             lost: false,
         })
     }
 
     pub fn intent(&self) -> &PrivateHostStartupIntent {
         &self.intent
+    }
+
+    /// Retain this connection's endpoint before the actual factory is offered.
+    /// Adoption transfers the same owner; binding alone admits no auth command
+    /// and creates no Console login or OAuth ceremony during preparation.
+    pub fn hosted_mcp_auth(&self) -> HostedMcpAuthEndpoint {
+        self.hosted_mcp.clone()
     }
 
     /// The trusted composition must validate the update and supply its original
@@ -146,6 +155,7 @@ impl PrivateHostStartup {
             super::HostWriter,
             u64,
             HostBootstrapSelection,
+            HostedMcpAuthEndpoint,
         ),
         PrivateHostError,
     > {
@@ -155,6 +165,12 @@ impl PrivateHostStartup {
         if self.lost || !self.frame.is_empty() {
             return Err(PrivateHostError::Protocol);
         }
-        Ok((self.reader, self.writer, self.request_id, selection))
+        Ok((
+            self.reader,
+            self.writer,
+            self.request_id,
+            selection,
+            self.hosted_mcp,
+        ))
     }
 }

@@ -116,6 +116,37 @@ impl LocalSetupApprovals {
             .map_err(|_| unavailable())?;
         Ok(approvals)
     }
+    /// Shared public setup uses the same software decision/presenter owner.
+    /// Account login is deliberately absent from this public-only composition.
+    pub(crate) fn create_shared(
+        &self,
+        tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
+        selected: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
+    ) -> Result<Arc<LocalApprovals>, ConnectError> {
+        self.check_open()?;
+        let permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
+        let (approvals, presenter) = LocalApprovals::create_for_selected_policy(
+            &self.artifact_parent,
+            selected,
+            Some(self.console.is_some()),
+        )?;
+        let presenter = presenter.ok_or_else(unavailable)?;
+        let approvals = Arc::new(approvals.with_service_tasks(Some(tasks)));
+        self.sender
+            .try_send(Enrollment {
+                console: self.console.clone(),
+                presenter: Some(presenter),
+                accounts: None,
+                _permit: permit,
+            })
+            .map_err(|_| unavailable())?;
+        Ok(approvals)
+    }
+
     /// Transfer the same account owner and sole presenter from native adapter
     /// construction. No effect future or native preparation receipt is sent.
     #[cfg(test)]
@@ -280,3 +311,40 @@ impl SetupPresenters {
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[async_trait::async_trait]
+impl toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpPresenter
+    for LocalSetupApprovals
+{
+    async fn review(
+        &self,
+        selection: toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpAdmissionSelection,
+        login: toolkit_mobkit::private_host::ConsoleLoginHandle,
+        request: meerkat_core::ApprovalRequest,
+        closed: toolkit_mobkit::private_host::PrivateHostClosed,
+    ) -> Result<
+        toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpApproval,
+        meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+    > {
+        use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+        self.check_open()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        let panel = self
+            .console
+            .as_ref()
+            .and_then(|slot| slot.get())
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let _permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        let (approvals, presenter) = self
+            .approval_pair()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        panel
+            .review_member(approvals, presenter, selection, login, request, closed)
+            .await
+            .map_err(|_| HostLifetimeError::NotSettled)
+    }
+}

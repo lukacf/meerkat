@@ -73,6 +73,40 @@ original task, or use [saved-work readback](/guides/manage-connections#read-save
 with new configuration/workspace paths after the old workers settle.
 Do not delete the old workspace to make the original command run again.
 
+## The Console reopens but the setup tools do not work
+
+A visible conversation or setup panel does not establish that the setup tools
+reattached. Keep the startup error and the existing setup request identifier. If
+it reports `local_setup_previous_session_needs_review`, preserve the old setup
+workspace. If that attempt produced a recovery manifest, use the supported
+[saved-work readback](/guides/manage-connections#read-saved-work-after-process-loss)
+route for its recorded requests. An empty setup round may have no such manifest;
+in that case, the application maintainer must restore the helper through its
+supported owner path. Do not delete the directory or rerun the old generated
+command to make startup succeed.
+
+For application maintainers, verify an actual tool call after restoration, not
+only the session or panel state. The native session, physical tool connection
+and any outstanding approval each need their owner's supported restoration
+path. A normal process exit alone does not prove that interrupted work settled.
+
+## An approved consent does not resume after another prompt or restart
+
+In the pending stock retained-resume implementation, inspect the notice's typed
+delivery state separately from the approval decision. A later governed prompt
+supersedes the earlier destination. Its old notice can fail with
+`NoAdmissibleWorkBinding` and withdraw the parked consent even though the person
+approved it. A process restart also loses stock original custody; a notice for
+that earlier original can fail with `AuthorityDenied`. Neither failure permits
+another model request under the old authority.
+
+Preserve the failed notice and its original request. If the action is still
+wanted, use the supported fresh request and review path. Reopening a Console,
+replaying a notice or copying an old grant cannot restore current authority.
+Applications that require consent to survive process loss need their actual
+durable original owner and supported retained-resume composition; stock session
+history alone is insufficient. See [resuming parked consent](/reference/access-control#resuming-parked-consent-unreleased).
+
 ## A saved setup file does not resume installation
 
 That file selects retained requests. Use `--recover-manifest` for readback or
@@ -140,6 +174,77 @@ not a reason to bypass these checks. Constructing the dispatcher alone does not
 enable setup execution. Store failures or an admission timeout can also return
 unavailable. See [host composition](/guides/host-composition).
 
+## A workflow launch reports not_admitted (unreleased)
+
+For host maintainers, the current Connect source writes a JSON event named
+`toolkit_workflow_launch_submission_error` to native stderr when a governed
+workflow submission returns an error. Keep the event from the same attempt
+alongside its workflow observation and exact Connect, Core and Meta source
+revisions. Older binaries may not emit it.
+
+The workflow observation `not_admitted` combines three different refusal paths.
+The diagnostic's `category` distinguishes them:
+
+| Category | Where to investigate |
+| --- | --- |
+| `GovernedInput::Bind` | The Connect input binder refused before native admission. Inspect the selected source and binding owner. |
+| `GovernedInput::EntryRefused` | The final entry fence refused submission. Inspect the host's current entry authority and lifetime. |
+| `GovernedInput::Mob` | The native mob rejected the submission. Inspect `mob_class` and, when present, `runtime_category` and `refusal_kind`. |
+
+For a native member-input refusal, `runtime_category` distinguishes errors such
+as `ControllerReadinessUnavailable` and `InputRefused`. Only `InputRefused`
+provides a `refusal_kind`: `ReprepareRequired`, `Denied` or `MalformedFacts`.
+These fields can be null for other error variants; null is not evidence that
+the corresponding check passed.
+
+This event contains fixed classifications, not the original error payload or
+the full refusal reason. A missing event does not identify the cause: a failure
+can occur before the submission call, and stderr output is best effort. The
+diagnostic alone proves neither settlement nor retry safety. Preserve uncertain
+effects and use the existing workflow's status and owner-supported recovery
+path instead of automatically repeating the submission.
+
+## Review is unavailable or a read-only tool is denied
+
+`review_unavailable` with `data.kind` set to `unsupported_entry` means the
+selected dispatcher did not expose the review-entry support required for that
+call. It does not mean a person rejected consent. Separately, `access_denied`
+under read-only policy can mean the owner's `ReadOnly` declaration did not reach
+the native dispatch gate. Neither error alone identifies a forwarding defect:
+policy can legitimately deny a tool, and unsupported inner tools or older
+Connect `CheckedInstalls` paths can refuse required review.
+
+`context_unavailable` is a different refusal: the policy owner cannot supply
+required review context, such as the current work mandate or selected action
+account. Inspect the host policy-owner integration and current source/lifetime
+state. An available consent route does not establish that this context is
+available.
+
+Since Core 0.9.7 the two external-dispatcher filters pass each allowed tool's
+`review_entry_support` and `tool_mutation_class` through; only filtered-out tools
+answer `Unsupported` and `Unknown`:
+
+- A nonempty resolved profile `tools.mcp` restriction selects
+  `McpProvenanceFilter` when the host supplies a default external dispatcher.
+- Actual tool-name collisions select `NameFilteredDispatcher` for a per-spawn
+  or default external dispatcher.
+
+If required review still refuses before consent, or read-only policy denies an
+owner-declared `ReadOnly` tool, another wrapper in the chain may drop the
+declarations. Inspect every wrapper in the dispatcher chain that actually owns the selected
+tool, including profile overrides and routing precedence. Check the owner's
+native mutation declaration; a read-looking name or MCP annotation is not that
+declaration. The shared `setup_state` configured-MCP route is composed as a
+sibling of those external dispatchers, so a `mcp_servers` entry alone does not
+establish filter exposure. See [host composition](/guides/host-composition) and
+[native MCP attachment](/guides/native-mcp).
+
+Preserve exact Connect, Core and Meta versions or source revisions,
+archive hashes, tool name, resolved profile, operation and access policies, and
+the fixed error with a bounded, redacted composition trace for the maintainer.
+Keep policy unchanged while diagnosing: do not broaden `tools.mcp` or access,
+turn off read-only enforcement, bypass review, or automatically retry.
+
 ## A recipe exists but discovery cannot find it
 
 Check the compiled include list in `crates/toolkit-package/src/library.rs`. Drive `0.1.0` and Slack `0.3.0` files currently exist outside that registered inventory. Also confirm whether the host chose the metadata-only catalog or the versioned library. A stale paging snapshot requires a fresh listing.
@@ -162,6 +267,41 @@ Check the application's restoration, helper and spawn configuration when a tool 
 
 Inspect the native startup result and the configured startup budgets. A timeout or lost reply calls for reconciliation through the startup owner before another attempt. See [native application lifecycle](/guides/host-composition#native-application-lifecycle).
 
+### A protected service host times out before HELLO (development)
+
+This section applies to the Linux protected-parent service host. Ordinary CLI
+setup and SDK startup have their own lifecycle paths.
+
+Identify the last phase observed by the original launcher. Releasing its held
+stage does not establish successful execution of the native image. Connect can
+also refuse adoption before it sends any protocol message.
+
+| Phase | What the selected Connect source does | Evidence to inspect |
+| --- | --- | --- |
+| Before adoption | The host transfers the original descriptors before creating threads or helpers. | The original child's execution identity, image and exit observation from the launch owner. A stage-release record alone is insufficient. |
+| `ProtectedServiceInputs::adopt` | Checks process protection, descriptors, parent identity, sealed mapping, execution identity, installed resources and private roots. | The exact installed executable, manifest and filesystem objects as seen by the selected child identity. A hash match or a root-only access check does not establish usable child access. |
+| Before `HELLO` | Adoption verifies the resource tree's ownership, inventory, modes, links and every listed file's content hash. Channel and pipe adoption also precede `HELLO`. | Original phase observations and elapsed time. Verification can refuse early; resource size alone cannot establish its duration. |
+| Native handshake | Starts one 20-second absolute deadline immediately before sending `HELLO`, then reuses it while receiving `ATTEST`, sending `BOUND` and awaiting `ACTIVATE`. | The original channel's actual messages and timing. `HELLO` alone does not establish activation or service use. |
+
+The native deadline does not cover the preceding synchronous installation
+verification. The launcher's first-message deadline may already be running
+during that work. Inspect the selected launcher's start point and configuration;
+the two budgets do not add together into an overall startup allowance. Missing
+`HELLO` does not by itself prove that verification was slow or that a larger
+timeout is needed.
+
+Keep channel and process observations separate. A parent that retains another
+reference to the child's socket endpoint may receive no EOF when the child
+exits. Use the original process owner's exit observation; a later containment
+signal does not identify the earlier cause. An absent reply or diagnostic file
+alone establishes neither liveness nor a particular exit code.
+
+Preserve the original attempt, source and artifact identities, phase timings and
+any available child exit or errno evidence. Resolve missing observations through
+the existing launch owner. Continue recovery through that owner's lifecycle;
+this diagnosis does not require a replacement launch, cache flush or timeout
+change.
+
 ## Authentication completed but access is denied
 
 Check actual account identity, requested operations/resources, host grant and provider scope separately. Developer registration or administrator installation may still be missing. A saved connection is not a grant, and a broad provider credential does not establish the intended local restriction.
@@ -169,6 +309,32 @@ Check actual account identity, requested operations/resources, host grant and pr
 ## A write timed out or returned an HTTP error
 
 Inspect the typed effect outcome. Once entered, a write can remain unknown even on an error response. Preserve the original business invocation and reconcile according to that provider/domain contract. Retry-After is not permission to replay; a Gmail Message-ID search is not proof that an earlier send did not happen.
+
+## An approved operation timed out but has no Used notice
+
+Preserve the original invocation and consult its native admission and effect
+owners. A cancelled caller can leave an entered worker or unresolved admission
+alive. In the development review-custody path, the `Used` notice waits for the
+admitting dispatch and retained effect custody to end; it is not a completion
+acknowledgment from the caller.
+
+For `AdmissionUnresolved` or an `Uncertain` effect, let the existing workflow
+owner reconcile the exact original input and effect. Do not submit a replacement
+input because the reply or notice is missing. A successful readback can settle
+that original effect without another admission. Retain uncertainty when
+reconciliation cannot establish an outcome. Report publication or cleanup
+failures separately without overwriting an independently established effect
+outcome. Neither a missing `Used` notice nor a later one establishes the
+business result. See
+[review lifetime during cancellation](/reference/access-control#review-lifetime-during-cancellation-unreleased).
+
+## A service input receipt reports outcome_unknown
+
+Keep the original input and treat its outcome as unknown even when the receipt
+is `finalized`. Do not automatically retry the action. The development
+[service input receipt guide](/guides/host-composition#read-a-service-input-receipt-unreleased)
+explains the receipt fields and historical run ID; reading the receipt again
+does not submit the work again.
 
 ## Slack retrieval finished but the summary is incomplete
 

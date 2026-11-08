@@ -69,6 +69,7 @@ class InertInputs:
         resources = package / "libexec/meerkat-connect"
         self.package, self.resources = package, resources
         self.explicit_kind = None
+        self.derivation = {}
         resources.mkdir(parents=True)
         (package / "bin").mkdir()
         paths = {"prepare": "prepare.py", "python": "runtime/python/bin/python3.11",
@@ -249,6 +250,7 @@ class InertInputs:
                 kwargs.update(resource_record_path=self.resource_record,
                               resource_record_sha=ASSEMBLER.digest(self.resource_record),
                               binary_kind=self.explicit_kind)
+            kwargs.update(self.derivation)
             kwargs.update(stage_only=stage_only, **overrides)
             return ASSEMBLER.assemble(self.binary, ASSEMBLER.digest(self.binary), self.record,
                                       destination or self.destination, **kwargs)
@@ -269,9 +271,11 @@ def inputs(target="macos-arm64", **kwargs):
 
 class InertGatewayReport:
     """Fabricated existing-verifier files, never a native execution result."""
-    def __init__(self, fixture):
+    def __init__(self, fixture, configure=None):
         self.fixture = fixture
         fixture.select_explicit("toolkit_gateway")
+        if configure is not None:
+            configure(fixture)
         # Gateway qualification has no dependency on the companion CLI tests.
         for key in ("test_executable", "installed_composition", "native_shutdown_review"):
             fixture.record_value.pop(key)
@@ -292,6 +296,9 @@ class InertGatewayReport:
                 "source_manifest": fixture.reference(fixture.source),
                 "resource_manifest": fixture.reference(self.package / "libexec/meerkat-connect/resources.json")},
             "sdk_sources": [], "cases": []}
+        if "derived_binary" in self.staging:
+            self.report["installed_inputs"]["derived_binary"] = fixture.reference(
+                fixture.destination / "derived-binary-record.json")
         for module, files in (("meerkat_toolkit", ("host_control.py", "application_runtime.py")),
                               ("meerkat_meta", ("__init__.py", "builder.py", "runtime.py", "_transport.py",
                                  "agent_builder.py", "identity_first_models.py", "identity_first_providers.py", "types.py"))):
@@ -475,6 +482,66 @@ class InertGatewayReport:
 
 class InstalledVerifierBoundaryTests(unittest.TestCase):
     """Exercise only pre-import admission and negative observation checks."""
+    def read_staged_gateway(self, fixture):
+        staging = fixture.destination / "staging.json"
+        args = VERIFIER.argparse.Namespace(
+            installed_staging=staging, installed_staging_sha256=ASSEMBLER.digest(staging),
+            toolkit_gateway=fixture.destination / fixture.prefix / "bin/toolkit_gateway")
+        with mock.patch.object(VERIFIER.sys, "platform", "darwin"), \
+                mock.patch.object(VERIFIER.platform, "machine", return_value="arm64"):
+            return VERIFIER.installed_candidate(args)
+
+    def test_combined_build_stages_and_verifies_only_the_selected_gateway(self):
+        for names in (("toolkit_gateway", "meerkat-connect"),
+                      ("meerkat-connect", "toolkit_gateway"),
+                      ("toolkit_gateway", "another_binary")):
+            with self.subTest(names=names), inputs() as fixture:
+                fixture.select_explicit("toolkit_gateway")
+                fixture.record_value["cargo"]["argv"] = ["NEVER-EXECUTED-SYNTHETIC-BUILD"] + [
+                    argument for name in names for argument in ("--bin", name)]
+                fixture.update_record()
+                original = fixture.record.read_bytes()
+                staged = fixture.assemble(stage_only=True)
+                candidate, package, _, _ = self.read_staged_gateway(fixture)
+                self.assertEqual(candidate, staged["candidate"])
+                self.assertEqual({path.name for path in (package / "bin").iterdir()}, {"toolkit_gateway"})
+                self.assertEqual((package / "bin/toolkit_gateway").read_bytes(), fixture.binary.read_bytes())
+                self.assertEqual((fixture.destination / "build-record.json").read_bytes(), original)
+                self.assertEqual(fixture.record.read_bytes(), original)
+
+    def test_ambiguous_or_missing_binary_selection_refuses_at_both_boundaries(self):
+        gateway = ["--bin", "toolkit_gateway"]
+        cases = {"absent": [], "other_only": ["--bin", "meerkat-connect"],
+            "duplicate_gateway": gateway + gateway,
+            "duplicate_other": gateway + ["--bin", "sidecar", "--bin", "sidecar"],
+            "missing_argument": gateway + ["--bin"],
+            "flag_argument": gateway + ["--bin", "--locked"],
+            "empty_argument": gateway + ["--bin", ""],
+            "invalid_argument": gateway + ["--bin", "bad target"],
+            "non_string_argument": gateway + ["--bin", None],
+            "hidden_equal_selection": gateway + ["--bin=toolkit_gateway"]}
+        for name, arguments in cases.items():
+            with self.subTest(case=name), inputs() as fixture:
+                fixture.select_explicit("toolkit_gateway")
+                fixture.assemble(stage_only=True)
+                fixture.record_value["cargo"]["argv"] = ["NEVER-EXECUTED-SYNTHETIC-BUILD", *arguments]
+                fixture.update_record()
+                refused = fixture.root / "refused-assembly"
+                with self.assertRaises(ValueError):
+                    fixture.assemble(destination=refused, stage_only=True)
+                self.assertFalse(refused.exists())
+                # Independently exercise verifier admission with a coherently
+                # repinned inert record, not an earlier artifact-hash failure.
+                built = fixture.destination / "build-record.json"
+                built.chmod(0o600)
+                built.write_bytes(fixture.record.read_bytes())
+                staging = fixture.destination / "staging.json"
+                value = json.loads(staging.read_bytes())
+                value["build_record_sha256"] = ASSEMBLER.digest(built)
+                staging.write_bytes(encoded(value))
+                with self.assertRaisesRegex(AssertionError, "gateway resource-bound build record required"):
+                    self.read_staged_gateway(fixture)
+
     def test_public_catalog_plan_explicitly_selects_whole_candidate_policy(self):
         for selected in (False, True):
             with self.subTest(selected=selected), tempfile.TemporaryDirectory() as scratch:
@@ -1419,6 +1486,8 @@ class ExplicitSelectionTests(unittest.TestCase):
             with self.subTest(change=change), inputs() as fixture:
                 fixture.select_explicit("toolkit_gateway")
                 value = fixture.record_value
+                value["cargo"]["argv"] = ["NEVER-EXECUTED-SYNTHETIC-BUILD", "--bin", "toolkit_gateway",
+                                           "--bin", "meerkat-connect"]
                 if change == "kind":
                     value["binary_kind"] = "meerkat-connect"
                 elif change == "resource":
@@ -1430,7 +1499,7 @@ class ExplicitSelectionTests(unittest.TestCase):
                 elif change == "binary":
                     value["binary"]["sha256"] = "0" * 64
                 elif change == "argv":
-                    value["cargo"]["argv"][-1] = "meerkat-connect"
+                    value["cargo"]["argv"] = ["NEVER-EXECUTED-SYNTHETIC-BUILD", "--bin", "meerkat-connect"]
                 else:
                     value["cargo"]["env"]["MEERKAT_CONNECT_RESOURCES_SHA256"] = "0" * 64
                 fixture.record.write_bytes(encoded(value))
@@ -2492,6 +2561,499 @@ class InstalledConsoleBoundaryTests(unittest.TestCase):
         for raw in (b'{"frames":', b'{"frames":[],"frames":[]}'):
             with self.assertRaises((ValueError, AssertionError)):
                 VERIFIER.unique_json(raw)
+
+
+
+def inert_elf(resource_digest, *, debug):
+    """Hand-built ELF64 data, never executed; models only strip-debug layout changes."""
+    data = bytearray(1024)
+    data[:7] = b"\x7fELF\x02\x01\x01"
+    rows = [("", 0, 0, 0, b"")]
+    def section(name, kind, flags, offset, content):
+        data[offset:offset + len(content)] = content
+        rows.append((name, kind, flags, offset, content))
+    section(".text", 1, 6, 256, b"INERT DATA - NEVER EXECUTE")
+    section(".rodata", 1, 2, 384, resource_digest.encode())
+    section(".note.gnu.build-id", 7, 2, 512, struct.pack("<III", 4, 20, 3) + b"GNU\0" + b"x" * 20)
+    section(".debug_gdb_scripts", 1, 2, 576, b"\1inert_printers.py\0")
+    section(".dynstr", 3, 2, 640, b"\0libc.so.6\0")
+    section(".dynamic", 6, 3, 672, struct.pack("<qQqQ", 1, 1, 0, 0))
+    section(".symtab", 2, 0, 1024, b"INERT SYMBOL DATA")
+    section(".strtab", 3, 0, len(data), b"\0inert_symbol\0")
+    if debug:
+        section(".debug_info", 1, 0, len(data), b"INERT DEBUG DATA" * 4)
+    names = b"\0" + b"".join(name.encode() + b"\0" for name, *_ in rows[1:]) + b".shstrtab\0"
+    section(".shstrtab", 3, 0, len(data), names)
+    table_offset = len(data)
+    for name, kind, flags, offset, content in rows:
+        data.extend(struct.pack("<IIQQQQIIQQ", names.index(name.encode() + b"\0"), kind, flags,
+            0x400000 + offset if flags & 2 else 0, offset, len(content), 0, 0, 1, 0))
+    struct.pack_into("<HHIQQQIHHHHHH", data, 16, 3, 62, 1, 0x400100, 64, table_offset,
+                     0, 64, 56, 1, 64, len(rows), len(rows) - 1)
+    struct.pack_into("<IIQQQQQQ", data, 64, 1, 5, 0, 0x400000, 0x400000, 1024, 1024, 4096)
+    return bytes(data)
+
+
+class InertDerivation:
+    """Fabricated producer records, real file hashes and ELF validation; no tool execution."""
+    def __init__(self, fixture, kind):
+        self.fixture, self.kind = fixture, kind
+        self.original = fixture.root / "inert-original"
+        self.original.write_bytes(inert_elf(fixture.resource_sha, debug=True))
+        fixture.binary.write_bytes(inert_elf(fixture.resource_sha, debug=False))
+        self.tool = fixture.root / "inert-objcopy"
+        self.tool.write_bytes(b"INERT TOOL - NEVER EXECUTE\n")
+        self.directory = fixture.root / "inert-transformation"
+        self.directory.mkdir()
+        fixture.record_value["binary"] = {"path": str(self.original), **fixture.identity(self.original)}
+        for value, path in [(fixture.composition_value, fixture.composition), (fixture.shutdown_value, fixture.shutdown)]:
+            value["candidate"]["binary"] = fixture.identity(fixture.binary)
+            path.write_bytes(encoded(value))
+        fixture.update_record()
+        self.record = self.directory / "DERIVED-BINARY.json"
+        self.write()
+
+    def write(self, edit=None):
+        f = self.fixture
+        original = {"path": str(self.original), **f.identity(self.original)}
+        derived = {"path": str(f.binary), **f.identity(f.binary)}
+        tool = {"path": str(self.tool), "sha256": sha(self.tool.read_bytes()), "version": "GNU objcopy (GNU Binutils for Ubuntu) 2.42"}
+        argv = [str(self.tool), "--strip-debug", original["path"], derived["path"]]
+        parts = {
+            "start": {"schema_version": 1, "kind": "meerkat_connect_strip_debug_start", "binary_kind": self.kind,
+                      "argv": list(argv), "tool": dict(tool), "input": original, "output": {"path": derived["path"]}},
+            "result": {"schema_version": 1, "kind": "meerkat_connect_strip_debug_result", "exit_code": 0,
+                       "class": "ok", "input": original, "output": derived,
+                       "tool": {"path": tool["path"], "sha256": tool["sha256"]}},
+            "record": {"schema_version": 1, "kind": {"toolkit_gateway": "meerkat_connect_derived_gateway", "meerkat-connect": "meerkat_connect_derived_cli"}[self.kind], "binary_kind": self.kind,
+                       "derivation": "strip_debug", "original": original, "derived": derived, "tool": tool, "argv": argv}}
+        if edit:
+            edit(parts)
+        start = self.directory / "START.json"
+        start.write_bytes(encoded(parts["start"]))
+        parts["result"]["start_sha256"] = sha(start.read_bytes())
+        result = self.directory / "RESULT.json"
+        result.write_bytes(encoded(parts["result"]))
+        parts["record"]["transformation"] = {"start": f.reference(start), "result": f.reference(result)}
+        self.record.write_bytes(encoded(parts["record"]))
+        f.derivation = {"derived_record_path": self.record, "derived_record_sha": sha(self.record.read_bytes())}
+
+    @contextlib.contextmanager
+    def pinned_tool(self):
+        with mock.patch.object(ASSEMBLER, "STRIP_TOOL", self.tool, create=True), \
+                mock.patch.object(ASSEMBLER, "STRIP_TOOL_SHA", sha(self.tool.read_bytes()), create=True):
+            yield
+
+    def join(self):
+        f = self.fixture
+        return ASSEMBLER.derived_binary(self.record, sha(self.record.read_bytes()), f.binary, sha(f.binary.read_bytes()),
+            binary_kind=self.kind, target=f.target, resources_sha=f.resource_sha)
+
+
+class DerivedBinaryTests(unittest.TestCase):
+    def require_case_sensitive(self, fixture):
+        try:
+            PACKAGER["require_case_sensitive"](fixture.root)
+        except ValueError:
+            self.skipTest("Linux assembly requires a case-sensitive temporary filesystem")
+
+    def test_stripped_cli_keeps_build_original_and_qualifies_shipped_candidate(self):
+        with inputs("linux-x86_64") as f:
+            self.require_case_sensitive(f)
+            f.select_explicit()
+            pair = InertDerivation(f, "meerkat-connect")
+            build_raw = f.record.read_bytes()
+            with pair.pinned_tool():
+                result = f.assemble()
+            self.assertEqual((f.destination / "build-record.json").read_bytes(), build_raw)
+            self.assertEqual(result["qualification"]["candidate"]["binary"], f.identity(f.binary))
+            self.assertEqual(result["derived_binary"]["original"]["sha256"], sha(pair.original.read_bytes()))
+            self.assertNotEqual(result["binary_sha256"], result["derived_binary"]["original"]["sha256"])
+            self.assertEqual((f.destination / ASSEMBLER.DERIVED_RECORD).read_bytes(), pair.record.read_bytes())
+            self.assertTrue(result["package_envelope"]["archive_within_host_member_limit"])
+            self.assertIn(".debug_gdb_scripts", result["derived_binary"]["validation"]["allocated_debug_sections_kept"])
+            self.assertEqual(result["derived_binary"]["validation"]["needed"], ["libc.so.6"])
+            self.assertIn(".debug_info", result["derived_binary"]["validation"]["removed_sections"])
+
+    def test_cli_acceptance_bound_to_original_cannot_qualify_derived_bytes(self):
+        with inputs("linux-x86_64") as f:
+            f.select_explicit()
+            pair = InertDerivation(f, "meerkat-connect")
+            f.composition_value["candidate"]["binary"] = f.identity(pair.original)
+            f.composition.write_bytes(encoded(f.composition_value)); f.update_record()
+            with pair.pinned_tool(), self.assertRaisesRegex(ValueError, "candidate"):
+                f.assemble()
+            self.assertFalse(f.destination.exists())
+
+    def test_stripped_gateway_stage_verifier_and_final_use_same_derivation(self):
+        with inputs("linux-x86_64") as f:
+            self.require_case_sensitive(f)
+            pairs = []
+            def configure(fixture):
+                pairs.append(InertDerivation(fixture, "toolkit_gateway"))
+            # Pin the inert tool before the evidence fixture stages its candidate.
+            tool = f.root / "inert-objcopy"
+            with mock.patch.object(ASSEMBLER, "STRIP_TOOL", tool), \
+                    mock.patch.object(ASSEMBLER, "STRIP_TOOL_SHA", sha(b"INERT TOOL - NEVER EXECUTE\n")):
+                report = InertGatewayReport(f, configure=configure)
+                pair = pairs[0]
+                staging = f.destination / "staging.json"
+                args = VERIFIER.argparse.Namespace(installed_staging=staging,
+                    installed_staging_sha256=sha(staging.read_bytes()), toolkit_gateway=report.package / "bin/toolkit_gateway")
+                with mock.patch.object(VERIFIER.sys, "platform", "linux"), \
+                        mock.patch.object(VERIFIER.platform, "machine", return_value="x86_64"):
+                    candidate, _, _, evidence = VERIFIER.installed_candidate(args)
+                self.assertEqual(candidate["binary"], f.identity(f.binary))
+                self.assertEqual(evidence["derived_binary"]["sha256"], sha(pair.record.read_bytes()))
+                result = report.assemble()
+                self.assertEqual(result["derived_binary"], report.staging["derived_binary"])
+                self.assertEqual(result["qualification"]["candidate"], candidate)
+                self.assertEqual((f.root / "final-gateway/build-record.json").read_bytes(), f.record.read_bytes())
+                # A different coherently pinned transformation record cannot replace the verifier's input.
+                value = json.loads(pair.record.read_bytes())
+                pair.record.write_bytes(json.dumps(value, separators=(",", ":")).encode())
+                f.derivation["derived_record_sha"] = sha(pair.record.read_bytes())
+                with self.assertRaisesRegex(ValueError, "another derived binary record"):
+                    f.assemble(destination=f.root / "refused", gateway_verification_path=report.path,
+                               gateway_verification_sha=sha(report.path.read_bytes()))
+                self.assertFalse((f.root / "refused").exists())
+
+    def test_changed_elf_bytes_refuse_even_with_coherent_hashes_and_records(self):
+        changes = {"loaded_code": (260, 1), "loaded_data": (400, 1), "entry": (24, 1),
+                   "program_flags": (68, 1), "unmasked_header": (7, 1), "build_id": (530, 1)}
+        for label, (offset, xor) in changes.items():
+            with self.subTest(change=label), inputs("linux-x86_64") as f:
+                f.select_explicit(); pair = InertDerivation(f, "meerkat-connect")
+                data = bytearray(f.binary.read_bytes()); data[offset] ^= xor; f.binary.write_bytes(data)
+                pair.write()
+                with pair.pinned_tool(), self.assertRaisesRegex(ValueError, "not a strip-debug"):
+                    pair.join()
+
+    def test_transformation_failures_are_not_replaced_by_elf_equivalence(self):
+        edits = {
+            "failed": lambda x: x["result"].update(exit_code=1),
+            "boolean_exit": lambda x: x["result"].update(exit_code=False),
+            "timeout": lambda x: x["result"].update({"class": "timeout"}),
+            "wrong_start_kind": lambda x: x["start"].update(binary_kind="toolkit_gateway"),
+            "strip_all": lambda x: (x["record"]["argv"].__setitem__(1, "--strip-all"), x["start"]["argv"].__setitem__(1, "--strip-all")),
+            "wrong_tool": lambda x: x["record"]["tool"].update(sha256="0" * 64),
+            "wrong_kind": lambda x: x["record"].update(kind="meerkat_connect_derived_gateway"),
+        }
+        for label, edit in edits.items():
+            with self.subTest(change=label), inputs("linux-x86_64") as f:
+                f.select_explicit(); pair = InertDerivation(f, "meerkat-connect"); pair.write(edit)
+                with pair.pinned_tool(), self.assertRaises(ValueError):
+                    pair.join()
+
+    def test_derivation_requires_both_pins_explicit_kind_and_linux(self):
+        for target in ("macos-arm64", "linux-x86_64"):
+            with inputs(target) as f:
+                f.select_explicit(); pair = InertDerivation(f, "meerkat-connect")
+                for override in ({"derived_record_path": None}, {"derived_record_sha": None},
+                                 {"derived_record_sha": "0" * 64}, {"binary_kind": None}):
+                    with self.subTest(target=target, override=override), pair.pinned_tool(), self.assertRaises(ValueError):
+                        f.assemble(stage_only=True, **override)
+                    self.assertFalse(f.destination.exists())
+                if target == "macos-arm64":
+                    with pair.pinned_tool(), self.assertRaisesRegex(ValueError, "Linux strip-debug"):
+                        pair.join()
+
+    def test_record_tamper_and_original_alias_are_refused(self):
+        with inputs("linux-x86_64") as f:
+            f.select_explicit(); pair = InertDerivation(f, "meerkat-connect")
+            with pair.pinned_tool():
+                (pair.directory / "RESULT.json").write_bytes(b"{}")
+                with self.assertRaises(ValueError): pair.join()
+                pair.write()
+                pair.original.unlink(); os.link(f.binary, pair.original)
+                pair.write()
+                with self.assertRaisesRegex(ValueError, "separate file"): pair.join()
+
+    def test_raw_artifact_bound_does_not_raise_shipped_binary_bound(self):
+        with inputs("linux-x86_64") as f:
+            # Scaled bounds exercise the real file checks without allocating gigabytes.
+            with mock.patch.object(ASSEMBLER, "BINARY_LIMIT", 64), \
+                    mock.patch.object(ASSEMBLER, "UNSTRIPPED_LIMIT", 512):
+                with self.assertRaisesRegex(ValueError, "outside bound"):
+                    ASSEMBLER.check_binary(f.binary, sha(f.binary.read_bytes()), target=f.target,
+                        resources_sha=f.resource_sha, limit=ASSEMBLER.BINARY_LIMIT)
+                ASSEMBLER.check_binary(f.binary, sha(f.binary.read_bytes()), target=f.target,
+                    resources_sha=f.resource_sha, limit=ASSEMBLER.UNSTRIPPED_LIMIT)
+                with self.assertRaisesRegex(ValueError, "unsupported binary bound"):
+                    ASSEMBLER.check_binary(f.binary, sha(f.binary.read_bytes()), target=f.target, limit=1024)
+
+    def test_package_envelope_checks_members_nested_members_and_raw_stream(self):
+        limit = ASSEMBLER.MEMBER_LIMIT
+        ASSEMBLER.package_envelope([("binary", limit)], archive_bytes=limit)
+        failures = [({"members": [("binary", limit + 1)]}, "member"),
+                    ({"members": [("binary", 1)], "archive_bytes": limit + 1}, "host member"),
+                    ({"members": [("binary", 1)], "raw_tar_bytes": ASSEMBLER.RAW_TAR_LIMIT + 1}, "tar stream"),
+                    ({"members": [("nested.tar.gz", 1)], "embedded": [{"name": "nested.tar.gz", "bytes": 1,
+                       "members": [("oversized", limit + 1)]}]}, "member")]
+        for kwargs, error in failures:
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, error):
+                ASSEMBLER.package_envelope(**kwargs)
+
+    def test_archive_envelope_measures_actual_nested_members_and_padding(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "outer.tar.gz"
+            nested = io.BytesIO()
+            with tarfile.open(fileobj=nested, mode="w:gz") as archive:
+                member = tarfile.TarInfo("payload"); member.size = 17
+                archive.addfile(member, io.BytesIO(b"x" * 17))
+            payload = nested.getvalue()
+            with tarfile.open(path, "w:gz") as archive:
+                member = tarfile.TarInfo("nested.tar.gz"); member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            result = ASSEMBLER.archive_envelope(path)
+            with gzip.open(path, "rb") as stream:
+                self.assertEqual(result["raw_tar_bytes"], len(stream.read()))
+            self.assertEqual(result["embedded_archives"][0]["largest_member_bytes"], 17)
+            with mock.patch.object(ASSEMBLER, "MEMBER_LIMIT", 16), self.assertRaisesRegex(ValueError, "member"):
+                ASSEMBLER.archive_envelope(path)
+
+
+
+class StripProducerTests(unittest.TestCase):
+    def test_producer_records_original_and_retained_output_without_running_product(self):
+        producer = load("connect_strip_producer", ROOT / "scripts/derive-strip-debug.py")
+        self.assertEqual((producer.TOOL, producer.TOOL_SHA, producer.TOOL_VERSION, producer.KINDS),
+                         (ASSEMBLER.STRIP_TOOL, ASSEMBLER.STRIP_TOOL_SHA, ASSEMBLER.STRIP_TOOL_VERSION,
+                          ASSEMBLER.DERIVED_KINDS))
+        for kind in producer.KINDS:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch).resolve(); original_dir = root / "original"; original_dir.mkdir()
+                original = original_dir / kind; original.write_bytes(inert_elf("a" * 64, debug=True))
+                before = original.read_bytes(); tool = root / "inert-tool"; tool.write_bytes(b"NEVER EXECUTE")
+                output = root / "derived"
+                def launch(argv, **kwargs):
+                    self.assertTrue((output / "START.json").is_file())
+                    self.assertFalse((output / "RESULT.json").exists())
+                    self.assertEqual(argv, [str(tool), "--strip-debug", str(original), str(output / kind)])
+                    (output / kind).write_bytes(inert_elf("a" * 64, debug=False))
+                    return mock.Mock(wait=mock.Mock(return_value=0))
+                args = producer.argparse.Namespace(original=original, original_sha256=sha(before),
+                    original_size=len(before), output_dir=output, binary_kind=kind, timeout_seconds=30)
+                with mock.patch.object(producer, "TOOL", tool), mock.patch.object(producer, "TOOL_SHA", sha(tool.read_bytes())), \
+                        mock.patch.object(producer, "tool_version", return_value=(0, producer.TOOL_VERSION)), \
+                        mock.patch.object(producer.subprocess, "Popen", side_effect=launch) as popen:
+                    code, report = producer.derive(args)
+                self.assertEqual(code, 0); popen.assert_called_once()
+                self.assertEqual(original.read_bytes(), before)
+                self.assertEqual((output / kind).stat().st_mode & 0o777, 0o555)
+                record = json.loads((output / "DERIVED-BINARY.json").read_bytes())
+                self.assertEqual(record["transformation"], {"start": report["start"], "result": report["result"]})
+                self.assertEqual(record["original"]["sha256"], sha(before))
+                result = json.loads((output / "RESULT.json").read_bytes())
+                self.assertEqual(result["start_sha256"], sha((output / "START.json").read_bytes()))
+                self.assertEqual(result["class"], "ok")
+
+    def test_producer_pin_refusal_precedes_process_and_output_creation(self):
+        producer = load("connect_strip_producer_refusal", ROOT / "scripts/derive-strip-debug.py")
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch).resolve(); original_dir = root / "original"; original_dir.mkdir()
+            original = original_dir / "inert"; original.write_bytes(b"INERT ORIGINAL")
+            args = producer.argparse.Namespace(original=original, original_sha256="0" * 64,
+                original_size=original.stat().st_size, output_dir=root / "derived",
+                binary_kind="toolkit_gateway", timeout_seconds=30)
+            with mock.patch.object(producer.subprocess, "Popen") as popen, \
+                    mock.patch.object(producer, "tool_version") as version, \
+                    self.assertRaisesRegex(producer.Refused, "original differs"):
+                producer.derive(args)
+            popen.assert_not_called(); version.assert_not_called()
+            self.assertFalse(args.output_dir.exists())
+
+    def test_failed_strip_cannot_emit_a_derived_record(self):
+        producer = load("connect_strip_producer_failure", ROOT / "scripts/derive-strip-debug.py")
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch).resolve(); original_dir = root / "original"; original_dir.mkdir()
+            original = original_dir / "inert"; original.write_bytes(b"INERT ORIGINAL")
+            tool = root / "tool"; tool.write_bytes(b"INERT TOOL")
+            args = producer.argparse.Namespace(original=original, original_sha256=sha(original.read_bytes()),
+                original_size=original.stat().st_size, output_dir=root / "derived",
+                binary_kind="toolkit_gateway", timeout_seconds=30)
+            with mock.patch.object(producer, "TOOL", tool), mock.patch.object(producer, "TOOL_SHA", sha(tool.read_bytes())), \
+                    mock.patch.object(producer, "tool_version", return_value=(0, producer.TOOL_VERSION)), \
+                    mock.patch.object(producer.subprocess, "Popen", return_value=mock.Mock(wait=mock.Mock(return_value=7))):
+                code, report = producer.derive(args)
+            self.assertEqual(code, 4); self.assertEqual(report["exit_code"], 7)
+            self.assertEqual(report["class"], "failed")
+            self.assertTrue((args.output_dir / "RESULT.json").is_file())
+            self.assertFalse((args.output_dir / "DERIVED-BINARY.json").exists())
+
+
+
+def git(repo, *args):
+    import subprocess
+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+
+@contextlib.contextmanager
+def monorepo_checkout():
+    """A real Git monorepo whose connect/ holds the in-tree source identity owner."""
+    import subprocess
+    with tempfile.TemporaryDirectory(prefix="connect-release-source-") as scratch:
+        repo = Path(scratch).resolve() / "meerkat"
+        files = {"Cargo.toml": "[workspace]\nmembers = [\"crates/*\", \"connect/crates/*\"]\n",
+                 "Cargo.lock": "version = 4\n", "rust-toolchain.toml": "[toolchain]\nchannel = \"1.97.0\"\n",
+                 ".cargo/config.toml": "[env]\n", "crates/meerkat-core/src/lib.rs": "pub fn core() {}\n",
+                 "connect/SOURCE-PROVENANCE.md": "# Source provenance\n",
+                 "connect/PUBLIC-SOURCE-COMMITS.json": "{}\n",
+                 "connect/crates/meerkat-connect/src/main.rs": "fn main() {}\n"}
+        for name, text in files.items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        identity = repo / "connect/scripts/connect-source-identity.py"
+        identity.parent.mkdir(parents=True)
+        identity.write_bytes(ASSEMBLER.SOURCE_IDENTITY.read_bytes())
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git(repo, "add", "-A")
+        git(repo, "-c", "user.name=Offline Control", "-c", "user.email=offline@example.invalid", "commit", "-qm", "c")
+        manifest = repo.parent / "source-manifest.json"
+        head = git(repo, "rev-parse", "HEAD")
+        subprocess.run([sys.executable, "-I", str(identity), "record", "--commit", head, "--export-commit", head,
+                        "--output", str(manifest)], check=True, capture_output=True)
+        with mock.patch.object(ASSEMBLER, "ROOT", repo / "connect"), \
+                mock.patch.object(ASSEMBLER, "SOURCE_IDENTITY", identity):
+            yield repo, manifest
+
+
+def release_record(repo, manifest, argv=None):
+    if argv is None:
+        argv = [str(repo / "scripts/repo-cargo"), "+1.97.0", "build", "--locked", "--release", "--manifest-path",
+                str(repo / "Cargo.toml"), "-p", "meerkat-connect", "--bin", "toolkit_gateway"]
+    return encoded({"schema_version": 1, "cargo": {"argv": argv, "exit_code": 0},
+                    "source_manifest": {"path": str(manifest), "sha256": ASSEMBLER.digest(manifest)}})
+
+
+class ReleaseSourceIdentityTests(unittest.TestCase):
+    """A versioned assembly binds the exact lukacf/meerkat checkout it runs in."""
+
+    def test_release_source_is_this_checkouts_commit_and_locked_root_workspace(self):
+        with monorepo_checkout() as (repo, manifest):
+            identity = ASSEMBLER.checked_release_source(release_record(repo, manifest))
+            self.assertEqual(identity, {"repository": "lukacf/meerkat", "revision": git(repo, "rev-parse", "HEAD"),
+                                        "tree": git(repo, "rev-parse", "HEAD^{tree}"),
+                                        "source_manifest_sha256": ASSEMBLER.digest(manifest)})
+
+    def test_release_build_from_another_workspace_or_unlocked_refuses(self):
+        with monorepo_checkout() as (repo, manifest):
+            base = ["repo-cargo", "build", "--locked", "--manifest-path", str(repo / "Cargo.toml")]
+            cases = {"unlocked": [item for item in base if item != "--locked"],
+                     "other_workspace": base[:-1] + [str(repo.parent / "other/Cargo.toml")],
+                     "connect_manifest": base[:-1] + [str(repo / "connect/crates/meerkat-connect/Cargo.toml")],
+                     "equals_form": base[:-2] + ["--manifest-path=" + str(repo / "Cargo.toml")],
+                     "two_manifests": base + ["--manifest-path", str(repo / "Cargo.toml")],
+                     "no_manifest": base[:-2]}
+            for name, argv in cases.items():
+                with self.subTest(name=name), self.assertRaisesRegex(ValueError, "locked root workspace"):
+                    ASSEMBLER.checked_release_source(release_record(repo, manifest, argv))
+
+    def test_release_source_from_another_state_refuses(self):
+        for change in ("dirty", "later_commit", "foreign_manifest"):
+            with self.subTest(change=change), monorepo_checkout() as (repo, manifest):
+                if change == "dirty":
+                    (repo / "crates/meerkat-core/src/lib.rs").write_text("pub fn changed() {}\n")
+                    pattern = "dirty"
+                elif change == "later_commit":
+                    (repo / "connect/crates/meerkat-connect/src/main.rs").write_text("fn main() { }\n")
+                    git(repo, "add", "-A")
+                    git(repo, "-c", "user.name=Offline Control", "-c", "user.email=offline@example.invalid",
+                        "commit", "-qm", "later")
+                    pattern = "another commit"
+                else:
+                    manifest.write_text(json.dumps({"files": []}) + "\n")
+                    pattern = "not a lukacf/meerkat Connect source manifest"
+                with self.assertRaisesRegex(ValueError, pattern):
+                    ASSEMBLER.checked_release_source(release_record(repo, manifest))
+
+    def test_versioned_stage_checks_the_validated_record_and_names_the_source(self):
+        identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                    "source_manifest_sha256": "c" * 64}
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            original = fixture.record.read_bytes()
+            with mock.patch.object(ASSEMBLER, "checked_release_source", return_value=identity) as checked:
+                result = fixture.assemble(stage_only=True, release_version="0.9.9")
+            checked.assert_called_once_with(original)
+            self.assertEqual((result["release_version"], result["source"]), ("0.9.9", identity))
+            staged = json.loads((fixture.destination / "staging.json").read_text())
+            self.assertEqual((staged["release_version"], staged["source"]), ("0.9.9", identity))
+
+    def test_versioned_assembly_refusal_stops_before_any_output(self):
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            with mock.patch.object(ASSEMBLER, "checked_release_source",
+                                   side_effect=ValueError("source checkout is dirty")), \
+                    self.assertRaisesRegex(ValueError, "dirty"):
+                fixture.assemble(stage_only=True, release_version="0.9.9")
+            self.assertFalse(fixture.destination.exists())
+
+    def test_unversioned_staging_keeps_its_existing_contract(self):
+        with inputs() as fixture:
+            fixture.select_explicit("toolkit_gateway")
+            for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+                del fixture.record_value[field]
+            fixture.update_record()
+            with mock.patch.object(ASSEMBLER, "checked_release_source") as checked:
+                result = fixture.assemble(stage_only=True)
+            checked.assert_not_called()
+            self.assertNotIn("release_version", result)
+            self.assertNotIn("source", result)
+
+
+class ReleaseVerifierSourceTests(unittest.TestCase):
+    """The installed verifier re-derives a release prefix's source from its own checkout."""
+    read_staged_gateway = InstalledVerifierBoundaryTests.read_staged_gateway
+
+    def staged_release(self, fixture, identity):
+        fixture.select_explicit("toolkit_gateway")
+        for field in ("test_executable", "installed_composition", "native_shutdown_review"):
+            del fixture.record_value[field]
+        fixture.record_value["cargo"]["argv"] = ["repo-cargo", "build", "--locked", "--manifest-path",
+                                                 "/checkout/Cargo.toml", "--bin", "toolkit_gateway"]
+        fixture.update_record()
+        with mock.patch.object(ASSEMBLER, "checked_release_source", return_value=identity):
+            fixture.assemble(stage_only=True, release_version="0.9.9")
+
+    def owner(self, identity, workspace="/checkout"):
+        checked = {"repository": identity["repository"], "revision": identity["revision"], "tree": identity["tree"]}
+        return {"checked_source": mock.Mock(return_value=checked), "WORKSPACE": Path(workspace)}
+
+    def test_release_prefix_verification_uses_the_in_tree_identity_owner(self):
+        with inputs() as fixture:
+            identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                        "source_manifest_sha256": ASSEMBLER.digest(fixture.source)}
+            self.staged_release(fixture, identity)
+            owner = self.owner(identity)
+            with mock.patch.object(VERIFIER.runpy, "run_path", return_value=owner) as loaded:
+                candidate, _, _, _ = self.read_staged_gateway(fixture)
+            self.assertEqual(Path(loaded.call_args.args[0]).name, "connect-source-identity.py")
+            owner["checked_source"].assert_called_once_with(fixture.source, ASSEMBLER.digest(fixture.source))
+            self.assertEqual(candidate["source_manifest_sha256"], ASSEMBLER.digest(fixture.source))
+
+    def test_release_prefix_from_another_source_or_workspace_refuses(self):
+        for change in ("revision", "workspace", "owner_refusal"):
+            with self.subTest(change=change), inputs() as fixture:
+                identity = {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                            "source_manifest_sha256": ASSEMBLER.digest(fixture.source)}
+                self.staged_release(fixture, identity)
+                owner = self.owner(identity, "/other-checkout" if change == "workspace" else "/checkout")
+                if change == "revision":
+                    owner["checked_source"].return_value = {**owner["checked_source"].return_value,
+                                                            "revision": "c" * 40}
+                elif change == "owner_refusal":
+                    owner["checked_source"].side_effect = ValueError("source manifest names another commit")
+                with mock.patch.object(VERIFIER.runpy, "run_path", return_value=owner), \
+                        self.assertRaises((AssertionError, ValueError)):
+                    self.read_staged_gateway(fixture)
 
 
 if __name__ == "__main__":

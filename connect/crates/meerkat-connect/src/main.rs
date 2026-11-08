@@ -49,6 +49,15 @@ struct Cli {
     /// Run the private, host-bound Connect JSONL adapter without a terminal.
     #[arg(long, conflicts_with_all = ["realm", "state_root", "context_root", "user_config_root", "model", "choose_model", "paired_host", "paired_host_memory_only"])]
     stdio: bool,
+    /// Run provider-only setup over a trusted parent pipe; creates no session.
+    #[arg(long, conflicts_with_all = ["stdio", "realm", "state_root", "context_root", "user_config_root", "model", "choose_model", "paired_host", "paired_host_memory_only"])]
+    provider_stdio: bool,
+    /// Trusted native File credential backend, also retained by Connect guides.
+    #[arg(long, conflicts_with = "provider_native_default")]
+    provider_store_root: Option<PathBuf>,
+    /// Explicit fixed-OS-user native default for provider-only onboarding.
+    #[arg(long, requires = "provider_stdio", conflicts_with = "stdio")]
+    provider_native_default: bool,
     /// Select a native realm. Omit to choose a stored realm or name a new one.
     #[arg(long)]
     realm: Option<String>,
@@ -105,8 +114,23 @@ enum CredentialAction {
 
 impl Cli {
     fn check_command_options(&self) -> Result<(), ConnectError> {
+        if self
+            .provider_store_root
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+            || (self.provider_store_root.is_some() && !(self.stdio || self.provider_stdio))
+            || (self.provider_native_default && !self.provider_stdio)
+            || (self.provider_stdio
+                && self.provider_store_root.is_none()
+                && !self.provider_native_default)
+        {
+            return Err(ConnectError::InvalidInput(
+                "Select an explicit trusted provider credential scope".into(),
+            ));
+        }
         if self.command.is_some()
             && (self.stdio
+                || self.provider_stdio
                 || self.model.is_some()
                 || self.choose_model
                 || self.paired_host.is_some()
@@ -181,8 +205,20 @@ async fn next_line(
 
 async fn run(cli: Cli) -> Result<(), ConnectError> {
     cli.check_command_options()?;
+    if cli.provider_stdio {
+        let scope = match cli.provider_store_root {
+            Some(root) => {
+                meerkat_connect::provider_setup::provider_only::CredentialScope::File { root }
+            }
+            None => meerkat_connect::provider_setup::provider_only::CredentialScope::NativeDefault,
+        };
+        return meerkat_connect::provider_setup::provider_only::run(scope).await;
+    }
     if cli.stdio {
-        return meerkat_connect::stdio::run().await;
+        return match cli.provider_store_root {
+            Some(root) => meerkat_connect::stdio::run_with_provider_store(root).await,
+            None => meerkat_connect::stdio::run().await,
+        };
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(ConnectError::InvalidInput(
@@ -1470,6 +1506,87 @@ mod finalization_handoff_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn provider_only_scope_is_explicit_absolute_and_reusable_for_stdio() {
+        use clap::Parser;
+        for mode in ["--provider-stdio", "--stdio"] {
+            let selected = super::Cli::try_parse_from([
+                "meerkat-connect",
+                mode,
+                "--provider-store-root",
+                "/private/host-selected-credentials",
+            ])
+            .unwrap();
+            selected.check_command_options().unwrap();
+            assert_eq!(
+                selected.provider_store_root.as_deref(),
+                Some(std::path::Path::new("/private/host-selected-credentials"))
+            );
+            let relative = super::Cli::try_parse_from([
+                "meerkat-connect",
+                mode,
+                "--provider-store-root",
+                "relative",
+            ])
+            .unwrap();
+            assert!(relative.check_command_options().is_err());
+        }
+        assert!(
+            super::Cli::try_parse_from(["meerkat-connect", "--provider-stdio"])
+                .unwrap()
+                .check_command_options()
+                .is_err()
+        );
+        super::Cli::try_parse_from([
+            "meerkat-connect",
+            "--provider-stdio",
+            "--provider-native-default",
+        ])
+        .unwrap()
+        .check_command_options()
+        .unwrap();
+        assert!(
+            super::Cli::try_parse_from(["meerkat-connect", "--stdio", "--provider-native-default"])
+                .is_err()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "meerkat-connect",
+                "--provider-stdio",
+                "--provider-native-default",
+                "--provider-store-root",
+                "/private/other"
+            ])
+            .is_err()
+        );
+        for arguments in [
+            vec!["meerkat-connect", "--provider-native-default"],
+            vec![
+                "meerkat-connect",
+                "--realm",
+                "fixture",
+                "--provider-native-default",
+            ],
+            vec![
+                "meerkat-connect",
+                "--provider-native-default",
+                "credentials",
+                "status",
+            ],
+        ] {
+            if let Ok(selected) = super::Cli::try_parse_from(arguments) {
+                assert!(
+                    selected.check_command_options().is_err(),
+                    "native default requires the provider-only route before any action"
+                );
+            }
+        }
+        super::Cli::try_parse_from(["meerkat-connect", "--stdio"])
+            .unwrap()
+            .check_command_options()
+            .unwrap();
+    }
     use super::*;
     use meerkat_core::{SessionId, TurnErrorMetadata, lifecycle::InputId};
     use meerkat_runtime::input_state::InputAbandonReason;

@@ -58,6 +58,13 @@ arguments. Supported family names are `agno`, `services`, `activepieces`,
 component in the selected archive for its target. Optional Compose acquisition
 and execution use the separate choices below.
 
+The exported `start.py` also accepts `--families`, forwarding the exact selection
+through bootstrap to this preparer. For example, `--families official-github`
+selects only the archived GitHub component without requiring Node. Omitting the
+option retains the starter's `agno,services` default, plus `activepieces` when
+its Node/npm pair is supplied. Providing Node does not add a family to an
+explicit list. Official payloads remain disabled unless explicitly selected.
+
 The `20261005-host-paths` edition rejects overlapping paths using
 Unicode-normalized, case-folded spellings in every preparation mode, including
 ordinary fresh setup. This can

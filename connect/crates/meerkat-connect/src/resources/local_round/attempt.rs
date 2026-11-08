@@ -7,7 +7,7 @@ use meerkat_core::mcp_attachment::McpAttachmentRefusal;
 use meerkat_mcp::{
     McpAttemptCancellation, McpAttemptDisposition, McpAttemptGuard, McpAttemptGuardFactory,
     McpAttemptGuardRequest, McpAttemptKey, McpAttemptOpenOutcome, McpAttemptOperation,
-    McpAttemptProcessEnd, McpGuardFinishError, McpServerCloseOutcome, McpStdioLeaderOutcome,
+    McpAttemptProcessEnd, McpGuardFinishError,
 };
 use std::sync::{Arc, Mutex, Weak};
 
@@ -36,13 +36,14 @@ struct State {
 
 impl LocalRoundAttempts {
     pub(crate) fn new(owner: LocalRoundOwner, selection: Weak<SetupResourceSelection>) -> Self {
+        let started = owner.is_restored();
         Self {
             selection,
             state: Arc::new(Mutex::new(State {
                 owner: Some(owner),
                 registration: None,
                 active: None,
-                started: false,
+                started,
                 closed: false,
             })),
         }
@@ -147,13 +148,16 @@ impl McpAttemptGuardFactory for LocalRoundAttempts {
             }
             let owner = state
                 .owner
-                .as_ref()
+                .as_mut()
                 .ok_or(McpAttachmentRefusal::Unavailable)?;
             if owner.poisoned || owner.has_pending_round() {
                 return Err(McpAttachmentRefusal::Unavailable);
             }
             owner
                 .check_resources()
+                .map_err(|_| McpAttachmentRefusal::Unavailable)?;
+            owner
+                .before_attempt(helper.member(), &request.owner.session_id.to_string())
                 .map_err(|_| McpAttachmentRefusal::Unavailable)?;
             let initial = !state.started;
             let owner = state
@@ -188,6 +192,8 @@ impl McpAttemptGuardFactory for LocalRoundAttempts {
         Ok(Some(Box::new(Guard {
             state: self.state.clone(),
             key: request.key,
+            helper: helper.member().clone(),
+            session: request.owner.session_id.to_string(),
             round,
         })))
     }
@@ -200,6 +206,8 @@ enum Round {
 struct Guard {
     state: Arc<Mutex<State>>,
     key: McpAttemptKey,
+    helper: meerkat_core::MobMemberBinding,
+    session: String,
     round: Round,
 }
 
@@ -243,16 +251,6 @@ fn graceful(disposition: &McpAttemptDisposition, key: &McpAttemptKey, settle: bo
         return false;
     }
     normal_close(&disposition.process)
-}
-
-fn normal_close(process: &McpAttemptProcessEnd) -> bool {
-    let McpAttemptProcessEnd::Closed(receipt) = process else {
-        return false;
-    };
-    McpServerCloseOutcome::Stdio(receipt.clone()).is_settled()
-        && matches!(&receipt.leader, McpStdioLeaderOutcome::Reaped(status) if status.success())
-        && receipt.sigterm.is_none()
-        && receipt.sigkill.is_none()
 }
 
 fn initial_cancellation(
@@ -309,6 +307,9 @@ impl Guard {
         };
         if !reusable {
             owner.poisoned = true;
+        }
+        if healthy && result.is_ok() {
+            owner.observed_graceful_close(self.helper, self.session);
         }
         // A normally closed initial child can use the existing successor
         // offer. Offered-round cancellation still requires its own protocol

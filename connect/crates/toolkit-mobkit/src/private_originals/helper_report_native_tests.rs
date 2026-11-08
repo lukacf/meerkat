@@ -2,8 +2,8 @@
 //! locally; the configured producer child below supplies correlated A targets.
 //! Neither fixture is a Console approval or account-provider interaction.
 use super::*;
-use crate::installed_host::acquisition::InstalledServiceTaskSource;
 use crate::installed_host::acquisition::InstalledSetupSelection;
+use crate::installed_host::acquisition::{InstalledServiceTaskSource, ServiceTaskError};
 use crate::private_originals::InstalledServiceTask;
 use futures::StreamExt;
 use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext, ToolResult};
@@ -26,7 +26,20 @@ enum ReportPreparation {
 struct ReportPreparationRequest {
     source: InstalledServiceTaskSource,
     kind: ReportPreparation,
-    reply: tokio::sync::oneshot::Sender<Result<Option<InstalledServiceTask>, PrivateOriginalError>>,
+    reply: tokio::sync::oneshot::Sender<Result<Option<InstalledServiceTask>, ServiceTaskError>>,
+}
+
+/// A check after a shared effect, run by the held real leaf on its own call.
+struct SharedCheckRequest {
+    source: InstalledServiceTaskSource,
+    reply: tokio::sync::oneshot::Sender<Result<(), meerkat_core::ToolError>>,
+}
+
+/// A reservation of the call's shared entry, run by the held real leaf on its
+/// own call; a reserved entry is settled unused at once.
+struct SharedReserveRequest {
+    source: InstalledServiceTaskSource,
+    reply: tokio::sync::oneshot::Sender<Result<(), ServiceTaskError>>,
 }
 
 pub(super) struct Report {
@@ -42,6 +55,8 @@ impl Report {
                 inner,
                 context: Mutex::new(None),
                 preparation: Mutex::new(None),
+                shared_check: Mutex::new(None),
+                shared_reserve: Mutex::new(None),
                 arrived: tokio::sync::Notify::new(),
                 released: AtomicBool::new(false),
                 resume: tokio::sync::Notify::new(),
@@ -82,7 +97,7 @@ impl Report {
         &self,
         source: &InstalledServiceTaskSource,
         kind: ReportPreparation,
-    ) -> Result<InstalledServiceTask, PrivateOriginalError> {
+    ) -> Result<InstalledServiceTask, ServiceTaskError> {
         assert!(!self.leaf.released.load(Ordering::SeqCst));
         let (reply, received) = tokio::sync::oneshot::channel();
         assert!(
@@ -101,7 +116,55 @@ impl Report {
         received
             .await
             .expect("held report dispatch must settle preparation")?
-            .ok_or(PrivateOriginalError::Unavailable)
+            .ok_or(ServiceTaskError::Refused(PrivateOriginalError::Unavailable))
+    }
+    /// Ask the held real leaf to run the task source's check after a shared
+    /// effect on its exact native call and plan, and answer what it answered.
+    async fn check_after_shared_effect(
+        &self,
+        source: &InstalledServiceTaskSource,
+    ) -> Result<(), meerkat_core::ToolError> {
+        assert!(!self.leaf.released.load(Ordering::SeqCst));
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(
+            self.leaf
+                .shared_check
+                .lock()
+                .unwrap()
+                .replace(SharedCheckRequest {
+                    source: source.clone(),
+                    reply,
+                })
+                .is_none()
+        );
+        self.leaf.resume.notify_one();
+        received
+            .await
+            .expect("held report dispatch must answer the check")
+    }
+    /// Ask the held real leaf to reserve its own call's shared entry through
+    /// the task source, and settle the reserved entry unused.
+    async fn reserve_shared_entry(
+        &self,
+        source: &InstalledServiceTaskSource,
+    ) -> Result<(), ServiceTaskError> {
+        assert!(!self.leaf.released.load(Ordering::SeqCst));
+        let (reply, received) = tokio::sync::oneshot::channel();
+        assert!(
+            self.leaf
+                .shared_reserve
+                .lock()
+                .unwrap()
+                .replace(SharedReserveRequest {
+                    source: source.clone(),
+                    reply,
+                })
+                .is_none()
+        );
+        self.leaf.resume.notify_one();
+        received
+            .await
+            .expect("held report dispatch must answer the reservation")
     }
 }
 
@@ -111,6 +174,8 @@ struct ReportLeaf {
     inner: Arc<dyn AgentToolDispatcher>,
     context: Mutex<Option<ToolDispatchContext>>,
     preparation: Mutex<Option<ReportPreparationRequest>>,
+    shared_check: Mutex<Option<SharedCheckRequest>>,
+    shared_reserve: Mutex<Option<SharedReserveRequest>>,
     arrived: tokio::sync::Notify,
     released: AtomicBool,
     resume: tokio::sync::Notify,
@@ -285,7 +350,7 @@ impl ReportLeaf {
                     );
                 }
                 let result = match context.check_tool_authorization(call, plan) {
-                    Err(_) => Err(PrivateOriginalError::Denied),
+                    Err(_) => Err(PrivateOriginalError::Denied.into()),
                     Ok(_) => match request.kind {
                         ReportPreparation::Software => {
                             request.source.prepare_software(call, context, plan).await
@@ -309,6 +374,38 @@ impl ReportLeaf {
                 };
                 // A timed-out test may have dropped its receiver; it still
                 // releases and joins this real dispatch through normal cleanup.
+                let _ = request.reply.send(result);
+            }
+            let shared_check = self.shared_check.lock().unwrap().take();
+            if let Some(request) = shared_check {
+                // The task source's check after a shared effect, on this
+                // exact call and plan, with the call's one waiting state.
+                let mut churn = context.owner_change_churn();
+                let result = request
+                    .source
+                    .check_after_shared_effect(
+                        call,
+                        context,
+                        plan,
+                        &mut churn,
+                        "toolkit.shared_check.control",
+                    )
+                    .await
+                    .map(drop);
+                let _ = request.reply.send(result);
+            }
+            let shared_reserve = self.shared_reserve.lock().unwrap().take();
+            if let Some(request) = shared_reserve {
+                // The task source's reservation of this exact call's shared
+                // entry; an entry it reserves is settled unused at once.
+                let result = match request
+                    .source
+                    .reserve_shared_entry(call, context, plan, None)
+                    .await
+                {
+                    Ok(entry) => entry.settle_unentered().map_err(ServiceTaskError::from),
+                    Err(error) => Err(error),
+                };
                 let _ = request.reply.send(result);
             }
             if self.released.load(Ordering::SeqCst) {
@@ -462,8 +559,29 @@ mod configured_parent;
 #[path = "helper_report_preparation_tests.rs"]
 mod legacy_preparation;
 
+#[path = "service_task_churn_tests.rs"]
+mod service_task_churn;
+
+#[path = "helper_admission_writer_tests.rs"]
+mod helper_admission_writer;
+
+#[path = "find_entry_wait_tests.rs"]
+mod find_entry_wait;
+
+#[path = "observe_helper_wait_tests.rs"]
+mod observe_helper_wait;
+
+#[path = "publication_source_wait_tests.rs"]
+mod publication_source_wait;
+
+#[path = "helper_source_wait_tests.rs"]
+mod helper_source_wait;
+
 #[path = "warm_service_issuance_tests.rs"]
 mod warm_service_issuance;
 
 #[path = "warm_reacquisition_native_tests.rs"]
 mod warm_reacquisition;
+
+#[path = "helper_reviewed_roles_tests.rs"]
+mod reviewed_roles;

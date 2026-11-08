@@ -1309,7 +1309,7 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
             "access-policy-swap-second",
         )
         .await;
-        let route = source.route(&first.route).unwrap();
+        let route = &source.route(&first.route).unwrap();
         let human = route.requester.clone();
         let subject = human.id.as_str().to_owned();
         let member = fixture

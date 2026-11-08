@@ -18,12 +18,27 @@ use toolkit_store::{
     Transition,
 };
 
+mod configured_workflow;
+pub(crate) mod workflow_mcp;
+pub(crate) mod workflow_public;
+#[cfg(test)]
+pub(crate) use configured_workflow::issue_mcp_target_for_policy_test;
+pub use configured_workflow::{
+    WorkflowHelperAuthorityRequest, WorkflowParentAuthoritySelection, workflow_operation_envelope,
+};
 pub(super) mod configured_setup;
-pub use configured_setup::AgentSetupCapabilityRequest;
+pub use configured_setup::{AgentSetupCapabilityRequest, SharedWorkflowSetupRequest};
 pub(super) mod configured_report;
 pub use configured_report::HelperReportCapabilityRequest;
-mod service_batch;
+pub(crate) mod member_mcp;
 mod service_mcp;
+pub use member_mcp::{
+    MemberMcpBindingRef, MemberMcpError, MemberMcpIntent, MemberMcpOrigin, MemberMcpReview,
+    MemberMcpSetupHost,
+};
+mod collector;
+pub use collector::{CollectorEnrollmentReview, CollectorSetupHost, InstalledCollectorPrincipal};
+mod service_batch;
 pub(crate) use service_batch::ReviewedServiceCatalogParent;
 pub(crate) use service_batch::member_decision_id as service_batch_member_id;
 pub use service_batch::{MAX_PUBLIC_SERVICE_BATCH, ServiceMcpParentBatchReview};
@@ -37,7 +52,9 @@ pub use setup_targets::SetupTargetRequest;
 mod setup_recovery;
 pub(crate) use service_mcp::ServiceMcpParentCompensation;
 pub use service_mcp::{ReviewedServiceMcpParent, ServiceMcpParentOutcome, ServiceMcpParentReview};
-pub(crate) use setup_request::{validate_retained_setup_selection, validate_setup_selection};
+pub(crate) use setup_request::{
+    validate_bound_setup_selection, validate_retained_setup_selection, validate_setup_selection,
+};
 
 const SCHEMA: &str = "toolkit.operator-application-parent";
 const RECORD_VERSION: u32 = 2;
@@ -87,6 +104,7 @@ pub struct OperatorParentProposal {
     restrictions: ExecutionRestrictions,
     purpose: OperatorParentPurpose,
     setup_request: Option<SetupRequestIntent>,
+    setup_caller: Option<setup_request::ReviewedSetupCaller>,
     batch_member: Option<service_batch::ServiceBatchMemberIdentity>,
     creating_source: std::sync::Weak<ToolkitOriginalOwner>,
     creating_lifetime: std::sync::Weak<NativeHostLifetime>,
@@ -606,26 +624,46 @@ impl OperatorSetup {
         session: &meerkat_core::SessionId,
         request: ApprovalRequest,
     ) -> Result<OperatorParentProposal, HostLifetimeError> {
+        self.prepare_setup_parent_review_for(route, session, request, None)
+    }
+
+    fn prepare_setup_parent_review_for(
+        &self,
+        route: Id,
+        session: &meerkat_core::SessionId,
+        request: ApprovalRequest,
+        caller: Option<setup_request::ReviewedSetupCaller>,
+    ) -> Result<OperatorParentProposal, HostLifetimeError> {
         self.lifetime.validate_current_selection()?;
-        let selected = self.route(&route)?;
+        self.check_setup_caller(caller.as_ref())?;
+        let selected = match &caller {
+            Some(caller) => caller.route(),
+            None => self.route(&route)?,
+        };
         let (binding, _, _) = selected.source_binding(self.lifetime.selected_policy())?;
-        let member = self
-            .native
-            .members
-            .iter()
-            .find(|member| &member.member == binding)
-            .ok_or(HostLifetimeError::InvalidSelection)?;
+        let audience = if let Some(caller) = &caller {
+            &caller.member.audience
+        } else {
+            &self
+                .native
+                .members
+                .iter()
+                .find(|member| &member.member == binding)
+                .ok_or(HostLifetimeError::InvalidSelection)?
+                .audience
+        };
         let values = application_operations::find_and_install(
             &self.native.grant_administrator,
             &selected.logical_executor,
-            &member.audience,
+            audience,
             session,
         );
-        let mut proposal = self.prepare_parent_review_for(
+        let mut proposal = self.prepare_parent_review_selected(
             route,
             application_operations::parent_restrictions(values),
             request,
             OperatorParentPurpose::SetupRequest,
+            caller,
         )?;
         proposal.setup_request = Some(SetupRequestIntent {
             session_id: session.clone(),
@@ -672,11 +710,26 @@ impl OperatorSetup {
         &self,
         route: Id,
         restrictions: ExecutionRestrictions,
-        mut request: ApprovalRequest,
+        request: ApprovalRequest,
         purpose: OperatorParentPurpose,
     ) -> Result<OperatorParentProposal, HostLifetimeError> {
+        self.prepare_parent_review_selected(route, restrictions, request, purpose, None)
+    }
+
+    fn prepare_parent_review_selected(
+        &self,
+        route: Id,
+        restrictions: ExecutionRestrictions,
+        mut request: ApprovalRequest,
+        purpose: OperatorParentPurpose,
+        caller: Option<setup_request::ReviewedSetupCaller>,
+    ) -> Result<OperatorParentProposal, HostLifetimeError> {
         self.lifetime.validate_current_selection()?;
-        let selected = self.route(&route)?;
+        self.check_setup_caller(caller.as_ref())?;
+        let selected = match &caller {
+            Some(caller) => caller.route(),
+            None => self.route(&route)?,
+        };
         // The parent must support a direct depth0 application-to-agent child.
         restrictions
             .for_child(&ExecutionRestrictions {
@@ -710,6 +763,7 @@ impl OperatorSetup {
             restrictions,
             purpose,
             setup_request: None,
+            setup_caller: caller,
             batch_member: None,
             creating_source: Arc::downgrade(&self.source),
             creating_lifetime: Arc::downgrade(&self.lifetime),
@@ -731,7 +785,49 @@ impl OperatorSetup {
         if !Arc::ptr_eq(&source, &self.source) || !Arc::ptr_eq(&lifetime, &self.lifetime) {
             return Err(HostLifetimeError::WrongOwner);
         }
-        self.lifetime.validate_current_selection()
+        self.lifetime.validate_current_selection()?;
+        self.check_setup_caller(proposal.setup_caller.as_ref())
+    }
+
+    fn check_setup_caller(
+        &self,
+        caller: Option<&setup_request::ReviewedSetupCaller>,
+    ) -> Result<(), HostLifetimeError> {
+        if let Some(caller) = caller {
+            caller.check_current(self)?;
+        }
+        Ok(())
+    }
+
+    async fn with_setup_caller<T>(
+        &self,
+        caller: Option<&setup_request::ReviewedSetupCaller>,
+        effect: impl FnOnce() -> Result<T, HostLifetimeError>,
+    ) -> Result<T, HostLifetimeError> {
+        match caller {
+            Some(caller) => caller.with_current(self, effect).await,
+            None => effect(),
+        }
+    }
+
+    fn proposal_route<'a>(
+        &'a self,
+        proposal: &'a OperatorParentProposal,
+    ) -> Result<
+        &'a meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceRoute,
+        HostLifetimeError,
+    > {
+        self.check_setup_caller(proposal.setup_caller.as_ref())?;
+        match &proposal.setup_caller {
+            Some(caller)
+                if proposal.purpose == OperatorParentPurpose::SetupRequest
+                    && caller.route().id == proposal.route =>
+            {
+                Ok(caller.route())
+            }
+            Some(_) => Err(HostLifetimeError::WrongOwner),
+            None => self.route(&proposal.route),
+        }
     }
 
     /// Apply only the actual record returned by that retained operator review.
@@ -755,7 +851,7 @@ impl OperatorSetup {
         // An actual approval is applied only by the source and lifetime that
         // created its opaque proposal. Re-prepare after a legitimate restore.
         self.check_parent_proposal_owner(proposal)?;
-        let route = self.route(&proposal.route)?;
+        let route = self.proposal_route(proposal)?;
         if !same_request(&proposal.request, &approval) {
             return Err(HostLifetimeError::Denied);
         }
@@ -804,8 +900,9 @@ impl OperatorSetup {
         presented: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
         let record = self.parent_decision_record(&proposal, approval)?;
+        let caller = proposal.setup_caller.as_ref();
         let approved = matches!(&record.issued, ParentIssuance::Pending);
-        let key = self.parent_decision_key(&record)?;
+        let key = self.parent_decision_key_for(&record, caller)?;
         // Store admission compares the whole immutable decision. An exact retry
         // reads the saved result even if the review deadline has since elapsed.
         if let Some(saved) = self
@@ -814,6 +911,7 @@ impl OperatorSetup {
             .await
             .map_err(|_| HostLifetimeError::Unavailable)?
         {
+            self.check_setup_caller(caller)?;
             let existing = decode(&saved, &key)?;
             if decision_body(&existing)? != decision_body(&record)? {
                 return Err(HostLifetimeError::Denied);
@@ -825,7 +923,9 @@ impl OperatorSetup {
                     .as_ref()
                     .is_some_and(|intent| intent.original.is_some())
             {
-                return self.observe_setup_decision(saved, existing).await;
+                return self
+                    .observe_setup_decision_for(saved, existing, caller)
+                    .await;
             }
             return self.observe(&existing);
         }
@@ -838,6 +938,7 @@ impl OperatorSetup {
             return Err(HostLifetimeError::Denied);
         }
         self.lifetime.validate_current_selection()?;
+        self.check_setup_caller(caller)?;
         let admitted = self
             .originals
             .admit(AdmissionRequest {
@@ -849,6 +950,7 @@ impl OperatorSetup {
             })
             .await
             .map_err(|_| HostLifetimeError::Unavailable)?;
+        self.check_setup_caller(caller)?;
         let saved = admitted.record();
         let mut record = decode(saved, &key)?;
         if !matches!(admitted, AdmissionOutcome::Created(_)) || !approved {
@@ -856,18 +958,23 @@ impl OperatorSetup {
         }
         let id =
             EvidenceId::new(key.id.clone()).map_err(|_| HostLifetimeError::InvalidSelection)?;
-        let issued = self.lifetime.with_current_setup(|| {
-            if !presented() {
-                return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied));
-            }
-            Ok(self.source.grants().issue_root(
-                &self.operator,
-                id,
-                record.application.clone(),
-                record.represented_subject.clone(),
-                record.requested.clone(),
-            ))
-        })?;
+        let issued = self
+            .with_setup_caller(caller, || {
+                self.lifetime.with_current_setup(|| {
+                    self.check_setup_caller(caller)?;
+                    if !presented() {
+                        return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied));
+                    }
+                    Ok(self.source.grants().issue_root(
+                        &self.operator,
+                        id,
+                        record.application.clone(),
+                        record.represented_subject.clone(),
+                        record.requested.clone(),
+                    ))
+                })
+            })
+            .await?;
         record.issued = match issued {
             Ok(parent) => ParentIssuance::Issued {
                 lineage: vec![parent],
@@ -877,6 +984,8 @@ impl OperatorSetup {
             }
             Err(_) => return Ok(OperatorParentOutcome::PendingReconciliation),
         };
+        // Record the actual native outcome even if the caller retired after
+        // issuance. Currentness gates the next effect, not acknowledgement.
         let saved = match self
             .originals
             .compare_and_swap(Transition {
@@ -893,7 +1002,9 @@ impl OperatorSetup {
             Ok(saved) => saved,
             Err(_) => return Ok(OperatorParentOutcome::PendingReconciliation),
         };
-        self.complete_setup_targets(saved, record, presented).await
+        self.check_setup_caller(caller)?;
+        self.complete_setup_targets(saved, record, presented, caller)
+            .await
     }
 
     fn route(

@@ -70,20 +70,20 @@ fn check_absence(
     let chain = RealmChain::resolve(config, realm)
         .map_err(|error| ConnectError::native("Resolve first-target inheritance", error))?;
     for owner in chain.realms() {
-        if let Some(section) = config.realm.get(owner.as_str()) {
-            if !section.binding.is_empty() {
+        if let Some(set) = realm_connection_set(config, owner)? {
+            if !set.bindings.is_empty() {
                 return Err(invalid(
                     "A native model binding appeared while first-target setup was being prepared. Restart setup to review the existing target.",
                 ));
             }
             if owner == realm
-                && (section.backend.contains_key(name) || section.auth.contains_key(name))
+                && (set.backends.contains_key(name) || set.auth_profiles.contains_key(name))
             {
                 return Err(invalid(
                     "That connection name is already used by a backend or auth profile in this realm. No profile was replaced.",
                 ));
             }
-            if owner == realm && section.default_binding.is_some() {
+            if owner == realm && set.default_binding.is_some() {
                 return Err(invalid(
                     "This realm already has an effective default binding. First-target setup will not replace it.",
                 ));
@@ -223,16 +223,11 @@ async fn prepare(
     )?;
     // Snapshot and raw presence are separate native observations, not an atomic
     // reservation. Check snapshot keys as well, and retain the original CAS.
-    if snapshot
-        .config
-        .realm
-        .get(startup.storage.locator.realm.as_str())
-        .is_some_and(|section| {
-            !section.binding.is_empty()
-                || section.backend.contains_key(name.as_str())
-                || section.auth.contains_key(name.as_str())
-        })
-    {
+    if realm_connection_set(&snapshot.config, &startup.storage.locator.realm)?.is_some_and(|set| {
+        !set.bindings.is_empty()
+            || set.backends.contains_key(name.as_str())
+            || set.auth_profiles.contains_key(name.as_str())
+    }) {
         return Err(invalid(
             "The own-realm snapshot already contains a binding or the requested profile name. No existing profile was replaced.",
         ));

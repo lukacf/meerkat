@@ -1,6 +1,6 @@
 //! One-shot callback-write faults over the fixture's selected SQLite owner.
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 use toolkit_store::*;
@@ -14,6 +14,9 @@ pub(super) struct ForegroundTestStore {
     mode: AtomicU8,
     pub(super) association_refusals: AtomicUsize,
     pub(super) attempt_commits: AtomicUsize,
+    held_get: Mutex<Option<StoreKey>>,
+    pub(super) get_entered: tokio::sync::Notify,
+    pub(super) dropped_gets: AtomicUsize,
 }
 
 impl ForegroundTestStore {
@@ -23,7 +26,16 @@ impl ForegroundTestStore {
             mode: AtomicU8::new(NEUTRAL),
             association_refusals: AtomicUsize::new(0),
             attempt_commits: AtomicUsize::new(0),
+            held_get: Mutex::new(None),
+            get_entered: tokio::sync::Notify::new(),
+            dropped_gets: AtomicUsize::new(0),
         }
+    }
+
+    pub(super) fn hold_one_get(&self, key: StoreKey) {
+        let mut held = self.held_get.lock().unwrap();
+        assert!(held.is_none(), "one exact source read is already held");
+        *held = Some(key);
     }
 
     pub(super) fn arm_association_no_commit(&self) {
@@ -44,6 +56,13 @@ impl ForegroundTestStore {
     }
 }
 
+struct HeldGet<'a>(&'a ForegroundTestStore);
+impl Drop for HeldGet<'_> {
+    fn drop(&mut self) {
+        self.0.dropped_gets.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolkitStore for ForegroundTestStore {
     fn capabilities(&self) -> StoreCapabilities {
@@ -56,6 +75,22 @@ impl ToolkitStore for ForegroundTestStore {
         self.inner.admit(request).await
     }
     async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
+        let hold = {
+            let mut selected = self.held_get.lock().unwrap();
+            if selected.as_ref() == Some(key) {
+                selected.take();
+                true
+            } else {
+                false
+            }
+        };
+        if hold {
+            let _entered = HeldGet(self);
+            self.get_entered.notify_one();
+            // Only the bounded fixture observer polls and drops this real read.
+            // No source/native lock is held and no replacement owner is spawned.
+            std::future::pending::<()>().await;
+        }
         self.inner.get(key).await
     }
     async fn list_records(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import json
@@ -61,6 +62,8 @@ STARTER = {
     "release-manifest.json": "e9950a90f0ec4fc65e707065ad6c08964851506629053c8a9be31cdfadfc5589",
     "start.py": "4b504d98f51621d0d08bc1813a0aca4151747f22fa99bd29b4db50311310107c",
 }
+MAX_RUNTIME_ARCHIVE_ENTRIES = 50000
+MAX_RUNTIME_ARCHIVE_BYTES = 1024 * 1024 * 1024
 
 
 def digest(path):
@@ -74,6 +77,31 @@ def digest(path):
 def pin(path, expected, size=None):
     if path.is_symlink() or not path.is_file() or digest(path) != expected or (size and path.stat().st_size != size):
         raise ValueError("packaging input does not match its pin")
+
+
+@contextmanager
+def captured_archive(path, expected, size):
+    """Yield a private archive verified before any decompression or inspection."""
+    if type(size) is not int or not 0 < size <= 512 * 1024 * 1024:
+        raise ValueError("invalid archive capture bound")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
+            raise ValueError("archive capture size or type mismatch")
+        with tempfile.TemporaryDirectory(prefix="connect-resource-input-") as scratch:
+            captured = Path(scratch) / path.name
+            total, observed = 0, hashlib.sha256()
+            with captured.open("xb") as output:
+                while block := source.read(1024 * 1024):
+                    total += len(block)
+                    if total > size:
+                        raise ValueError("archive capture size mismatch")
+                    observed.update(block)
+                    output.write(block)
+            if total != size or observed.hexdigest() != expected:
+                raise ValueError("archive capture pin mismatch")
+            captured.chmod(0o400)
+            yield captured
 
 
 def captured_input(path, expected, size):
@@ -220,6 +248,13 @@ def require_case_sensitive(directory):
 
 def extract(archive, root, mapping, *, target="macos-arm64"):
     """Extract only mapped runtime/notices with bounded, confined links."""
+    def path_key(value):
+        value = unicodedata.normalize("NFC", value)
+        return value if target == "linux-x86_64" else value.casefold()
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("resource extraction requires an existing real directory")
+    root = root.resolve()
     rows, seen, total = [], set(), 0
     with tarfile.open(archive) as source:
         for member in source:
@@ -229,24 +264,70 @@ def extract(archive, root, mapping, *, target="macos-arm64"):
             rel = mapping(name)
             if rel is None:
                 continue
-            key = unicodedata.normalize("NFC", rel)
-            if target != "linux-x86_64":
-                key = key.casefold()
-            if key in seen or len(rows) >= 50000 or total > 1024 * 1024 * 1024:
+            if (not isinstance(rel, str) or not rel or "\x00" in rel or "\\" in rel
+                    or PurePosixPath(rel).is_absolute() or ".." in rel.split("/")):
+                raise ValueError("invalid mapped archive path")
+            # Normalize filesystem aliases before checking duplicate paths and
+            # parent ownership. Keep original case and Unicode spelling on disk.
+            rel = PurePosixPath(rel).as_posix()
+            if rel == ".":
+                raise ValueError("invalid mapped archive path")
+            key = path_key(rel)
+            if (key in seen or len(rows) >= MAX_RUNTIME_ARCHIVE_ENTRIES
+                    or member.size < 0 or total + member.size > MAX_RUNTIME_ARCHIVE_BYTES):
                 raise ValueError("upstream path collision or size limit")
             seen.add(key)
             if not (member.isfile() or member.isdir() or member.issym()):
                 raise ValueError("unsupported upstream archive entry")
             total += member.size
             rows.append((member, rel))
-        links = {rel for member, rel in rows if member.issym()}
+        declared = {path_key(rel): member for member, rel in rows}
         for member, rel in rows:
             path = root / rel
-            if any(str(parent) in links for parent in PurePosixPath(rel).parents):
-                raise ValueError("archive descends through a link")
+            for parent in PurePosixPath(rel).parents:
+                owner = declared.get(path_key(parent.as_posix()))
+                if owner is not None and not owner.isdir():
+                    raise ValueError("archive descends through a non-directory")
+                existing = root / parent
+                if existing.is_symlink() or (existing.exists() and not existing.is_dir()):
+                    raise ValueError("archive descends through a non-directory")
+            if path.is_symlink() or (path.exists() and not (member.isdir() and path.is_dir())):
+                raise ValueError("upstream path collides with existing resources")
             if member.issym():
-                if os.path.isabs(member.linkname) or not (path.parent / member.linkname).resolve().is_relative_to(root):
+                if (not member.linkname or "\x00" in member.linkname or "\\" in member.linkname
+                        or PurePosixPath(member.linkname).is_absolute()):
                     raise ValueError("upstream link escapes packaged resources")
+
+        # Resolve the complete planned link graph before creating any entry.
+        # Path.resolve() alone cannot see links that have not been created yet.
+        for member, rel in rows:
+            if not member.issym():
+                continue
+            parts = list(PurePosixPath(rel).parent.parts)
+            pending = list(reversed(member.linkname.split("/")))
+            traversed = 0
+            while pending:
+                part = pending.pop()
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    if not parts:
+                        raise ValueError("upstream link escapes packaged resources")
+                    parts.pop()
+                    continue
+                parts.append(part)
+                planned = declared.get(path_key("/".join(parts)))
+                existing = root.joinpath(*parts)
+                link = (planned.linkname if planned is not None and planned.issym()
+                        else os.readlink(existing) if existing.is_symlink() else None)
+                if link is not None:
+                    traversed += 1
+                    if traversed > 40:
+                        raise ValueError("upstream link cycle or depth limit")
+                    if PurePosixPath(link).is_absolute():
+                        raise ValueError("upstream link escapes packaged resources")
+                    parts.pop()
+                    pending.extend(reversed(link.split("/")))
         for member, rel in rows:
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,18 +479,36 @@ def runtime_compatibility(archive, resources, target, supported_host, decode, *,
             "scope": "hash_bound_archive_metadata_and_declared_host_only_not_runtime_qualification"}
 
 
+def materialize_library(archive, resources, target):
+    """Package inert archive bytes; only the checkout's validator is loaded."""
+    name = archive.name.removesuffix(".tar.gz")
+    extract(archive, resources, lambda path: "library/" + path, target=target)
+    release = resources / "library" / name
+    owner = runpy.run_path(str(ROOT / "sdk/consumer-setup/prepare_host.py"))
+    owner["release_snapshot"](str(archive), digest(archive), release, target)
+    return "library/" + name
+
+
 def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
           library_sha256=None, library_bytes=None, starter=None, release_manifest_sha256=None,
           acquisition_node_archive=None, acquisition_node_sha256=None, acquisition_node_bytes=None,
           npm_archive=None, npm_archive_sha256=None, npm_archive_bytes=None,
           node_prebuilt_policy=None, node_prebuilt_policy_sha256=None,
-          node_build_profile=None, node_build_profile_sha256=None):
+          node_build_profile=None, node_build_profile_sha256=None, families=None,
+          immutable_library_release=False):
     if target not in TARGETS:
         raise ValueError("unsupported packaging target")
     fields = (library, library_sha256, library_bytes, starter, release_manifest_sha256)
     explicit = any(value is not None for value in fields)
     if explicit and not all(value is not None for value in fields):
         raise ValueError("complete explicit library and starter selection required")
+    if type(immutable_library_release) is not bool or immutable_library_release and not explicit:
+        raise ValueError("immutable library requires explicit current starter and library selection")
+    if families is not None:
+        if not isinstance(families, str):
+            raise ValueError("invalid library families selection")
+        if not explicit:
+            raise ValueError("family selection requires explicit current starter and library selection")
     acquisition = selected_npm_inputs(target, acquisition_node_archive, acquisition_node_sha256,
         acquisition_node_bytes, npm_archive, npm_archive_sha256, npm_archive_bytes)
     if acquisition is not None and not explicit:
@@ -463,14 +562,16 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     (package / "bin").mkdir()
     with tempfile.TemporaryDirectory(prefix="connect-resource-unpack-") as scratch:
         unpacked = Path(scratch) / "python.tar"
-        with unpacked.open("xb") as python_tar:
-            subprocess.run([str(zstd), "-d", "-c", str(upstream / python[0])], stdout=python_tar,
+        with captured_archive(upstream / python[0], python[1], python[2]) as selected_python, \
+                unpacked.open("xb") as python_tar:
+            subprocess.run([str(zstd), "-d", "-c", str(selected_python)], stdout=python_tar,
                            stderr=subprocess.PIPE, check=True, timeout=60)
         extract(unpacked, resources, python_mapping, target=target)
     prefix = node[0].removesuffix(".tar.gz") + "/"
-    extract(upstream / node[0], resources,
-            lambda name: "runtime/node/" + name.removeprefix(prefix) if name.startswith(prefix) else None,
-            target=target)
+    with captured_archive(upstream / node[0], node[1], node[2]) as selected_node:
+        extract(selected_node, resources,
+                lambda name: "runtime/node/" + name.removeprefix(prefix) if name.startswith(prefix) else None,
+                target=target)
     if acquisition is not None:
         # Extraction reads only the captured archive, never its mutable input
         # pathname. The library pair remains in runtime/node unchanged.
@@ -500,34 +601,16 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
         (resources / "node-prebuilt-policy.json").write_bytes(prebuilt_policy_raw)
     if node_build_raw is not None:
         (resources / "node-build-profile.json").write_bytes(node_build_raw)
-    if explicit:
-        # Compatibility and packaged payload consume the same pinned capture.
-        # A changed external pathname cannot substitute metadata during review
-        # and then restore the selected archive before the later copy.
-        with os.fdopen(os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as original, \
-                tempfile.TemporaryFile() as captured:
-            metadata = os.fstat(original.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != library[2]:
-                raise ValueError("selected library capture size or type mismatch")
-            total, observed = 0, hashlib.sha256()
-            while block := original.read(1024 * 1024):
-                total += len(block)
-                if total > library[2]:
-                    raise ValueError("selected library capture size mismatch")
-                observed.update(block)
-                captured.write(block)
-            if total != library[2] or observed.hexdigest() != library[1]:
-                raise ValueError("selected library capture pin mismatch")
-            captured.seek(0)
-            compatibility = runtime_compatibility(
-                archive, resources, target, SUPPORTED_HOSTS[target], helpers["decode"], fileobj=captured)
-            captured.seek(0)
-            (resources / "archives").mkdir()
-            with (resources / "archives" / library[0]).open("xb") as output:
-                shutil.copyfileobj(captured, output, 1024 * 1024)
-            pin(resources / "archives" / library[0], library[1], library[2])
-    else:
-        compatibility = runtime_compatibility(archive, resources, target, SUPPORTED_HOSTS[target], helpers["decode"])
+    library_release = None
+    # Both selection modes inspect and package the same captured library bytes.
+    with captured_archive(archive, library[1], library[2]) as selected_archive:
+        compatibility = runtime_compatibility(
+            selected_archive, resources, target, SUPPORTED_HOSTS[target], helpers["decode"])
+        (resources / "archives").mkdir()
+        shutil.copyfile(selected_archive, resources / "archives" / library[0])
+        pin(resources / "archives" / library[0], library[1], library[2])
+        if immutable_library_release:
+            library_release = materialize_library(selected_archive, resources, target)
     shutil.copyfile(upstream / PIP[0], resources / "runtime/pip.pyz")
     pin(resources / "runtime/pip.pyz", PIP[1], PIP[2])
     shutil.copyfile(pip_license, resources / "notices/pip-LICENSE.txt")
@@ -537,11 +620,7 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     for name in STARTER:
         shutil.copyfile(starter / name, resources / "starter" / name)
         (resources / "starter" / name).chmod(0o644)
-        if explicit:
-            pin(resources / "starter" / name, starter_files[name]["sha256"], starter_files[name]["bytes"])
-    if not explicit:
-        (resources / "archives").mkdir()
-        shutil.copyfile(archive, resources / "archives" / library[0])
+        pin(resources / "starter" / name, starter_files[name]["sha256"], starter_files[name].get("bytes"))
     shutil.copyfile(PREPARE, resources / "prepare.py")
     if digest(resources / "prepare.py") != source_prepare_sha:
         raise ValueError("preparation source changed during packaging")
@@ -574,6 +653,10 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
         "prepare": "prepare.py", "python": "runtime/python/bin/python3.11", "node": "runtime/node/bin/node",
         "npm_cli": "runtime/node/lib/node_modules/npm/bin/npm-cli.js", "starter": "starter/start.py",
         "archive": "archives/" + library[0], "sources": sources, "entries": helpers["tree_entries"](resources)}
+    if library_release is not None:
+        manifest["library_release"] = library_release
+    if families is not None:
+        manifest["families"] = families
     if acquisition is not None:
         manifest["npm_acquisition"] = {"node": "runtime/acquisition-node/bin/node",
             "npm_cli": "runtime/acquisition-node/lib/node_modules/npm/bin/npm-cli.js",
@@ -584,6 +667,7 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
     resources.chmod(0o555)
     helpers["verify_resources"](resources)
     output = destination / ("meerkat-connect-resources-" + target + ".tar.gz")
+    member_count = content_bytes = largest_member_bytes = 0
     with output.open("xb") as stream, gzip.GzipFile(filename="", mode="wb", fileobj=stream, mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:
             for path in [package, *sorted(package.rglob("*"))]:
@@ -591,6 +675,9 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
                 member.uid = member.gid = 0
                 member.uname = member.gname = ""
                 member.mtime = 0
+                member_count += 1
+                content_bytes += member.size
+                largest_member_bytes = max(largest_member_bytes, member.size)
                 if path.is_file() and not path.is_symlink():
                     with path.open("rb") as payload:
                         tar.addfile(member, payload)
@@ -600,7 +687,13 @@ def build(destination, upstream, zstd, target="macos-arm64", *, library=None,
         "resources": str(resources), "resources_sha256": hashlib.sha256(raw).hexdigest(),
         "entries": len(manifest["entries"]), "archive": str(output), "archive_sha256": digest(output),
         "archive_bytes": output.stat().st_size, "prepare_source_sha256": source_prepare_sha,
-        "runtime_compatibility": compatibility}
+        "runtime_compatibility": compatibility,
+        "resource_volume": {"manifest_bytes": len(raw),
+            "archive_members": member_count, "archive_member_content_bytes": content_bytes,
+            "largest_archive_member_bytes": largest_member_bytes,
+            "resource_entries_including_manifest": len(manifest["entries"]) + 1}}
+    if library_release is not None:
+        result["library_release"] = library_release
     if explicit:
         if digest(Path(__file__)) != source_packager_sha or digest(PREPARE) != source_prepare_sha:
             raise ValueError("packaging source changed during packaging")
@@ -631,6 +724,9 @@ def main():
     parser.add_argument("--library-bytes", type=int)
     parser.add_argument("--starter", type=Path)
     parser.add_argument("--release-manifest-sha256")
+    parser.add_argument("--immutable-library-release", action="store_true",
+        help="package the complete verified readonly library in resources; requires explicit current inputs")
+    parser.add_argument("--families", help="explicit comma-separated setup families, pinned in resources.json; requires explicit library and starter inputs")
     parser.add_argument("--acquisition-node-archive", type=Path)
     parser.add_argument("--acquisition-node-sha256")
     parser.add_argument("--acquisition-node-bytes", type=int)
@@ -646,6 +742,10 @@ def main():
         "library", "library_sha256", "library_bytes", "starter", "release_manifest_sha256")}
     if not any(value is not None for value in selected.values()):
         selected = {}
+    if args.immutable_library_release:
+        selected["immutable_library_release"] = True
+    if args.families is not None:
+        selected["families"] = args.families
     acquisition = {key: getattr(args, key) for key in (
         "acquisition_node_archive", "acquisition_node_sha256", "acquisition_node_bytes",
         "npm_archive", "npm_archive_sha256", "npm_archive_bytes")}

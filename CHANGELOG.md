@@ -335,6 +335,15 @@ them.
   `vm.memfd_noexec` is 2 now refuses (`BackendUnavailable`) the confined
   launches it ran before. See Changed.
 
+- `meerkat-core`: the variant
+  `model_profile::catalog::OpenAiImageGenerationRequestShape::DallE` is
+  removed, and with it `meerkat-openai`'s
+  `image_generation::OpenAiImagesApiRequestShape::DallE` (also exported at
+  the crate root). The image generation catalog no longer lists the DALL-E
+  models (see Removed), and no remaining OpenAI image model uses that
+  request shape. Code that names either variant must drop it; the Images API
+  route keeps the `GptImage` shape.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -772,6 +781,16 @@ them.
   `HostConfinement::startup_report`) names them beside a launch kind's
   `BackendUnavailable` refusal, so an operator can act on it.
 
+- `meerkat`: `HookSource::new(path, sha256)` builds a `HookSource` outside
+  the crate. A host tests its `HookSourceTrust` without a build by putting
+  `HookSource::new(path, HookSourceDigest::of(bytes))` to `decide`: the
+  question the factory asks about those bytes at that path. `HookSource`
+  stays `#[non_exhaustive]` (requested by @zond).
+
+- GPT Image 2.6 Flare (`gpt-image-2.6-flare`), OpenAI's faster GPT Image 2.6
+  model, is a catalog image generation model. Select it by model; it runs on
+  the hosted Responses image tool, as the default does.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -912,6 +931,18 @@ them.
   linker call, failed with `EPERM`); datagram pairs stay refused. A
   confined launch is now two processes. See Breaking.
 
+- The OpenAI image generation default is now GPT Image 2.6 Sunburst
+  (`gpt-image-2.6-sunburst`; was `gpt-image-2`, which stays selectable by
+  model). It runs on the same hosted Responses image tool route, so edits,
+  reference images, `action`, `reasoning_effort` and `web_search` work as
+  before, and the OpenAI text models that generate images run it too. On
+  GPT Image 2.6 models a `low`, `medium` or `high` `reasoning_effort` also
+  sets the image model's planning complexity. A transparent background
+  (`provider_params.background: "transparent"` with `png` or `webp`) works
+  on the default; the `generate_image` tool description and the docs no
+  longer advise against it. With `jpeg`, which cannot carry one, the
+  request is denied with `projection_unsupported` before the provider call.
+
 ### Deprecated
 
 - `meerkat-core`, `meerkat-runtime`: `DecisionStore::claim_executor` and
@@ -922,6 +953,17 @@ them.
 - Docs: instruction activations (`session/activate_instruction`) are
   deprecated in favour of operator instructions (`session/set_instruction`).
   The method keeps working.
+
+### Removed
+
+- The OpenAI image models `gpt-image-1`, `dall-e-3` and `dall-e-2` are no
+  longer in the image generation catalog. OpenAI has shut them down (the
+  DALL-E models on 2026-05-12, `gpt-image-1` on 2026-10-23), so requests for
+  them already failed at OpenAI; `generate_image` now refuses them before
+  calling the provider: denied with `unsupported_target` when the request
+  names `provider: "openai"`, and refused as invalid arguments when it names
+  no provider, since no configured image provider owns them. See Breaking
+  for the request shape removed with them.
 
 ### Fixed
 

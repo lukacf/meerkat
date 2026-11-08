@@ -39227,6 +39227,8 @@ supports_reasoning = true
         )
         .await
         .expect("write user document");
+        let refusal =
+            meerkat_core::confinement::ConfinementRefusal::UntrustedConfigurationSource.to_string();
         for selection in [
             None,
             Some(meerkat_core::McpServerSource::File(McpScope::Project)),
@@ -39235,7 +39237,7 @@ supports_reasoning = true
                 .await
                 .expect_err("a server only an untrusted mcp.toml defines is refused");
             assert!(
-                format!("{refused:#}").contains("confined process"),
+                format!("{refused:#}").contains(&refusal),
                 "{selection:?}: {refused:#}"
             );
         }

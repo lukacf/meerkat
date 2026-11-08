@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import subprocess
 import tarfile
 
@@ -17,6 +18,16 @@ import pytest
 SPEC = importlib.util.spec_from_file_location("connect_candidate_publication", Path(__file__).with_name("connect-candidate.py"))
 p = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(p)
+
+# The publishing environment supplies the private names (CONNECT_PUBLICATION_PRIVATE_NAMES).
+# Here the neutral renames that stand in for the original private names in these
+# fixtures are the supplied names, so every refusal keeps its original meaning.
+STAND_IN_PRIVATE_NAMES = r"paired[ _-]?host|organizational host|memory_?store|LICENSE-EXTRACTED"
+
+
+@pytest.fixture(autouse=True)
+def supplied_private_names(monkeypatch):
+    monkeypatch.setattr(p, 'PRIVATE', p.private_pattern(STAND_IN_PRIVATE_NAMES))
 
 
 def dump(path, value):
@@ -28,9 +39,17 @@ def pin(path):
     return {"path": str(path), "size": path.stat().st_size, "sha256": p.digest(path)}
 
 
+def native_selection(core_version, meta_version=None):
+    if meta_version is None:
+        meta_version = core_version
+    return {name: {"repository": "lukacf/" + repo, "version": version, "tag": "v" + version, "source_sha": sha * 40}
+            for name, repo, sha, version in (("core", "meerkat", "c", core_version),
+                                             ("meta", "meerkat-meta", "d", meta_version))}
+
+
 def verified_statement(path, request):
-    repo = "https://github.com/lukacf/meerkat-connect"
-    identity = repo + "/.github/workflows/connect-candidate.yml@" + request["source_ref"]
+    repo = "https://github.com/" + p.PUBLICATION_REPO
+    identity = f"{repo}/{p.PUBLICATION_WORKFLOW}@" + request["source_ref"]
     invocation = f"{repo}/actions/runs/{request['run_id']}/attempts/{request['run_attempt']}"
     cert = {"issuer": "https://token.actions.githubusercontent.com", "subjectAlternativeName": identity,
         "buildSignerURI": identity, "buildSignerDigest": request["source_sha"], "sourceRepositoryURI": repo,
@@ -63,8 +82,7 @@ def fixture(tmp_path, monkeypatch, request):
     c.request = {"source_sha": "a" * 40, "source_tree": "b" * 40, "source_ref": "refs/heads/main",
         "run_id": 123, "run_attempt": 2, "inputs_sha256": "0" * 64, "connect_version": "1.2.3",
         "release_id": 456, "tag": "candidate-1.2.3", "target": c.target}
-    c.native = {name: {"repository": "lukacf/" + repo, "version": "0.9.4", "tag": "v0.9.4", "source_sha": sha * 40}
-                for name, repo, sha in (("core", "meerkat", "c"), ("meta", "meerkat-meta", "d"))}
+    c.native = native_selection("0.9.4")
     # Controlled package with the same public function signatures. This is not
     # the actual published Meta owner and is never release qualification.
     c.reader_calls = []
@@ -136,7 +154,8 @@ def selected_runtime_artifacts(target):
     c.pack = pack
     c.pack()
     c.commands, c.mutate_verified = [], None
-    c.git_commands = []
+    c.git_commands, c.git_directories = [], []
+    c.git_status = ''
     c.git_refs = {'HEAD^{commit}': 'd' * 40, 'refs/tags/v0.9.4^{commit}': 'd' * 40}
     real_output = subprocess.check_output
     def output(argv, **kwargs):
@@ -144,11 +163,12 @@ def selected_runtime_artifacts(target):
         if args[0] == 'git':
             command = args[3:]
             c.git_commands.append(command)
+            c.git_directories.append(args[2])
             if command[:1] == ['rev-parse']:
                 assert command[:2] == ['rev-parse', '--verify']
                 return c.git_refs[command[2]] + '\n'
             if command[:1] == ['status']:
-                return ''
+                return c.git_status
             raise AssertionError(args)
         if args[:3] == ['gh', 'attestation', 'verify']:
             c.commands.append((args, kwargs.get('env')))
@@ -194,11 +214,200 @@ def reselect_native(c):
     c.pack()
 
 
-@pytest.mark.parametrize('tag', ['', 'v0.9.4-rc.1'])
-def test_exact_rc_selection_accepts_without_final_release_tag(fixture, tag):
+def select_forge_reader(c, tag='forge-v0.3.0'):
+    c.forge = c.root / 'forge'
+    shutil.copytree(c.meta, c.forge)
+    selected = {'repository': 'lukacf/meerkat-meta', 'source_sha': 'e' * 40, 'tag': tag}
+    inputs = p.read_json(c.export / 'inputs-selection.json')
+    inputs['forge_reader_source'] = selected
+    dump(c.export / 'inputs-selection.json', inputs)
+    c.request['inputs_sha256'] = p.digest(c.export / 'inputs-selection.json')
+    c.pack()
+    c.git_refs['HEAD^{commit}'] = selected['source_sha']
+    if tag:
+        c.git_refs['refs/tags/' + tag + '^{commit}'] = selected['source_sha']
+    c.accept = lambda: p.accept_publication(c.root / 'request.json', c.candidate, c.forge, c.root / 'accepted')
+    return inputs
+
+
+@pytest.mark.parametrize('tag', ['', 'forge-v0.3.0'])
+@pytest.mark.parametrize('core_version,meta_version', [('0.9.4', '0.9.4'), ('0.9.5', '0.9.5'), ('0.9.7', '0.9.6'), ('0.9.8', '0.9.7')])
+def test_independent_forge_reader_acceptance_preserves_native_sdk_selection(fixture, tag, core_version, meta_version):
     c = fixture
+    c.native = native_selection(core_version, meta_version)
+    reselect_native(c)
+    native, selection = copy.deepcopy(c.native), copy.deepcopy(c.selection)
+    before = {name: (c.artifacts / name).read_bytes() for name in ('meta.whl', 'toolkit.whl', 'RUNTIME-SELECTION.json')}
+    inputs = select_forge_reader(c, tag)
+    # The native Meta tree need not contain the separately selected reader.
+    shutil.rmtree(c.meta / 'installer')
+    accepted = c.accept()
+    assert accepted['selection'] == selection and c.native == native
+    assert len(c.reader_calls) == 1 and str(c.forge / 'installer') in c.reader_calls[0]
+    assert set(c.git_directories) == {str(c.forge)}
+    refs = [args[2] for args in c.git_commands if args[:1] == ['rev-parse']]
+    assert refs == ['HEAD^{commit}'] + (['refs/tags/' + tag + '^{commit}'] if tag else [])
+    assert p.read_json(c.root / 'accepted/unpacked/inputs-selection.json') == inputs
+    assert p.read_json(c.root / 'accepted/assets' / c.subjects[1])['native_release'] == native
+    assert {name: (c.root / 'accepted/unpacked/artifacts' / name).read_bytes() for name in before} == before
+
+
+def test_build_uses_independent_reader_for_both_dependency_batches(fixture, monkeypatch):
+    c = fixture
+    value = select_forge_reader(c)
+    shutil.rmtree(c.meta / 'installer')
+    value.update(files={name: {} for name in ('sdk.txt', 'sdk.whl', 'runtime.txt', 'runtime.whl')},
+                 sdk_build={'requirements': 'sdk.txt', 'wheels': ['sdk.whl']},
+                 dependencies={'requirements': 'runtime.txt', 'wheels': ['runtime.whl']})
+    selected = c.root / 'producer-inputs.json'
+    dump(selected, value)
+    production = c.root / 'production'
+    production.mkdir()
+    monkeypatch.setenv('RUNNER_TEMP', str(production))
+    monkeypatch.setenv('TMPDIR', str(c.root))
+    monkeypatch.setattr(p, 'ROOT', c.root)
+    monkeypatch.setattr(p, 'preflight', lambda **kwargs: (value, 'a' * 40, 'b' * 40))
+    monkeypatch.setattr(p, 'input_path', lambda target: selected)
+    def download(destination, row):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b'inert dependency bytes')
+    monkeypatch.setattr(p, 'download', download)
+    monkeypatch.setattr(p, 'inspect_prebuilt', lambda path: None)
+    sources, calls = [], []
+    def fetch(record, work, domain, selection):
+        sources.append((domain, copy.deepcopy(selection)))
+        return {'core': c.root / 'core', 'meta': c.meta, 'forge-reader': c.forge}[domain]
+    monkeypatch.setattr(p, 'fetch_native_source', fetch)
+    class StopBeforeInstallation(Exception):
+        pass
+    class Recorder:
+        def __init__(self, work):
+            pass
+        def run(self, name, argv, **kwargs):
+            calls.append((name, list(argv)))
+            if name == 'dependencies-read':
+                raise StopBeforeInstallation
+            assert name == 'sdk_build-read'
+            return {}, None
+    monkeypatch.setattr(p, 'Recorder', Recorder)
+    with pytest.raises(StopBeforeInstallation):
+        p.build()
+    assert sources == [('core', c.native['core']), ('meta', c.native['meta']),
+                       ('forge-reader', value['forge_reader_source'])]
+    assert [name for name, _ in calls] == ['sdk_build-read', 'dependencies-read']
+    for _, argv in calls:
+        assert argv[-2] == c.forge / 'installer'
+        assert 'from launchkit.templates.install_candidate import _read_selected_dependency_wheels' in argv[3]
+    assert not (production / 'connect-sdk-build-venv').exists()
+
+
+@pytest.mark.parametrize('change', ['meta_commit', 'tag', 'dirty', 'cached', 'file'])
+def test_independent_forge_reader_refuses_changed_checkout_before_owner(fixture, change):
+    c = fixture
+    select_forge_reader(c)
+    if change == 'meta_commit':
+        c.git_refs['HEAD^{commit}'] = c.native['meta']['source_sha']
+    elif change == 'tag':
+        c.git_refs['refs/tags/forge-v0.3.0^{commit}'] = 'f' * 40
+    elif change == 'dirty':
+        c.git_status = ' M installer/launchkit/runtime_selection.py'
+    elif change == 'cached':
+        (c.forge / 'installer/launchkit/cached.pyc').write_bytes(b'not executable')
+    else:
+        (c.forge / 'installer/launchkit/runtime_selection.py').write_text('# changed source\n')
+    with pytest.raises(ValueError, match='exact clean selected Forge|cached Python code|Forge reader source differs'):
+        c.accept()
+    assert not c.reader_calls and not (c.root / 'accepted/acceptance.json').exists()
+
+
+@pytest.mark.parametrize('change', ['null', 'missing_sha', 'extra', 'repository', 'mutable_sha', 'uppercase_sha',
+                                  'null_tag', 'native_tag', 'unsafe_tag', 'pin_inventory', 'pin_hash'])
+def test_explicit_invalid_forge_reader_never_falls_back_to_meta(fixture, change):
+    c = fixture
+    inputs = select_forge_reader(c)
+    selected = inputs['forge_reader_source']
+    if change == 'null':
+        inputs['forge_reader_source'] = None
+    elif change == 'missing_sha':
+        selected.pop('source_sha')
+    elif change == 'extra':
+        selected['version'] = '0.3.0'
+    elif change == 'repository':
+        selected['repository'] = 'foreign/meerkat-meta'
+    elif change == 'mutable_sha':
+        selected['source_sha'] = 'release/0.9.5'
+    elif change == 'uppercase_sha':
+        selected['source_sha'] = 'E' * 40
+    elif change == 'null_tag':
+        selected['tag'] = None
+    elif change == 'native_tag':
+        selected['tag'] = 'v0.9.5'
+    elif change == 'unsafe_tag':
+        selected['tag'] = 'forge-v0.3.0^{commit}'
+    elif change == 'pin_inventory':
+        inputs['forge_reader_source_pins'].pop(next(iter(p.FORGE_READERS)))
+    else:
+        inputs['forge_reader_source_pins'][next(iter(p.FORGE_READERS))] = None
+    for legacy in (False, True):
+        with pytest.raises(ValueError, match='Forge reader'):
+            p.checked_forge_reader_source(inputs, allow_legacy=legacy)
+    dump(c.export / 'inputs-selection.json', inputs)
+    c.request['inputs_sha256'] = p.digest(c.export / 'inputs-selection.json')
+    c.pack()
+    with pytest.raises(ValueError, match='Forge reader'):
+        c.accept()
+    assert not c.reader_calls and not c.git_commands
+
+
+def test_reader_source_is_bound_by_original_attested_input_digest(fixture):
+    c = fixture
+    inputs = select_forge_reader(c)
+    inputs['forge_reader_source']['source_sha'] = 'f' * 40
+    dump(c.export / 'inputs-selection.json', inputs)
+    c.pack()  # The independently selected original input digest is unchanged.
+    with pytest.raises(ValueError, match='original input selection differs'):
+        c.accept()
+    assert not c.reader_calls and not c.git_commands
+
+
+def test_reader_omission_is_legacy_acceptance_only(fixture):
+    c = fixture
+    inputs = p.read_json(c.export / 'inputs-selection.json')
+    with pytest.raises(ValueError, match='explicit exact Forge reader source'):
+        p.checked_forge_reader_source(inputs)
+    assert c.accept()['selection'] == c.selection
+    assert set(c.git_directories) == {str(c.meta)}
+    assert ['rev-parse', '--verify', 'refs/tags/v0.9.4^{commit}'] in c.git_commands
+
+
+@pytest.mark.parametrize('flags', [('--forge-reader-source',), ('--meta-source',),
+                                  ('--forge-reader-source', '--meta-source')])
+def test_publication_reader_cli_alias_is_explicit_and_exclusive(monkeypatch, flags):
+    argv = ['connect-candidate.py', 'accept-publication', '--request', '/request',
+            '--candidate', '/candidate', '--output', '/output']
+    for flag in flags:
+        argv += [flag, '/forge' if flag == '--forge-reader-source' else '/legacy']
+    calls = []
+    monkeypatch.setattr(p.sys, 'argv', argv)
+    monkeypatch.setattr(p, 'accept_publication', lambda *args: calls.append(args))
+    if len(flags) == 2:
+        with pytest.raises(SystemExit) as error:
+            p.main()
+        assert error.value.code == 2 and not calls
+    else:
+        p.main()
+        assert calls == [(Path('/request'), Path('/candidate'),
+                          Path('/forge' if flags[0] == '--forge-reader-source' else '/legacy'), Path('/output'))]
+
+
+@pytest.mark.parametrize('core_version,meta_version', [('0.9.4', '0.9.4'), ('0.9.5', '0.9.5'), ('0.9.7', '0.9.6'), ('0.9.8', '0.9.7')])
+@pytest.mark.parametrize('tag_suffix', [None, '', '-rc.1'])
+def test_exact_rc_selection_accepts_without_final_release_tag(fixture, core_version, meta_version, tag_suffix):
+    c = fixture
+    c.native = native_selection(core_version, meta_version)
     for selected in c.native.values():
-        selected['tag'] = tag
+        selected['tag'] = '' if tag_suffix is None else 'v' + selected['version'] + tag_suffix
+    tag = c.native['meta']['tag']
     c.git_refs.pop('refs/tags/v0.9.4^{commit}')
     if tag:
         c.git_refs['refs/tags/' + tag + '^{commit}'] = c.native['meta']['source_sha']
@@ -211,28 +420,125 @@ def test_exact_rc_selection_accepts_without_final_release_tag(fixture, tag):
     assert retained['native_release'] == c.native
 
 
-@pytest.mark.parametrize('tag', ['', 'v0.9.4'])
-def test_selected_meta_commit_mismatch_refuses_before_reader(fixture, tag):
+@pytest.mark.parametrize('core_version,meta_version', [('0.9.4', '0.9.4'), ('0.9.5', '0.9.5'), ('0.9.7', '0.9.6'), ('0.9.8', '0.9.7')])
+@pytest.mark.parametrize('change', [None, 'sdk_version', 'requirement', 'missing_extra'])
+def test_sdk_dependency_matches_selected_native_version(core_version, meta_version, change):
+    value = {'native_release': native_selection(core_version, meta_version), 'sdks': {'meta': {'version': meta_version}}}
+    sdk = {'optional-dependencies': {'native-host': ['meerkat-meta==' + meta_version]}}
+    other = core_version if core_version != meta_version else ('0.9.5' if meta_version == '0.9.4' else '0.9.4')
+    if change == 'sdk_version':
+        value['sdks']['meta']['version'] = other
+    elif change == 'requirement':
+        sdk['optional-dependencies']['native-host'] = ['meerkat-meta==' + other]
+    elif change == 'missing_extra':
+        sdk['optional-dependencies'].pop('native-host')
+    p.checked_native_releases(value['native_release'])
+    if change is None:
+        p.checked_sdk_native_dependency(value, sdk)
+    else:
+        with pytest.raises(ValueError, match='must match native release|matching native-host dependency'):
+            p.checked_sdk_native_dependency(value, sdk)
+
+
+@pytest.mark.parametrize('core_version,meta_version', [('0.9.4', '0.9.4'), ('0.9.5', '0.9.5'), ('0.9.7', '0.9.6'), ('0.9.8', '0.9.7')])
+@pytest.mark.parametrize('git_suffix', ['', '.git'])
+@pytest.mark.parametrize('change', [None, 'registry', 'core_version', 'meta_version', 'missing', 'extra',
+                                  'foreign_commit', 'foreign_repository', 'foreign_host',
+                                  'repository_suffix', 'repository_child', 'missing_commit', 'path'])
+def test_native_family_matches_selected_versions_and_sources(core_version, meta_version, git_suffix, change):
+    value = {'native_release': native_selection(core_version, meta_version),
+             'native_family_packages': ['meerkat-core', 'meerkat-meta']}
+    families = [{'name': name, 'version': value['native_release'][domain]['version'],
+                 'source': 'git+https://github.com/' + value['native_release'][domain]['repository']
+                           + git_suffix + '?rev=selected#' + value['native_release'][domain]['source_sha']}
+                for name, domain in [('meerkat-core', 'core'), ('meerkat-meta', 'meta')]]
+    other = '0.9.5' if meta_version == '0.9.4' else '0.9.4'
+    if change == 'registry':
+        for package in families:
+            package['source'] = 'registry+https://github.com/rust-lang/crates.io-index'
+    elif change in ('core_version', 'meta_version'):
+        families[0 if change == 'core_version' else 1]['version'] = other
+    elif change == 'missing':
+        families.pop()
+    elif change == 'extra':
+        families.append({**families[0], 'name': 'meerkat-unselected'})
+    elif change == 'foreign_commit':
+        families[1]['source'] = families[1]['source'].replace('d' * 40, 'e' * 40)
+    elif change == 'foreign_repository':
+        families[1]['source'] = families[1]['source'].replace('lukacf/', 'foreign/')
+    elif change == 'foreign_host':
+        families[1]['source'] = families[1]['source'].replace('github.com/', 'github.com.example/')
+    elif change == 'repository_suffix':
+        families[1]['source'] = families[1]['source'].replace('?rev=', '-other?rev=')
+    elif change == 'repository_child':
+        families[1]['source'] = families[1]['source'].replace('?rev=', '/child?rev=')
+    elif change == 'missing_commit':
+        families[1]['source'] = families[1]['source'].split('#', 1)[0]
+    elif change == 'path':
+        families[1]['source'] = None
+    p.checked_native_releases(value['native_release'])
+    if change in (None, 'registry'):
+        p.checked_native_family(families, value)
+    else:
+        with pytest.raises(ValueError, match='native family|native Git source|path-sourced native family'):
+            p.checked_native_family(families, value)
+
+
+@pytest.mark.parametrize('core_version,meta_version,tag', [
+    ('0.9.4', '0.9.4', ''), ('0.9.4', '0.9.4', 'v0.9.4'),
+    ('0.9.7', '0.9.6', ''), ('0.9.7', '0.9.6', 'v0.9.6'),
+    ('0.9.8', '0.9.7', ''), ('0.9.8', '0.9.7', 'v0.9.7')])
+def test_selected_meta_commit_mismatch_refuses_before_reader(fixture, core_version, meta_version, tag):
     c = fixture
+    c.native = native_selection(core_version, meta_version)
     c.native['meta']['tag'] = tag
     reselect_native(c)
     c.git_refs['HEAD^{commit}'] = 'e' * 40
-    with pytest.raises(ValueError, match='exact clean selected Meta checkout'):
+    with pytest.raises(ValueError, match='exact clean selected Forge checkout'):
         c.accept()
     assert not c.reader_calls
 
 
-def test_selected_meta_tag_must_resolve_to_exact_selected_commit(fixture):
+@pytest.mark.parametrize('core_version,meta_version', [('0.9.4', '0.9.4'), ('0.9.7', '0.9.6'), ('0.9.8', '0.9.7')])
+def test_selected_meta_tag_must_resolve_to_exact_selected_commit(fixture, core_version, meta_version):
     c = fixture
-    c.git_refs['refs/tags/v0.9.4^{commit}'] = 'e' * 40
-    with pytest.raises(ValueError, match='exact clean selected Meta checkout'):
+    c.native = native_selection(core_version, meta_version)
+    reselect_native(c)
+    c.git_refs['refs/tags/v' + meta_version + '^{commit}'] = 'e' * 40
+    with pytest.raises(ValueError, match='exact clean selected Forge checkout'):
         c.accept()
     assert not c.reader_calls
+
+
+@pytest.mark.parametrize('version', ['0.9.7', '0.9.8', '0.10.0', '1.0.0'])
+def test_unsupported_native_version_refuses_before_verifier_or_reader(fixture, version):
+    c = fixture
+    c.native = native_selection(version)
+    # Match the attested input bytes, so this is a closed-version refusal.
+    reselect_native(c)
+    with pytest.raises(ValueError, match='supported Core/Meta release pair required'):
+        c.accept()
+    assert not c.commands and not c.reader_calls and not c.git_commands
+
+
+@pytest.mark.parametrize('core_version,meta_version', [
+    ('0.9.6', '0.9.6'), ('0.9.6', '0.9.7'), ('0.9.7', '0.9.7'),
+    ('0.9.4', '0.9.6'), ('0.9.5', '0.9.6'), ('0.9.7', '0.9.4'), ('0.9.7', '0.9.5'),
+    ('0.9.4', '0.9.7'), ('0.9.5', '0.9.7'),
+    ('0.9.8', '0.9.4'), ('0.9.8', '0.9.5'), ('0.9.8', '0.9.6')])
+def test_unqualified_native_pairs_refuse_before_verifier_or_reader(fixture, core_version, meta_version):
+    c = fixture
+    c.native = native_selection(core_version, meta_version)
+    # Exact input bytes and valid selectors cannot authorize an unsupported pair.
+    reselect_native(c)
+    with pytest.raises(ValueError, match='supported Core/Meta release pair required'):
+        c.accept()
+    assert not c.commands and not c.reader_calls and not c.git_commands
 
 
 @pytest.mark.parametrize('field,value', [
     ('source_sha', 'main'), ('source_sha', 'D' * 40), ('source_sha', None),
-    ('version', '0.9.3'), ('repository', 'other/meerkat-meta'),
+    ('version', '0.9.3'), ('version', '0.9.5'), ('version', '0.9.6'), ('repository', 'other/meerkat-meta'),
     ('tag', None), ('tag', '--upload-pack=foreign'), ('tag', 'v0.9.4^{commit}'),
     ('tag', 'v0.9.4..rc1'), ('tag', 'v0.9.4.lock'), ('tag', 'v0.9.4.'),
     ('tag', 'refs/tags/v0.9.4'), ('tag', 'v0.9.4 rc1')])
@@ -280,8 +586,9 @@ def local_native_fetch(tmp_path):
         def run(self, name, argv, *, cwd=None):
             args = [str(x) for x in argv]
             self.commands.append(args)
-            actual = [str(source) if x == 'https://github.com/lukacf/meerkat-meta.git' else x for x in args]
-            if self.wrong_commit and name == 'meta-fetch':
+            actual = [str(source) if x in ('https://github.com/lukacf/meerkat.git',
+                                           'https://github.com/lukacf/meerkat-meta.git') else x for x in args]
+            if self.wrong_commit and name in ('core-fetch', 'meta-fetch', 'forge-reader-fetch'):
                 actual[-1] = other
             log = work / (name + '.log')
             with log.open('xb') as output:
@@ -290,14 +597,18 @@ def local_native_fetch(tmp_path):
     return git, work, selected, other, LocalRecorder()
 
 
-@pytest.mark.parametrize('tag', ['', 'v0.9.4', 'v0.9.4-rc.1'])
-def test_source_fetch_uses_exact_commit_and_only_explicit_tag(local_native_fetch, tag):
+@pytest.mark.parametrize('domain,tag', [('meta', ''), ('meta', 'v0.9.4'), ('meta', 'v0.9.4-rc.1'),
+                                      ('meta', 'v0.9.6'), ('meta', 'v0.9.6-rc.1'),
+                                      ('core', 'v0.9.7'), ('core', 'v0.9.7-rc.1'),
+                                      ('forge-reader', ''), ('forge-reader', 'forge-v0.3.0')])
+def test_source_fetch_uses_exact_commit_and_only_explicit_tag(local_native_fetch, domain, tag):
     git, work, selected, _, record = local_native_fetch
     if tag:
         git('-c', 'user.name=Offline Control', '-c', 'user.email=offline@example.invalid',
             'tag', '-a', tag, selected, '-m', 'selected tag')
-    checkout = p.fetch_native_source(record, work, 'meta', {
-        'repository': 'lukacf/meerkat-meta', 'source_sha': selected, 'tag': tag})
+    checkout = p.fetch_native_source(record, work, domain, {
+        'repository': 'lukacf/meerkat' if domain == 'core' else 'lukacf/meerkat-meta',
+        'source_sha': selected, 'tag': tag})
     assert subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip() == selected
     assert (checkout / 'payload').read_text() == 'selected commit\n'
     assert record.commands[1][-1] == selected
@@ -306,17 +617,19 @@ def test_source_fetch_uses_exact_commit_and_only_explicit_tag(local_native_fetch
 
 
 @pytest.mark.parametrize('mismatch', ['commit', 'tag'])
-def test_source_fetch_mismatch_refuses_before_checkout(local_native_fetch, mismatch):
+@pytest.mark.parametrize('domain', ['core', 'meta', 'forge-reader'])
+def test_source_fetch_mismatch_refuses_before_checkout(local_native_fetch, mismatch, domain):
     git, work, selected, other, record = local_native_fetch
     tag = ''
     if mismatch == 'tag':
-        tag = 'v0.9.4'
+        tag = {'core': 'v0.9.7', 'meta': 'v0.9.4', 'forge-reader': 'forge-v0.3.0'}[domain]
         git('tag', tag, other)
     else:
         record.wrong_commit = True
     with pytest.raises(ValueError, match='fetched native commit differs|selected native tag points elsewhere'):
-        p.fetch_native_source(record, work, 'meta', {
-            'repository': 'lukacf/meerkat-meta', 'source_sha': selected, 'tag': tag})
+        p.fetch_native_source(record, work, domain, {
+            'repository': 'lukacf/meerkat' if domain == 'core' else 'lukacf/meerkat-meta',
+            'source_sha': selected, 'tag': tag})
     assert not any(args[:2] == ['git', 'checkout'] for args in record.commands)
 
 
@@ -424,11 +737,54 @@ def prepare_publish(c,monkeypatch):
     return transport,publish
 
 
+def assert_public_fragment(c, result):
+    fragment_path = c.root / 'publication/forge-fragment.json'
+    fragment = p.read_json(fragment_path)
+    assert set(fragment) == {'files', 'selection', 'paths'}
+    assert fragment == {key: result[key] for key in fragment}
+    projected = fragment['selection']
+    # Reattach the original locators to prove every other value and row order
+    # survives, including the complete wheel source-payload/metadata inventory.
+    restored = copy.deepcopy(projected)
+    assert 'artifact_root' not in restored
+    restored['artifact_root'] = c.selection['artifact_root']
+    for key, original in c.selection.items():
+        if isinstance(original, dict) and 'path' in original:
+            assert 'path' not in restored[key]
+            restored[key]['path'] = original['path']
+    assert len(restored['dependency_wheels']) == len(c.selection['dependency_wheels'])
+    for wheel, original in zip(restored['dependency_wheels'], c.selection['dependency_wheels']):
+        assert 'path' not in wheel
+        wheel['path'] = original['path']
+    assert restored == c.selection
+    assert c.producer_root.encode() not in fragment_path.read_bytes()
+    for key, value in fragment['paths'].items():
+        for name in value if key == 'dependency_wheels' else [value]:
+            assert p.relative(name) == name
+    attribution = p.read_json(c.root / 'publication/forge-fragment-attribution.json')
+    assert attribution == result['selection_projection']
+    assert attribution['rule'] == 'original-selection-minus-physical-locators-v1'
+    assert attribution['fragment'] == {'path': fragment_path.name,
+        'size': fragment_path.stat().st_size, 'sha256': p.digest(fragment_path)}
+    original = attribution['original_selection']
+    assert original == fragment['files']['artifacts/RUNTIME-SELECTION.json']
+    assert original['member'] == 'connect-export/artifacts/RUNTIME-SELECTION.json'
+    archive = c.root / 'publication/assets' / c.subjects[0]
+    assert original['archive_size'] == archive.stat().st_size
+    assert original['archive_sha256'] == p.digest(archive)
+    with tarfile.open(archive, 'r:gz') as package:
+        raw = package.extractfile(original['member']).read()
+    assert raw == (c.artifacts / 'RUNTIME-SELECTION.json').read_bytes()
+    assert original['size'] == len(raw) and original['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert json.loads(raw) == c.selection
+
+
 def test_publication_uploads_only_accepted_bytes_then_emits_original_inventory(fixture,monkeypatch):
     c=fixture;t,publish=prepare_publish(c,monkeypatch)
     result=publish()
     assert t.uploads==list(c.files)
-    assert result['status']=='verified_public_inventory' and result['selection']==c.selection
+    assert result['status']=='verified_public_inventory'
+    assert_public_fragment(c, result)
     assert result['files']['artifacts/product.tar.gz']['member']=='connect-export/artifacts/product.tar.gz'
     assert all(v['url'].endswith('/'+c.subjects[0]) for v in result['files'].values())
     for name in c.files:assert t.files[name]==(c.candidate/name).read_bytes()
@@ -475,13 +831,25 @@ def test_draft_release_is_not_treated_as_publication(fixture,monkeypatch):
     assert not t.uploads
 
 
-def test_selected_acceptance_hash_and_allowlist_are_rechecked(fixture,monkeypatch):
+@pytest.mark.parametrize('mutation', ['scope', 'target', 'artifact_hash', 'wheel_identity', 'dependency'])
+def test_selected_acceptance_hash_and_allowlist_are_rechecked(fixture,monkeypatch,mutation):
     c=fixture;t,publish=prepare_publish(c,monkeypatch)
     directory=c.root/'accepted';selected=p.digest(directory/'acceptance.json')
-    value=p.read_json(directory/'acceptance.json');value['scope']='different';dump(directory/'acceptance.json',value)
+    value=p.read_json(directory/'acceptance.json')
+    if mutation == 'scope':
+        value['scope'] = 'different'
+    elif mutation == 'target':
+        value['selection']['target'] = next(target for target in p.TARGETS if target != c.target)
+    elif mutation == 'artifact_hash':
+        value['selection']['assembly']['sha256'] = 'f' * 64
+    elif mutation == 'wheel_identity':
+        value['selection']['meta']['version'] = '99.0.0'
+    else:
+        value['selection']['dependency_wheels'] = []
+    dump(directory/'acceptance.json',value)
     with pytest.raises(ValueError,match='acceptance changed'):
         p.publish_accepted(directory,selected,c.root/'publication')
-    assert not t.uploads
+    assert not t.uploads and not (c.root/'publication').exists()
 
 
 def test_changed_allowlist_never_reaches_upload(fixture,monkeypatch):
@@ -581,7 +949,7 @@ def test_acceptance_replacement_after_read_cannot_change_parsed_selection(fixtur
     monkeypatch.setattr(p,'copy_publication_input',copy_input)
     result=publish()
     assert len(observed)==1 and result['status']=='verified_public_inventory'
-    assert result['selection']==c.selection
+    assert_public_fragment(c, result)
     assert p.read_json(observed[0])=={'scope':'substituted after selected read'}
 
 
@@ -856,3 +1224,288 @@ def test_new_resource_hosts_still_require_exact_download_bytes(tmp_path, monkeyp
         with pytest.raises(ValueError, match="public input"):
             p.download(target, selected)
     assert calls == [(url, 60)]
+
+
+def test_public_projection_preserves_full_wheel_identity_and_dependency_order(fixture, monkeypatch):
+    c = fixture
+    # Two distinct ordered dependencies expose truncation, sorting or pairing
+    # mistakes. Full nested wheel identities must survive locator removal.
+    extra = c.artifacts / 'second-dependency.whl'
+    extra.write_bytes(b'distinct second dependency')
+    c.selection['dependency_wheels'].insert(0, {**pin(extra),
+        'path': c.selection['artifact_root'] + '/' + extra.name})
+    for name, distribution in [('meta', 'meerkat-mobkit'), ('toolkit', 'meerkat-toolkit')]:
+        artifact = c.selection[name + '_wheel']
+        c.selection[name] = {'distribution': distribution, 'version': '0.9.5',
+            'size': artifact['size'], 'sha256': artifact['sha256'],
+            'source_payload': [[distribution.replace('-', '_') + '/__init__.py', '1' * 64, 12]],
+            'metadata': [['METADATA', '2' * 64, 34]]}
+    dump(c.artifacts / 'RUNTIME-SELECTION.json', c.selection)
+    c.pack()
+    t, publish = prepare_publish(c, monkeypatch)
+    accepted = (c.root / 'accepted/acceptance.json').read_bytes()
+    result = publish()
+    assert_public_fragment(c, result)
+    assert (c.root / 'accepted/acceptance.json').read_bytes() == accepted
+    assert p.read_json(c.root / 'accepted/acceptance.json')['selection'] == c.selection
+    assert result['selection']['meta'] == c.selection['meta']
+    assert result['selection']['toolkit'] == c.selection['toolkit']
+    assert [row['sha256'] for row in result['selection']['dependency_wheels']] == [
+        p.digest(extra), p.digest(c.artifacts / 'dependency.whl')]
+    assert len(c.reader_calls) == 1 and t.uploads == list(c.files)
+
+
+# These controls enter the real publication command with the existing offline
+# reader/transport fixture. They do not claim signatures or Forge acceptance.
+def delivery_evidence(c, name, raw):
+    path = c.artifacts / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    for selected in c.selection.values():
+        if isinstance(selected, dict) and selected.get('path') == c.selection['artifact_root'] + '/' + name:
+            selected.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    dump(c.artifacts / 'RUNTIME-SELECTION.json', c.selection)
+    c.pack()
+
+
+def assert_delivery_refused(c, transport, publish, message='Forge pinned text hygiene refused'):
+    accepted = (c.root / 'accepted/acceptance.json').read_bytes()
+    original = {name: (c.candidate / name).read_bytes() for name in c.files}
+    with pytest.raises(ValueError, match=message):
+        publish()
+    assert not transport.uploads
+    report = p.read_json(c.root / 'publication/publication.json')
+    assert report['status'] == 'refused_or_partial' and report['write_attempted'] == []
+    assert not (c.root / 'publication/forge-fragment.json').exists()
+    assert 'files' not in report
+    assert (c.root / 'accepted/acceptance.json').read_bytes() == accepted
+    assert {name: (c.root / 'publication/assets' / name).read_bytes() for name in c.files} == original
+    assert {name: (c.candidate / name).read_bytes() for name in c.files} == original
+    assert len(c.commands) == 2 and len(c.reader_calls) == 1
+
+
+@pytest.mark.parametrize('name', ['build-record.json', 'resource-build-record.json',
+    'gateway-verification.json', 'source-manifest.json', 'indirect/retained.jsonl',
+    'indirect/notes.md', 'indirect/readme.txt', 'product.tar.gz.sha256'])
+def test_publication_scans_every_pinned_text_category_before_write(fixture, monkeypatch, name):
+    c = fixture
+    raw = (json.dumps({'producer': '/Users/private-person/work/input'}).encode()
+           if name.endswith('.json') else b'producer /home/private-person/work/input\n')
+    delivery_evidence(c, name, raw)
+    t, publish = prepare_publish(c, monkeypatch)
+    assert_delivery_refused(c, t, publish)
+
+
+def test_original_selection_remains_attested_but_personal_paths_refuse_delivery(fixture, monkeypatch):
+    c = fixture
+    before_root = c.selection['artifact_root']
+    c.selection = json.loads(json.dumps(c.selection).replace(before_root, '/Users/private-person/artifacts'))
+    dump(c.artifacts / 'RUNTIME-SELECTION.json', c.selection)
+    c.pack()
+    t, publish = prepare_publish(c, monkeypatch)
+    # The prospective fragment has no locators. Its original pinned document
+    # still must pass F2; projection is not evidence sanitation.
+    assert_delivery_refused(c, t, publish)
+
+
+@pytest.mark.parametrize('location', ['key', 'value'])
+@pytest.mark.parametrize('spelling', ['slash', 'unicode'])
+def test_publication_decodes_escaped_json_home_paths(fixture, monkeypatch, location, spelling):
+    c = fixture
+    text = '/Users/private-person/work/input'
+    raw = json.dumps({text: 'ordinary'} if location == 'key' else {'producer': text})
+    raw = raw.replace('/', '\\/') if spelling == 'slash' else raw.replace('/', '\\u002f')
+    assert '/Users/' not in raw
+    delivery_evidence(c, 'gateway-verification.json', raw.encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    assert_delivery_refused(c, t, publish)
+
+
+@pytest.mark.parametrize('producer, allowed', [
+    ('/Users/runner/work/input', True), ('/home/runner/work/input', True),
+    ('/home/.cargo/registry/input', True), ('/Users/.cargo/registry/input', False),
+    ('/Users/runner-other/work/input', False), ('/home/Runner/work/input', False),
+    ('/home/.cargo-other/work/input', False), ('/Users/private-person/work/input', False),
+])
+def test_publication_pinned_evidence_has_only_exact_runner_exceptions(fixture, monkeypatch, producer, allowed):
+    c = fixture
+    delivery_evidence(c, 'build-record.json', json.dumps({'producer': producer}).encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    if not allowed:
+        return assert_delivery_refused(c, t, publish)
+    before = (c.root / 'accepted/acceptance.json').read_bytes()
+    result = publish()
+    assert_public_fragment(c, result)
+    assert t.uploads == list(c.files)
+    assert (c.root / 'accepted/acceptance.json').read_bytes() == before
+    checked = result['forge_delivery']['text_files']
+    assert {row['path'] for row in checked} == {row['path'] for row in json.loads(before)['evidence']
+        if row['path'].endswith(('.json', '.jsonl', '.md', '.txt', '.sha256'))}
+    assert all(row['user_home_paths'] == row['private_names'] == 0 for row in checked)
+    for name in c.files:
+        assert t.files[name] == (c.candidate / name).read_bytes()
+
+
+@pytest.mark.parametrize('wheel', ['meta', 'toolkit'])
+@pytest.mark.parametrize('inventory', ['files', 'metadata', 'source_payload'])
+def test_publication_f1_wheel_entries_keep_exact_private_name_exception(fixture, monkeypatch, wheel, inventory):
+    c = fixture
+    names = ['licenses/PAIRED_HOST-LIVE.md', 'licenses/LICENSE-EXTRACTED', 'meerkat_toolkit/frontend/paired_host_live.py']
+    c.selection[wheel][inventory] = [[name, '1' * 64, 12] for name in names]
+    # F2 uses exact selected wheel names for string values, including retained
+    # evidence, while F1 permits the structural selection inventory entries.
+    delivery_evidence(c, 'build-record.json', json.dumps({'retained_entries': names}).encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    result = publish()
+    assert_public_fragment(c, result)
+    assert result['selection'][wheel][inventory] == c.selection[wheel][inventory]
+
+
+@pytest.mark.parametrize('case', ['value_suffix', 'key', 'unselected_name', 'home_in_selected_name',
+    'outside_inventory', 'row_hash'])
+def test_publication_f1_never_exempts_paths_keys_or_other_selection_fields(fixture, monkeypatch, case):
+    c = fixture
+    name = 'licenses/PAIRED_HOST-LIVE.md'
+    c.selection['toolkit']['files'] = [[name, '1' * 64, 12]]
+    value = {'retained': name}
+    fragment_refusal = False
+    if case == 'value_suffix':
+        value['retained'] += '.other'
+    elif case == 'key':
+        value = {name: 'ordinary'}
+    elif case == 'unselected_name':
+        value['retained'] = 'licenses/LICENSE-EXTRACTED'
+    elif case == 'home_in_selected_name':
+        c.selection['toolkit']['files'][0][0] = '/home/private-person/' + name
+        fragment_refusal = True
+    elif case == 'outside_inventory':
+        c.selection['toolkit']['description'] = name
+        fragment_refusal = True
+    else:
+        c.selection['toolkit']['files'][0][1] = name
+        fragment_refusal = True
+    delivery_evidence(c, 'build-record.json', json.dumps(value).encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    assert_delivery_refused(c, t, publish, 'Forge fragment hygiene refused' if fragment_refusal
+                            else 'Forge pinned text hygiene refused')
+
+
+@pytest.mark.parametrize('case', ['exact', 'nested', 'wrong_file', 'sibling', 'key', 'home', 'escaped_home'])
+def test_publication_f1b_is_only_manifest_file_path_private_name_exception(fixture, monkeypatch, case):
+    c = fixture
+    name = 'source-manifest.json'
+    value = {'files': [{'path': 'docs/Paired host.md', 'sha256': '1' * 64, 'size': 12}]}
+    if case == 'nested':
+        value = {'nested': value}
+    elif case == 'wrong_file':
+        name = 'build-record.json'
+    elif case == 'sibling':
+        value['files'][0]['note'] = 'Paired host'
+    elif case == 'key':
+        value['files'][0]['Paired host'] = 'ordinary'
+    elif case in ('home', 'escaped_home'):
+        value['files'][0]['path'] = '/Users/private-person/docs/Paired host.md'
+    raw = json.dumps(value)
+    if case == 'escaped_home':
+        raw = raw.replace('/', '\\u002f')
+    delivery_evidence(c, name, raw.encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    if case != 'exact':
+        return assert_delivery_refused(c, t, publish)
+    result = publish()
+    assert_public_fragment(c, result)
+    assert t.files[c.subjects[0]] == (c.candidate / c.subjects[0]).read_bytes()
+
+
+@pytest.mark.parametrize('case', ['unselected_private', 'selected_exact', 'selected_plus_other', 'selected_home'])
+def test_publication_non_json_text_uses_selected_helper_fallback(fixture, monkeypatch, case):
+    c = fixture
+    name = 'licenses/PAIRED_HOST-LIVE.md'
+    raw = name
+    if case != 'unselected_private':
+        c.selection['toolkit']['files'] = [[name, '1' * 64, 12]]
+    if case == 'selected_plus_other':
+        raw += '\nMemoryStore\n'
+    elif case == 'selected_home':
+        raw += '\n/home/private-person/source\n'
+    delivery_evidence(c, 'indirect/retained.jsonl', raw.encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    if case != 'selected_exact':
+        return assert_delivery_refused(c, t, publish)
+    assert publish()['status'] == 'verified_public_inventory'
+
+
+@pytest.mark.parametrize('location', ['selection_key', 'selection_value', 'layout', 'file_name'])
+def test_publication_fragment_hygiene_covers_keys_values_layout_and_inventory(fixture, monkeypatch, location):
+    c = fixture
+    if location == 'selection_key':
+        c.selection['/home/runner/unexpected'] = 'ordinary'
+    elif location == 'selection_value':
+        c.selection['meta']['description'] = '/Users/runner/source'
+    elif location == 'file_name':
+        delivery_evidence(c, 'indirect/Paired host.txt', b'ordinary contents')
+    dump(c.artifacts / 'RUNTIME-SELECTION.json', c.selection)
+    c.pack()
+    t, publish = prepare_publish(c, monkeypatch)
+    if location == 'layout':
+        # Select this malformed layout handoff explicitly; original artifact
+        # pins remain unchanged. Layout data cannot bypass fragment hygiene.
+        accepted = c.root / 'accepted/acceptance.json'
+        value = p.read_json(accepted)
+        value['paths']['artifact_root'] = 'artifacts/home/runner/unexpected'
+        dump(accepted, value)
+    assert_delivery_refused(c, t, publish, 'Forge fragment hygiene refused')
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'changed'])
+def test_publication_rechecks_pinned_text_before_scan(fixture, monkeypatch, mutation):
+    c = fixture
+    t, publish = prepare_publish(c, monkeypatch)
+    path = c.root / 'accepted/unpacked/artifacts/gateway-verification.json'
+    if mutation == 'missing':
+        path.unlink()
+        with pytest.raises(FileNotFoundError):
+            publish()
+        assert not t.uploads
+        assert p.read_json(c.root / 'publication/publication.json')['write_attempted'] == []
+    else:
+        path.write_bytes(b'{"changed":"otherwise hygienic"}')
+        assert_delivery_refused(c, t, publish, 'accepted text evidence changed')
+
+
+def test_publication_scans_retained_text_bytes_despite_path_replacement(fixture, monkeypatch):
+    c = fixture
+    t, publish = prepare_publish(c, monkeypatch)
+    original = p.copy_publication_input
+    replaced = []
+    def capture(path, stream, maximum):
+        row = original(path, stream, maximum)
+        if path == c.root / 'accepted/unpacked/artifacts/build-record.json':
+            path.unlink()
+            path.write_bytes(b'{"replacement":"/Users/private-person/input"}')
+            replaced.append(path)
+        return row
+    monkeypatch.setattr(p, 'copy_publication_input', capture)
+    result = publish()
+    assert result['status'] == 'verified_public_inventory' and len(replaced) == 1
+    for name in c.files:
+        assert t.files[name] == (c.candidate / name).read_bytes()
+
+
+@pytest.mark.parametrize('location', ['key', 'value'])
+def test_publication_decodes_escaped_json_private_names(fixture, monkeypatch, location):
+    c = fixture
+    value = {'Paired host': 'ordinary'} if location == 'key' else {'note': 'Paired host'}
+    raw = json.dumps(value).replace('P', '\\u0050')
+    assert 'Paired host' not in raw
+    delivery_evidence(c, 'gateway-verification.json', raw.encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    assert_delivery_refused(c, t, publish)
+
+
+@pytest.mark.parametrize('private', ['Paired host', 'Paired Host', 'organizational host', 'MemoryStore'])
+def test_publication_preserves_selected_private_pattern_refusals(fixture, monkeypatch, private):
+    c = fixture
+    delivery_evidence(c, 'build-record.json', json.dumps({'note': private}).encode())
+    t, publish = prepare_publish(c, monkeypatch)
+    assert_delivery_refused(c, t, publish)

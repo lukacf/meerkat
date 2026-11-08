@@ -4,11 +4,12 @@ description: "Inspect packages, validate selections and compose native setup."
 icon: "rust"
 ---
 
-The public source has a root workspace for `toolkit-package` and `toolkit-store`,
-and a `native-candidate` workspace for Connect and its native adapters. It uses
-published Core and Meta 0.9.0 crates plus the exact included Core code generator.
-Build with Rust 1.97.0. See the repository
-`BUILDING.md` for resource-bound native build commands.
+Connect's six crates are members of the Meerkat repository's root Cargo
+workspace. They take Core and Meta from the same checkout, pinned at `=0.9.10`,
+and the manifests declare Rust 1.97.0. Build and test them from the repository
+root, for example `./scripts/repo-cargo build -p meerkat-connect`. Follow
+[BUILDING.md](https://github.com/lukacf/meerkat/blob/main/connect/BUILDING.md)
+for the resource-bound native build commands.
 
 ## Crate map
 
@@ -19,7 +20,7 @@ Build with Rust 1.97.0. See the repository
 | `toolkit-store` | `ToolkitStore`, `SqliteStore`, `ConditionalAdmissionStore` | Atomic feature records/effects; no policy or external exactly-once guarantee |
 | `toolkit-mobkit` | `discovery::DiscoveryTools`, `FindAndInstallTool` | Discovery and acquisition admission; execution requires the installed native owner |
 | `meerkat-toolkit` | Setup, request, binding and continuation modules | Host composition retains native grants, lifecycle and currentness |
-| `meerkat-connect` | `service_preparation::NativeSetup`, `SessionStartup`, `session::ResumedStandalone` | Reusable native setup conversation in the separate `native-candidate` workspace; source dependency |
+| `meerkat-connect` | `service_preparation::NativeSetup`, `SessionStartup`, `session::ResumedStandalone` | Reusable native setup conversation; source dependency |
 
 ## Embed the native setup conversation
 
@@ -43,6 +44,15 @@ private fields, then move the pair together into `NativeSetup::with_forge`.
 Crossed, used or previously claimed pairs are refused. A later setup needs a
 fresh pair from the same trusted application configuration after the earlier
 setup closes. This operation selects no new host origin, login or permission.
+
+`ConnectSession::submit` returns an admission receipt and a native
+`CompletionHandle`; admission alone is not a completed response. Await
+`try_wait_with_terminal_outcome()` and retain its outcome.
+`terminal::committed_text` returns text only for committed completion, including
+an empty string for `CompletedWithoutResult`. That empty string is not a failed
+request or a reason to resubmit. Pending callbacks and durable finalization
+failures remain distinct outcomes; a completion wait error does not prove that
+work completed.
 
 Keep the returned setup and presenters with the existing session owner. Cancel
 and await active input before awaiting `ConnectSession::close`; preserve a
@@ -121,6 +131,11 @@ The dispatcher implements Meerkat's tool surface, but the application must compo
 ## MCP integrations
 
 Connect supports MCP servers through Meerkat's native session APIs. Use the host's existing credential, grant and runtime owners when attaching a selected integration.
+
+The development [service collection API](/guides/service-collections) lets a
+trusted Rust host run bounded, result-dependent checks over one installed
+service. Its private protocol 7 requires an explicit host selection and retains
+historical observations; installed and live acceptance remain pending.
 
 ## Source locations
 

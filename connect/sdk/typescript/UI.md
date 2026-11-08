@@ -8,7 +8,10 @@ browser entrypoint from the Node service operations. The optional stylesheet is
 ## Native setup conversation (source embedding)
 
 `NativeSetupConversation` from `@rkat/toolkit/setup-session` borrows an actual
-host-selected `Session` from the released `@rkat/sdk@0.8.51`. It uses that SDK's
+host-selected `Session` from the optional `@rkat/sdk` peer, currently pinned to
+`0.9.8` in the source package metadata and lock. Select the matching native
+composition described in [BUILDING.md](../../BUILDING.md#sdks).
+The adapter uses that SDK's
 `Session.history()`, `Session.stream(message)` and `Session.stopRun(runId, reason)`.
 `mountSetupConversation` from `@rkat/toolkit/ui` renders its native saved history,
 pages earlier/later messages, sends complete user messages unchanged and shows
@@ -22,9 +25,9 @@ The [typed embedding example](examples/setup-conversation.ts) composes this chat
 with the existing management view. The host supplies the real Session, captured
 viewer/realm/session admission readback and mandatory permission-invalidation
 `AbortSignal`. There is no user-supplied session ID. The host owns exclusive
-streaming access to that Session: the released SDK has one stream queue per
-session, and the adapter's local reservation does not arbitrate other handles or
-clients. The host must preserve that reservation until the native turn settles.
+streaming access to that Session: the adapter's local reservation does not
+arbitrate other handles or clients. The host must preserve that reservation
+until the native turn settles.
 This interactive binding requires admission to view, send and exact-run control,
 not just session-read access. Audiences lacking one of these permissions need
 the host's separate read-only presentation. An authenticated browser bridge can
@@ -82,12 +85,12 @@ packaged Connect delivery. The TypeScript native Session client is Node-oriented
 it must remain in the privileged host, not be serialized to a browser. A web
 console still needs its authenticated application bridge and the optional MobKit
 application slot. This package introduces neither a user-operated Connect server
-nor invented MobKit RPC methods. The SDK is an exact optional peer, with the same
-release installed for component type/event tests. No native/provider execution,
-sign-in or host adoption is implied by those tests.
+nor invented MobKit RPC methods. Component type/event tests require the selected
+matching SDK. No native/provider execution, sign-in or host adoption is implied
+by those tests.
 The browser UI declaration closure uses only the safe view model and remains
 usable without that optional native peer; only the native adapter entry needs
-the released Session types.
+the selected Session types.
 
 ```ts
 import { mountToolkitView } from "@rkat/toolkit/ui";
@@ -377,10 +380,10 @@ is insufficient. `view.dispose()` releases the UI only, so an existing host step
 can retain its callback transport across remounts. Offers must still be admitted
 and replay-protected by that host.
 
-This optional Python binding targets reviewed Meerkat PR 1732 source, not the
-released 0.8.50/0.8.45 consumption baseline. It does not complete the native
-provider protocol or credential-use bridge. See its guide for exact contracts,
-uncertain outcomes and loopback-local profile limits.
+This optional Python binding requires the public Core connector login
+start/complete/cancel/status APIs and the host's protected presenter. It does not
+complete the native provider composition or credential-use bridge. See its guide
+for exact contracts, uncertain outcomes and loopback-local profile limits.
 
 ## Verification and preview
 

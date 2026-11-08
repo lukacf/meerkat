@@ -13,7 +13,7 @@ import os
 import stat
 from typing import Any
 
-from .host_control import ApplicationUpdateStartup, HostControlError, ToolkitMobKitRuntime, ToolkitPersistentTransport
+from .host_control import ApplicationUpdateStartup, HostControlError, ToolkitMobKitRuntime, ToolkitPersistentTransport, _hosted_mcp_redirect_base, _check_private_gateway_transport
 
 
 class ToolkitApplicationUpdateRuntime(ToolkitMobKitRuntime):
@@ -25,7 +25,9 @@ class ToolkitApplicationUpdateRuntime(ToolkitMobKitRuntime):
     authority selections are restored independently of the candidate policy.
     """
 
-    def __init__(self, config: Any, startup: ApplicationUpdateStartup):
+    def __init__(self, config: Any, startup: ApplicationUpdateStartup, *, member_mcp: Any = None,
+                 hosted_mcp_redirect_base: str | None = None):
+        hosted_mcp_redirect_base = _hosted_mcp_redirect_base(hosted_mcp_redirect_base)
         if not isinstance(startup, ApplicationUpdateStartup):
             raise HostControlError("application update startup is required")
         startup.__post_init__()
@@ -39,18 +41,21 @@ class ToolkitApplicationUpdateRuntime(ToolkitMobKitRuntime):
                 raise HostControlError("application update selection changed or exceeds its limit")
         finally:
             os.close(descriptor)
-        super().__init__(config, startup)
+        super().__init__(config, startup, member_mcp=member_mcp, hosted_mcp_redirect_base=hosted_mcp_redirect_base)
         self._update_startup = startup
         self._update_bytes = selected
         self._update_started = False
 
     def _make_gateway_transport(self) -> ToolkitPersistentTransport:
+        _check_private_gateway_transport(self._config)
         if self._update_started:
             raise HostControlError("application update already started; inspect the original transaction")
         if self._config.gateway_bin is None:
             raise HostControlError("application update requires its local gateway")
         self._update_started = True
-        return ToolkitPersistentTransport(self._config.gateway_bin, self._update_startup)
+        return ToolkitPersistentTransport(self._config.gateway_bin, self._update_startup, member_mcp=self._member_mcp,
+                                          bootstrap_timeout=getattr(self._config, "gateway_init_timeout", None),
+                                          hosted_mcp_redirect_base=self._hosted_mcp_redirect_base)
 
     def _build_init_params(self) -> dict[str, Any]:
         params = super()._build_init_params()

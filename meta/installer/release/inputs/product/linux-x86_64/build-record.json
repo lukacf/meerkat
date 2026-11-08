@@ -1,56 +1,59 @@
 {
  "binary": {
-  "path": "/mnt/connect-release/a1/parent/20261101T113908Z/binary/toolkit_gateway",
-  "sha256": "102598814924ba043ade5d772e6dc44b684c54cd2bd7707a74ca4f553ed645c8",
-  "size": 2544390736
+  "path": "/srv/connect-0910-rpub/work/binary/toolkit_gateway",
+  "sha256": "d5d6c813e70499147fd13f8e8523650445e051d443db32aa09a561b7d3c9a853",
+  "size": 508941776
  },
  "binary_kind": "toolkit_gateway",
  "cargo": {
   "argv": [
-   "/home/luka/src/wt/099-connect-linux-build/src/scripts/repo-cargo",
+   "/srv/connect-0910-rpub/src/connect/scripts/repo-cargo",
+   "+1.97.0",
    "build",
    "--locked",
    "--offline",
+   "--release",
+   "-j",
+   "16",
    "--manifest-path",
-   "/home/luka/src/wt/099-connect-linux-build/src/native-candidate/Cargo.toml",
+   "/srv/connect-0910-rpub/src/Cargo.toml",
    "-p",
    "meerkat-connect",
    "--features",
    "meerkat-connect/console,toolkit-mobkit/native-host",
    "--bin",
    "toolkit_gateway",
+   "--bin",
+   "meerkat-connect",
    "--message-format=json-render-diagnostics"
   ],
+  "cwd": "/srv/connect-0910-rpub/src",
   "env": {
-   "MEERKAT_CONNECT_RESOURCES_SHA256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae"
+   "MEERKAT_CONNECT_RESOURCES_SHA256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0"
   },
   "exit_code": 0,
+  "messages": {
+   "path": "/srv/connect-0910-rpub/work/records/native-build.stdout",
+   "sha256": "72cd86f5af4c1ac682b50b2dd84476afdbf73a5557541e92338cb6ba8983e1b5",
+   "size": 519117
+  },
   "result_record": {
-   "path": "/mnt/connect-release/a1/parent/20261101T113908Z/build.RESULT.json",
-   "sha256": "b5fd9666162a2904957284a966b4d9b58a037ae3d869f1e5ef122aa3da7dbabf",
-   "size": 2301
+   "path": "/srv/connect-0910-rpub/work/records/native-build.RESULT.json",
+   "sha256": "a2f57736b3508f88a84f20d5a2610bd4819c8bb8dbbaabdc3c584430738642bc",
+   "size": 777
   },
   "start_record": {
-   "path": "/mnt/connect-release/a1/parent/20261101T113908Z/build.START.json",
-   "sha256": "64fb81160e7029e0a3501044a1b25fc1d4167299e4dbf9d09f09ee1a4d5bf278",
-   "size": 1900
+   "path": "/srv/connect-0910-rpub/work/records/native-build.START.json",
+   "sha256": "cf608e942dc3c36dcc5c28d7e0d3efbdb6bb2110014990b71e45b0bb2736e65f",
+   "size": 1096
   }
  },
- "provenance": {
-  "gateway_artifact_record": {
-   "path": "/mnt/connect-release/a1/parent/20261101T113908Z/GATEWAY-ARTIFACT.json",
-   "sha256": "673ec57bcfed83a40a0004341b90f971195cc02807f71fe171b233218ebe5070",
-   "size": 16079
-  },
-  "note": "projection of the admitted executor records; the executor records are the original evidence",
-  "run_dir": "/mnt/connect-release/a1/parent/20261101T113908Z"
- },
- "resource_build_record_sha256": "d0cbde86f22e68b40b0303de4605b3744399bfb52350131982604fdf330beaaf",
- "resources_sha256": "aba32d4a5bf2a2238cae8aa5993ea83ce5fb8c2c79167cd05d30675d6c0fd8ae",
+ "resource_build_record_sha256": "c9a47ba5f1a4014cfa41ceedcc3ba9a6d826fce18fffd1847e51229c095e13b4",
+ "resources_sha256": "807200a5f0fd330750765d26e59748799b97675e559a8f5aebecf559bf1e58b0",
  "schema_version": 1,
  "source_manifest": {
-  "path": "/mnt/connect-release/a1/inputs/source/CURRENT-SOURCE-FILES.json",
-  "sha256": "11176a73ce4e376cbce906d4133cbbcd8685ec2e06ab789944d83f85587d44b7"
+  "path": "/srv/connect-0910-rpub/work/source-manifest.json",
+  "sha256": "e411b67a9b45370468e04ca62584e1b34d6dd3e1ce14601f31db01ecf2ea6095"
  },
  "target": "linux-x86_64"
 }

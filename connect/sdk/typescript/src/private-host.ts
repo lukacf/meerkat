@@ -2,6 +2,8 @@
  * This client neither authenticates source events nor admits native work. It must
  * never be connected to public RPC, HTTP, model callbacks or a remote socket.
  */
+import { MemberClassAddAttempt, MemberClassClient, MemberMcpApplication, decodeMemberClassObservation } from "./member-classes.js";
+import type { MemberClassAddRequest, MemberClassControlOutcome, MemberClassObservation } from "./member-classes.js";
 import type { Readable, Writable } from "node:stream";
 import { createHash } from "node:crypto";
 import { visit } from "jsonc-parser";
@@ -51,6 +53,65 @@ export interface PrivateOriginalRef {
 export interface PrivateOriginalRetention {
   readonly original: PrivateOriginalRef; readonly state: "retained_pending_native_admission";
 }
+/** Exact source submission facts, not a native admission result. */
+export interface PrivateOriginalSubmit {
+  readonly original: PrivateOriginalRef;
+  readonly content: string;
+  readonly transport_authentication: PrivateSourceEvidence;
+}
+export interface NativeOriginalOperationsRequest {
+  readonly not_before_ms: number;
+  readonly expires_at_ms: number;
+  readonly targets: readonly { readonly issuance_id: string; readonly target:
+    { readonly kind: "peer"; readonly route: string; readonly actions: readonly ("message" | "request")[] }
+    | { readonly kind: "peer_directory" }
+    | { readonly kind: "recorder_identity"; readonly actions: readonly ("read" | "write" | "delete")[] } }[];
+}
+export interface WorkflowWorkItemRef { readonly realm_id: string; readonly namespace: string; readonly item_id: string }
+export interface WorkflowWorkOwnerKey { readonly kind: "principal" | "agent" | "session" | "mob" | "label"; readonly id: string }
+export interface WorkflowSetupTarget { readonly target: SetupGrantTarget | null; readonly issuance_id: string }
+/** Host-selected actual child relationships. Native owns permission, target
+ * bounds and audience validation. This request does not commission G. */
+export interface WorkflowChildLaunchRequest {
+  readonly parent: PrivateOriginalRef;
+  readonly planning: PrivateOriginalRef;
+  readonly submission: PrivateOriginalSubmit;
+  readonly child: WorkflowWorkItemRef;
+  readonly child_owner: WorkflowWorkOwnerKey;
+  readonly issuance_id: string;
+  readonly targets: readonly WorkflowSetupTarget[];
+  readonly output_audiences: readonly string[];
+}
+/** Host selections only. Native derives profile, route, envelope and backend.
+ * Requires explicit fresh privateWorkflowLaunch. No SDK grouping or authority. */
+export interface WorkflowCommissionRequest {
+  readonly admission_id: string;
+  readonly identity: string;
+  readonly parent: PrivateOriginalSubmit;
+  readonly instance: MemberClassAddRequest["instance"];
+  readonly event: PrivateAuthenticatedEvent;
+  readonly content: string;
+  readonly workflow: string;
+  readonly parent_work: WorkflowWorkItemRef;
+  readonly parent_owner: WorkflowWorkOwnerKey;
+  readonly cycle_label: string;
+  readonly not_before_ms: number;
+  readonly expires_at_ms: number;
+  readonly deadline_ms: number;
+  readonly max_waiters: number;
+  readonly hold_timeout_ms: number;
+  readonly controller_issuance_id: string;
+  readonly planning_root_issuance_id: string;
+  readonly planning_leaf_issuance_id: string;
+}
+/** Prepared retains G and its plan, but does not submit G or complete acquisition. */
+export type WorkflowCommissionResponse =
+  | { readonly state: "prepared"; readonly parent: PrivateOriginalRef; readonly planning: PrivateOriginalRef; readonly admission_id: string; readonly native: MemberClassObservation }
+  | { readonly state: "created_without_planning"; readonly parent: PrivateOriginalRef; readonly planning: PrivateOriginalRef; readonly admission_id: string; readonly native: MemberClassObservation; readonly error: HostRefusal }
+  | { readonly state: "native"; readonly outcome: MemberClassObservation }
+  | { readonly state: "add_not_accepted"; readonly native: MemberClassObservation; readonly retirement: MemberClassControlOutcome }
+  | { readonly state: "preparation_refused"; readonly error: HostRefusal; readonly retirement: MemberClassControlOutcome; readonly physical_cleanup: MemberClassControlOutcome | null };
+export type WorkflowCommissionAttempt = MemberClassAddAttempt<WorkflowCommissionResponse>;
 /** Source bookkeeping after native admission, separate from task completion. */
 export type PrivateSourceSettlement = "fresh_acceptance_promoted" | "retry_withdrawn" | "post_admission_publication_failed";
 /** Native admission observation. A turn ticket does not attest task completion. */
@@ -62,9 +123,13 @@ export type PrivateOriginalSubmission = {
   readonly turn_ticket: string | null;
   readonly source_settlement: PrivateSourceSettlement;
 } | { readonly state: "admission_unresolved" } | { readonly state: "native_outcome_unavailable" };
-/** Durable cancellation of this original's operations, not settlement of a run, controller or descendants. */
+/** Durable source cancellation. Cleanup pending retains the workflow close in the host recovery worker.
+ * Operations are already cancelled; callers need not repeat cancellation.
+ * Neither state certifies run, process, controller or descendant settlement.
+ * Shared-workflow hosts require the matching SDK generation that accepts cleanup pending;
+ * older closed-set decoders reject that state. Protocol v1 does not negotiate this capability. */
 export interface PrivateOriginalCancellation {
-  readonly original: PrivateOriginalRef; readonly state: "operations_cancelled";
+  readonly original: PrivateOriginalRef; readonly state: "operations_cancelled" | "operations_cancelled_cleanup_pending";
 }
 export type HostCloseReason = "shutdown" | "operator_disable" | "quarantine" | "activation_replaced" | "host_lost";
 export type HostCloseScope = { readonly kind: "activation" } | { readonly kind: "component"; readonly component: string };
@@ -82,7 +147,8 @@ export interface HostComponentObservation {
   readonly revision: number;
   readonly state: "staged" | "open" | "closing" | "closed" | "quarantined" | "uncertain" | "failed";
 }
-export type HostRefusal = "source_conflict" | "invalid_selection" | "unavailable" | "denied" | "wrong_owner" | "not_settled";
+/** observation_changed is a stale read, not a no-effect receipt or permission to resend. */
+export type HostRefusal = "source_conflict" | "invalid_selection" | "unavailable" | "denied" | "wrong_owner" | "not_settled" | "observation_changed";
 export class HostControlError extends Error {}
 /** The shared channel has failed or closed. An admitted effect may have occurred;
  * this error never authorizes replay or attests native settlement.
@@ -619,7 +685,7 @@ class ServiceParentExchange implements ServiceParentAdministrationRequest {
 const MAX_FRAME = 1_048_576;
 const MAX_PENDING = 32;
 const encoder = new TextEncoder();
-const refusals: readonly HostRefusal[] = ["source_conflict", "invalid_selection", "unavailable", "denied", "wrong_owner", "not_settled"];
+const refusals: readonly HostRefusal[] = ["source_conflict", "invalid_selection", "unavailable", "denied", "wrong_owner", "not_settled", "observation_changed"];
 function invalid(): never { throw new HostControlError("private host data was rejected"); }
 function fields(value: unknown, keys: readonly string[]): JsonObject {
   if (!isObject(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) invalid();
@@ -672,7 +738,7 @@ function serviceInputObservation(value: unknown): ServiceInputObservation {
     if (recipients[0] !== owner || !recipients.includes(selected) || new Set(recipients).size !== recipients.length) invalid();
     if (!isObject(report.outcome)) invalid();
     oneOf(report.outcome.completion_type, ["completed", "completed_without_result", "callback_pending", "callback_batch_pending",
-      "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated"]);
+      "cancelled", "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated", "outcome_unknown"]);
   } else invalid();
   if (identifier(report.input_id) !== selected || typeof report.attempt_count !== "number"
     || !Number.isInteger(report.attempt_count) || report.attempt_count < 0 || report.attempt_count > 0xffff_ffff) invalid();
@@ -767,9 +833,121 @@ function snapshot(value: unknown): JsonObject {
   try { const result = receiptJson(serviceBody(value)); if (!isObject(result)) invalid(); return result; }
   catch { return invalid(); }
 }
+function workflowToken(value: unknown): string {
+  const result = text(value);
+  if (!result.trim() || /\p{Cc}/u.test(result)) invalid();
+  return result;
+}
+function nativeOperationsRequest(value: NativeOriginalOperationsRequest): JsonObject {
+  const row = fields(snapshot(value), ["not_before_ms", "expires_at_ms", "targets"]);
+  for (const key of ["not_before_ms", "expires_at_ms"]) {
+    const item = row[key];
+    if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) invalid();
+  }
+  if ((row.not_before_ms as number) >= (row.expires_at_ms as number)) invalid();
+  if (!Array.isArray(row.targets) || row.targets.length < 1 || row.targets.length > 32) invalid();
+  const ids: string[] = [];
+  for (const entry of row.targets) {
+    const item = fields(entry, ["issuance_id", "target"]); ids.push(identifier(item.issuance_id));
+    if (!isObject(item.target)) invalid();
+    const target = item.target;
+    if (target.kind === "peer_directory") { fields(target, ["kind"]); continue; }
+    let allowed: string[];
+    if (target.kind === "peer") { fields(target, ["kind", "route", "actions"]); id(target.route); allowed = ["message", "request"]; }
+    else if (target.kind === "recorder_identity") { fields(target, ["kind", "actions"]); allowed = ["read", "write", "delete"]; }
+    else invalid();
+    if (!Array.isArray(target.actions) || target.actions.length === 0) invalid();
+    const actions = target.actions;
+    if (actions.some(action => typeof action !== "string" || !allowed.includes(action))
+      || JSON.stringify(actions) !== JSON.stringify(allowed.filter(action => actions.includes(action)))) invalid();
+  }
+  if (new Set(ids).size !== ids.length) invalid();
+  return row;
+}
+function workflowChildRequest(value: WorkflowChildLaunchRequest): JsonObject {
+  // Snapshot before any write/wait; never sort, combine or infer selectors.
+  const row = fields(snapshot(value), ["parent", "planning", "submission", "child", "child_owner", "issuance_id", "targets", "output_audiences"]);
+  original(row.parent); original(row.planning); identifier(row.issuance_id);
+  const submission = fields(row.submission, ["original", "content", "transport_authentication"]);
+  original(submission.original); text(submission.content); evidence(submission.transport_authentication);
+  const child = fields(row.child, ["realm_id", "namespace", "item_id"]);
+  Object.values(child).forEach(workflowToken);
+  const owner = fields(row.child_owner, ["kind", "id"]);
+  oneOf(owner.kind, ["principal", "agent", "session", "mob", "label"]); workflowToken(owner.id);
+  if (!Array.isArray(row.targets) || !Array.isArray(row.output_audiences)) invalid();
+  for (const entry of row.targets) {
+    const item = fields(entry, ["target", "issuance_id"]); identifier(item.issuance_id);
+    if (item.target === null) continue;
+    if (!isObject(item.target)) invalid();
+    if (item.target.kind === "mcp_server") workflowToken(fields(item.target, ["kind", "server"]).server);
+    else if (item.target.kind === "registered_tool_bundle_operation") {
+      const target = fields(item.target, ["kind", "bundle", "operation"]);
+      workflowToken(target.bundle); workflowToken(target.operation);
+    } else invalid();
+  }
+  row.output_audiences.forEach(identifier);
+  return row;
+}
+function workflowCommissionRequest(value: WorkflowCommissionRequest): JsonObject {
+  const row = fields(snapshot(value), ["admission_id", "identity", "parent", "instance", "event", "content", "workflow", "parent_work", "parent_owner", "cycle_label",
+    "not_before_ms", "expires_at_ms", "deadline_ms", "max_waiters", "hold_timeout_ms", "controller_issuance_id", "planning_root_issuance_id", "planning_leaf_issuance_id"]);
+  for (const key of ["admission_id", "identity", "workflow", "controller_issuance_id", "planning_root_issuance_id", "planning_leaf_issuance_id"]) identifier(row[key]);
+  const parent = fields(row.parent, ["original", "content", "transport_authentication"]);
+  original(parent.original); text(parent.content); evidence(parent.transport_authentication);
+  eventData(row.event); text(row.content); workflowToken(row.cycle_label);
+  const instance = fields(row.instance, ["class", "member"]); identifier(instance.class);
+  const selected = fields(instance.member, ["member", "logical_owner", "context_generation", "audience"]);
+  Object.values(fields(selected.member, ["mob_id", "member", "role"])).forEach(identifier);
+  if (typeof selected.context_generation !== "number" || !Number.isSafeInteger(selected.context_generation) || selected.context_generation < 0) invalid();
+  Object.values(fields(row.parent_work, ["realm_id", "namespace", "item_id"])).forEach(workflowToken);
+  const owner = fields(row.parent_owner, ["kind", "id"]);
+  oneOf(owner.kind, ["principal", "agent", "session", "mob", "label"]); workflowToken(owner.id);
+  for (const key of ["not_before_ms", "expires_at_ms", "deadline_ms", "hold_timeout_ms", "max_waiters"]) {
+    if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || (row[key] as number) < 0) invalid();
+  }
+  if ((row.max_waiters as number) > 65535) invalid();
+  return row;
+}
+function workflowCommissionResponse(reply: JsonObject, request: JsonObject, correlation: number): WorkflowCommissionResponse {
+  fields(reply, ["kind", "outcome"]); if (reply.kind !== "workflow_commissioned" || !isObject(reply.outcome)) invalid();
+  const value = reply.outcome;
+  const shapes: Record<string, string[]> = {
+    prepared: ["state", "parent", "planning", "admission_id", "native"],
+    created_without_planning: ["state", "parent", "planning", "admission_id", "native", "error"],
+    native: ["state", "outcome"], add_not_accepted: ["state", "native", "retirement"],
+    preparation_refused: ["state", "error", "retirement", "physical_cleanup"],
+  };
+  if (typeof value.state !== "string" || !Object.hasOwn(shapes, value.state)) invalid();
+  fields(value, shapes[value.state]!);
+  if (value.state === "prepared" || value.state === "created_without_planning") {
+    const planning = original(value.planning), parent = original(value.parent), requestedParent = request.parent as JsonObject, event = request.event as JsonObject;
+    if (!sameOriginal(parent, original(requestedParent.original)) || value.admission_id !== request.admission_id
+      || planning.route !== event.route || planning.original !== event.original) invalid();
+  }
+  for (const key of ["native", "outcome"]) if (key in value) {
+    decodeMemberClassObservation({ kind: "member_class", observation: value[key] }, request, correlation,
+      ["reservation_not_accepted", "preflight_refused", "settled", "native_refused"]);
+  }
+  if (value.state === "prepared" || value.state === "created_without_planning") {
+    const observed = value.native as JsonObject;
+    if (observed.state !== "settled" || (observed.native as JsonObject).state !== "result"
+      || (observed.authorization as JsonObject).state !== "succeeded" || (observed.cleanup as JsonObject).state !== "succeeded") invalid();
+  }
+  if ("error" in value) oneOf(value.error, refusals);
+  const checkControl = (control: unknown): void => {
+    if (!isObject(control)) invalid();
+    if (control.state === "succeeded") fields(control, ["state"]);
+    else { fields(control, ["state", "error"]); if (control.state !== "refused") invalid(); oneOf(control.error, refusals); }
+  };
+  if ("retirement" in value) checkControl(value.retirement);
+  if (value.physical_cleanup != null) checkControl(value.physical_cleanup);
+  return snapshot(value) as unknown as WorkflowCommissionResponse;
+}
 function privateFrame(line: string): unknown {
   const parsed = receiptJson(line);
   const nativeOutcome = isObject(parsed) && isObject(parsed.result) && parsed.result.kind === "service_input_receipt";
+  const workflowOutcome = isObject(parsed) && isObject(parsed.result) && parsed.result.kind === "workflow_commissioned";
+  const memberOutcome = isObject(parsed) && isObject(parsed.result) && parsed.result.kind === "member_class";
   // Protocol counters remain unsigned integer tokens, including 1 versus 1.0.
   // Only this new reply's native CompletionOutcome subtree accepts the existing
   // finite JSON numeric profile. Its arbitrary callback/result data is not a
@@ -787,7 +965,12 @@ function privateFrame(line: string): unknown {
     onLiteralValue: (value: unknown, offset, length) => {
       const frame = stack.at(-1);
       const path = frame ? [...frame.path, frame.property] : [];
-      const payload = nativeOutcome && prefix.every((part, index) => path[index] === part);
+      const memberPrefixes = [["result", "observation", "native", "result"], ["result", "observation", "native", "data"],
+        ["result", "observation", "data"], ["result", "observation", "record"]];
+      const payload = (nativeOutcome && prefix.every((part, index) => path[index] === part))
+        || (memberOutcome && memberPrefixes.some(prefix => prefix.every((part, index) => path[index] === part)))
+        || (workflowOutcome && ["native", "outcome"].some(key => memberPrefixes.some(prefix =>
+          ["result", "outcome", key, ...prefix.slice(2)].every((part, index) => path[index] === part))));
       if (!payload && typeof value === "number" && !/^(0|[1-9][0-9]*)$/.test(line.slice(offset, offset + length))) invalid();
     },
   });
@@ -901,10 +1084,14 @@ export class PrivateHostClient {
   #nextId = 1;
   #serviceExchange: ServiceParentExchange | null = null;
   #state: "new" | "preparing" | "bootstrapping" | "ready" = "new";
+  #memberClasses: MemberClassClient | null = null;
+  readonly #memberMcp: MemberMcpApplication | undefined;
 
-  constructor(commands: Writable, responses: Readable, options: { timeoutMs?: number } = {}) {
+  constructor(commands: Writable, responses: Readable, options: { timeoutMs?: number; memberMcp?: MemberMcpApplication } = {}) {
     // Per-call timeouts may extend observation, never this transport budget.
     this.#timeout = timeout(options.timeoutMs ?? 60_000);
+    if (options.memberMcp !== undefined && !(options.memberMcp instanceof MemberMcpApplication)) invalid();
+    this.#memberMcp = options.memberMcp;
     if (commands.destroyed || responses.destroyed || commands.writableEnded || responses.readableEnded) {
       throw new HostTransportError("private host endpoints are unavailable");
     }
@@ -918,6 +1105,7 @@ export class PrivateHostClient {
   #fail(error: HostTransportError): void {
     if (this.#failure !== null) return;
     this.#failure = error;
+    this.#memberClasses?._lost(); this.#memberMcp?._close();
     for (const pending of this.#pending.values()) { clearTimeout(pending.timer); clearTimeout(pending.writeTimer); pending.reject(error); }
     this.#pending.clear();
     // Destruction need not invoke a held Writable callback. Release our own
@@ -957,7 +1145,15 @@ export class PrivateHostClient {
 
   #receive(value: unknown): void {
     const response = fields(value, ["version", "id", "result"]);
-    if (response.version !== 1 || typeof response.id !== "number" || !Number.isSafeInteger(response.id) || response.id < 1 || !isObject(response.result)) invalid();
+    if (response.version !== 1 || typeof response.id !== "number" || !Number.isSafeInteger(response.id) || response.id < 0 || !isObject(response.result)) invalid();
+    if (response.id === 0) {
+      if (response.result.kind !== "member_class_mcp_required" || !this.#memberMcp) invalid();
+      this.#memberMcp._request(this, response.result); return;
+    }
+    if (response.result.kind === "member_class_listing_required") {
+      if (!this.#memberClasses) invalid();
+      this.#memberClasses._listing(response.id, response.result); return;
+    }
     const pending = this.#pending.get(response.id);
     if (!pending) invalid();
     let result: unknown;
@@ -965,13 +1161,14 @@ export class PrivateHostClient {
     if (response.result.kind === "error") {
       fields(response.result, ["kind", "error"]);
       refusal = new HostRefusedError(oneOf(response.result.error, refusals));
+      this.#memberClasses?._refused(response.id);
     } else { result = pending.decode(response.result); }
     clearTimeout(pending.timer);
     this.#pending.delete(response.id);
     if (!pending.abandoned) { if (refusal) pending.reject(refusal); else pending.resolve(result); }
   }
 
-  #startCall<T>(command: object, decode: (reply: JsonObject) => T, duration = this.#timeout, retirement = false, retainReply = false): { id: number; result: Promise<T> } {
+  #startCall<T>(command: object, decode: (reply: JsonObject) => T, duration = this.#timeout, retirement = false, retainReply = false, published?: (id: number) => void): { id: number; result: Promise<T> } {
     timeout(duration);
     if (this.#failure) throw this.#failure;
     if (this.#pending.size >= MAX_PENDING + Number(retirement) || !Number.isSafeInteger(this.#nextId)) {
@@ -1022,8 +1219,32 @@ export class PrivateHostClient {
         finally { clearTimeout(pending.writeTimer); }
       });
     });
+    try { published?.(requestId); }
+    catch { this.#fail(new HostTransportError("member callback correlation unavailable; settlement is unknown")); }
     return { id: requestId, result };
   }
+
+  /** Same native child; these local callbacks carry no public RPC authority. */
+  get memberClasses(): MemberClassClient { return this.#memberClasses ??= new MemberClassClient(this); }
+
+  /** @internal Narrow member protocol bridge used by the typed SDK adapter. */
+  _memberCall<T>(operation: Record<string, unknown>, decode: (reply: JsonObject, correlation: number) => T,
+    duration?: number, acknowledgement = false, published?: (id: number) => void): { id: number; result: Promise<T> } {
+    if (acknowledgement) this.assertAvailable(); else this.#ready();
+    if (!["add", "observe", "retire", "join", "listing_result", "mcp_result"].includes(String(operation.kind))) invalid();
+    let correlation = 0;
+    return this.#startCall({ kind: "member_class", operation }, reply => decode(reply, correlation), duration ?? this.#timeout,
+      acknowledgement, false, id => { correlation = id; published?.(id); });
+  }
+  /** @internal Same inherited pipe and retained listing owner, distinct command. */
+  _workflowCommissionCall<T>(request: Record<string, unknown>, decode: (reply: JsonObject, correlation: number) => T,
+    duration?: number, published?: (id: number) => void): { id: number; result: Promise<T> } {
+    this.#ready(); let correlation = 0;
+    return this.#startCall({ kind: "commission_workflow", request }, reply => decode(reply, correlation), duration ?? this.#timeout,
+      false, false, id => { correlation = id; published?.(id); });
+  }
+  /** @internal Wake a native callback waiter after an unacknowledged pipe failure. */
+  _memberTransportFailed(): void { this.#fail(new HostTransportError("member callback acknowledgement unavailable; settlement is unknown")); }
 
   #call<T>(command: object, decode: (reply: JsonObject) => T, duration = this.#timeout): Promise<T> {
     try { return this.#startCall(command, decode, duration).result; }
@@ -1252,6 +1473,74 @@ export class PrivateHostClient {
     }, options.timeoutMs);
   }
 
+  /** Explicit finite operations for a new host-authenticated original, using
+   * the same private client after Fresh or Restore. Does not authorize native
+   * incoming originals, automatic replies or mob-scope Recorder operations. */
+  async prepareOriginalNativeOperations(submission: PrivateOriginalSubmit,
+    request: NativeOriginalOperationsRequest, options: { timeoutMs?: number } = {}): Promise<PrivateOriginalRef> {
+    this.#ready();
+    const source = fields(snapshot(submission), ["original", "content", "transport_authentication"]);
+    const selected = original(source.original); text(source.content); evidence(source.transport_authentication);
+    const targets = nativeOperationsRequest(request);
+    return this.#call({ kind: "prepare_original_native_operations", submission: source, request: targets }, reply => {
+      fields(reply, ["kind", "original"]);
+      if (reply.kind !== "native_operations_prepared" || !sameOriginal(original(reply.original), selected)) invalid();
+      return selected;
+    }, options.timeoutMs);
+  }
+
+  /** Select P's exact contribution ceiling before first admission. No G is
+   * created and no input submitted. Timeout leaves named issuance uncertain. */
+  async prepareWorkflowParent(request: WorkflowCommissionRequest,
+    parentRootIssuanceId: string, parentLeafIssuanceId: string,
+    options: { timeoutMs?: number } = {}): Promise<PrivateOriginalRef> {
+    this.#ready();
+    const wire = workflowCommissionRequest(request);
+    const ids = [parentRootIssuanceId, parentLeafIssuanceId, wire.controller_issuance_id,
+      wire.planning_root_issuance_id, wire.planning_leaf_issuance_id];
+    ids.forEach(identifier);
+    if (new Set(ids).size !== ids.length) invalid();
+    const selected = original((wire.parent as JsonObject).original);
+    return this.#call({ kind: "prepare_workflow_parent", request: { commission: wire,
+      parent_root_issuance_id: parentRootIssuanceId, parent_leaf_issuance_id: parentLeafIssuanceId } }, reply => {
+      fields(reply, ["kind", "original"]);
+      if (reply.kind !== "workflow_parent_prepared" || !sameOriginal(original(reply.original), selected)) invalid();
+      return selected;
+    }, options.timeoutMs);
+  }
+
+  /** Publish only inside native held completion. Listing survives observer loss.
+   * joinListing joins actual application work and ACK, not native activation.
+   * Prepared is not G submission or completion. No retry or cold fallback. */
+  beginWorkflowCommission(request: WorkflowCommissionRequest, publish: () => Promise<void>,
+    options: { timeoutMs?: number } = {}): WorkflowCommissionAttempt {
+    this.#ready(); if (typeof publish !== "function") invalid();
+    const wire = workflowCommissionRequest(request);
+    return new MemberClassAddAttempt<WorkflowCommissionResponse>(this, wire, publish, options.timeoutMs,
+      { decode: (reply, correlation) => workflowCommissionResponse(reply as JsonObject, wire, correlation) });
+  }
+  commissionWorkflow(request: WorkflowCommissionRequest, publish: () => Promise<void>,
+    options: { timeoutMs?: number } = {}): Promise<WorkflowCommissionResponse> {
+    return this.beginWorkflowCommission(request, publish, options).result();
+  }
+
+  /** Prepare an actual selected child before first submission; does not submit.
+   * Requires explicit fresh private-workflow startup plus a real retained P/G.
+   * This command alone is not complete shared setup and cannot retrofit a bound
+   * singleton. Timeout leaves preparation/issuance unknown; never resend.
+   */
+  async prepareWorkflowChild(request: WorkflowChildLaunchRequest,
+    options: { timeoutMs?: number } = {}): Promise<PrivateOriginalRef> {
+    this.#ready();
+    const wire = workflowChildRequest(request);
+    const selected = original((wire.submission as JsonObject).original);
+    return this.#call({ kind: "prepare_workflow_child", request: wire }, reply => {
+      fields(reply, ["kind", "original"]);
+      if (reply.kind !== "workflow_child_prepared" || !sameOriginal(original(reply.original), selected)) invalid();
+      return selected;
+    }, options.timeoutMs);
+  }
+
   /** Read one canonical approved B without submitting or waking work. Pending,
    * absent receipt and unavailable read differ. Preserve witness/batch/scope and
    * native outcome; Run scope alone does not establish Completed(result).
@@ -1273,10 +1562,10 @@ export class PrivateHostClient {
     const selected = original(snapshot(reference));
     return this.#call({ kind: "cancel_original_operation", original: selected }, reply => {
       fields(reply, ["kind", "original", "state"]);
-      if (reply.kind !== "original_operation_cancelled" || reply.state !== "operations_cancelled") invalid();
+      if (reply.kind !== "original_operation_cancelled" || (reply.state !== "operations_cancelled" && reply.state !== "operations_cancelled_cleanup_pending")) invalid();
       const retained = original(reply.original);
       if (!sameOriginal(retained, selected)) invalid();
-      return { original: retained, state: "operations_cancelled" };
+      return { original: retained, state: reply.state };
     }, options.timeoutMs);
   }
 
@@ -1395,6 +1684,9 @@ export class PrivateHostClient {
     this.#fail(new HostTransportError("local host stream closed; settlement is unknown"));
     await this.#readerTask;
     await this.#writeTail;
+    const joined = await Promise.allSettled([this.#memberClasses?._joinEntered(), this.#memberMcp?.join()]);
+    const failures = joined.filter((value): value is PromiseRejectedResult => value.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map(value => value.reason), "member callback cleanup requires reconciliation");
   }
 }
 

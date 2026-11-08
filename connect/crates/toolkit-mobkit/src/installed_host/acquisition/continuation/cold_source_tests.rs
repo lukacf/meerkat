@@ -73,11 +73,22 @@ async fn case(explicit: bool, case: Case) {
     let mut owner_handle = None;
     let mut owner_passes = None;
     let result = fixture.source.with_synthetic_admission_diagnostics(AssertUnwindSafe(Box::pin(async {
+        if !matches!(case, Case::WarmLegacy) {
+            // Select the same source recovery owner as installed composition
+            // before A enters. Its real settlement writes the durable decision.
+            fixture.source.start_custody_recovery(None).unwrap();
+        }
         let admitted = fixture.submit().await;
         fixture.finish(&admitted).await.unwrap();
         let context = fixture.probe.as_ref().unwrap().captured();
         tokio::time::timeout(EVENT_GUARD, fixture.machine.wait_run_settled(
             &fixture.session, context.retained_work().unwrap().run_id())).await.unwrap();
+        if !matches!(case, Case::WarmLegacy) {
+            // Join the source's accepted work before simulating custody loss.
+            // The later native continuation reuses A; it binds no new original.
+            fixture.source.stop_custody_recovery();
+            fixture.source.join_custody_recovery().await.unwrap();
+        }
         assert_eq!(fixture.inputs().await, Ok(1));
         let association = fixture.binding().await.unwrap().unwrap();
         if matches!(case, Case::TargetedFirst | Case::TargetedPending) {
@@ -90,6 +101,10 @@ async fn case(explicit: bool, case: Case) {
             assert!(source_before.data.body.get("bound_service_input").is_none(),
                 "unsupported warm source does not enter the extra evidence write");
         } else {
+            let attempt = crate::private_originals::historical_custody_attempt(&source_before)
+                .unwrap().expect("the actual first admission retained its custody attempt");
+            assert!(attempt.decision() == crate::original_ingress::custody_attempt::CustodyDecision::Promoted,
+                "the joined source owner must settle A before its custody is forgotten");
             assert!(!source_before.data.body["bound_service_input"].is_null(),
                 "actual binder retained the input before native admission");
             assert!(source_before.data.body[if explicit { "setup_request" } else { "configured_setup" }].is_object());
@@ -221,8 +236,11 @@ async fn case(explicit: bool, case: Case) {
         .await
         .unwrap();
     }
+    fixture.source.stop_custody_recovery();
     let cleanup = fixture.shutdown().await;
+    let source_cleanup = fixture.source.join_custody_recovery().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(source_cleanup.is_ok(), "{source_cleanup:?}");
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
@@ -466,3 +484,327 @@ async fn durable_owner_reopen_drains_same_pending_completion_after_source_recove
 
 #[path = "custody_recovery_wake_tests.rs"]
 mod custody_recovery_wake_tests;
+
+/// A completed native input and a committed Toolkit result do not require
+/// Core boot to materialize the restored seat. Cold source recovery must do
+/// that explicitly, before asking for registration or executor witnesses.
+async fn restored_seat_case(retire_owner: bool) {
+    use meerkat_runtime::{LogicalRuntimeId, input_state::InputLifecycleState};
+    let (fixture, store, retained, adapter) = ContinuationFixture::for_durable_continuation().await;
+    let mut active = Some(fixture);
+    let mut history = Some(store);
+    let mut retained = Some(retained);
+    let mut continuation = Some(adapter);
+    let result = AssertUnwindSafe(tokio::time::timeout(
+        EVENT_GUARD * 4,
+        Box::pin(async {
+            let (obligation, association, source_record, input_rows, session) = {
+                let fixture = active.as_ref().unwrap();
+                // Select the real source settlement owner before A enters, as in case().
+                fixture.source.start_custody_recovery(None).unwrap();
+                let admitted = fixture.submit().await;
+                fixture.finish(&admitted).await.unwrap();
+                let context = fixture.probe.as_ref().unwrap().captured();
+                tokio::time::timeout(
+                    EVENT_GUARD,
+                    fixture.machine.wait_run_settled(
+                        &fixture.session,
+                        context.retained_work().unwrap().run_id(),
+                    ),
+                )
+                .await
+                .unwrap();
+                // Finish the accepted source decision before retaining the cold baseline.
+                fixture.source.stop_custody_recovery();
+                fixture.source.join_custody_recovery().await.unwrap();
+                let source_record = fixture.cold_source_record().await;
+                let attempt = crate::private_originals::historical_custody_attempt(&source_record)
+                    .unwrap()
+                    .expect("the actual first admission retained its custody attempt");
+                assert!(
+                    attempt.decision()
+                        == crate::original_ingress::custody_attempt::CustodyDecision::Promoted,
+                    "the joined source owner must settle A before its durable owners close"
+                );
+                let association = fixture.binding().await.unwrap().unwrap();
+                let (correlation, selected_continuation) =
+                    InstalledOriginalInvocation::capture_native_continuation_for_test(
+                        continuation.as_ref().unwrap(),
+                        &fixture.source,
+                        &context,
+                        "continuation-probe-call",
+                    )
+                    .await
+                    .unwrap();
+                let binding = selected_continuation.native_original.as_ref().unwrap();
+                assert_eq!(binding.origin_session_id, fixture.session);
+                assert_eq!(&binding.retained_work, context.retained_work().unwrap());
+                assert!(
+                    binding.member.is_some(),
+                    "the actual owner selected its real member"
+                );
+                let obligation = terminal_result_with_continuation(
+                    continuation.as_ref().unwrap(),
+                    fixture,
+                    &context,
+                    None,
+                    Some((correlation, selected_continuation.clone())),
+                )
+                .await;
+                assert_eq!(
+                    obligation.continuation(),
+                    &selected_continuation,
+                    "the committed obligation preserves the complete native owner's selection"
+                );
+                assert!(
+                    obligation
+                        .continuation()
+                        .native_original
+                        .as_ref()
+                        .unwrap()
+                        .member
+                        .is_some()
+                );
+                let rows = history
+                    .as_ref()
+                    .unwrap()
+                    .load_input_states_strict(&LogicalRuntimeId::for_session(&fixture.session))
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
+                (
+                    obligation,
+                    association,
+                    source_record,
+                    serde_json::to_value(rows).unwrap(),
+                    fixture.session.clone(),
+                )
+            };
+            let weak_source = Arc::downgrade(&active.as_ref().unwrap().source);
+            let weak_machine = Arc::downgrade(&active.as_ref().unwrap().machine);
+            let weak_service = Arc::downgrade(&active.as_ref().unwrap().service);
+            let weak_store = Arc::downgrade(history.as_ref().unwrap());
+            let weak_adapter = Arc::downgrade(continuation.as_ref().unwrap());
+            active
+                .as_ref()
+                .unwrap()
+                .close_durable_owners()
+                .await
+                .unwrap();
+            drop(continuation.take());
+            drop(active.take());
+            drop(history.take());
+            assert!(weak_adapter.upgrade().is_none());
+            assert!(weak_source.upgrade().is_none());
+            assert!(weak_machine.upgrade().is_none());
+            assert!(weak_service.upgrade().is_none());
+            assert!(weak_store.upgrade().is_none());
+
+            let (fixture, store, adapter) =
+                ContinuationFixture::reopen_seated_durable_continuation(retained.take().unwrap())
+                    .await;
+            active = Some(fixture);
+            history = Some(store);
+            continuation = Some(adapter);
+            let fixture = active.as_ref().unwrap();
+            assert_eq!(fixture.session, session);
+            assert_eq!(fixture.model_requests(), 0);
+            assert!(fixture.cold_source_custody(&association).is_none());
+            assert_eq!(fixture.cold_source_record().await, source_record);
+            assert!(
+                fixture
+                    .machine
+                    .current_session_registration_witness(&session)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                fixture
+                    .machine
+                    .current_executor_attachment_witness(&session)
+                    .await
+                    .is_none()
+            );
+            let runtime = fixture.source.bound_identity_runtime().unwrap();
+            let identity = runtime.core_session_owner(&session).await.unwrap().unwrap();
+            let before = runtime.status(&identity).await.unwrap();
+            assert_eq!(before.session_id.as_ref(), Some(&session));
+
+            if retire_owner {
+                // A real lifecycle removal must not be reversed merely because
+                // the Toolkit result still names the former session owner.
+                runtime.retire_tracked(&identity).await.unwrap();
+                let member =
+                    meerkat_mob::AgentIdentity::from(before.member_id.as_ref().unwrap().as_str());
+                // Meta retirement releases materialization but retains the seat.
+                // Remove that actual Core member before testing historical refusal.
+                assert!(
+                    runtime
+                        .owner()
+                        .handle()
+                        .get_member(&member)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                runtime
+                    .owner()
+                    .handle()
+                    .retire(member.clone())
+                    .await
+                    .unwrap();
+                assert!(
+                    runtime
+                        .owner()
+                        .handle()
+                        .get_member(&member)
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(matches!(
+                    fixture
+                        .source
+                        .restore_setup_continuation_source(&obligation)
+                        .await,
+                    Err(ContinuationError::OwnerUnavailable)
+                ));
+                assert!(
+                    runtime
+                        .owner()
+                        .handle()
+                        .get_member(&member)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "the refused historical restore did not reseat the retired owner"
+                );
+                assert!(
+                    fixture
+                        .machine
+                        .current_session_registration_witness(&session)
+                        .await
+                        .is_none()
+                );
+                assert!(
+                    fixture
+                        .machine
+                        .current_executor_attachment_witness(&session)
+                        .await
+                        .is_none()
+                );
+                assert!(fixture.cold_source_custody(&association).is_none());
+                assert_eq!(fixture.cold_source_record().await, source_record);
+                assert_eq!(fixture.model_requests(), 0);
+                let rows = history
+                    .as_ref()
+                    .unwrap()
+                    .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
+                    .await
+                    .unwrap();
+                assert_eq!(serde_json::to_value(rows).unwrap(), input_rows);
+                return;
+            }
+
+            // No fixture wake, controller pin, prompt, completion submission or
+            // manufactured row precedes this actual production restore call.
+            assert!(
+                fixture
+                    .source
+                    .with_synthetic_admission_diagnostics(
+                        fixture
+                            .source
+                            .restore_setup_continuation_source(&obligation),
+                    )
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                fixture
+                    .machine
+                    .current_session_registration_witness(&session)
+                    .await
+                    .is_some()
+            );
+            assert!(
+                fixture
+                    .machine
+                    .current_executor_attachment_witness(&session)
+                    .await
+                    .is_some()
+            );
+            assert_eq!(
+                runtime.core_session_owner(&session).await.unwrap(),
+                Some(identity.clone())
+            );
+            let after = runtime.status(&identity).await.unwrap();
+            assert_eq!(after.session_id.as_ref(), Some(&session));
+            assert_eq!(after.member_id, before.member_id);
+            assert_eq!(
+                fixture.cold_source_custody(&association),
+                Some((true, true))
+            );
+            assert_eq!(fixture.cold_source_record().await, source_record);
+            assert_eq!(fixture.model_requests(), 0);
+            let rows = history
+                .as_ref()
+                .unwrap()
+                .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(rows).unwrap(),
+                input_rows,
+                "materialization admits no new input"
+            );
+            assert!(
+                !fixture
+                    .source
+                    .restore_setup_continuation_source(&obligation)
+                    .await
+                    .unwrap(),
+                "the exact warm source retains its existing branch"
+            );
+            assert_eq!(fixture.model_requests(), 0);
+            let rows = history
+                .as_ref()
+                .unwrap()
+                .load_input_states_strict(&LogicalRuntimeId::for_session(&session))
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(rows).unwrap(), input_rows);
+        }),
+    ))
+    .catch_unwind()
+    .await;
+    let (cleanup, source_cleanup) = if let Some(fixture) = active.as_ref() {
+        fixture.source.stop_custody_recovery();
+        let cleanup = fixture.close_durable_owners().await;
+        let source_cleanup = fixture.source.join_custody_recovery().await;
+        (cleanup, source_cleanup)
+    } else {
+        (Ok(()), Ok(()))
+    };
+    assert!(
+        cleanup.is_ok(),
+        "{cleanup:?}; custody recovery: {source_cleanup:?}"
+    );
+    assert!(source_cleanup.is_ok(), "{source_cleanup:?}");
+    match result {
+        Ok(completed) => {
+            completed.expect("cold materialization control completed within its existing bound")
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_setup_continuation_materializes_exact_restored_seat_without_an_input() {
+    Box::pin(restored_seat_case(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_setup_continuation_does_not_reseat_a_retired_owner() {
+    Box::pin(restored_seat_case(true)).await;
+}

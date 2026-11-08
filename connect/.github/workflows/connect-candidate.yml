@@ -1,8 +1,9 @@
 name: Connect native candidate
 
 # Draft: candidate construction only. No push/tag trigger or publication job.
-# Core/Meta 0.9.4 and Connect's independently selected version are checked by
-# the producer. Unbound or historical inputs refuse before a native build.
+# The producer checks exact Core/Meta pairs: 0.9.4/0.9.4, 0.9.5/0.9.5,
+# 0.9.7/0.9.6 or 0.9.8/0.9.7, plus Connect's independent version. Unbound or historical inputs
+# refuse before a native build.
 "on":
   workflow_dispatch:
     inputs:

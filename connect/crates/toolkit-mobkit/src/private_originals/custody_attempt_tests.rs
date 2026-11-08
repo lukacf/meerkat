@@ -1,6 +1,7 @@
 //! Canonical schema/CAS controls with real native binding and SQLite rows.
 //! Schema and foreground controls execute no native admission, model, recovery task or wake.
 //! Explicit source-only staging controls label their synthetic settlement separately.
+use super::foreground_test_store::ForegroundTestStore;
 use super::*;
 use crate::original_ingress::custody_attempt::CustodyChange;
 use crate::original_ingress::tests::{
@@ -17,9 +18,6 @@ use meerkat_runtime::meerkat_machine::AuthenticatedOriginalSource;
 use meerkat_runtime::{Input, LogicalRuntimeId, PromptInput};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::Ordering;
-#[path = "foreground_test_store.rs"]
-mod foreground_test_store;
-use foreground_test_store::ForegroundTestStore;
 
 const CONTENT: &str = "one exact prepared source input";
 fn id(value: &str) -> EvidenceId {
@@ -81,6 +79,9 @@ impl Fixture {
         Self::with_binding_rebase(false).await
     }
     async fn with_binding_rebase(rebase: bool) -> Self {
+        Self::with_content(rebase, CONTENT).await
+    }
+    async fn with_content(rebase: bool, content: &str) -> Self {
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -101,7 +102,7 @@ impl Fixture {
             )
             .unwrap();
         let mut event = private_event("schema");
-        event.content_sha256 = digest(CONTENT.as_bytes());
+        event.content_sha256 = digest(content.as_bytes());
         let reference = adapter.retain_event(event).await.unwrap();
         let unbound = adapter
             .store
@@ -143,10 +144,10 @@ impl Fixture {
                             ));
                             assert!(adapter.store.get(&key).await.unwrap().unwrap() == before);
                             assert_eq!(faults.association_refusals.load(Ordering::SeqCst), 1);
-                            // Changed immutable source content cannot borrow the entered-write witness.
+                            // Changed immutable purpose cannot borrow the entered-write witness.
                             let mut changed = adapter.decode_record(&before, &reference).unwrap();
-                            changed.event.content_sha256 =
-                                digest(b"different authenticated source content");
+                            changed.planning_source_evidence =
+                                Some(planning_source_evidence::PlanningSourceEvidence::Parent);
                             assert!(
                                 adapter
                                     .owner
@@ -155,7 +156,8 @@ impl Fixture {
                                         &adapter.scope,
                                         &key,
                                         Arc::new(rewritten(&before, encode(changed).unwrap())),
-                                        &association
+                                        &association,
+                                        None,
                                     )
                                     .is_err()
                             );
@@ -197,7 +199,7 @@ impl Fixture {
             .prepare_authenticated_input(
                 &original,
                 &session,
-                Input::Prompt(PromptInput::new(CONTENT, None)),
+                Input::Prompt(PromptInput::new(content, None)),
                 cold_service_admission::source_event_key(&record).unwrap(),
                 original
                     .association()
@@ -283,6 +285,13 @@ fn rewritten(row: &StoredRecord, data: RecordData) -> StoredRecord {
 #[tokio::test]
 async fn canonical_custody_cas_preserves_rows_and_refuses_stale_or_reset_attempts() {
     let f = Fixture::new().await;
+    let claims = f.original.association().candidate();
+    assert!(matches!(
+        f.adapter
+            .owner
+            .retained_custody(&claims.ingress_namespace, &claims.original_work),
+        Ok(meerkat_runtime::meerkat_machine::RetainedCustody::NotRetained)
+    ));
     let before = f.row().await;
     assert_eq!(before.data.version, SOURCE_VERSION);
     assert!(before.data.body.get("custody_attempt").is_none());
@@ -304,7 +313,11 @@ async fn canonical_custody_cas_preserves_rows_and_refuses_stale_or_reset_attempt
         .await
         .unwrap();
     assert_eq!(enrolled.data.version, CUSTODY_SOURCE_VERSION);
-    assert_eq!(without_attempt(&enrolled.data), before.data.body);
+    assert!(before.data.body.get("custody_input").is_none());
+    let mut expected = before.data.body.clone();
+    expected["custody_input"] = serde_json::to_value(&f.input).unwrap();
+    assert_eq!(without_attempt(&enrolled.data), expected);
+    assert!(enrolled.data.body.get("bound_service_input").is_none());
     assert!(same_source_origin(&before, &enrolled));
     assert!(f.adapter.store.compare_and_swap(initial).await.is_err());
     let attempt = f
@@ -378,6 +391,10 @@ async fn canonical_custody_cas_preserves_rows_and_refuses_stale_or_reset_attempt
         )
         .await
         .unwrap();
+    assert_eq!(
+        without_attempt(&withdrawn.data),
+        without_attempt(&charged.data)
+    );
     let reopened = decode_source_record(
         &serde_json::from_value(serde_json::to_value(&withdrawn).unwrap()).unwrap(),
     )
@@ -491,6 +508,265 @@ async fn custody_enrollment_requires_canonical_binding_and_exact_prepared_input(
 }
 
 #[tokio::test]
+async fn oversized_ordinary_custody_input_refuses_sqlite_cas_without_partial_enrollment() {
+    // The limit applies to the whole RecordData, not only user text. Exactly
+    // 2 MiB of text exceeds it once actual input/association/source fields join.
+    let content = "x".repeat(2 * 1024 * 1024);
+    let f = Fixture::with_content(false, &content).await;
+    assert!(!f.held().retain_bound_input);
+    let before = f.row().await;
+    let record = decode_source_record(&before).unwrap();
+    assert!(record.final_association.as_ref() == Some(f.original.association()));
+    assert!(
+        record.custody_attempt.is_none()
+            && record.custody_input.is_none()
+            && record.bound_service_input.is_none()
+    );
+    let transition = f.enrollment(&before);
+    assert!(serde_json::to_vec(&transition.data).unwrap().len() > 2 * 1024 * 1024);
+    assert!(
+        matches!(transition.data.validate(), Err(toolkit_store::StoreError::Invalid(reason))
+        if reason == "record exceeds 2 MiB")
+    );
+    assert!(transition.events.is_empty() && transition.effects.is_empty());
+    drop(transition);
+
+    // One real source-owner persistence attempt reaches the real SQLite store.
+    // Its Invalid size refusal maps to Unavailable before any Candidate exists.
+    assert!(matches!(
+        f.adapter
+            .persist_first_custody_attempt(&f.held(), &f.session, &f.input)
+            .await,
+        Err(PrivateOriginalError::Unavailable)
+    ));
+    let after = f.row().await;
+    assert!(
+        after == before,
+        "failed retention cannot partially write payload, attempt or revision"
+    );
+    f.assert_no_candidate();
+    assert!(
+        !f.adapter
+            .owner
+            .has_admitted_source(f.original.association())
+            .unwrap()
+    );
+    let prior_owner = Arc::downgrade(&f.adapter.owner);
+    let prior_source = Arc::downgrade(&f.adapter);
+    let Fixture {
+        adapter,
+        original,
+        input,
+        faults,
+        prepared,
+        _directory: directory,
+        ..
+    } = f;
+    drop((prepared, input, original, adapter, faults));
+    assert!(prior_owner.upgrade().is_none() && prior_source.upgrade().is_none());
+    let reopened =
+        toolkit_store::SqliteStore::open(directory.path().join("source.sqlite3")).unwrap();
+    let durable = reopened.get(&before.key).await.unwrap().unwrap();
+    assert!(
+        durable == before,
+        "the already legitimate association survives exact database reopen"
+    );
+    let decoded = decode_source_record(&durable).unwrap();
+    assert!(
+        decoded.final_association.is_some()
+            && decoded.custody_attempt.is_none()
+            && decoded.custody_input.is_none()
+            && decoded.bound_service_input.is_none()
+    );
+}
+
+#[tokio::test]
+async fn ordinary_custody_input_survives_owner_reopen_without_selecting_service_or_admission() {
+    let f = Fixture::new().await;
+    assert!(!f.held().retain_bound_input);
+    let association = f.original.association().clone();
+    let expected = serde_json::to_value(&f.input).unwrap();
+    f.adapter
+        .persist_first_custody_attempt(&f.held(), &f.session, &f.input)
+        .await
+        .unwrap();
+    let committed = f.row().await;
+    let record = decode_source_record(&committed).unwrap();
+    assert!(
+        record.approved_task.is_none()
+            && record.setup_request.is_none()
+            && record.configured_setup.is_none()
+            && record.planning_source_evidence.is_none()
+            && record.peer_ingress.is_none()
+            && record.console_child_input.is_none()
+            && record.bound_service_input.is_none()
+    );
+    let saved = record.custody_input.as_ref().unwrap().decode().unwrap();
+    assert_eq!(serde_json::to_value(&saved).unwrap(), expected);
+    assert_eq!(saved.id(), f.input.id());
+    assert_eq!(saved.header().timestamp, f.input.header().timestamp);
+    assert!(saved.header().ingress_context.is_none() && saved.header().retained_resume.is_none());
+    assert!(
+        record
+            .custody_attempt
+            .as_ref()
+            .unwrap()
+            .matches_input(&saved)
+            .unwrap()
+    );
+    f.assert_no_candidate();
+    assert!(!f.adapter.owner.has_admitted_source(&association).unwrap());
+    let prior_owner = Arc::downgrade(&f.adapter.owner);
+    let prior_source = Arc::downgrade(&f.adapter);
+    let Fixture {
+        adapter,
+        original,
+        reference,
+        input,
+        faults,
+        prepared,
+        _directory: directory,
+        ..
+    } = f;
+    drop((prepared, input, original, adapter, faults));
+    assert!(prior_owner.upgrade().is_none() && prior_source.upgrade().is_none());
+    let owner = Arc::new(
+        ToolkitOriginalOwner::restore(
+            Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
+                directory.path().join("grants"),
+            )),
+            Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
+            association.candidate().ingress_namespace.ingress.clone(),
+        )
+        .unwrap(),
+    );
+    let reopened = private_originals_with_store(
+        owner.clone(),
+        Arc::new(
+            toolkit_store::SqliteStore::open(directory.path().join("source.sqlite3")).unwrap(),
+        ),
+    )
+    .await;
+    let row = reopened
+        .store
+        .get(&reopened.key(&reference).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        row == committed,
+        "reopen reads the committed paired CAS without repairing it"
+    );
+    let record = reopened.decode_record(&row, &reference).unwrap();
+    let saved = record.custody_input.as_ref().unwrap().decode().unwrap();
+    assert_eq!(serde_json::to_value(&saved).unwrap(), expected);
+    assert!(
+        record
+            .custody_attempt
+            .as_ref()
+            .unwrap()
+            .matches_input(&saved)
+            .unwrap()
+    );
+    assert!(record.bound_service_input.is_none() && record.planning_source_evidence.is_none());
+    assert!(
+        !owner.has_admitted_source(&association).unwrap(),
+        "historical bytes are not admitted custody"
+    );
+    let claims = association.candidate();
+    assert!(
+        owner
+            .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn ordinary_custody_input_rejects_malformed_mismatched_and_unenrolled_evidence() {
+    let f = Fixture::new().await;
+    let row = f.row().await;
+    let enrolled = f
+        .adapter
+        .store
+        .compare_and_swap(f.enrollment(&row))
+        .await
+        .unwrap();
+    for field in [
+        "id",
+        "timestamp",
+        "authority_association",
+        "idempotency_key",
+    ] {
+        let mut data = enrolled.data.clone();
+        data.body["custody_input"]["header"][field] = match field {
+            "id" => serde_json::to_value(meerkat_core::lifecycle::InputId::new()).unwrap(),
+            "timestamp" => serde_json::json!("2000-01-01T00:00:00Z"),
+            "idempotency_key" => {
+                serde_json::to_value(meerkat_runtime::identifiers::IdempotencyKey::new("other"))
+                    .unwrap()
+            }
+            _ => serde_json::Value::Null,
+        };
+        assert!(
+            decode_source_record(&rewritten(&enrolled, data)).is_err(),
+            "changed {field}"
+        );
+    }
+    let mut data = enrolled.data.clone();
+    data.body["custody_input"] = serde_json::json!({"not_an_input": true});
+    assert!(decode_source_record(&rewritten(&enrolled, data)).is_err());
+    let mut data = enrolled.data.clone();
+    data.body.as_object_mut().unwrap().remove("custody_attempt");
+    data.version = SOURCE_VERSION;
+    assert!(
+        decode_source_record(&rewritten(&enrolled, data)).is_err(),
+        "bytes require an enrolled attempt"
+    );
+
+    // Even a matching fingerprint cannot turn different content into this source.
+    let Input::Prompt(mut changed) = f.input.clone() else {
+        unreachable!()
+    };
+    changed.content = meerkat_core::ContentInput::Text("different source content".into());
+    let changed = Input::Prompt(changed);
+    let mut record = decode_source_record(&enrolled).unwrap();
+    record.custody_input =
+        Some(cold_service_admission::RetainedBoundInput::from_bound(&changed).unwrap());
+    record.custody_attempt = Some(
+        crate::original_ingress::custody_attempt::CustodyAttempt::for_prepared(
+            &f.session,
+            &changed,
+            f.original.association(),
+        )
+        .unwrap(),
+    );
+    assert!(encode(record).is_err());
+
+    // Ordinary custody bytes do not grant the selected service/planning field's purpose.
+    let mut data = enrolled.data.clone();
+    let saved = data
+        .body
+        .as_object_mut()
+        .unwrap()
+        .remove("custody_input")
+        .unwrap();
+    data.body["bound_service_input"] = saved;
+    assert!(decode_source_record(&rewritten(&enrolled, data)).is_err());
+    // Existing v4 rows without bytes remain readable, with no manufactured replacement.
+    let mut legacy = enrolled.data.clone();
+    legacy.body.as_object_mut().unwrap().remove("custody_input");
+    let decoded = decode_source_record(&rewritten(&enrolled, legacy.clone())).unwrap();
+    assert!(decoded.custody_input.is_none() && decoded.bound_service_input.is_none());
+    assert_eq!(encode(decoded).unwrap(), legacy);
+    assert!(
+        f.row().await == enrolled,
+        "negative decoding and legacy reads do not write"
+    );
+    f.assert_no_candidate();
+}
+
+#[tokio::test]
 async fn source_schema_versions_and_immutable_purpose_remain_exact() {
     let f = Fixture::new().await;
     let before = f.row().await;
@@ -498,26 +774,6 @@ async fn source_schema_versions_and_immutable_purpose_remain_exact() {
         encode(decode_source_record(&before).unwrap()).unwrap(),
         before.data
     );
-    assert!(before.data.body.get("shared_preparations").is_none());
-    assert!(before.data.body.get("planning_source_evidence").is_none());
-    let canonical = canonical_json(&before.data.body).unwrap();
-    let decoded = decode_source_record(&before).unwrap();
-    assert_eq!(canonical_json(&decoded).unwrap(), canonical);
-    assert_eq!(
-        encode(decoded).unwrap().digest().unwrap(),
-        before.content_digest
-    );
-    // Shared development records are outside this release's source contract.
-    // Unknown fields must refuse, never disappear during canonicalization.
-    for shared in [
-        serde_json::json!([{"source":"shared-development-row"}]),
-        serde_json::json!([]),
-    ] {
-        let mut data = before.data.clone();
-        data.body["shared_preparations"] = shared;
-        let injected = rewritten(&before, data);
-        assert!(decode_source_record(&injected).is_err());
-    }
     let data = f.enrollment(&before).data;
     let enrolled = rewritten(&before, data.clone());
     assert!(decode_source_record(&enrolled).is_ok());
@@ -550,7 +806,8 @@ async fn source_schema_versions_and_immutable_purpose_remain_exact() {
     data.body["final_association"] = serde_json::Value::Null;
     assert!(decode_source_record(&rewritten(&enrolled, data)).is_err());
     let mut changed = decode_source_record(&f.unbound).unwrap();
-    changed.event.content_sha256 = digest(b"different authenticated source content");
+    changed.planning_source_evidence =
+        Some(planning_source_evidence::PlanningSourceEvidence::Parent);
     let changed = rewritten(&f.unbound, encode(changed).unwrap());
     assert!(decode_source_record(&changed).is_ok());
     assert!(!same_source_origin(&f.unbound, &changed));
@@ -570,7 +827,8 @@ async fn first_binding_failed_write_rebases_same_origin_and_keeps_prewrite_witne
             &f.adapter.scope,
             &key,
             Arc::new(wrong_key),
-            f.original.association()
+            f.original.association(),
+            None,
         ),
         Err(OriginalWriterError::WrongOwner)
     ));
@@ -612,6 +870,11 @@ async fn first_attempt_lost_reply_reconciles_exact_input_before_candidate() {
     ));
     let committed = f.row().await;
     assert_eq!(f.faults.attempt_commits.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        committed.data.body["custody_input"],
+        serde_json::to_value(&f.input).unwrap()
+    );
+    assert!(committed.data.body.get("bound_service_input").is_none());
     assert!(
         decode_source_record(&committed)
             .unwrap()
@@ -828,6 +1091,11 @@ async fn legacy_bound_row_does_not_recreate_first_write_provenance_on_owner_rest
         .unwrap()
         .unwrap();
     assert!(!original.first_binding_for(&row.key));
+    let claims = association.candidate();
+    assert!(matches!(
+        owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+        Ok(meerkat_runtime::meerkat_machine::RetainedCustody::NotRetained)
+    ));
     let record = decode_source_record(&row).unwrap();
     let prepared = owner
         .prepare_authenticated_input(
@@ -896,6 +1164,13 @@ async fn admitted_only_observation_cannot_restage_after_actual_source_release() 
     drop(prepared);
     replay_guard.admit().unwrap();
     f.assert_no_candidate();
+    let claims = f.original.association().candidate();
+    assert!(matches!(
+        f.adapter
+            .owner
+            .retained_custody(&claims.ingress_namespace, &claims.original_work),
+        Ok(meerkat_runtime::meerkat_machine::RetainedCustody::NotRetained)
+    ));
     assert!(
         decode_source_record(&f.row().await)
             .unwrap()
@@ -1122,4 +1397,496 @@ async fn withdrawn_custody_reopens_as_terminal_absence_without_reenrollment() {
             Some(&association)
         );
     }
+}
+
+/// Real SQLite/grant-owner reopen with canonical enrollment. Promotion here is
+/// a source-schema transition only; the native positive control proves actual
+/// restoration. Neither Pending nor Promoted history creates fresh authority.
+#[tokio::test]
+async fn enrolled_cold_binding_stays_unknown_until_restoration_or_terminal_source_change() {
+    use meerkat_core::authorization::ControllerReadinessFailure;
+    use meerkat_runtime::input_authority::NativeAdmissionError;
+    use meerkat_runtime::meerkat_machine::{
+        OriginalDisposition, RetainedCustody, require_source_original_live,
+    };
+
+    for promoted in [false, true] {
+        for terminal in ["release", "cancel", "withdraw"] {
+            if promoted && terminal == "withdraw" {
+                continue;
+            } // Promoted is already terminal.
+            let mut f = Fixture::new().await;
+            let initial = f.row().await;
+            let enrolled = f
+                .adapter
+                .store
+                .compare_and_swap(f.enrollment(&initial))
+                .await
+                .unwrap();
+            let saved = if promoted {
+                let attempt = decode_source_record(&enrolled)
+                    .unwrap()
+                    .custody_attempt
+                    .unwrap();
+                f.adapter
+                    .store
+                    .compare_and_swap(
+                        f.adapter
+                            .prepare_custody_transition(
+                                &enrolled,
+                                &f.reference,
+                                attempt.changed(CustodyChange::Promote).unwrap(),
+                            )
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                enrolled
+            };
+            let association = f.original.association().clone();
+            let claims = association.candidate();
+            let warm = f
+                .adapter
+                .owner
+                .bind_issued_access_async(
+                    association.clone(),
+                    source(&association),
+                    &principal("user"),
+                    &principal("frontend"),
+                    Some(&principal("admin")),
+                    |association| {
+                        let adapter = f.adapter.clone();
+                        let reference = f.reference.clone();
+                        async move {
+                            adapter
+                                .persist_or_observe_binding(&reference, &association, true)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&warm, &f.original));
+            assert!(
+                matches!(
+                    f.adapter
+                        .owner
+                        .retained_custody(&claims.ingress_namespace, &claims.original_work),
+                    Ok(RetainedCustody::NotRetained)
+                ),
+                "a live first binding is not historical restoration"
+            );
+            drop(warm);
+            let (_, candidate) = f.prepared.take().unwrap().stage().unwrap();
+            assert!(
+                matches!(
+                    f.adapter
+                        .owner
+                        .retained_custody(&claims.ingress_namespace, &claims.original_work),
+                    Ok(RetainedCustody::NotRetained)
+                ),
+                "an unsettled Candidate without a recovery owner remains absent"
+            );
+            candidate.admit().unwrap();
+            let warm = f
+                .adapter
+                .owner
+                .bind_issued_access_async(
+                    association.clone(),
+                    source(&association),
+                    &principal("user"),
+                    &principal("frontend"),
+                    Some(&principal("admin")),
+                    |association| {
+                        let adapter = f.adapter.clone();
+                        let reference = f.reference.clone();
+                        async move {
+                            adapter
+                                .persist_or_observe_binding(&reference, &association, true)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&warm, &f.original));
+            assert!(
+                matches!(
+                    f.adapter
+                        .owner
+                        .retained_custody(&claims.ingress_namespace, &claims.original_work),
+                    Ok(RetainedCustody::Retained(_))
+                ),
+                "warm binding preserves the actual source settlement"
+            );
+            drop(warm);
+            let old = Arc::downgrade(&f.adapter.owner);
+            let Fixture {
+                adapter,
+                original,
+                reference,
+                session,
+                input,
+                unbound,
+                _directory: directory,
+                faults,
+                prepared,
+            } = f;
+            drop((adapter, original, input, unbound, faults, prepared));
+            assert!(old.upgrade().is_none());
+            let owner = Arc::new(
+                ToolkitOriginalOwner::restore(
+                    Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
+                        directory.path().join("grants"),
+                    )),
+                    Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
+                    claims.ingress_namespace.ingress.clone(),
+                )
+                .unwrap(),
+            );
+            let adapter = private_originals_with_store(
+                owner.clone(),
+                Arc::new(
+                    toolkit_store::SqliteStore::open(directory.path().join("source.sqlite3"))
+                        .unwrap(),
+                ),
+            )
+            .await;
+            assert!(matches!(
+                owner.original_disposition(&claims.ingress_namespace, &claims.original_work),
+                Err(ControllerReadinessFailure::PolicyUnavailable)
+            ));
+            let original = owner
+                .bind_issued_access_async(
+                    association.clone(),
+                    source(&association),
+                    &principal("user"),
+                    &principal("frontend"),
+                    Some(&principal("admin")),
+                    |association| {
+                        let adapter = adapter.clone();
+                        let reference = reference.clone();
+                        async move {
+                            adapter
+                                .persist_or_observe_binding(&reference, &association, true)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            adapter
+                .hold_binding(reference.clone(), original.clone())
+                .await
+                .unwrap();
+            assert!(!original.first_binding_for(&saved.key));
+            assert!(matches!(
+                owner.original_disposition(&claims.ingress_namespace, &claims.original_work),
+                Ok(OriginalDisposition::Active)
+            ));
+            assert!(matches!(
+                owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                Err(ControllerReadinessFailure::PolicyUnavailable)
+            ));
+            assert!(matches!(
+                require_source_original_live(
+                    owner.grants().as_ref(),
+                    owner.as_ref(),
+                    &claims.ingress_namespace,
+                    &claims.original_work,
+                    &claims.logical_executor,
+                    claims.represented_subject.as_ref()
+                ),
+                Err(NativeAdmissionError::Readiness(
+                    ControllerReadinessFailure::PolicyUnavailable
+                ))
+            ));
+            let replay = owner
+                .bind_issued_access_async(
+                    association.clone(),
+                    source(&association),
+                    &principal("user"),
+                    &principal("frontend"),
+                    Some(&principal("admin")),
+                    |association| {
+                        let adapter = adapter.clone();
+                        let reference = reference.clone();
+                        async move {
+                            adapter
+                                .persist_or_observe_binding(&reference, &association, true)
+                                .await
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&replay, &original));
+            assert!(
+                matches!(
+                    owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                    Err(ControllerReadinessFailure::PolicyUnavailable)
+                ),
+                "warm rebind preserves unresolved custody"
+            );
+            drop(replay);
+            let record = decode_source_record(&saved).unwrap();
+            let prepared = owner
+                .prepare_authenticated_input(
+                    &original,
+                    &session,
+                    Input::Prompt(PromptInput::new(CONTENT, None)),
+                    cold_service_admission::source_event_key(&record).unwrap(),
+                    claims.original_authentication.clone(),
+                    ControllerModelClient::new(selection(), Arc::new(UnusedClient)),
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    prepared.stage(),
+                    Err(meerkat_runtime::RuntimeDriverError::ValidationFailed { .. })
+                ),
+                "historical uncertainty cannot enter the first Candidate path"
+            );
+            assert!(adapter.store.get(&saved.key).await.unwrap().unwrap() == saved);
+            if terminal == "cancel" {
+                adapter
+                    .record_operation_cancelled(&reference)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    owner.original_disposition(&claims.ingress_namespace, &claims.original_work),
+                    Ok(OriginalDisposition::OperationCancelled { .. })
+                ));
+                assert!(
+                    matches!(require_source_original_live(owner.grants().as_ref(), owner.as_ref(),
+                    &claims.ingress_namespace, &claims.original_work, &claims.logical_executor,
+                    claims.represented_subject.as_ref()), Err(NativeAdmissionError::Refused(ref refusal))
+                    if refusal.kind() == meerkat_core::OperationRefusalKind::Denied)
+                );
+                // Cancellation owns disposition. It need not erase historical custody.
+                assert!(
+                    decode_source_record(&adapter.store.get(&saved.key).await.unwrap().unwrap())
+                        .unwrap()
+                        .operation_cancelled
+                );
+            } else if terminal == "withdraw" {
+                let attempt = decode_source_record(&saved)
+                    .unwrap()
+                    .custody_attempt
+                    .unwrap();
+                let withdrawn = adapter
+                    .store
+                    .compare_and_swap(
+                        adapter
+                            .prepare_custody_transition(
+                                &saved,
+                                &reference,
+                                attempt.changed(CustodyChange::Withdraw).unwrap(),
+                            )
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                        Err(ControllerReadinessFailure::PolicyUnavailable)
+                    ),
+                    "a durable write alone is not local publication"
+                );
+                let replay = owner
+                    .bind_issued_access_async(
+                        association.clone(),
+                        source(&association),
+                        &principal("user"),
+                        &principal("frontend"),
+                        Some(&principal("admin")),
+                        |association| {
+                            let adapter = adapter.clone();
+                            let reference = reference.clone();
+                            async move {
+                                adapter
+                                    .persist_or_observe_binding(&reference, &association, true)
+                                    .await
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(Arc::ptr_eq(&replay, &original));
+                assert!(
+                    matches!(
+                        owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                        Ok(RetainedCustody::NotRetained)
+                    ),
+                    "exact withdrawal closes only historical uncertainty"
+                );
+                assert!(adapter.store.get(&saved.key).await.unwrap().unwrap() == withdrawn);
+            } else {
+                owner.release_original(&original).unwrap();
+                let replay = owner
+                    .bind_issued_access_async(
+                        association.clone(),
+                        source(&association),
+                        &principal("user"),
+                        &principal("frontend"),
+                        Some(&principal("admin")),
+                        |association| {
+                            let adapter = adapter.clone();
+                            let reference = reference.clone();
+                            async move {
+                                adapter
+                                    .persist_or_observe_binding(&reference, &association, true)
+                                    .await
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(Arc::ptr_eq(&replay, &original));
+                assert!(
+                    matches!(
+                        owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                        Ok(RetainedCustody::NotRetained)
+                    ),
+                    "warm replay cannot undo explicit release"
+                );
+                assert!(adapter.store.get(&saved.key).await.unwrap().unwrap() == saved);
+            }
+        }
+    }
+}
+
+/// Direct binding also observes real terminal withdrawal without depending on
+/// a running census. This is separate from the unchanged repeated census test.
+#[tokio::test]
+async fn withdrawn_cold_binding_is_terminal_without_census_or_reenrollment() {
+    use meerkat_runtime::meerkat_machine::{
+        OriginalDisposition, RetainedCustody, require_source_original_live,
+    };
+    let f = Fixture::new().await;
+    let initial = f.row().await;
+    let enrolled = f
+        .adapter
+        .store
+        .compare_and_swap(f.enrollment(&initial))
+        .await
+        .unwrap();
+    let attempt = decode_source_record(&enrolled)
+        .unwrap()
+        .custody_attempt
+        .unwrap();
+    let withdrawn = f
+        .adapter
+        .store
+        .compare_and_swap(
+            f.adapter
+                .prepare_custody_transition(
+                    &enrolled,
+                    &f.reference,
+                    attempt.changed(CustodyChange::Withdraw).unwrap(),
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let association = f.original.association().clone();
+    let claims = association.candidate();
+    let old = Arc::downgrade(&f.adapter.owner);
+    let Fixture {
+        adapter,
+        original,
+        reference,
+        session,
+        input,
+        unbound,
+        _directory: directory,
+        faults,
+        prepared,
+    } = f;
+    drop((adapter, original, input, unbound, faults, prepared));
+    assert!(old.upgrade().is_none());
+    let owner = Arc::new(
+        ToolkitOriginalOwner::restore(
+            Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
+                directory.path().join("grants"),
+            )),
+            Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
+            claims.ingress_namespace.ingress.clone(),
+        )
+        .unwrap(),
+    );
+    let adapter = private_originals_with_store(
+        owner.clone(),
+        Arc::new(
+            toolkit_store::SqliteStore::open(directory.path().join("source.sqlite3")).unwrap(),
+        ),
+    )
+    .await;
+    let original = owner
+        .bind_issued_access_async(
+            association.clone(),
+            source(&association),
+            &principal("user"),
+            &principal("frontend"),
+            Some(&principal("admin")),
+            |association| {
+                let adapter = adapter.clone();
+                let reference = reference.clone();
+                async move {
+                    adapter
+                        .persist_or_observe_binding(&reference, &association, true)
+                        .await
+                }
+            },
+        )
+        .await
+        .unwrap();
+    adapter
+        .hold_binding(reference.clone(), original.clone())
+        .await
+        .unwrap();
+    assert!(!original.first_binding_for(&withdrawn.key));
+    assert!(matches!(
+        owner.original_disposition(&claims.ingress_namespace, &claims.original_work),
+        Ok(OriginalDisposition::Active)
+    ));
+    assert!(matches!(
+        owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+        Ok(RetainedCustody::NotRetained)
+    ));
+    assert!(
+        matches!(require_source_original_live(owner.grants().as_ref(), owner.as_ref(),
+        &claims.ingress_namespace, &claims.original_work, &claims.logical_executor,
+        claims.represented_subject.as_ref()),
+        Err(meerkat_runtime::input_authority::NativeAdmissionError::Refused(ref refusal))
+            if refusal.kind() == meerkat_core::OperationRefusalKind::Denied)
+    );
+    let record = decode_source_record(&withdrawn).unwrap();
+    let prepared = owner
+        .prepare_authenticated_input(
+            &original,
+            &session,
+            Input::Prompt(PromptInput::new(CONTENT, None)),
+            cold_service_admission::source_event_key(&record).unwrap(),
+            claims.original_authentication.clone(),
+            ControllerModelClient::new(selection(), Arc::new(UnusedClient)),
+        )
+        .unwrap();
+    let held = adapter
+        .retained
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|held| held.reference == reference)
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        adapter
+            .persist_first_custody_attempt(&held, &session, prepared.input())
+            .await,
+        Err(PrivateOriginalError::Unavailable)
+    ));
+    assert!(adapter.store.get(&withdrawn.key).await.unwrap().unwrap() == withdrawn);
 }

@@ -145,7 +145,7 @@ def test_private_failure_after_acceptance_fences_queued_native_init_worker():
     async def scenario():
         client, reader, writer = pipes()
         transport = ToolkitPersistentTransport("/inert/not-spawned", selection(), timeout=0.1)
-        child = _InertNativeChild(transport)
+        child = _InertNativeChild(transport, shutdown_result={"inert": True})
         transport._process, transport.host_control = child, client
         release, submitted = threading.Event(), threading.Event()
 
@@ -971,3 +971,143 @@ def test_direct_start_preserves_failure_and_leaves_stop_to_same_caller(monkeypat
         # failed-build cleanup handle or a second process owner.
         transport.stop()
     assert child.waits == 1 and child.returncode == 0 and transport._process is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hold_write_during_shutdown", [False, True])
+async def test_update_runtime_member_mcp_uses_private_pipe_and_joins_entered_write(
+    tmp_path, monkeypatch, hold_write_during_shutdown,
+):
+    """Real SDK/private pipe composition with an inert native process owner."""
+    from meerkat_meta._transport import PersistentTransport
+    from meerkat_meta.builder import MetaBuilderConfig
+    from meerkat_toolkit.member_classes import (
+        MemberMcpAdmissionSelection, MemberMcpApplication, RetainedMemberMcpBindings,
+    )
+
+    selected = MemberMcpAdmissionSelection("update-admission", "project-one", "project")
+    retained = RetainedMemberMcpBindings(selected, ())
+    rows, lookups, writes = {selected.admission_id: retained}, [], []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def lookup(key):
+        lookups.append(key)
+        assert key == selected
+        return rows[key.admission_id]
+
+    async def retain(value):
+        assert value == retained
+        entered.set()
+        if hold_write_during_shutdown:
+            await release.wait()
+        rows[value.selection.admission_id] = value
+        writes.append(value)
+
+    participant = MemberMcpApplication(retain, lookup)
+    path = tmp_path / "update.json"
+    source = b'{"update_id":"same-private-participant"}\n'
+    path.write_bytes(source)
+    startup = selection(str(path), hashlib.sha256(source).hexdigest())
+    runtime = ToolkitApplicationUpdateRuntime(
+        MetaBuilderConfig(gateway_bin="/inert/not-spawned"), startup, member_mcp=participant,
+    )
+    transport = runtime._make_gateway_transport()
+    # Use the transport actually returned by the update runtime. Only native
+    # process creation is inert; private endpoint creation/decoding and both
+    # runtime/transport shutdown implementations execute unchanged.
+    runtime._transport = transport
+    loop = asyncio.get_running_loop()
+    native_joined, pipe_joined = asyncio.Event(), asyncio.Event()
+    child = _InertNativeChild(
+        transport, lambda: loop.call_soon_threadsafe(native_joined.set),
+        shutdown_result={"shutdown": True, "runtime_cleanup_completed": True},
+    )
+    requests, failures, endpoints, workers = [], [], [], []
+
+    def start_native(owner):
+        assert owner is transport
+        reader = os.fdopen(os.dup(owner._inherited_fds[0]), "rb")
+        writer = os.fdopen(os.dup(owner._inherited_fds[1]), "wb", buffering=0)
+        endpoints.extend((reader, writer))
+        owner._process = child
+        owner._supports_shutdown_handshake = True
+
+        def private_peer():
+            try:
+                for line in reader:
+                    request = json.loads(line)
+                    requests.append(request)
+                    command = request["command"]
+                    if command["kind"] == "replace_application":
+                        assert command["startup"] == dataclasses.asdict(startup)
+                        respond(writer, request, {"kind": "bootstrap_accepted"})
+                    else:
+                        operation = command["operation"]
+                        assert command["kind"] == "member_class"
+                        assert operation["kind"] == "mcp_result"
+                        assert operation["retained"] == retained.wire()
+                        respond(writer, request, {"kind": "member_class_mcp_acknowledged",
+                                                 "exchange_id": operation["exchange_id"]})
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                reader.close()
+                writer.close()
+                loop.call_soon_threadsafe(pipe_joined.set)
+
+        worker = threading.Thread(target=private_peer)
+        workers.append(worker)
+        worker.start()
+
+    monkeypatch.setattr(PersistentTransport, "start", start_native)
+
+    def callback(exchange, bindings):
+        endpoints[1].write(json.dumps({"version": 1, "id": 0, "result": {
+            "kind": "member_class_mcp_required", "exchange_id": exchange,
+            "selection": selected.wire(), "bindings": bindings,
+        }}).encode() + b"\n")
+
+    async def callback_settled(count):
+        while len(requests) < count or participant._pending:
+            await asyncio.sleep(0.001)
+
+    shutting = None
+    try:
+        await asyncio.to_thread(transport.start)
+        client = runtime.host_control
+        callback(1, None)  # Cold registration must use this exact app row.
+        await asyncio.wait_for(callback_settled(2), 2)
+        assert lookups == [selected] and writes == []
+        callback(2, [])
+        await asyncio.wait_for(entered.wait(), 2)
+        if not hold_write_during_shutdown:
+            await asyncio.wait_for(callback_settled(3), 2)
+        shutting = asyncio.create_task(runtime.shutdown())
+        await asyncio.wait_for(native_joined.wait(), 2)
+        if hold_write_during_shutdown:
+            # Physical native exit cannot cancel the entered application write
+            # or turn its now-unacknowledged commit into a clean shutdown.
+            await asyncio.wait_for(pipe_joined.wait(), 2)
+            assert not shutting.done() and writes == []
+            release.set()
+            with pytest.raises(HostTransportError, match="requires reconciliation"):
+                await asyncio.wait_for(shutting, 2)
+        else:
+            await asyncio.wait_for(shutting, 2)
+        assert writes == [retained] and rows[selected.admission_id] == retained
+        assert child.waits == 1 and child.returncode == 0
+        assert transport.host_control is None and not client._reader.is_alive()
+        assert [row["command"]["kind"] for row in requests].count("replace_application") == 1
+        assert [row["method"] for row in child.requests] == ["meta/shutdown"]
+        assert not failures
+    finally:
+        release.set()
+        if shutting is not None:
+            await asyncio.gather(shutting, return_exceptions=True)
+        try:
+            await runtime.shutdown()
+        except HostTransportError:
+            assert hold_write_during_shutdown
+        for worker in workers:
+            await asyncio.to_thread(worker.join, 2)
+            assert not worker.is_alive()

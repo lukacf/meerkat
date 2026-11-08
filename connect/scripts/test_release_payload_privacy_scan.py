@@ -363,10 +363,23 @@ class CandidatePrivacyScan(unittest.TestCase):
         def recorded(recorder, name, argv, **kwargs):
             original.record = Path(argv[argv.index("--build-record") + 1])
             original.assemble(destination=Path(argv[argv.index("--destination") + 1]), release_version="1.2.3")
+            assert released == [original.record.read_bytes()]
             return {}, None
 
+        # A versioned assembly also requires the monorepo source identity of the
+        # checkout it runs in (the assembler's own tests cover that check). This
+        # synthetic producer has no Git checkout, so a stand-in records the call,
+        # as in test_connect_candidate_cli.
+        released = []
+
+        def release_source(raw):
+            released.append(raw)
+            return {"repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+                    "source_manifest_sha256": p.digest(original.source)}
+
         patches = (mock.patch.object(p, "cli_producer_inputs", lambda supplied: (value, original.source, resources)),
-                   mock.patch.object(p.Recorder, "run", recorded))
+                   mock.patch.object(p.Recorder, "run", recorded),
+                   mock.patch.object(f.ASSEMBLER, "checked_release_source", release_source))
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)

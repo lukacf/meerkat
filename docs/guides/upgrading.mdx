@@ -321,6 +321,16 @@ another identity held, or the identity changed since) as
 left as it is, and a retry under the import's own operation replays its
 receipt.
 
+### Machine schemas: CI samples for an input field of any type
+
+In `meerkat-machine-schema`, `InputFieldDomainKind` gains `CiSamples`, the
+values the CI profile samples for an input field of any type (the Deep
+profile and every composition explore the field's whole domain), and
+`InputFieldDomainError` gains `SampleTypeMismatch { index }`, which refuses
+a sample that is not a value of the field's type. Both are appended last.
+
+**Do:** add the new arm to each exhaustive match on either enum.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in

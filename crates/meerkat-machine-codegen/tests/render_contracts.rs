@@ -12,8 +12,9 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_module, render_machine_semantic_model,
 };
 use meerkat_machine_schema::catalog::dsl::{
-    dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
-    dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
+    dsl_auth_machine as auth_machine, dsl_durable_decision_machine as durable_decision_machine,
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
     dsl_schedule_lifecycle_machine as schedule_lifecycle,
     dsl_session_document_machine as session_document_machine,
     dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
@@ -125,6 +126,31 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     }
     assert!(rendered.contains("AgentIdentity"));
     assert!(!rendered.contains("MeerkatId"));
+}
+
+#[test]
+fn renders_the_ci_profile_samples_in_contract_markdown() {
+    let contract = |schema: &MachineSchema| {
+        let coverage = canonical_machine_coverage_manifests()
+            .into_iter()
+            .find(|coverage| coverage.machine == schema.machine)
+            .expect("machine coverage manifest");
+        render_machine_contract_markdown(schema, &coverage)
+    };
+    let rendered = contract(&durable_decision_machine());
+    let expected = "\n## CI Profile Samples\nThe CI profile samples `Decide`.`carried_audience` as \
+         `{Some(\"alpha\")}`, `Decide`.`carried_digest` as `{Some(\"alpha\")}`, \
+         `Decide`.`carried_complete` as `{FALSE}` and `Decide`.`carried_link_served_digest` as \
+         `{Some(\"alpha\")}`; the Deep profile and every composition explore each field's whole \
+         domain.\n\n## Signals\n";
+    assert!(
+        rendered.contains(expected),
+        "DurableDecisionMachine's contract states its CI samples after its inputs:\n{rendered}"
+    );
+    assert!(
+        !contract(&session_document_machine()).contains("## CI Profile Samples"),
+        "a machine with no CiSamples declaration renders no such section"
+    );
 }
 
 #[test]

@@ -43,6 +43,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SettleCleanup`
 - `SettleReply`(digest: DecisionDigest)
 
+## CI Profile Samples
+The CI profile samples `Decide`.`carried_audience` as `{Some("alpha")}`, `Decide`.`carried_digest` as `{Some("alpha")}`, `Decide`.`carried_complete` as `{FALSE}` and `Decide`.`carried_link_served_digest` as `{Some("alpha")}`; the Deep profile and every composition explore each field's whole domain.
+
 ## Signals
 
 ## Effects

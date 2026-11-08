@@ -1842,6 +1842,11 @@ pub struct ExperimentalLiveDelegationCoordinator {
     /// worker-start authority was granted, before anything physical starts.
     #[cfg(test)]
     source_busy_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test stand-in for an executor start failure other than a busy source:
+    /// this many next worker starts end as a failed spawn once their
+    /// worker-start authority was granted, before anything physical starts.
+    #[cfg(test)]
+    failed_starts_for_test: Arc<std::sync::atomic::AtomicUsize>,
     /// Test gate on the next worker terminal's realization, entered once it
     /// read the machine's settlement and before it takes the schedule lock:
     /// `(entered, resume)`.
@@ -2556,6 +2561,8 @@ impl ExperimentalLiveDelegationCoordinator {
             start_gate_for_test: Arc::default(),
             #[cfg(test)]
             source_busy_starts_for_test: Arc::default(),
+            #[cfg(test)]
+            failed_starts_for_test: Arc::default(),
             #[cfg(test)]
             realization_lock_gate_for_test: Arc::default(),
             #[cfg(test)]
@@ -6295,6 +6302,20 @@ impl ExperimentalLiveDelegationCoordinator {
                 source_identity: source_identity.clone(),
                 waited_ms: 0,
             });
+        }
+        #[cfg(test)]
+        if self
+            .failed_starts_for_test
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(DelegationExecutionError::Spawn(
+                meerkat_mob::MobError::Internal("injected executor start failure".to_string()),
+            ));
         }
         #[cfg(not(test))]
         let _ = source_identity;

@@ -2920,6 +2920,66 @@ async fn a_refused_fold_records_the_steers_it_authorized_as_undelivered() {
     fx.close().await;
 }
 
+/// A continuation held for a queued delegation joins that delegation's start
+/// under generated steer authority, and the executor then fails to start for
+/// a reason other than a busy source: nothing physical started. The request
+/// is retired, and the folded steer is recorded as not delivered: the words
+/// never reached a worker.
+#[tokio::test]
+async fn an_executor_start_failure_records_its_folded_steers_as_undelivered() {
+    use meerkat_runtime::live_execution::LiveDelegationScheduleState as State;
+    let mut fx = fixture(false).await;
+    let first = fx.delegate("first", "serial task one").await;
+    let second = fx.delegate("second", "serial task two").await;
+    let head = fx.next_call().await;
+    assert_eq!(head.index, 0);
+    fx.continue_utterance("second", "continuation-q", " with three headings")
+        .await;
+    assert!(
+        !fx.steered("continuation-q").await,
+        "the continuation is held for the queued delegation"
+    );
+    fx.coordinator
+        .failed_starts_for_test
+        .store(1, Ordering::Release);
+    fx.client.release(head.index);
+    let (first_settled, mut calls) = fx.settle_releasing_calls(&first).await;
+    assert_eq!(first_settled, Some(State::Completed));
+    let (settled, later_calls) = fx.settle_releasing_calls(&second).await;
+    calls.extend(later_calls);
+    assert_eq!(
+        settled,
+        Some(State::Failed),
+        "a start whose executor did not start is retired"
+    );
+    assert_eq!(
+        fx.coordinator
+            .failed_starts_for_test
+            .load(Ordering::Acquire),
+        0,
+        "the queued delegation's start met the executor failure"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| !call.task_text.contains("serial task two")),
+        "the retired request's worker never started: {calls:?}"
+    );
+    assert!(
+        fx.steered("continuation-q").await,
+        "the start folded the held continuation under steer authority"
+    );
+    assert_eq!(
+        fx.runtime
+            .live_delegation_steer_delivered(&fx.session_id, "continuation-q")
+            .await
+            .expect("machine state"),
+        Some(false),
+        "the steer folded into a start whose executor did not start is recorded as not delivered"
+    );
+    fx.close().await;
+}
+
 /// Stand down the mob state and return what it reported unsettled among the
 /// live delegation work a start or the schedule pump holds.
 async fn delegation_start_holds_left(fx: &Fixture) -> Vec<String> {

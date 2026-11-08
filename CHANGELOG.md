@@ -343,12 +343,14 @@ them.
   0.9.10.
 
 - `meerkat-mob-mcp`: words a GPT Live user spoke to continue a delegated
-  request while it waited for its worker now reach the worker also when the
-  worker's start meets a busy source member at the fork cut and is retried,
-  on an open channel as after the channel closed. The start folded them
-  into the worker's task under generated steer authority and recorded them
-  delivered before it started, so the retry ran the request without them.
-  A start now keeps the folded words for its retry, and their delivery is
+  request while it waited for its worker are recorded delivered only once a
+  worker started with them. A start folded them into the worker's task
+  under generated steer authority and recorded them delivered before it
+  started; when that start met a busy source member at the fork cut, the
+  retry was refused and the request retired (the deferred-start fix above),
+  with the words recorded delivered although no worker had run with them.
+  A start that meets a busy source now keeps the folded words for its retry,
+  on an open channel as after the channel closed, and their delivery is
   recorded once a worker started with them, or as not delivered when the
   request is retired. Affects 0.8.50 through 0.9.10.
 
@@ -389,6 +391,11 @@ them.
   Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
+
+- `meerkat-mob-mcp`: when the machine refuses the report that a GPT Live
+  delegation's worker did not start, the start is retired without a
+  narration. The machine refuses that report only when the session or the
+  channel is gone or its binding is stale.
 
 ## [0.9.10] - 2026-11-04
 

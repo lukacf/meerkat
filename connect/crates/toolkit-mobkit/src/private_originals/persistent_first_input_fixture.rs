@@ -194,11 +194,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         use meerkat_toolkit::host_lifetime::control::{
             HostCloseReason, HostCloseState, PrivateHostLifetimeControl,
         };
+        // The product's close order: custody recovery stops as the close
+        // begins, and its last round is joined, within the product's bound,
+        // before the native join and the final release. A test that joins
+        // the recovery itself checks its result; the close only waits for it.
+        self.source.stop_custody_recovery();
         let close = self
             ._lifetime
             .begin_close_activation(HostCloseReason::Shutdown)
             .map_err(|error| error.to_string());
         let native = self.shutdown().await;
+        let _recovery = tokio::time::timeout(
+            crate::host_gateway::CLOSE_JOIN_BOUND,
+            self.source.join_custody_recovery(),
+        )
+        .await;
         let local = match close {
             Ok(close) => self
                 ._lifetime
@@ -212,8 +222,9 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         if local.state != HostCloseState::Settled {
             return Err(format!("host close: {local:?}"));
         }
-        // Every join of this host returned, its native runtime's and its
-        // lifetime's: the close's final release ends the native custody.
+        // Every join of this host returned, its custody recovery's, its
+        // native runtime's and its lifetime's: the close's final release
+        // ends the native custody.
         self._lifetime
             .release_native_custody()
             .await

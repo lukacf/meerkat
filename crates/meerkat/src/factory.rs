@@ -27426,7 +27426,7 @@ mod mcp_server_grant_gate_tests {
         match outcome.terminal_cause() {
             Some(meerkat_core::ToolDispatchTerminalCause::RuntimeToolError {
                 error: meerkat_core::ToolError::PolicyDenied { denial },
-            }) => Some(denial.code.to_string()),
+            }) => Some(denial.code.clone()),
             _ => None,
         }
     }

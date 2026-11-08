@@ -123,9 +123,14 @@ impl SendState {
     /// input is a delivery. An absent one is dispatched again under the
     /// send's own delivery identity, into the session it recorded; a held
     /// send is dispatched again on its hold, whatever the evidence short of
-    /// an admission. A submitted send is never dispatched again: with no
-    /// owner left to finish its submission and none of its input on the
-    /// runtime, its outcome is unknown and it fails.
+    /// an admission. A submitted send is never dispatched again, and an
+    /// absent read of it is final only where no unresolved answer of its
+    /// submission was seen: with no owner left to finish its submission and
+    /// none of its input on the runtime, its outcome is unknown and it fails.
+    /// In the process that saw its submission answer unresolved its input
+    /// may still be admitted, so the read changes nothing: the send stays
+    /// submitted, with no effect, until evidence of an admission settles it
+    /// or a later process reads it absent.
     pub(crate) fn reconcile(
         self,
         evidence: SendEvidence,
@@ -142,10 +147,13 @@ impl SendState {
                 state @ (Self::AcceptedPersisted | Self::Dispatching),
                 SendEvidence::AbsentRedispatchable | SendEvidence::Held,
             ) => Ok((state, vec![SendEffect::DispatchSend])),
-            (Self::Submitted, SendEvidence::Absent) => Ok((
+            (Self::Submitted, SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)) => Ok((
                 Self::DeliveryFailed,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
+            (Self::Submitted, SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere)) => {
+                Ok((Self::Submitted, Vec::new()))
+            }
             _ => Err("illegal send reconciliation"),
         }
     }
@@ -157,8 +165,9 @@ impl SendState {
 pub(crate) enum SendEvidence {
     /// The runtime holds an input as the send's own.
     Admitted,
-    /// The runtime's read answered and holds no input as the send's own.
-    Absent,
+    /// The runtime's read answered and holds no input as the send's own,
+    /// read where [`AbsentRead`] says.
+    Absent(AbsentRead),
     /// The runtime holds no input under the send's delivery keys, and the
     /// send's delivery is keyed and pinned to the session it recorded, so
     /// dispatching it again cannot duplicate or retarget it.
@@ -171,6 +180,21 @@ pub(crate) enum SendEvidence {
     /// dispatch again, so it is the record that nothing was submitted since:
     /// the send is dispatched again under its own keyed input.
     Held,
+}
+
+/// Where an absent read of a send's input was made, against the answers of
+/// the send's submission: the evidence on which the send machine decides
+/// whether the absence is final ([`SendState::reconcile`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbsentRead {
+    /// In the process that saw the send's submission answer unresolved (its
+    /// native admission's answer was lost): its input may still be admitted
+    /// there.
+    SubmissionUnresolvedHere,
+    /// In a process that saw no unresolved answer of the send's submission:
+    /// a later process, which starts with none, or one whose submission of
+    /// it ended otherwise.
+    NoUnresolvedAnswerHere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,14 +358,20 @@ mod tests {
                 unsettled.reconcile(SendEvidence::Held),
                 Ok((unsettled, vec![SendEffect::DispatchSend]))
             );
-            assert_eq!(
-                unsettled.reconcile(SendEvidence::Absent),
-                Err("illegal send reconciliation"),
-                "{unsettled:?}: absent alone settles nothing before a submission"
-            );
+            for read in [
+                AbsentRead::NoUnresolvedAnswerHere,
+                AbsentRead::SubmissionUnresolvedHere,
+            ] {
+                assert_eq!(
+                    unsettled.reconcile(SendEvidence::Absent(read)),
+                    Err("illegal send reconciliation"),
+                    "{unsettled:?} {read:?}: absent alone settles nothing before a submission"
+                );
+            }
         }
         // A submitted send is delivered on an admission, fails on a read
-        // that found none of its input, and is never dispatched again.
+        // that found none of its input where no unresolved answer of its
+        // submission was seen, and is never dispatched again.
         assert_eq!(
             SendState::Submitted.reconcile(SendEvidence::Admitted),
             Ok((
@@ -350,7 +380,8 @@ mod tests {
             ))
         );
         assert_eq!(
-            SendState::Submitted.reconcile(SendEvidence::Absent),
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)),
             Ok((
                 SendState::DeliveryFailed,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
@@ -370,7 +401,8 @@ mod tests {
         ] {
             for evidence in [
                 SendEvidence::Admitted,
-                SendEvidence::Absent,
+                SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere),
+                SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere),
                 SendEvidence::AbsentRedispatchable,
                 SendEvidence::Held,
             ] {
@@ -381,6 +413,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Whether an absent read of a submitted send is final is the send
+    /// machine's own rule, on where the read was made. In the process that
+    /// saw the send's submission answer unresolved, its input may still be
+    /// admitted: the read changes nothing, with no effect. Anywhere else no
+    /// submission of it can still be admitted: it fails.
+    #[test]
+    fn an_absent_read_is_final_only_where_no_unresolved_answer_was_seen() {
+        assert_eq!(
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere)),
+            Ok((SendState::Submitted, Vec::new())),
+            "an absent read where the submission answered unresolved is not final"
+        );
+        assert_eq!(
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)),
+            Ok((
+                SendState::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            )),
+            "an absent read anywhere else is final"
+        );
     }
 
     #[test]

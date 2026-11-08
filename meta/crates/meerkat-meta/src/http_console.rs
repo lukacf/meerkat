@@ -2780,7 +2780,10 @@ impl crate::identity_first::GovernedInputBinder for CurrentHumanBinder {
 /// answered bound, before the input is submitted, the frame moves to
 /// `submitted` (the send machine's `MarkSubmitted`, from `dispatching`), so
 /// a hold is never recorded over a submitted send. A frame that cannot
-/// record it refuses the send: nothing is submitted.
+/// record it refuses the send: nothing is submitted. When the submission
+/// answers unresolved, the runtime-owned operation hands the answer here,
+/// and the frame records it (`MarkUnresolved`) whether or not the send's
+/// request is still waiting.
 struct SubmittingSendBinder {
     inner: Arc<dyn crate::identity_first::GovernedInputBinder>,
     aggregator: MetaConsoleAggregator,
@@ -2842,6 +2845,26 @@ impl crate::identity_first::GovernedInputBinder for SubmittingSendBinder {
         detail: &str,
     ) {
         self.inner.retain_unresolved(settlement, detail);
+        // Inside the final protected entry: this process notes at once, with
+        // no I/O, that the send's input may still be admitted here, and the
+        // frame's durable record of the answer is written by a task of its
+        // own.
+        self.aggregator.note_submission_unresolved(&self.frame_id);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let aggregator = self.aggregator.clone();
+            let frame_id = self.frame_id.clone();
+            runtime.spawn(async move {
+                match aggregator.mark_interaction_unresolved(&frame_id).await {
+                    // Recorded, or the send settled first.
+                    Ok(()) | Err(ConsoleSendError::State(_)) => {}
+                    Err(error) => tracing::warn!(
+                        frame_id = %frame_id,
+                        %error,
+                        "a governed console send's admission is unresolved but its record failed"
+                    ),
+                }
+            });
+        }
     }
 }
 
@@ -3138,15 +3161,15 @@ async fn console_send_identity_first_governed(
                 // the session its bind bound, its dispatch owner gone: the
                 // request and the runtime-owned operation share that
                 // ownership, so no operation can still submit it. It is never
-                // dispatched again: it fails, its outcome unknown, and its
-                // sender can send it again. Not in the process that saw its
-                // submission answer unresolved: its input may still be
-                // admitted here, so it stays submitted.
+                // dispatched again. The send machine decides on where the
+                // read was made: it fails, its outcome unknown, and its
+                // sender can send it again; in the process that saw its
+                // submission answer unresolved its input may still be
+                // admitted, so it stays submitted.
                 NativeSendObservation::Absent
-                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted
-                        && aggregator.absence_is_final_here(&frame.id) =>
+                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted =>
                 {
-                    return aggregator.settle_lost_submission(&frame, &claim).await;
+                    return aggregator.settle_absent_submission(&frame, &claim).await;
                 }
                 // Dispatched again only as a host-human send: keyed by the
                 // send's delivery identity and pinned to the session it

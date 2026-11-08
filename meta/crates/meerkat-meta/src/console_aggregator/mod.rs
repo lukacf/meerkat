@@ -71,7 +71,7 @@ pub(crate) use send_recovery::{
 };
 use send_recovery::{SendDispatchClaims, SendSweepOutcome};
 pub(crate) use send_scope::ConsoleSendScope;
-use state::SendEvidence;
+use state::{AbsentRead, SendEvidence};
 pub use state::{
     ReplaySubscriptionEffect, ReplaySubscriptionState, ReplaySubscriptionTransition, SendEffect,
     SendState, SendTransition, SourceIngestionEffect, SourceIngestionState,
@@ -3286,10 +3286,9 @@ impl MetaConsoleAggregator {
             accepted = self.settle_admitted_send(&frame, &claim).await?;
         } else if frame.status == ConsoleFrameStatus::Submitted
             && native == NativeSendObservation::Absent
-            && self.absence_is_final_here(&frame.id)
             && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
         {
-            accepted = self.settle_lost_submission(&frame, &claim).await?;
+            accepted = self.settle_absent_submission(&frame, &claim).await?;
         }
         Ok(Some(ConsoleSendRecovery { accepted, native }))
     }
@@ -3349,12 +3348,12 @@ impl MetaConsoleAggregator {
                         ),
                     }
                 }
-                NativeSendObservation::Absent
-                    if frame.status == ConsoleFrameStatus::Submitted
-                        && self.absence_is_final_here(&frame.id) =>
-                {
-                    match self.settle_lost_submission(&frame, &claim).await {
-                        Ok(_) => outcome.lost += 1,
+                NativeSendObservation::Absent if frame.status == ConsoleFrameStatus::Submitted => {
+                    match self.settle_absent_submission(&frame, &claim).await {
+                        Ok(settled) if settled.status == ConsoleFrameStatus::DeliveryFailed => {
+                            outcome.lost += 1;
+                        }
+                        Ok(_) => {}
                         Err(error) => tracing::warn!(
                             frame_id = %frame.id,
                             %error,
@@ -3804,18 +3803,17 @@ impl MetaConsoleAggregator {
     /// `MarkUnresolved`, applied to the send's own state (submitted), keeps
     /// it submitted and records `delivery_unresolved`
     /// (`admission_unresolved`, not retryable as a new send). This process
-    /// holds that its input may still be admitted here, so an absent read
-    /// here never fails it; a replay of its key or its recovery settles it
-    /// `delivered` once the runtime's evidence shows its input admitted, and
-    /// a later process settles it from evidence as any send a stopped
-    /// process left submitted.
+    /// notes that its submission answered unresolved
+    /// ([`Self::note_submission_unresolved`]), so an absent read here never
+    /// fails it; a replay of its key or its recovery settles it `delivered`
+    /// once the runtime's evidence shows its input admitted, and a later
+    /// process settles it from evidence as any send a stopped process left
+    /// submitted.
     pub(crate) async fn mark_interaction_unresolved(
         &self,
         input_frame_id: &str,
     ) -> Result<(), ConsoleSendError> {
-        self.inner
-            .send_dispatch_claims
-            .mark_unresolved(input_frame_id);
+        self.note_submission_unresolved(input_frame_id);
         self.transition_send(
             input_frame_id,
             SendTransition::MarkUnresolved,
@@ -3828,13 +3826,26 @@ impl MetaConsoleAggregator {
         .await
     }
 
-    /// Whether an absent read of the runtime's evidence is final for the
-    /// submitted send `frame_id` here (the absence rule): not while this
-    /// process saw its submission answer unresolved, since its input may
-    /// still be admitted here. A later process reads such an absence as
-    /// final.
-    pub(crate) fn absence_is_final_here(&self, frame_id: &str) -> bool {
-        !self.inner.send_dispatch_claims.unresolved_here(frame_id)
+    /// This process saw the submission of the send `frame_id` answer
+    /// unresolved: an absent read of it here is read as made where that
+    /// answer was seen ([`AbsentRead::SubmissionUnresolvedHere`]).
+    /// Synchronous and without I/O, so the runtime-owned operation notes it
+    /// inside its final protected entry, whether or not the send's request
+    /// is still waiting.
+    pub(crate) fn note_submission_unresolved(&self, frame_id: &str) {
+        self.inner.send_dispatch_claims.mark_unresolved(frame_id);
+    }
+
+    /// Where an absent read of the send `frame_id` is made, against the
+    /// answers of its submission: the evidence on which the send machine
+    /// decides whether the absence is final. A later process starts with no
+    /// unresolved answer noted.
+    fn absent_read(&self, frame_id: &str) -> AbsentRead {
+        if self.inner.send_dispatch_claims.unresolved_here(frame_id) {
+            AbsentRead::SubmissionUnresolvedHere
+        } else {
+            AbsentRead::NoUnresolvedAnswerHere
+        }
     }
 
     /// Whether this Console's log store moves a send through the send
@@ -3869,22 +3880,34 @@ impl MetaConsoleAggregator {
         Ok(())
     }
 
-    /// Settle a submitted send whose input the runtime does not hold, its
-    /// dispatch owner gone: the process that bound it stopped before its
-    /// input reached the runtime. Its outcome is unknown, so it fails,
-    /// recording why (`delivery_failure`, `outcome_unknown`, retryable), and
-    /// is never dispatched again: its sender can send it again. Only the
-    /// frame's dispatch owner settles it.
-    pub(crate) async fn settle_lost_submission(
+    /// Settle, from an absent read, a submitted send whose input the runtime
+    /// does not hold, its dispatch owner gone, as the send machine decides on
+    /// where the read was made ([`AbsentRead`]). Where no unresolved answer
+    /// of its submission was seen (a later process, the one that bound it
+    /// having stopped before its input reached the runtime), its outcome is
+    /// unknown, so it fails, recording why (`delivery_failure`,
+    /// `outcome_unknown`, retryable), and is never dispatched again: its
+    /// sender can send it again. In the process that saw its submission
+    /// answer unresolved its input may still be admitted: it stays submitted
+    /// and nothing is recorded. Only the frame's dispatch owner settles it.
+    pub(crate) async fn settle_absent_submission(
         &self,
         frame: &ConsoleFrame,
         _owner: &SendDispatchClaim,
     ) -> Result<ConsoleInteractionAccepted, ConsoleSendError> {
         let state = SendState::from_send_frame_status(frame.status)
             .ok_or(ConsoleSendError::State("not a console send frame"))?;
-        let (_failed, _effects) = state
-            .reconcile(SendEvidence::Absent)
-            .map_err(ConsoleSendError::State)?;
+        match state
+            .reconcile(SendEvidence::Absent(self.absent_read(&frame.id)))
+            .map_err(ConsoleSendError::State)?
+        {
+            (SendState::DeliveryFailed, _) => {}
+            // The machine keeps the send as it is, with no effect.
+            (kept, effects) if kept == state && effects.is_empty() => {
+                return Ok(accepted_from_frame(frame));
+            }
+            _ => return Err(ConsoleSendError::State("illegal send reconciliation")),
+        }
         let Some(updated) = self
             .inner
             .store

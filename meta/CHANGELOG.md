@@ -89,8 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   outcome unknown (`delivery_failure`:
   `{reason: "outcome_unknown", retryable: true}`); it is never dispatched
   again. A governed send whose native admission is unresolved (its answer
-  was lost: the input may have run) is never failed for it: it stays
-  `submitted` and records `delivery_unresolved`
+  was lost: the input may have run) is never failed for it: the operation
+  that submitted it records the answer, whether or not the send's request
+  is still waiting, so the send stays `submitted` and records
+  `delivery_unresolved`
   (`{reason: "admission_unresolved", retryable: false}`), and a replay or a
   recovery settles it `delivered` once the runtime's evidence shows its
   input admitted. Its absence is final only in a later gateway: in the one
@@ -111,6 +113,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   until the runtime's evidence settles it.
 - A governed Console send verifies its human again at every bind, a bind after
   a wait included, and a shutdown ends a send's wait at once.
+
+### Known limitations
+
+- A governed send through the Console gateway (`meta_gateway`) or the SDK
+  RPC gateway (`rpc_gateway`) reports no wait for its binder's "not now"
+  answers to a host's operation refusal observer: neither gateway gives an
+  observer to its identity runtime. A host that builds its runtime with the
+  unified runtime builder's `operation_refusal_observer` gets the reports.
 
 ## [0.9.10] - 2026-11-04
 

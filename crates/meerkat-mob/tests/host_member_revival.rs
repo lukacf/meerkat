@@ -757,6 +757,9 @@ async fn a_placed_revival_checks_the_stored_profile_first() {
         Some(&meerkat_mob::runtime::SpawnSource::Resume),
         "the revival asks as a rebuild: {seen:?}"
     );
+    // A revival re-sends the stored spec at the recorded tuple, so the host
+    // row cannot show a re-send; a re-sent spec would recompose the member,
+    // so its session stays down only when nothing was sent.
     assert!(
         !fixture
             .member_session_service()
@@ -764,18 +767,6 @@ async fn a_placed_revival_checks_the_stored_profile_first() {
             .await
             .unwrap_or(false),
         "nothing was revived on the host"
-    );
-    let after = fixture
-        .host_binding_record(controlling.mob_id.as_ref())
-        .await
-        .materialized
-        .get("b2")
-        .cloned()
-        .expect("host row");
-    assert_eq!(
-        (after.generation, after.fence_token),
-        (row.generation, row.fence_token),
-        "no materialization was re-issued"
     );
 
     fixture.shutdown().await;

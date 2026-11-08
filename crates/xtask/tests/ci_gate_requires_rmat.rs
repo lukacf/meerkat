@@ -961,8 +961,8 @@ fn ci_runs_the_bounded_tlc_audits_on_machine_authority_changes() {
     assert_eq!(
         job.get("timeout-minutes")
             .and_then(serde_json::Value::as_u64),
-        Some(30),
-        "a TLC shard times out at 30 minutes: one audit (audits-j) cannot be split and runs near 20 hosted"
+        Some(60),
+        "a TLC shard times out at 60 minutes: one audit (in audits-s) cannot be split and runs past 30 hosted"
     );
     let job_text = job_step_text(job);
     for required in [

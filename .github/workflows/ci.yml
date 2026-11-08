@@ -1065,12 +1065,12 @@ jobs:
     # classification), but a budget failure is reported while a cancelled
     # shard is a failed lane. A shard is sized to about 13 minutes hosted
     # (776 s, the longest shard of this assignment on the 0.9.9 release
-    # runs), but one audit cannot be split across shards: the durable
-    # decision audit with --mutants, alone in audits-j, takes about 530 s
-    # locally with 4 TLC workers in 0.9.11, so about 950-1140 s at the
-    # 1.8-2.15x hosted factor of its run class, near or past 20 minutes.
-    # 30 leaves headroom.
-    timeout-minutes: 30
+    # runs), but one audit cannot be split across shards: in 0.9.11
+    # audits-s takes 1109 s locally with 4 TLC workers, 756 s of it the
+    # AuthMachine source-credential publication audit alone, so about
+    # 2000-2400 s at the 1.8-2.15x hosted factor of its run class, past 30
+    # minutes. 60 leaves headroom.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

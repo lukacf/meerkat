@@ -57159,16 +57159,18 @@ function renderHistoryUserEntry(frame2, entryId, blobBaseUrl, textMode = "markdo
     ...origin ? { origin } : {}
   };
 }
-function hasDeliveryHold(frame2) {
+function hasDeliveryRecord(frame2, field) {
   const data = frame2.data;
   if (!data || typeof data !== "object") return false;
-  const hold = data.delivery_hold;
-  return Boolean(hold) && typeof hold === "object";
+  const record10 = data[field];
+  return Boolean(record10) && typeof record10 === "object";
 }
 function renderUserDeliveryFailureEntry(frame2, entryId) {
   if (frame2.event !== "user_input") return null;
   const failed = frame2.status === "delivery_failed";
-  if (!failed && !(frame2.status === "accepted" && hasDeliveryHold(frame2))) return null;
+  const held = frame2.status === "accepted" && hasDeliveryRecord(frame2, "delivery_hold");
+  const unresolved = frame2.status === "submitted" && hasDeliveryRecord(frame2, "delivery_unresolved");
+  if (!failed && !held && !unresolved) return null;
   return {
     kind: "message",
     id: "".concat(entryId, ":delivery-status"),
@@ -57176,7 +57178,7 @@ function renderUserDeliveryFailureEntry(frame2, entryId) {
     variant: "meta",
     createdAt: isoFromTimestampMs(frame2.timestampMs),
     ...frame2.interactionId ? { interactionId: frame2.interactionId } : {},
-    text: failed ? "Message delivery failed." : "Message held: nothing was delivered yet. Send it again.",
+    text: failed ? "Message delivery failed." : unresolved ? "Message may have run. Check before sending it again." : "Message held: nothing was delivered yet. Check before sending it again.",
     runtimeEvent: runtimeEventFromFrame(frame2.event, {
       status: frame2.status,
       input_frame_id: frame2.id,

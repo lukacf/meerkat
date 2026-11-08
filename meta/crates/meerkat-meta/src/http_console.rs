@@ -3139,9 +3139,12 @@ async fn console_send_identity_first_governed(
                 // request and the runtime-owned operation share that
                 // ownership, so no operation can still submit it. It is never
                 // dispatched again: it fails, its outcome unknown, and its
-                // sender can send it again.
+                // sender can send it again. Not in the process that saw its
+                // submission answer unresolved: its input may still be
+                // admitted here, so it stays submitted.
                 NativeSendObservation::Absent
-                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted =>
+                    if frame.status == crate::console_aggregator::ConsoleFrameStatus::Submitted
+                        && aggregator.absence_is_final_here(&frame.id) =>
                 {
                     return aggregator.settle_lost_submission(&frame, &claim).await;
                 }
@@ -3291,6 +3294,30 @@ async fn console_send_identity_first_governed(
                         err,
                     ));
                 }
+                if matches!(
+                    &err,
+                    crate::identity_first::IdentityRuntimeError::GovernedInput(
+                        crate::identity_first::GovernedInputError::AdmissionUnresolved { .. }
+                    )
+                ) {
+                    // Unresolved, not failed: the input may have run. The
+                    // send stays submitted, its answer recorded, until the
+                    // runtime's evidence settles it.
+                    if let Err(mark) = aggregator
+                        .mark_interaction_unresolved(&accepted.input_frame_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %identity,
+                            error = %mark,
+                            "console identity-first steer's admission is unresolved but its record failed"
+                        );
+                    }
+                    return Err(identity_runtime_error_to_console_send_error(
+                        identity.as_str(),
+                        err,
+                    ));
+                }
                 let _ = aggregator
                     .mark_interaction_delivery_failed(&accepted.input_frame_id)
                     .await;
@@ -3385,6 +3412,27 @@ async fn console_send_identity_first_governed(
                             identity = %dispatch_identity,
                             error = %mark,
                             "console identity-first send was held but its hold was not recorded"
+                        );
+                    }
+                    return;
+                }
+                if matches!(
+                    &err,
+                    crate::identity_first::IdentityRuntimeError::GovernedInput(
+                        crate::identity_first::GovernedInputError::AdmissionUnresolved { .. }
+                    )
+                ) {
+                    // Unresolved, not failed: the input may have run. The
+                    // send stays submitted, its answer recorded, until the
+                    // runtime's evidence settles it.
+                    if let Err(mark) = dispatch_aggregator
+                        .mark_interaction_unresolved(&dispatch_accepted.input_frame_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            identity = %dispatch_identity,
+                            error = %mark,
+                            "console identity-first send's admission is unresolved but its record failed"
                         );
                     }
                     return;

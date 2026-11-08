@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Dispatching`; from there it is delivered or fails, and is never held.
   `MarkHeld` is accepted only from `Dispatching`. New variants of
   exhaustive public enums.
+- `SendTransition::MarkUnresolved`: a governed Console send whose
+  submission answered unresolved stays `Submitted`. A new variant of an
+  exhaustive public enum.
 
 ### Added
 
@@ -85,7 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   hold in the session its bind bound, once nothing owns its dispatch, its
   outcome unknown (`delivery_failure`:
   `{reason: "outcome_unknown", retryable: true}`); it is never dispatched
-  again. Downgrade: an older binary reads a frame's `submitted` status as
+  again. A governed send whose native admission is unresolved (its answer
+  was lost: the input may have run) is never failed for it: it stays
+  `submitted` and records `delivery_unresolved`
+  (`{reason: "admission_unresolved", retryable: false}`), and a replay or a
+  recovery settles it `delivered` once the runtime's evidence shows its
+  input admitted. Its absence is final only in a later gateway: in the one
+  that saw the unresolved answer an absent read leaves it submitted.
+  Downgrade: an older binary reads a frame's `submitted` status as
   `completed`, so a send in flight at a rollback shows completed even if it
   then fails; nothing is sent twice.
 - A Console whose log store does not record a send's states refuses every
@@ -96,7 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   its key as qualified by its association, so the read by the raw key never
   found it, and an admitted governed send now settles delivered.
 - The Console UI shows a held send ("Message held: nothing was delivered yet.
-  Send it again.") until a dispatch clears the hold.
+  Check before sending it again.") until a dispatch clears the hold, and an
+  unresolved one ("Message may have run. Check before sending it again.")
+  until the runtime's evidence settles it.
 - A governed Console send verifies its human again at every bind, a bind after
   a wait included, and a shutdown ends a send's wait at once.
 

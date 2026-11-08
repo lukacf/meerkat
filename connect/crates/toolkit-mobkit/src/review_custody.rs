@@ -97,6 +97,15 @@ impl meerkat_mobkit::identity_first::GovernedInputBinder for HeldBinder {
         self.inner.wait_budget()
     }
 
+    async fn submitting(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), meerkat_mobkit::identity_first::GovernedBindRefusal> {
+        self._review
+            .retain_io(self.inner.submitting(session_id))
+            .await
+    }
+
     fn retain_unresolved(
         &self,
         settlement: Box<dyn meerkat_mobkit::identity_first::GovernedSettlement>,

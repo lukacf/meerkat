@@ -149,7 +149,8 @@ impl PrivateOriginals {
     /// conflict (contention: another writer's change in flight, a
     /// contributor's binding not settled yet) is a stale read of the owners.
     /// It is waited out with `churn` on the call's own work authorization
-    /// and made again, afresh, until `deadline`. A conflict that outlasts
+    /// and made again, afresh, until `deadline`, and never past the
+    /// dispatch's remaining tool time. A conflict that outlasts
     /// the wait is answered as one, which an admission answers as
     /// unavailable: retryable, never a denial. Nothing is held across a wait.
     pub(crate) async fn acquisition_original_through_waiter(
@@ -487,15 +488,16 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 /// The budget of one wait of
 /// [`PrivateOriginals::acquisition_original_through_waiter`]: the time left
-/// to the read's `deadline`. `tool_time` is the dispatch's remaining tool
-/// time (`None` without a tool timeout).
+/// to the read's `deadline`, cut to the dispatch's remaining tool time
+/// (`tool_time`; `None` without a tool timeout) when less is left, so a wait
+/// never turns a conflict into the dispatch's timeout.
 fn waiter_budget(
     deadline: tokio::time::Instant,
     now: tokio::time::Instant,
     tool_time: Option<std::time::Duration>,
 ) -> std::time::Duration {
-    let _ = tool_time;
-    deadline.saturating_duration_since(now)
+    let remaining = deadline.saturating_duration_since(now);
+    tool_time.map_or(remaining, |tool_time| tool_time.min(remaining))
 }
 
 #[cfg(test)]

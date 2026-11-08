@@ -630,6 +630,13 @@ impl PrivateOriginals {
     /// denial: it is waited out with `churn`, the step's one churn, holding
     /// nothing, and the resolution made again. Past the churn's bounds it
     /// stays typed, unavailable. Only the owner's own refusal is a denial.
+    ///
+    /// The first binding write checks the issued lineages again before it
+    /// writes. An owner change in progress there is unavailable, with
+    /// nothing written: Core names that change, so it is waited out with the
+    /// same churn, holding nothing, and the bind made again (a bind whose
+    /// write was done is only replayed). Past the bounds it stays typed,
+    /// unavailable.
     pub(crate) async fn retain_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
@@ -713,19 +720,30 @@ impl PrivateOriginals {
         // The bind's one budget, from its start: its waits for a held source
         // collection before the write, and after it, for the contributors'
         // check and the publication.
-        let source = self
-            .owner
-            .bind_admitted_helper_until(
-                self.store.as_ref(),
-                &prepared.admitted,
-                binding,
-                Some(
-                    tokio::time::Instant::now()
-                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
-                ),
-            )
-            .await
-            .map_err(helper_error)?;
+        let bind_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let source = loop {
+            let bound = self
+                .owner
+                .bind_admitted_helper_until(
+                    self.store.as_ref(),
+                    &prepared.admitted,
+                    binding.clone(),
+                    Some(bind_until),
+                )
+                .await;
+            if matches!(bound, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.helper.first_binding_check",
+                )
+                .await
+            {
+                continue;
+            }
+            break bound.map_err(helper_error)?;
+        };
         let mut held = self
             .helper_sources
             .lock()

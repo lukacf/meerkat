@@ -43,10 +43,16 @@ pub(crate) const BOOT_SEND_READ_BOUND: Duration = Duration::from_secs(2);
 /// included, before it gives up on the request.
 pub(crate) const INTERACTIVE_SEND_READ_BOUND: Duration = Duration::from_secs(45);
 
-/// Console send frames whose dispatch has a live owner in this process.
+/// Console send frames whose dispatch has a live owner in this process,
+/// and those whose governed submission answered unresolved in this process.
 #[derive(Debug, Default)]
 pub(crate) struct SendDispatchClaims {
     live: Mutex<BTreeSet<String>>,
+    /// Sends whose submission's native admission answered unresolved in
+    /// this process: their input may still be admitted here, so an absent
+    /// read of it is not final here (the absence rule). A later process
+    /// starts with none.
+    unresolved: Mutex<BTreeSet<String>>,
 }
 
 impl SendDispatchClaims {
@@ -61,6 +67,23 @@ impl SendDispatchClaims {
             claims: Arc::clone(self),
             frame_id: frame_id.to_string(),
         })
+    }
+
+    /// Record that this process saw `frame_id`'s submission answer
+    /// unresolved.
+    pub(crate) fn mark_unresolved(&self, frame_id: &str) {
+        self.unresolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame_id.to_string());
+    }
+
+    /// Whether this process saw `frame_id`'s submission answer unresolved.
+    pub(crate) fn unresolved_here(&self, frame_id: &str) -> bool {
+        self.unresolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(frame_id)
     }
 
     #[cfg(test)]

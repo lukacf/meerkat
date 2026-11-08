@@ -286,7 +286,11 @@ fn tool_succeeded(row: &StoredInputState, name: &str) {
 }
 
 /// Whether the native tool `name` prepared once in `audit` and returned a
-/// success, with no refused or unavailable answer for its operation.
+/// success, with no refused or unavailable answer for its operation but
+/// Core's own refusal to rebuild a preparation that met an owner change
+/// (`ReprepareRequired`, read while the publication changed), recorded
+/// before the operation's preparation: Core waits that change out and
+/// prepares the operation again under the same id.
 fn tool_succeeded_in(
     audit: &[StoredAuthorizationAuditObservation],
     name: &str,
@@ -318,16 +322,40 @@ fn tool_succeeded_in(
     }) {
         return Err("the tool's operation returned no success".to_string());
     }
+    let prepared_at = audit.iter().position(|row| {
+        operations.contains(&row.observation.operation_id)
+            && matches!(
+                row.observation.observation,
+                AuditObservation::Prepared { .. }
+            )
+    });
     let refused = audit
         .iter()
-        .filter(|row| {
+        .enumerate()
+        .filter(|(at, row)| {
             operations.contains(&row.observation.operation_id)
-                && matches!(
-                    row.observation.observation,
-                    AuditObservation::Refused { .. }
-                        | AuditObservation::AuthorizationUnavailable { .. }
-                )
+                && match &row.observation.observation {
+                    AuditObservation::Refused { reason, read, .. } => {
+                        // Core's waited re-preparation: refused to rebuild at a
+                        // read the publication changed under, before the
+                        // operation's preparation.
+                        let reprepared = *reason
+                            == meerkat_core::authorization::OperationRefusalKind::ReprepareRequired
+                            && read.as_ref().is_some_and(|read| {
+                                matches!(
+                                    read.basis,
+                                    meerkat_authorization_contracts::audit::AuditRefusalBasis::ChangeInProgress
+                                        | meerkat_authorization_contracts::audit::AuditRefusalBasis::PublicationChanged
+                                )
+                            })
+                            && prepared_at.is_some_and(|prepared| *at < prepared);
+                        !reprepared
+                    }
+                    AuditObservation::AuthorizationUnavailable { .. } => true,
+                    _ => false,
+                }
         })
+        .map(|(_, row)| row)
         .collect::<Vec<_>>();
     if !refused.is_empty() {
         return Err(format!(

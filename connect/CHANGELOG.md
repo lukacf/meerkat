@@ -29,10 +29,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   wait of the launch.
 - A setup acquisition's admission that reads its original's source facts in
   conflict (contention: another writer's change in flight) waits it out
-  through Core's owner-change waiter and reads again; a conflict that
-  outlasts the wait is answered as unavailable (retryable). It was answered
-  as `access_denied` ("not allowed by policy"), although no policy refused
-  it.
+  through Core's owner-change waiter, within its deadline and the dispatch's
+  remaining tool time, and reads again; a conflict that outlasts the wait is
+  answered as unavailable (retryable). It was answered as `access_denied`
+  ("not allowed by policy"), although no policy refused it.
+- A Find's work step answers contention as unavailable (retryable), never as
+  `access_denied`: an owner change its helper's first binding check meets
+  (another original's first binding, for example) is waited out through
+  Core's owner-change waiter and the bind made again, and one that outlasts
+  the wait is unavailable. The workflow call gate, plan staging and the
+  setup report tool answer a conflict in a source's facts as unavailable too.
+  Each answered `access_denied`.
 
 ## [0.9.10] - 2026-11-05
 

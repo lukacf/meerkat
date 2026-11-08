@@ -29,7 +29,9 @@ pub enum SendTransition {
     /// submitted.
     MarkSubmitted,
     /// A governed dispatch's submission answered unresolved: its native
-    /// admission's answer was lost, and its input may have run.
+    /// admission's answer was lost, and its input may have run. The send
+    /// stays submitted, recording the answer, until the runtime's evidence
+    /// settles it; it is neither failed nor held.
     MarkUnresolved,
 }
 
@@ -69,6 +71,10 @@ impl SendState {
             )),
             (Self::Dispatching, SendTransition::MarkHeld) => Ok((
                 Self::AcceptedPersisted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Submitted, SendTransition::MarkUnresolved) => Ok((
+                Self::Submitted,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
             _ => Err("illegal send state transition"),

@@ -1261,7 +1261,13 @@ HTTP `504` `governed_admission_unresolved`, as an admission timeout answers
 `504` `admission_timeout`, and the Console's JSON-RPC answers `-32000` with
 the same message and `data` (`{kind}`): retry it only under the same
 idempotency key, or read it with `meta/console/recover_send`, never as a new
-send. A Console whose log store does not record a send's states
+send. Its frame stays `submitted` and records `delivery_unresolved`
+(`{reason: "admission_unresolved", retryable: false}`): a replay of its key
+or `meta/console/recover_send` settles it `delivered` once the runtime's
+evidence shows its input admitted. In the gateway that saw the unresolved
+answer an absent read leaves it `submitted` (its input may still be admitted
+there); a later gateway settles it from evidence as any send a stopped
+gateway left submitted. A Console whose log store does not record a send's states
 (`ConsoleLogStore::supports_send_transitions`) refuses every governed send
 before anything is reserved (`governed_send_refused`). The runtime's evidence
 of a governed send is read by the send's own input id, a host-human send's

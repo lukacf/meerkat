@@ -265,10 +265,13 @@ fn unavailable() -> ToolError {
 fn invalid() -> ToolError {
     ToolError::InvalidArguments { name: SETUP_REPORT.into(), reason: "Provide kind failed or unavailable and a nonempty human-facing explanation within 4096 bytes. Operation, authority and routing are supplied by the installed host.".into() }
 }
+/// A source owner's answer as the report tool's: its own refusal denies; a
+/// conflict in the source's facts is contention (another writer's change in
+/// flight), unavailable, retryable.
 fn source_error(error: PrivateOriginalError) -> ToolError {
     match error {
-        PrivateOriginalError::Unavailable => unavailable(),
-        _ => denied(),
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => unavailable(),
+        PrivateOriginalError::Denied => denied(),
     }
 }
 /// Exact native tool definition for the application's initial-surface compiler.

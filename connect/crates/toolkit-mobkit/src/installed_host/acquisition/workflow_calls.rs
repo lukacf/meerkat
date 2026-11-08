@@ -13,15 +13,18 @@ struct WorkflowCalls {
     source: InstalledServiceTaskSource,
 }
 
+/// A source owner's refusal at the workflow call gate: its own refusal
+/// denies; a conflict in the source's facts is contention (another writer's
+/// change in flight), unavailable, retryable.
 fn workflow_failure(name: &str, error: PrivateOriginalError) -> ToolError {
     match error {
-        PrivateOriginalError::Unavailable => ToolError::unavailable(
-            name,
-            meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-        ),
-        PrivateOriginalError::Denied | PrivateOriginalError::Conflict => {
-            ToolError::access_denied(name)
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
+            ToolError::unavailable(
+                name,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            )
         }
+        PrivateOriginalError::Denied => ToolError::access_denied(name),
     }
 }
 
@@ -140,18 +143,20 @@ impl WorkflowCalls {
     }
 }
 
-/// A plan's staging refusal as a resolution answer.
+/// A plan's staging refusal as a resolution answer: the source owner's own
+/// refusal denies; a conflict in the source's facts is contention,
+/// unavailable, retryable.
 fn stage_refusal(name: &str, error: PrivateOriginalError) -> ToolExecutionResolutionError {
     match error {
-        PrivateOriginalError::Unavailable => ToolExecutionResolutionError::Unavailable {
-            tool_name: name.into(),
-            reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
-        },
-        PrivateOriginalError::Denied | PrivateOriginalError::Conflict => {
-            ToolExecutionResolutionError::AccessDenied {
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
+            ToolExecutionResolutionError::Unavailable {
                 tool_name: name.into(),
+                reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
             }
         }
+        PrivateOriginalError::Denied => ToolExecutionResolutionError::AccessDenied {
+            tool_name: name.into(),
+        },
     }
 }
 

@@ -894,11 +894,15 @@ fn aa1_private_failure(stage: &'static str, error: PrivateOriginalError) {
     );
 }
 
+/// A source owner's answer as a step's: its own refusal denies; a conflict
+/// in the source's facts is contention (another writer's change in
+/// flight), unavailable like an owner that cannot answer now, retryable.
 fn source_error(error: PrivateOriginalError) -> SetupError {
     match error {
         PrivateOriginalError::Denied => SetupError::Denied,
-        PrivateOriginalError::Conflict => SetupError::InvalidRecord,
-        _ => SetupError::NativeExecutionUnavailable,
+        PrivateOriginalError::Conflict | PrivateOriginalError::Unavailable => {
+            SetupError::NativeExecutionUnavailable
+        }
     }
 }
 
@@ -1095,10 +1099,10 @@ impl SetupWorkObservationAuthorizer<NativeWorkPreparation> for InstalledAcquisit
                 disclose,
             )
             .map_err(|error| match error {
-                PrivateOriginalError::Unavailable => {
+                PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
                     SetupWorkAdmissionError::NativeExecutionUnavailable
                 }
-                _ => SetupWorkAdmissionError::Denied,
+                PrivateOriginalError::Denied => SetupWorkAdmissionError::Denied,
             })
     }
 }

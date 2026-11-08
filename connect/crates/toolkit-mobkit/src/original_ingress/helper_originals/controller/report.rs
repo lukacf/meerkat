@@ -199,7 +199,7 @@ impl HelperReportIntent {
                 &intent.issuer,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         let expected = parent
             .restrictions()
             .for_child(&intent.requested)
@@ -211,7 +211,7 @@ impl HelperReportIntent {
                 &intent.grantee,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         if child.restrictions() != &expected {
             return Err(OriginalWriterError::Conflict);
         }

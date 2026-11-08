@@ -146,7 +146,7 @@ impl HelperControllerIntent {
                 &intent.issuer,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         let expected = parent
             .restrictions()
             .for_child(&intent.requested)
@@ -158,7 +158,7 @@ impl HelperControllerIntent {
                 &intent.grantee,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         if child.restrictions() != &expected || binding.controller_ceiling != expected {
             return Err(OriginalWriterError::Conflict);
         }
@@ -181,6 +181,19 @@ impl HelperControllerIntent {
             .check_current()
             .map_err(|_| OriginalWriterError::Unavailable)?;
         Ok(())
+    }
+}
+
+/// A lineage resolution's refusal as a binding check's answer: the grant
+/// owner's own refusal denies the operation; an owner that cannot say now
+/// (an owner change in progress, or one published during the resolution,
+/// among them) is unavailable, retryable, never a denial.
+fn lineage_refusal(refusal: meerkat_authorization::grants::GrantRefusal) -> OriginalWriterError {
+    match refusal {
+        meerkat_authorization::grants::GrantRefusal::Unavailable => {
+            OriginalWriterError::Unavailable
+        }
+        _ => OriginalWriterError::OperationDenied,
     }
 }
 

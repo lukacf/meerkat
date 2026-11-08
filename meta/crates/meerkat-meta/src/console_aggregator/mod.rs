@@ -3286,6 +3286,7 @@ impl MetaConsoleAggregator {
             accepted = self.settle_admitted_send(&frame, &claim).await?;
         } else if frame.status == ConsoleFrameStatus::Submitted
             && native == NativeSendObservation::Absent
+            && self.absence_is_final_here(&frame.id)
             && let Some(claim) = self.inner.send_dispatch_claims.claim(&frame.id)
         {
             accepted = self.settle_lost_submission(&frame, &claim).await?;
@@ -3348,7 +3349,10 @@ impl MetaConsoleAggregator {
                         ),
                     }
                 }
-                NativeSendObservation::Absent if frame.status == ConsoleFrameStatus::Submitted => {
+                NativeSendObservation::Absent
+                    if frame.status == ConsoleFrameStatus::Submitted
+                        && self.absence_is_final_here(&frame.id) =>
+                {
                     match self.settle_lost_submission(&frame, &claim).await {
                         Ok(_) => outcome.lost += 1,
                         Err(error) => tracing::warn!(
@@ -3793,6 +3797,44 @@ impl MetaConsoleAggregator {
             "only a dispatching send is submitted",
         )
         .await
+    }
+
+    /// A governed send whose submission's native admission answered
+    /// unresolved (its answer was lost: its input may have run):
+    /// `MarkUnresolved`, applied to the send's own state (submitted), keeps
+    /// it submitted and records `delivery_unresolved`
+    /// (`admission_unresolved`, not retryable as a new send). This process
+    /// holds that its input may still be admitted here, so an absent read
+    /// here never fails it; a replay of its key or its recovery settles it
+    /// `delivered` once the runtime's evidence shows its input admitted, and
+    /// a later process settles it from evidence as any send a stopped
+    /// process left submitted.
+    pub(crate) async fn mark_interaction_unresolved(
+        &self,
+        input_frame_id: &str,
+    ) -> Result<(), ConsoleSendError> {
+        self.inner
+            .send_dispatch_claims
+            .mark_unresolved(input_frame_id);
+        self.transition_send(
+            input_frame_id,
+            SendTransition::MarkUnresolved,
+            Some((
+                "delivery_unresolved",
+                json!({"reason": "admission_unresolved", "retryable": false}),
+            )),
+            "only a submitted send is unresolved",
+        )
+        .await
+    }
+
+    /// Whether an absent read of the runtime's evidence is final for the
+    /// submitted send `frame_id` here (the absence rule): not while this
+    /// process saw its submission answer unresolved, since its input may
+    /// still be admitted here. A later process reads such an absence as
+    /// final.
+    pub(crate) fn absence_is_final_here(&self, frame_id: &str) -> bool {
+        !self.inner.send_dispatch_claims.unresolved_here(frame_id)
     }
 
     /// Whether this Console's log store moves a send through the send

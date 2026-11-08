@@ -1313,7 +1313,7 @@ impl WakeBuildGate {
 
     async fn wait_held(&self) {
         let mut held = self.held.subscribe();
-        tokio::time::timeout(Duration::from_secs(60), held.wait_for(|held| *held))
+        tokio::time::timeout(Duration::from_mins(1), held.wait_for(|held| *held))
             .await
             .expect("Core's wake of the fresh life asks for its build")
             .expect("the gate's channel stays open");
@@ -1463,15 +1463,10 @@ async fn a_warm_after_a_reprofiling_reset_waits_out_the_kickoff_wake_in_flight()
         "params": { "identity": identity.as_str() },
     })
     .to_string();
-    let warm = handle_unified_rpc_json(
-        &runtime,
-        &request,
-        Duration::from_secs(120),
-        None,
-        Some(&ctx),
-    );
+    let warm =
+        handle_unified_rpc_json(&runtime, &request, Duration::from_mins(2), None, Some(&ctx));
     tokio::pin!(warm);
-    let reply = tokio::time::timeout(Duration::from_secs(120), async {
+    let reply = tokio::time::timeout(Duration::from_mins(2), async {
         tokio::select! {
             reply = &mut warm => reply,
             waited = door_waited.wait_for(|waited| *waited) => {

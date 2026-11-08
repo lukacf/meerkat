@@ -1128,6 +1128,7 @@ impl Flow {
                 Some(Arc::clone(&blob_store)),
                 NativeGrantWorkConfiguration {
                     retained_resume: None,
+                    kept_original: None,
                     require_scoped_destination: false,
                     grants: Arc::clone(&grants.owner),
                     ingress,

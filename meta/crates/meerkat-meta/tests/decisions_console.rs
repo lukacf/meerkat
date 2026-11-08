@@ -1219,7 +1219,8 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
         "{rendering}"
     );
 
-    // Gating decide: the person decides a gate that names the approver id.
+    // Gating decide: the gate names the approver id, and the Console decides
+    // as the signed-in person, who holds that id only as the people subject.
     let evaluated = runtime
         .evaluate_gating_action_with_origin(
             serde_json::from_value(json!({
@@ -1244,7 +1245,6 @@ async fn a_people_subject_holds_the_approver_id_on_the_console() {
         json!({
             "pending_id": pending_id,
             "decision": "approve",
-            "approver_id": "team:owners",
         }),
     )
     .await;

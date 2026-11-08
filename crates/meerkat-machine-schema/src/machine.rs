@@ -166,10 +166,11 @@ pub struct MachineSchema {
     /// `CompositionSchema.deep_domain_overrides`; absent keys use the codegen
     /// default deep cardinality.
     pub deep_domain_overrides: std::collections::BTreeMap<String, usize>,
-    /// TLC payload domains for individual unsigned input fields. Model-checker
-    /// configuration only: the generated Rust machine, its guards, updates and
-    /// invariants are unchanged. A field without a declaration explores the
-    /// default unsigned domain (`0..2`).
+    /// TLC payload domains for individual input fields: unsigned ones, and
+    /// fields of any type through `CiSamples`. Model-checker configuration
+    /// only: the generated Rust machine, its guards, updates and invariants
+    /// are unchanged. A field without a declaration explores its type's
+    /// default domain (`0..2` for an unsigned one).
     pub input_field_domains: Vec<InputFieldDomain>,
 }
 
@@ -177,7 +178,7 @@ pub struct MachineSchema {
 /// 32-bit). Declared input samples above it are refused.
 pub const TLC_MAX_UNSIGNED_INPUT_SAMPLE: u64 = 2_147_483_647;
 
-/// TLC payload domain for one unsigned field of one input variant.
+/// TLC payload domain for one field of one input variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputFieldDomain {
     pub input: InputVariantId,
@@ -204,6 +205,16 @@ pub enum InputFieldDomainKind {
     /// the field's other values only reach states that no guard or invariant
     /// tells apart from the kept ones.
     CiValues(std::collections::BTreeSet<u64>),
+    /// Explore exactly these values in the CI profile, for a field that holds
+    /// a `bool`, a number, a string, a key or an enum value, or an `Option`
+    /// of one; each must be a value of the field's type. The Deep profile
+    /// explores the field's whole type domain, and so does every
+    /// composition, which has no machine CI profile. The generated model
+    /// ranges the field over a constant that each profile's config assigns.
+    /// Use it, like `CiValues`, to keep a CI sweep within its budget when the
+    /// field's other values only reach states that no guard or invariant
+    /// tells apart from the kept ones, or a renaming of them.
+    CiSamples(Vec<crate::TlcValue>),
 }
 
 /// Why an input field domain declaration is refused.
@@ -211,14 +222,16 @@ pub enum InputFieldDomainKind {
 pub enum InputFieldDomainError {
     /// The input variant has no such field.
     UnknownField,
-    /// The field is not `u32` or `u64`.
+    /// The field is not `u32` or `u64`, which every kind but `CiSamples`
+    /// needs.
     NotUnsigned,
     /// No transition binds this field of this input, so the domain would
     /// never be explored.
     Unused,
     /// The same input field is declared twice.
     Duplicate,
-    /// An `AdditionalValues` or `CiValues` declaration lists no values.
+    /// An `AdditionalValues`, `CiValues` or `CiSamples` declaration lists no
+    /// values.
     EmptyValues,
     /// A value exceeds [`TLC_MAX_UNSIGNED_INPUT_SAMPLE`].
     ValueOutOfRange { value: u64 },
@@ -229,6 +242,8 @@ pub enum InputFieldDomainError {
     /// The input is a TLC representative input, whose payload is already
     /// sampled as one typed value per field.
     RepresentativeInput,
+    /// The `CiSamples` value at `index` is not a value of the field's type.
+    SampleTypeMismatch { index: usize },
 }
 
 impl fmt::Display for InputFieldDomainError {
@@ -250,6 +265,9 @@ impl fmt::Display for InputFieldDomainError {
                 write!(f, "state field `{state_field}` has a different type")
             }
             Self::RepresentativeInput => f.write_str("the input is a TLC representative input"),
+            Self::SampleTypeMismatch { index } => {
+                write!(f, "sample {index} is not a value of the field's type")
+            }
         }
     }
 }
@@ -282,7 +300,9 @@ impl MachineSchema {
                 .iter()
                 .find(|field| field.name == declaration.field)
                 .ok_or_else(|| refuse(InputFieldDomainError::UnknownField))?;
-            if !matches!(field.ty, TypeRef::U32 | TypeRef::U64) {
+            if !matches!(declaration.domain, InputFieldDomainKind::CiSamples(_))
+                && !matches!(field.ty, TypeRef::U32 | TypeRef::U64)
+            {
                 return Err(refuse(InputFieldDomainError::NotUnsigned));
             }
             if !seen.insert((declaration.input.as_str(), declaration.field.as_str())) {
@@ -327,6 +347,16 @@ impl MachineSchema {
                         return Err(refuse(InputFieldDomainError::StateFieldTypeMismatch {
                             state_field: state_field.as_str().to_owned(),
                         }));
+                    }
+                }
+                InputFieldDomainKind::CiSamples(samples) => {
+                    if samples.is_empty() {
+                        return Err(refuse(InputFieldDomainError::EmptyValues));
+                    }
+                    if let Some(index) = samples.iter().position(|sample| {
+                        !crate::tlc_model::is_value_of_type(sample, &field.ty, &self.named_types)
+                    }) {
+                        return Err(refuse(InputFieldDomainError::SampleTypeMismatch { index }));
                     }
                 }
             }

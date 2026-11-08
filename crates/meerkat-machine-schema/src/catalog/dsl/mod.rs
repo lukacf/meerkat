@@ -6459,6 +6459,43 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
         vec![],
     )
     .with_tlc_model(durable_decision_tlc_model())
+    // A carried presentation's facts (its audience, digest, completeness
+    // and the digest its link served) decide only whether it counts
+    // (counted_carried_presentation); the machine stores none of them.
+    // Their whole domains made every Decide arm enumerate 54 times the
+    // inputs, so the CI profile samples one carried presentation: a summary
+    // to "alpha" of "alpha" whose link served "alpha"'s rendering. It
+    // counts exactly when the held approver and subject are "alpha" and it
+    // carries a time, so every state the whole domains reach is, up to
+    // renaming the keys' values, one this sample reaches: neither the model
+    // nor an invariant names a key value. The Deep profile keeps the whole
+    // domains, and the durable decision audit drives every other shape.
+    .with_input_field_domain(
+        input_variant_id("Decide"),
+        crate::identity::FieldId::from_trusted_catalog_literal("carried_audience"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::Some(Box::new(
+            crate::TlcValue::String("alpha".to_owned()),
+        ))]),
+    )
+    .with_input_field_domain(
+        input_variant_id("Decide"),
+        crate::identity::FieldId::from_trusted_catalog_literal("carried_digest"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::Some(Box::new(
+            crate::TlcValue::String("alpha".to_owned()),
+        ))]),
+    )
+    .with_input_field_domain(
+        input_variant_id("Decide"),
+        crate::identity::FieldId::from_trusted_catalog_literal("carried_complete"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::Bool(false)]),
+    )
+    .with_input_field_domain(
+        input_variant_id("Decide"),
+        crate::identity::FieldId::from_trusted_catalog_literal("carried_link_served_digest"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::Some(Box::new(
+            crate::TlcValue::String("alpha".to_owned()),
+        ))]),
+    )
 }
 
 /// The durable decision machine's explicit TLC model. Every refusal that
@@ -6467,12 +6504,13 @@ pub fn durable_decision_schema_metadata() -> MachineSchemaMetadata {
 /// both key types sample the two values `alpha` and `beta`; every input time
 /// ranges over `0..2`, which puts a hold's deadline before, at and after a
 /// later touch, and a presentation before, at and after a decision's
-/// observed time (a carried presentation's time is sampled as `1`). Every
-/// arm is reached within six steps (the deepest: hold, approve, authorize,
-/// record, settle the notice, settle it again; hold, approve, authorize,
-/// open the cleanup, end, settle it; hold, approve, authorize, record,
-/// settle the reply, settle it again), so the CI run requires each of them
-/// to generate a state.
+/// observed time (a carried presentation's time is sampled as `1`, and in
+/// the CI profile its other facts as the one shape the metadata declares).
+/// Every arm is reached within six steps (the deepest: hold, approve,
+/// authorize, record, settle the notice, settle it again; hold, approve,
+/// authorize, open the cleanup, end, settle it; hold, approve, authorize,
+/// record, settle the reply, settle it again), so the CI run requires each
+/// of them to generate a state.
 #[allow(clippy::expect_used)]
 fn durable_decision_tlc_model() -> crate::MachineTlcModel {
     let two_keys = || crate::MachineTlcProfile {

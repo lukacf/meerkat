@@ -277,6 +277,9 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
         model: portable.model.clone(),
         provider: Some(portable.provider),
         self_hosted_server_id: portable.self_hosted_server_id.clone(),
+        // A placed member resolves its credentials on its member host: a
+        // binding reaches it only as the spawn's own, never a profile's.
+        auth_binding: None,
         image_generation_provider: portable.image_generation_provider,
         auto_compact_threshold: portable.auto_compact_threshold,
         resume_overrides: portable
@@ -384,6 +387,7 @@ mod tests {
             model: "override-model".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: Some(meerkat_core::Provider::OpenAI),
             auto_compact_threshold: std::num::NonZeroU64::new(1024),
             resume_overrides: vec![
@@ -511,6 +515,7 @@ mod tests {
                 model: "override-model".to_string(),
                 provider: Some(meerkat_core::Provider::Anthropic),
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -570,6 +575,7 @@ mod tests {
                     model: "override-model".to_string(),
                     provider: Some(meerkat_core::Provider::Anthropic),
                     self_hosted_server_id: None,
+                    auth_binding: None,
                     image_generation_provider: None,
                     auto_compact_threshold: None,
                     resume_overrides: Vec::new(),
@@ -605,6 +611,7 @@ mod tests {
             model: "override-model".to_string(),
             provider: Some(meerkat_core::Provider::Anthropic),
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),

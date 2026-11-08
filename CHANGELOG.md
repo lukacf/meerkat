@@ -37,6 +37,15 @@ them.
 
 ### Breaking
 
+- `meerkat-mob`: `Profile` gains `auth_binding: Option<AuthBindingRef>`, the
+  realm auth binding the profile's members resolve their credentials
+  through, so code that builds a `Profile` literally must set it (`None`
+  keeps the realm's resolution for the provider, as before). A spawn that
+  names its own binding wins over the profile's. A `[profiles.<name>]`
+  table may name it. The adaptive layer-decision schema does not offer it,
+  and an adaptive layer refuses a profile that names one. A member placed
+  on a member host does not carry it there.
+
 - Behaviour-only (not measured by the gate): `meerkat-mob`:
   `MobHandle::apply_declared_roster` with a complete roster also retires a
   member the roster does not list when the member's spawn row carries both

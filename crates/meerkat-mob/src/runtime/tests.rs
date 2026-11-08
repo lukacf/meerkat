@@ -8898,6 +8898,7 @@ fn sample_definition() -> MobDefinition {
             model: "claude-opus-4-8".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -8935,6 +8936,7 @@ fn sample_definition() -> MobDefinition {
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -28290,6 +28292,49 @@ async fn spawn_bound_worker(handle: &MobHandle, member: &AgentIdentity) {
         .spawn_spec(spec)
         .await
         .expect("spawn the bound worker");
+}
+
+/// A member of a profile that names an auth binding builds through that
+/// binding, and a spawn that names its own binding wins over the profile's.
+#[tokio::test]
+async fn a_profile_auth_binding_builds_its_member_and_a_spawn_binding_wins() {
+    let profile_binding = meerkat_core::AuthBindingRef {
+        realm: meerkat_core::RealmId::parse("tenant_a").expect("realm id"),
+        binding: meerkat_core::BindingId::parse("profile_named").expect("binding id"),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    };
+    let mut definition = bound_respawn_definition("profile-binding");
+    match definition.profiles.get_mut(&ProfileName::from("worker")) {
+        Some(ProfileBinding::Inline(profile)) => {
+            profile.auth_binding = Some(profile_binding.clone());
+        }
+        _ => panic!("an inline worker profile"),
+    }
+    let (handle, service) = create_test_mob(definition).await;
+
+    let profile_bound = AgentIdentity::from("profile-bound-worker");
+    let mut spec = SpawnMemberSpec::new("worker", profile_bound.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn on the profile's binding");
+    assert_eq!(
+        last_member_build(&service, &profile_bound)
+            .await
+            .auth_binding,
+        Some(profile_binding),
+        "a spawn that names no binding builds through the profile's"
+    );
+
+    let spawn_bound = AgentIdentity::from("spawn-bound-worker");
+    spawn_bound_worker(&handle, &spawn_bound).await;
+    assert_eq!(
+        last_member_build(&service, &spawn_bound).await.auth_binding,
+        Some(scoped_auth_binding()),
+        "the spawn's own binding wins over the profile's"
+    );
 }
 
 /// A default respawn keeps the auth binding its predecessor's credentials
@@ -88422,6 +88467,7 @@ async fn test_spawn_realm_ref_resolves_from_store() {
         model: "claude-sonnet-4-5".into(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),

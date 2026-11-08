@@ -650,6 +650,9 @@ fn decompile_portable_spec_with_env(
         // never re-infers a provider for the model id.
         provider: Some(spec.profile.provider),
         self_hosted_server_id: spec.profile.self_hosted_server_id.clone(),
+        // A placed member resolves its credentials here, on its member host:
+        // the spec overlay's binding applies, never a profile's.
+        auth_binding: None,
         image_generation_provider: spec.profile.image_generation_provider,
         auto_compact_threshold: spec.profile.auto_compact_threshold,
         resume_overrides: spec

@@ -51,7 +51,7 @@ fn second_phase(root: &Path) -> ApplicationSetupCompilation {
     input.roster[1].identity =
         meerkat_mobkit::identity_first::AgentIdentity::parse(identity).unwrap();
     input.members[1].member.member = member_id.clone();
-    input.helper.member.member = member_id.clone();
+    input.helper.as_mut().unwrap().member.member = member_id.clone();
     input.tool_policy.members[1].member_identity = member_id;
     input
         .tool_policy
@@ -92,9 +92,9 @@ async fn aggregate_fixture(
     std::fs::create_dir(&b).unwrap();
     let a = phase(&a);
     let b = second_phase(&b);
-    assert_ne!(a.helper().member, b.helper().member);
-    assert_eq!(a.server().name, b.server().name);
-    assert_ne!(a.server(), b.server());
+    assert_ne!(a.helper().unwrap().member, b.helper().unwrap().member);
+    assert_eq!(a.server().unwrap().name, b.server().unwrap().name);
+    assert_ne!(a.server().unwrap(), b.server().unwrap());
     let mut selected = a.final_authorities.get().unwrap().owner.clone();
     selected.native_host.remote_operator = Some(
         meerkat_core::PrincipalRef::in_domain(
@@ -114,7 +114,10 @@ async fn aggregate_fixture(
     .complete(a.prepared_tool_policy())
     .await
     .unwrap();
-    let resources = [a.resource_selection(), b.resource_selection()];
+    let resources = [
+        a.resource_selection().unwrap(),
+        b.resource_selection().unwrap(),
+    ];
     let inherited = Arc::new(Inherited::default());
     let provider = Arc::new(SetupResourceProvider::multiple(
         resources.to_vec(),

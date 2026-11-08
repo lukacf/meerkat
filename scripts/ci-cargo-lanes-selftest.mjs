@@ -24,6 +24,8 @@ import {
   workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import {
+  CONNECT_CONSOLE_KNOWN_REDS,
+  CONNECT_CONSOLE_TEST_DEBT,
   FEATURE_UNIT_SUITES,
   TOOLKIT_MOBKIT_KNOWN_REDS,
   TOOLKIT_MOBKIT_TEST_DEBT,
@@ -720,9 +722,25 @@ function assertArchivedLanes(plan, label) {
   assert.ok(filters.known_reds.startsWith("package(toolkit-mobkit) and (test(="), "the ratchet runs the package's steady known reds");
   assert.equal(filters.known_red_count, steady.length, "the ratchet counts the steady known reds");
   // A suite without companions or known reds keeps its plain flags and no filter.
-  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
-  assert.equal(featureSuiteFlags(plain), "-p meerkat-connect --features console");
+  const plain = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-live" && candidate.id === "webrtc");
+  assert.equal(featureSuiteFlags(plain), "-p meerkat-live --features webrtc");
   assert.deepEqual(featureSuiteFilters(plain), {});
+  // A suite whose known reds are all intermittent excludes them and runs no
+  // ratchet: meerkat-connect's console suite.
+  const intermittentOnly = FEATURE_UNIT_SUITES.find((candidate) => candidate.package === "meerkat-connect" && candidate.id === "console");
+  assert.equal(featureSuiteFlags(intermittentOnly), "-p meerkat-connect --features console");
+  assert.ok(
+    CONNECT_CONSOLE_KNOWN_REDS.length > 0 && CONNECT_CONSOLE_KNOWN_REDS.every((entry) => entry.intermittent),
+    "the console suite's known reds are intermittent",
+  );
+  const consoleFilters = featureSuiteFilters(intermittentOnly);
+  assert.ok(consoleFilters.filter.startsWith("not (test(="), "the console suite runs without its intermittent known reds");
+  for (const entry of CONNECT_CONSOLE_KNOWN_REDS) {
+    assert.ok(consoleFilters.filter.includes(`test(=${entry.test})`), `the console suite excludes ${entry.test}`);
+  }
+  assert.equal(consoleFilters.known_reds, undefined, "intermittent known reds get no ratchet");
+  assert.equal(consoleFilters.known_red_count, undefined, "intermittent known reds get no ratchet count");
+  checkKnownRedsDoc(readFileSync(resolve(root, CONNECT_CONSOLE_TEST_DEBT), "utf8"), CONNECT_CONSOLE_KNOWN_REDS, CONNECT_CONSOLE_TEST_DEBT);
 
   // The page and the list agree, and every drift between them is refused.
   const page = readFileSync(resolve(root, TOOLKIT_MOBKIT_TEST_DEBT), "utf8");
@@ -2439,8 +2457,12 @@ for (const path of [
   // Its Console process controls (resources::local_round) run a synthetic
   // protocol child under an explicitly selected Python and refuse to guess
   // one, so every unit job selects it, whichever wave or event holds the row.
-  // The tests see it only when the shell that runs nextest exported it first:
-  // in that step, before the nextest command.
+  // A row of a Connect package whose tests read it selects the qualified
+  // interpreter scripts/connect-test-python prepares (this checkout's Connect
+  // and Meta Python SDKs, MCP 2.2.0) instead, also as the shared setup native
+  // case's TOOLKIT_D5_TEST_PYTHON. The tests see them only when the shell
+  // that runs nextest exported them first: in that step, before the nextest
+  // command.
   const unitJobs = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
   for (const job of ["unit", "main-unit", "main-unit-rest"]) {
     const jobBody = jobLines(unitJobs, job);
@@ -2449,14 +2471,68 @@ for (const path of [
       /^ {10}TOOLKIT_SHARED_TEST_PYTHON="\$\(command -v python3\)"\n {10}export TOOLKIT_SHARED_TEST_PYTHON$/m,
       `${job} selects the Python of Connect's Console process controls`,
     );
+    assert.match(
+      jobBody.join("\n"),
+      /^ {10}connect_python="\$\(scripts\/connect-test-python --if-needed "\$\{RUNNER_TEMP\}\/connect-test-python" \$\{PACKAGES\}\)"\n {10}if \[\[ -n "\$\{connect_python\}" \]\]; then\n {12}export TOOLKIT_SHARED_TEST_PYTHON="\$\{connect_python\}" TOOLKIT_D5_TEST_PYTHON="\$\{connect_python\}"$/m,
+      `${job} selects the qualified Python of a Connect row, for the shared setup native case too`,
+    );
     const exportAt = jobBody.indexOf("          export TOOLKIT_SHARED_TEST_PYTHON");
+    const qualifiedAt = jobBody.findIndex((line) => line.startsWith("            export TOOLKIT_SHARED_TEST_PYTHON="));
     const nextestAt = jobBody.findIndex((line) => line.includes("nextest run"));
-    assert.ok(exportAt >= 0 && exportAt < nextestAt, `${job} exports the Python before nextest runs`);
+    assert.ok(
+      exportAt >= 0 && exportAt < qualifiedAt && qualifiedAt < nextestAt,
+      `${job} exports the Python, then a Connect row's qualified one, before nextest runs`,
+    );
     assert.ok(
       !jobBody.slice(exportAt, nextestAt).some((line) => /^ {6}- /.test(line)),
       `${job} exports the Python in the step that runs nextest`,
     );
   }
+  // The script prepares the interpreter only for a row that selects a package
+  // whose tests read it (Connect's meerkat-connect, toolkit-mobkit and
+  // meerkat-toolkit rows); it prints nothing, and needs no network, for any
+  // other row. A relative directory, refused before anything is created,
+  // shows which rows reach the preparation.
+  const connectPython = (flags) =>
+    spawnSync(join(root, "scripts/connect-test-python"), ["--if-needed", "relative-dir", ...flags], { cwd: root, encoding: "utf8" });
+  for (const flags of [
+    ["-p", "meerkat-core", "-p", "meerkat-runtime"],
+    ["-p", "toolkit-catalog"],
+    ["-p", "toolkit-package"],
+    ["-p", "toolkit-store"],
+    ["--workspace", "--exclude", "meerkat-connect", "--exclude", "toolkit-mobkit", "--exclude", "meerkat-toolkit"],
+  ]) {
+    const prepared = connectPython(flags);
+    assert.deepEqual([prepared.status, prepared.stdout, prepared.stderr], [0, "", ""], `no Connect test Python for ${flags.join(" ")}`);
+  }
+  for (const flags of [
+    ["-p", "meerkat-connect"],
+    ["-p", "meerkat-connect", "--features", "console"],
+    ["-p", "toolkit-mobkit"],
+    ["-p", "toolkit-mobkit", "-p", "meerkat-connect", "--features", "toolkit-mobkit/native-host"],
+    ["-p", "meerkat-toolkit"],
+    ["--workspace"],
+  ]) {
+    const prepared = connectPython(flags);
+    assert.equal(prepared.status, 2, `the Connect test Python for ${flags.join(" ")}: ${prepared.stderr}`);
+    assert.match(prepared.stderr, /DIR must be an absolute path/, `the Connect test Python for ${flags.join(" ")}`);
+  }
+  // Its packages are an exact, hash-pinned closure: every requirement names
+  // one version and its wheel's sha256, mcp==2.2.0 among them, and the script
+  // installs only those, so pip resolves nothing.
+  const pins = readFileSync(resolve(root, "scripts/connect-test-python-requirements.txt"), "utf8")
+    .split("\n")
+    .map((line) => line.split("#")[0].trim())
+    .filter(Boolean);
+  for (const pin of pins) {
+    assert.match(pin, /^[a-z0-9-]+==[^\s=]+ --hash=sha256:[0-9a-f]{64}$/, `connect-test-python pins ${pin} exactly, with its hash`);
+  }
+  assert.ok(pins.some((pin) => pin.startsWith("mcp==2.2.0 ")), "connect-test-python pins mcp==2.2.0");
+  assert.match(
+    readFileSync(resolve(root, "scripts/connect-test-python"), "utf8"),
+    /--require-hashes --no-deps --only-binary=:all: -r "\$\{requirements\}"/,
+    "connect-test-python installs the pinned closure only",
+  );
   // An unrelated leaf change carries no pull-request suite; docs carry none anywhere.
   assert.deepEqual(planFor(["crates/meerkat-sqlite/src/lib.rs"]).unit_feature_shards, []);
   const docs = planFor(["docs/index.mdx"]);

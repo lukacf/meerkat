@@ -55,6 +55,8 @@
               "library/local-install",
               "acquisition/local-install",
               "guides/native-mcp",
+              "guides/service-collections",
+              "guides/protected-service-host",
               "guides/host-composition",
               "guides/setup-a-frontend"
             ]

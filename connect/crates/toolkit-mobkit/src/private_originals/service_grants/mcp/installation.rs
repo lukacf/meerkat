@@ -45,7 +45,7 @@ impl PrivateOriginals {
         let AccessDecision::Mcp(decision) = &access.decision else {
             return Err(PrivateOriginalError::Denied);
         };
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         application.validate(route, decision, &self.scope.owner)?;
         application.check_parent(&lifetime, route, &access.parent)?;
         if record.event.original_authentication != decision.evidence

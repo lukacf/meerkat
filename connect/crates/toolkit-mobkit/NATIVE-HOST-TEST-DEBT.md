@@ -30,26 +30,11 @@ fail at the first original's promoted-custody restore when run alone, and at
 the helper's restore in the parallel known-red run, with the same refusal
 (`Unavailable`), so the diagnostic run should cover both.
 
-- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission`
-- `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery`
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission`
 - `private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes`
 - `private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer`
-
-## Tool result payload
-
-Status: open. Kind: stale test.
-
-A denied tool result now carries `"tool_invoked": false`, and these tests
-still expect `"unknown"`. Fix: expect `{"kind":"denied","tool_invoked":false}`
-in `controller_only_acquisition_tests.rs`, `warm_reacquisition_native_tests.rs`
-and `batch_native_tests.rs`.
-
-- `private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn`
-- `private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper`
-- `private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets`
 - `private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke`
 
 ## Interaction lineage
@@ -71,7 +56,6 @@ crate's own code. The fix for each is the expectation to update.
 |---|---|
 | `installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement` | Count the access rows from a baseline taken after `open`, or leave out the `toolkit.application-service-tool-policy` schema as `identity_binding.rs` does. |
 | `installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access` | The same. |
-| `installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication` | The same, in `gateway_identity.rs`. |
 | `installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write` | Expect `Err(PrivateOriginalError::Denied)` and the row's `issuance.state == "native_refused"`. |
 | `private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b` | Build the control with `prepare_service_mcp_control`, as `attachment_entry_tests.rs` does. |
 | `private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input` | Write the raw `RecordData`. |
@@ -82,7 +66,6 @@ crate's own code. The fix for each is the expectation to update.
 | `private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child` | Check only the published parent. Open question: whether `can_recover` should read `parent_state`. |
 | `private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source` | Expect `Unavailable` for the unknown server and keep `Denied` for the known one. |
 | `private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper` | Assert the enrolled form (revision 3, version 5), not equality with the held snapshot. |
-| `original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row` | Expect `PolicyUnavailable` while the collection is held and `Active` after its release; if waiting is the contract, make the product wait instead. |
 
 ## Decision source unknown field
 
@@ -97,15 +80,25 @@ make the variant `StandingRuleDecision {}` and update its match in
 
 - `private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer`
 
-## Double model request
+## Governed origin requester
 
-Status: open. Kind: not yet determined.
+Status: open. Kind: product gap, not test debt.
 
-The reconstruction sends a second model request where the test expects one,
-which may be a second run. One solo run that records where each request
-comes from decides the class before any fix.
+Core keeps the original requester of an in-process peer delivery sent from
+governed work: it refuses, as malformed, a binding of such a delivery that
+does not keep the sending work's requester, name the sending agent as its
+ingress actor and name every work of the sending work as a contributor (the
+`GovernedDelivery` pin of `check_bound_original` in `meerkat-runtime`, Core
+commit 263280d604). Connect's `bind_peer_delivery`
+(`private_originals/peer_ingress.rs`) binds every peer delivery under the
+receiving member's standing grants with no contributors. Core therefore
+refuses Connect's binding of the reply a receiving member's governed run
+sends back, and that run's `reply_to_peer` call returns an error. Fix:
+`bind_peer_delivery` binds a governed in-process delivery under the
+origin's requester, or leaves it to Core's `OriginalRequesterPeerBinder`;
+the test then moves to that contract and leaves this page.
 
-- `installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input`
+- `private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder`
 
 ## Intermittent races
 

@@ -59,7 +59,7 @@ use local_round::LocalRoundCleanup;
 
 /// Trusted fresh-application preparation input on the inherited channel. The owner
 /// facts contain no surface references; native construction produces those.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationPreparationPlan {
     pub schema: u32,
@@ -69,17 +69,93 @@ pub struct ApplicationPreparationPlan {
     #[serde(default)]
     pub authorities: PreparationAuthorityIntent,
     pub application: ApplicationSetupCompilationInput,
-    pub acquisition: ApplicationAcquisitionParameters,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<ApplicationAcquisitionParameters>,
     pub output: PathBuf,
     pub hold_timeout_ms: u64,
 }
 
+impl Serialize for ApplicationPreparationPlan {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut value = serializer.serialize_struct(
+            "ApplicationPreparationPlan",
+            8 + usize::from(self.acquisition.is_some()),
+        )?;
+        value.serialize_field("schema", &self.schema)?;
+        value.serialize_field("deployment_root", &self.deployment_root)?;
+        value.serialize_field("owner", &self.owner)?;
+        value.serialize_field("startup", &self.startup)?;
+        if self.application.helper.is_some() {
+            value.serialize_field("authorities", &self.authorities)?;
+        } else {
+            #[derive(Serialize)]
+            struct HelperlessAuthorities<'a> {
+                #[serde(skip_serializing_if = "slice_is_empty")]
+                controllers:
+                    &'a [toolkit_mobkit::installed_host::preparation::PreparedControllerIntent],
+            }
+            fn slice_is_empty<T>(rows: &&[T]) -> bool {
+                rows.is_empty()
+            }
+            // Reject incompatible typed input rather than dropping requested
+            // authority when serializing the explicitly helperless wire.
+            self.authorities
+                .validate_without_helper()
+                .map_err(serde::ser::Error::custom)?;
+            value.serialize_field(
+                "authorities",
+                &HelperlessAuthorities {
+                    controllers: &self.authorities.controllers,
+                },
+            )?;
+        }
+        value.serialize_field("application", &self.application)?;
+        if let Some(acquisition) = &self.acquisition {
+            value.serialize_field("acquisition", acquisition)?;
+        }
+        value.serialize_field("output", &self.output)?;
+        value.serialize_field("hold_timeout_ms", &self.hold_timeout_ms)?;
+        value.end()
+    }
+}
+
+fn read_plan(bytes: &[u8]) -> Result<ApplicationPreparationPlan, String> {
+    let wire: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let plan: ApplicationPreparationPlan =
+        serde_json::from_value(wire.clone()).map_err(|error| error.to_string())?;
+    if plan.application.helper.is_none()
+        && wire
+            .get("authorities")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|fields| {
+                [
+                    "helper_mcp",
+                    "helper_catalog",
+                    "helper_report",
+                    "agent_setup",
+                    "shared_workflow_setup",
+                ]
+                .iter()
+                .any(|field| fields.contains_key(*field))
+            })
+    {
+        return Err("helperless preparation must omit helper-only authority fields".into());
+    }
+    Ok(plan)
+}
+
 struct Publication {
     closed: bool,
+    admission_stopped: bool,
     installed: Option<Arc<ToolkitGatewayHost>>,
 }
 
 struct Driver {
+    operation_review_policy:
+        Option<Arc<dyn toolkit_mobkit::installed_host::InstalledOperationReviewPolicy>>,
+    operation_review: Option<crate::application_consent::RetainedApplicationOperationReview>,
     plan: ApplicationPreparationPlan,
     plan_reference: SelectedHostArtifact,
     plan_bytes: Vec<u8>,
@@ -97,12 +173,42 @@ struct Driver {
     completed: OnceLock<PreparedApplicationSetup>,
     deliver: Mutex<Option<oneshot::Sender<SelectedHostArtifact>>>,
     adopted: Mutex<Option<oneshot::Receiver<()>>>,
-    attempt_guards: McpAttemptGuards,
-    local_round_attempts: Arc<LocalRoundAttempts>,
+    local_round: Option<(Arc<LocalRoundAttempts>, McpAttemptGuards)>,
     local_round_cleanup: tokio::sync::Mutex<LocalRoundCleanup>,
+    member_class_context: OnceLock<meerkat_mobkit::identity_first::PublicIdentityFirstContext>,
+    workflow:
+        Option<Arc<crate::application_acquisition::workflow::ApplicationWorkflowCommissioner>>,
+    workflow_resources: Option<Arc<crate::installed_service_review::composer::LiveSharedSetup>>,
+    hosted_mcp: Option<(
+        toolkit_mobkit::private_host::HostedMcpAuthEndpoint,
+        meerkat::McpRegisteredRedirectBase,
+    )>,
+    #[cfg(test)]
+    late_adoption: Option<Arc<late_adoption_tests::Probe>>,
 }
 
 impl Driver {
+    fn selected_operation_review(
+        &self,
+    ) -> Result<Option<Arc<meerkat_core::approval::review::BoundOperationReview>>, GatewayHostError>
+    {
+        self.current()?;
+        if !self.selected.load(Ordering::Acquire) {
+            return Err(GatewayHostError::Denied);
+        }
+        let review = self
+            .operation_review
+            .as_ref()
+            .map(|selection| {
+                selection
+                    .current()
+                    .map_err(|_| GatewayHostError::Unavailable)
+            })
+            .transpose()?;
+        self.current()?;
+        Ok(review)
+    }
+
     fn current(&self) -> Result<(), GatewayHostError> {
         if self
             .publication
@@ -129,6 +235,20 @@ impl Driver {
             .map_err(|_| HostLifetimeError::Unavailable)?;
         if publication.closed || publication.installed.is_some() {
             return Err(HostLifetimeError::Denied);
+        }
+        // A held bootstrap may finish during the native drain window. Keep its
+        // completion, but fence the adopted host before exposing its sources.
+        if publication.admission_stopped {
+            host.stop_admitting_work().map_err(|error| match error {
+                GatewayHostError::Unavailable => HostLifetimeError::Unavailable,
+                _ => HostLifetimeError::Denied,
+            })?;
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.late_adoption {
+            probe
+                .retained(&host, publication.admission_stopped)
+                .map_err(|_| HostLifetimeError::Unavailable)?;
         }
         publication.installed = Some(host);
         // Wake the existing close observer to start observing this exact host.
@@ -183,6 +303,31 @@ impl RosterProjection for LiveRoster {
 
 #[async_trait]
 impl GatewayHostComposition for Driver {
+    fn compose_agent_customizer(
+        &self,
+        customizer: Option<Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer>>,
+    ) -> Result<Option<Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer>>, GatewayHostError>
+    {
+        self.current()?;
+        if !self.selected.load(Ordering::Acquire) {
+            return Err(GatewayHostError::Denied);
+        }
+        if customizer.is_none() && !self.plan.application.member_classes.is_empty() {
+            return Err(GatewayHostError::AgentCustomizerRequired);
+        }
+        // Meta installs this same composed value for fresh, held and rebuilt
+        // members. Ordinary applications may leave the SDK customizer absent.
+        Ok(customizer.map(|inner| {
+            let inner = self
+                .compilation
+                .prepared_tool_policy()
+                .member_class_gateway_customizer(inner);
+            match &self.workflow_resources {
+                Some(resources) => resources.customizer(inner),
+                None => inner,
+            }
+        }))
+    }
     async fn prepared_application(
         &self,
         request: Option<&PreparedApplicationRequest>,
@@ -225,6 +370,17 @@ impl GatewayHostComposition for Driver {
         if !self.selected.load(Ordering::Acquire) {
             return Err(GatewayHostError::Denied);
         }
+        self.runtime
+            .capture_member_mcp_factory(construction)
+            .map_err(|_| GatewayHostError::Unavailable)?;
+        if let Some((endpoint, base)) = &self.hosted_mcp {
+            endpoint
+                .bind_factory(construction, base.clone())
+                .map_err(|_| GatewayHostError::Unavailable)?;
+        }
+        let Some(helper) = self.compilation.helper() else {
+            return Ok(None);
+        };
         let realm = self
             .plan
             .application
@@ -233,32 +389,36 @@ impl GatewayHostComposition for Driver {
             .map_err(|_| GatewayHostError::Denied)?
             .locator;
         let composition = match &self.selected_policy {
-            Some(policy) => {
-                crate::installed_service_review::composer::gateway_selected_policy_composition(
-                    construction,
-                    self.compilation.helper().member.clone(),
-                    realm,
-                    policy.clone(),
-                    self.presenters.clone(),
-                    self.plan.deployment_root.clone(),
-                    self.runtime.service_tasks(),
-                )
-            }
+            Some(policy) => crate::installed_service_review::composer::gateway_selected_policy_composition_with_workflows(
+                construction, helper.member.clone(), realm, policy.clone(),
+                self.presenters.clone(), self.plan.deployment_root.clone(), self.runtime.service_tasks(),
+                self.workflow_resources.clone()),
             None => crate::installed_service_review::composer::gateway_account_composition(
-                construction,
-                self.compilation.helper().member.clone(),
-                realm,
-                self.presenters
-                    .clone()
-                    .ok_or(GatewayHostError::Unavailable)?,
-                self.runtime.service_tasks(),
-            ),
-        }
-        .map_err(|_| GatewayHostError::Unavailable)?;
+                construction, helper.member.clone(), realm,
+                self.presenters.clone().ok_or(GatewayHostError::Unavailable)?, self.runtime.service_tasks()),
+        }.map_err(|_| GatewayHostError::Unavailable)?;
         self.current()?;
         Ok(Some(
-            composition.with_attempt_guards(self.attempt_guards.clone()),
+            composition.with_attempt_guards(
+                self.local_round
+                    .as_ref()
+                    .ok_or(GatewayHostError::Unavailable)?
+                    .1
+                    .clone(),
+            ),
         ))
+    }
+    fn operation_review(
+        &self,
+        _construction: &GatewayFactoryConstruction<'_>,
+    ) -> Result<Option<Arc<meerkat_core::approval::review::BoundOperationReview>>, GatewayHostError>
+    {
+        // Meta offers the same construction to compose_member_factory first.
+        // Its installation realm is not the prepared member realm. Selection
+        // was bound to the actual application owner before either callback.
+        // Meta installs this exact review's settlement before any session and
+        // then retains the same Arc on its factory, for both init paths.
+        self.selected_operation_review()
     }
     async fn prepare_bootstrap(
         &self,
@@ -284,6 +444,15 @@ impl GatewayHostComposition for Driver {
             .compilation
             .prepare_helper_bootstrap(spec)
             .map_err(|_| GatewayHostError::Denied)?;
+        let spec = match &self.workflow_resources {
+            Some(resources) => {
+                resources
+                    .capture_native(&spec)
+                    .map_err(|_| GatewayHostError::Denied)?;
+                spec.with_spawn_member_customizer(resources.clone())
+            }
+            None => spec,
+        };
         self.runtime.prepare_bootstrap(spec)
     }
     async fn bind_runtime(&self, runtime: &mut UnifiedRuntime) -> Result<(), GatewayHostError> {
@@ -295,7 +464,14 @@ impl GatewayHostComposition for Driver {
         runtime: &mut UnifiedRuntime,
     ) -> Result<(), GatewayHostError> {
         self.current()?;
-        self.runtime.bind_identity_runtime(runtime)
+        self.runtime.bind_identity_runtime(runtime)?;
+        self.member_class_context
+            .set(
+                runtime
+                    .identity_first_context()
+                    .ok_or(GatewayHostError::Unavailable)?,
+            )
+            .map_err(|_| GatewayHostError::Denied)
     }
     fn identity_bootstrap_hold(&self) -> Option<Duration> {
         Some(Duration::from_millis(self.plan.hold_timeout_ms))
@@ -322,7 +498,13 @@ impl GatewayHostComposition for Driver {
             .iter()
             .map(|request| {
                 let target = match &request.target {
-                    PreparedControllerTarget::Helper => &self.compilation.helper().member,
+                    PreparedControllerTarget::Helper => {
+                        &self
+                            .compilation
+                            .helper()
+                            .ok_or(GatewayHostError::Denied)?
+                            .member
+                    }
                     PreparedControllerTarget::OriginalRoute { route } => {
                         let route = self
                             .plan
@@ -388,38 +570,44 @@ impl GatewayHostComposition for Driver {
                 return Err(GatewayHostError::Denied);
             }
         }
-        let mut helper = self.compilation.helper().clone();
+        let mut helper = self.compilation.helper().cloned();
         let selected = {
             let mut prepared = self
                 .prepared
                 .lock()
                 .map_err(|_| GatewayHostError::Unavailable)?;
-            prepared
-                .as_mut()
-                .ok_or(GatewayHostError::Denied)?
-                .finalize_authorities_with_helper_resources(
-                    &mut helper,
+            let prepared = prepared.as_mut().ok_or(GatewayHostError::Denied)?;
+            match helper.as_mut() {
+                Some(helper) => prepared.finalize_authorities_with_helper_resources(
+                    helper,
                     &authorities,
-                    Some(self.compilation.server()),
-                    helper_session
-                        .as_ref()
-                        .map(|session| (&self.compilation.helper().member, session)),
-                )
-                .map_err(|error| match error {
-                    HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
-                        GatewayHostError::Unavailable
-                    }
-                    _ => GatewayHostError::Denied,
-                })?
+                    self.compilation.server(),
+                    helper_session.as_ref().map(|session| {
+                        (
+                            &self.compilation.helper().expect("selected helper").member,
+                            session,
+                        )
+                    }),
+                ),
+                None => prepared.finalize_authorities_without_helper(&authorities),
+            }
+            .map_err(|error| match error {
+                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+                    GatewayHostError::Unavailable
+                }
+                _ => GatewayHostError::Denied,
+            })?
         };
-        self.compilation
-            .retain_authorities_with_helper_access(
+        match helper {
+            Some(helper) => self.compilation.retain_authorities_with_helper_access(
                 selected,
                 helper,
                 authorities.helper_mcp.as_ref(),
                 authorities.helper_catalog.as_ref(),
-            )
-            .map_err(|_| GatewayHostError::Denied)?;
+            ),
+            None => self.compilation.retain_owner(selected),
+        }
+        .map_err(|_| GatewayHostError::Denied)?;
         self.current()?;
         let (setup, manifest) = self
             .compilation
@@ -457,7 +645,17 @@ impl GatewayHostComposition for Driver {
         publication: GatewayBootstrapReady<'_>,
     ) -> Result<(), GatewayHostError> {
         self.current()?;
-        self.installed()?.publish_bootstrap_ready(publication)
+        let host = self.installed()?;
+        #[cfg(test)]
+        if let Some(probe) = &self.late_adoption {
+            probe.observe("before_ready", &host)?;
+        }
+        host.publish_bootstrap_ready(publication)?;
+        #[cfg(test)]
+        if let Some(probe) = &self.late_adoption {
+            probe.observe("after_ready", &host)?;
+        }
+        Ok(())
     }
     fn host_app_routes(
         &self,
@@ -466,7 +664,34 @@ impl GatewayHostComposition for Driver {
         self.current()?;
         self.installed()?.host_app_routes(viewer)
     }
+    fn stop_admitting(&self, _reason: GatewayHostCloseReason) -> Result<(), GatewayHostError> {
+        // The prepared runtime already owns sources before an installed host
+        // exists. Fence it first, then serialize adoption with the same fence.
+        // Actual close and its watch notification still belong to begin_close.
+        let runtime_result = self.runtime.stop_admitting_work();
+        let mut publication = self
+            .publication
+            .lock()
+            .map_err(|_| GatewayHostError::Unavailable)?;
+        publication.admission_stopped = true;
+        let host_result = match &publication.installed {
+            Some(host) => host.stop_admitting_work(),
+            None => Ok(()),
+        };
+        let result = runtime_result.and(host_result);
+        drop(publication);
+        #[cfg(test)]
+        if result.is_ok()
+            && let Some(probe) = &self.late_adoption
+        {
+            probe.stopped(self)?;
+        }
+        result
+    }
     fn begin_close(&self, reason: GatewayHostCloseReason) -> Result<(), GatewayHostError> {
+        if let Some(resources) = &self.workflow_resources {
+            resources.begin_close();
+        }
         self.runtime.begin_custody_close();
         let host = {
             let mut publication = self
@@ -498,13 +723,50 @@ impl GatewayHostComposition for Driver {
         };
         // Meta calls this after native transport shutdown. A failed host lookup
         // cannot abandon either the selected source task or local guard owner.
-        join_driver_close(
+        let (host_result, source_result, local_result) = join_driver_close(
             toolkit_mobkit::host_gateway::CLOSE_JOIN_BOUND,
             self.runtime.join_custody_close(),
             host_close,
             self.join_local_round(),
         )
-        .await
+        .await;
+        if host_result.is_err() {
+            close_join_refusal("installed_host");
+        }
+        if source_result.is_err() {
+            close_join_refusal("source_custody");
+        }
+        if local_result.is_err() {
+            close_join_refusal("local_round");
+        }
+        // Native transport and the one installed guard owner have now drained.
+        // Join the actual shared Controllers even when another close failed.
+        let shared_result = match &self.workflow_resources {
+            Some(resources) => resources
+                .join_after_native_close(
+                    host_result.is_ok() && source_result.is_ok() && local_result.is_ok(),
+                )
+                .await
+                .map_err(|_| GatewayHostError::Unavailable),
+            None => Ok(()),
+        };
+        if shared_result.is_err() {
+            close_join_refusal("shared_resources");
+        }
+        #[cfg(test)]
+        if let Some(probe) = &self.late_adoption {
+            probe.joined(
+                self,
+                host_result.is_ok()
+                    && source_result.is_ok()
+                    && local_result.is_ok()
+                    && shared_result.is_ok(),
+            )?;
+        }
+        host_result
+            .and(source_result)
+            .and(local_result)
+            .and(shared_result)
     }
     async fn wait_closed(&self) {
         let mut changed = self.closed.subscribe();
@@ -532,18 +794,25 @@ struct RunningPrivate {
 /// in time stays retained for a later join, and the close reports itself
 /// incomplete. The installed host's close is then joined beside the local
 /// round, whatever the recovery returned. Neither join ends the native
-/// custody: the process's close releases it after every join.
+/// custody: the process's close releases it after every join. Each owner's
+/// own result is returned, the installed host's, the recovery's and the
+/// local round's, so the close reports each refusal and joins the shared
+/// resources after them.
 async fn join_driver_close(
     bound: Duration,
     recovery: impl std::future::Future<Output = Result<(), GatewayHostError>>,
     host_close: impl std::future::Future<Output = Result<(), GatewayHostError>>,
     local_round: impl std::future::Future<Output = Result<(), GatewayHostError>>,
-) -> Result<(), GatewayHostError> {
+) -> (
+    Result<(), GatewayHostError>,
+    Result<(), GatewayHostError>,
+    Result<(), GatewayHostError>,
+) {
     let recovery = tokio::time::timeout(bound, recovery)
         .await
         .unwrap_or(Err(GatewayHostError::SettlementIncomplete));
     let (host, local) = tokio::join!(host_close, local_round);
-    host.and(recovery).and(local)
+    (host, recovery, local)
 }
 
 /// The last steps of a Toolkit process's close, shared by the gateway
@@ -586,6 +855,16 @@ impl RunningPrivate {
     }
 }
 
+// Failure-only join phases; never format owner errors or dynamic data.
+// Diagnostic I/O cannot change the original refusal or its cleanup path.
+fn close_join_refusal(stage: &'static str) {
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{{\"event\":\"toolkit_application_close_join_refused\",\"stage\":\"{stage}\"}}"
+    );
+}
+
 // Failure-only local diagnostic. Fixed labels and unit variants contain no owner data.
 // Diagnostic I/O cannot change the original refusal or its cleanup path.
 fn adoption_refusal(stage: &'static str, error: HostLifetimeError) -> HostLifetimeError {
@@ -617,6 +896,12 @@ async fn serve_private(
         error = startup.wait_lost() => return Err(error.to_string()),
         result = &mut completed => result.map_err(|_| "native preparation has no completed bundle")?,
     };
+    #[cfg(test)]
+    if let Some(probe) = &driver.late_adoption {
+        probe
+            .before_selection(&driver)
+            .map_err(|error| error.to_string())?;
+    }
     let startup = tokio::select! { biased;
         _ = driver.closing() => return Err("native preparation closed before final selection".into()),
         result = startup.application_prepared(manifest) => result.map_err(|error| error.to_string())?,
@@ -673,70 +958,90 @@ async fn serve_private(
                             HostLifetimeError::InvalidSelection,
                         )
                     })?;
-                let selected = crate::application_acquisition::read_application_acquisition(
-                    native,
-                    |reference| {
-                        toolkit_mobkit::installed_host::read_bundle_artifact(&selection, reference)
-                    },
-                )
-                .map_err(|error| adoption_refusal("driver.read_acquisition", error))?
-                .ok_or_else(|| {
-                    adoption_refusal(
-                        "driver.selected_acquisition",
-                        HostLifetimeError::InvalidSelection,
-                    )
-                })?;
                 let completed = finish_driver.completed.get().ok_or_else(|| {
                     adoption_refusal(
                         "driver.completed_setup",
                         HostLifetimeError::InvalidSelection,
                     )
                 })?;
-                if !selected
-                    .matches_preparation(&finish_driver.plan.acquisition, completed)
-                    .map_err(|error| adoption_refusal("driver.compare_preparation", error))?
-                {
-                    return Err(adoption_refusal(
-                        "driver.preparation_matches",
-                        HostLifetimeError::InvalidSelection,
-                    ));
+                match &finish_driver.plan.acquisition {
+                    Some(parameters) => {
+                        let selected =
+                            crate::application_acquisition::read_application_acquisition(
+                                native,
+                                |reference| {
+                                    toolkit_mobkit::installed_host::read_bundle_artifact(
+                                        &selection, reference,
+                                    )
+                                },
+                            )?
+                            .ok_or(HostLifetimeError::InvalidSelection)?;
+                        if !selected.matches_preparation(parameters, completed)? {
+                            return Err(HostLifetimeError::InvalidSelection);
+                        }
+                    }
+                    None => {
+                        let selected = crate::application_acquisition::read_application_only(
+                            native,
+                            |reference| {
+                                toolkit_mobkit::installed_host::read_bundle_artifact(
+                                    &selection, reference,
+                                )
+                            },
+                        )?
+                        .ok_or(HostLifetimeError::InvalidSelection)?;
+                        if !selected.matches_preparation(completed)? {
+                            return Err(HostLifetimeError::InvalidSelection);
+                        }
+                    }
                 }
-                let (installed, acquisition) =
-                    crate::application_acquisition::prepare_gateway_acquisition_with_retained(
-                        &selection,
-                        native,
-                        installed,
-                        Some((
-                            finish_driver.runtime.tools(),
-                            finish_driver.runtime.continuation(),
-                        )),
-                    )
-                    .map_err(|error| adoption_refusal("driver.prepare_acquisition", error))?;
-                let acquisition = acquisition.ok_or_else(|| {
-                    adoption_refusal(
-                        "driver.prepared_acquisition",
-                        HostLifetimeError::InvalidSelection,
-                    )
-                })?;
+                let retained = finish_driver.runtime.acquisition();
+                let (installed, acquisition) = match &finish_driver.workflow {
+                    Some(workflow) => {
+                        crate::application_acquisition::prepare_gateway_acquisition_with_workflow(
+                            &selection,
+                            native,
+                            installed,
+                            retained.ok_or(HostLifetimeError::InvalidSelection)?,
+                            workflow.clone(),
+                        )
+                    }
+                    None => {
+                        crate::application_acquisition::prepare_gateway_acquisition_with_retained(
+                            &selection, native, installed, retained,
+                        )
+                    }
+                }
+                .map_err(|error| adoption_refusal("driver.prepare_acquisition", error))?;
+                if acquisition.is_some() != finish_driver.plan.acquisition.is_some() {
+                    return Err(HostLifetimeError::InvalidSelection);
+                }
+                let class_policy = installed.prepared_tool_policy();
                 let host = installed
+                    .with_operation_review_policy(finish_driver.operation_review_policy.clone())
                     .compose_with_prepared_registration(
                         owner.clone(),
                         closed,
                         finish_driver.registration.clone(),
-                        policy,
+                        policy.clone(),
                     )
                     .map_err(|error| adoption_refusal("driver.compose_registration", error))?
                     .with_console_logins(logins)
-                    .map_err(|error| adoption_refusal("driver.compose_console_logins", error))?;
-                let host = acquisition
-                    .compose_prepared_factory(
-                        host,
-                        finish_driver.presenters.as_ref(),
-                        finish_driver.selected_policy.as_ref(),
-                        owner,
-                        service_parent,
-                    )
-                    .map_err(|error| adoption_refusal("driver.compose_acquisition", error))?;
+                    .map_err(|error| adoption_refusal("driver.compose_console_logins", error))?
+                    .with_member_class_policy(class_policy)
+                    .map_err(|error| adoption_refusal("driver.compose_member_classes", error))?;
+                let host = match acquisition {
+                    Some(acquisition) => acquisition
+                        .compose_prepared_factory(
+                            host,
+                            finish_driver.presenters.as_ref(),
+                            finish_driver.selected_policy.as_ref(),
+                            owner,
+                            service_parent,
+                        )
+                        .map_err(|error| adoption_refusal("driver.compose_acquisition", error))?,
+                    None => host,
+                };
                 let host = Arc::new(
                     finish_driver
                         .runtime
@@ -744,6 +1049,41 @@ async fn serve_private(
                         .await
                         .map_err(|error| adoption_refusal("driver.runtime_adopt", error))?,
                 );
+                host.bind_member_class_context(
+                    finish_driver
+                        .member_class_context
+                        .get()
+                        .cloned()
+                        .ok_or(HostLifetimeError::Unavailable)?,
+                )?;
+                if let Some(workflow) = &finish_driver.workflow {
+                    workflow.bind_runtime(
+                        crate::application_acquisition::workflow::ApplicationWorkflowRuntime::new(
+                            host.clone(),
+                            finish_driver
+                                .workflow_resources
+                                .clone()
+                                .ok_or(HostLifetimeError::Unavailable)?,
+                            finish_driver
+                                .presenters
+                                .clone()
+                                .ok_or(HostLifetimeError::Unavailable)?,
+                            finish_driver
+                                .selected_policy
+                                .clone()
+                                .ok_or(HostLifetimeError::Unavailable)?,
+                            finish_driver.runtime.service_tasks(),
+                            finish_driver
+                                .plan
+                                .acquisition
+                                .as_ref()
+                                .ok_or(HostLifetimeError::InvalidSelection)?
+                                .output_audience
+                                .clone(),
+                            finish_driver.plan.application.realm.clone(),
+                        ),
+                    )?;
+                }
                 finish_driver
                     .retain_installed(host.clone())
                     .map_err(|error| adoption_refusal("driver.retain_installed", error))?;
@@ -752,6 +1092,16 @@ async fn serve_private(
         )
         .await
         .map_err(|error| error.to_string())?;
+    private
+        .member_classes()
+        .bind(&host)
+        .map_err(|error| error.to_string())?;
+    if let Some(workflow) = &driver.workflow {
+        private
+            .workflow_children()
+            .bind(workflow.clone())
+            .map_err(|error| error.to_string())?;
+    }
     let service_parent = match private.service_parent_endpoint() {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -785,7 +1135,12 @@ async fn serve_private(
         )),
         (None, Some(reviews)) => {
             drop(local_reviews);
-            if driver.plan.acquisition.console_setup.is_some() {
+            if driver
+                .plan
+                .acquisition
+                .as_ref()
+                .is_some_and(|selected| selected.console_setup.is_some())
+            {
                 tasks.push(tokio::spawn(
                     crate::application_gateway::serve_console_setup(
                         reviews,
@@ -796,7 +1151,16 @@ async fn serve_private(
                 drop(reviews);
             }
         }
-        (_, None) => {
+        (Some(terminal), None) => tasks.push(tokio::spawn(
+            crate::application_gateway::serve_local_operator(
+                host,
+                local_reviews,
+                terminal,
+                driver.plan.deployment_root.clone(),
+                private.closed_observer(),
+            ),
+        )),
+        (None, None) => {
             drop(local_reviews);
         }
     }
@@ -819,10 +1183,75 @@ async fn serve_private(
 /// Actual executable entry for the private PrepareApplication request. The SDK
 /// concurrently runs ordinary init and all live providers on this same child.
 pub async fn run(
-    mut startup: PrivateHostStartup,
+    startup: PrivateHostStartup,
     terminal: Option<InheritedOperatorTerminal>,
     control: Option<ControlListenAddr>,
 ) -> Result<(), String> {
+    run_with_options(
+        startup,
+        terminal,
+        control,
+        ApplicationDriverOptions::default(),
+    )
+    .await
+}
+
+/// Trusted application entry for a real host-selected workflow launch owner.
+/// Serialized setup configuration and ordinary Console input cannot select it.
+/// The same driver still owns bootstrap, Console login, native runtime and
+/// cleanup; the supplied owner only binds its actual workflow invocations.
+pub async fn run_with_workflows(
+    startup: PrivateHostStartup,
+    terminal: Option<InheritedOperatorTerminal>,
+    control: Option<ControlListenAddr>,
+    workflows: Arc<dyn crate::application_acquisition::workflow::ApplicationWorkflowLaunchOwner>,
+) -> Result<(), String> {
+    run_with_options(
+        startup,
+        terminal,
+        control,
+        ApplicationDriverOptions {
+            workflows: Some(workflows),
+            ..ApplicationDriverOptions::default()
+        },
+    )
+    .await
+}
+
+/// Trusted process composition, never application-plan or public RPC data.
+#[derive(Default)]
+pub struct ApplicationDriverOptions {
+    /// Explicit process-owned review floor, applied by the final installed
+    /// policy after ordinary authorization. No plan or Console tier selection.
+    pub operation_review_policy:
+        Option<Arc<dyn toolkit_mobkit::installed_host::InstalledOperationReviewPolicy>>,
+    /// Trusted opt-in issuer/reviewer selection; absent preserves ordinary review.
+    pub operation_review: Option<crate::application_consent::ApplicationOperationReview>,
+    /// Explicit exact predecessor selection; never a fallback from failed successful close.
+    pub abandoned_workflows: Option<crate::application_consent::AbandonedWorkflowRecovery>,
+    pub workflows:
+        Option<Arc<dyn crate::application_acquisition::workflow::ApplicationWorkflowLaunchOwner>>,
+    pub hosted_mcp_redirect_base: Option<meerkat::McpRegisteredRedirectBase>,
+    #[cfg(test)]
+    late_adoption: Option<Arc<late_adoption_tests::Probe>>,
+}
+
+pub async fn run_with_options(
+    mut startup: PrivateHostStartup,
+    terminal: Option<InheritedOperatorTerminal>,
+    control: Option<ControlListenAddr>,
+    options: ApplicationDriverOptions,
+) -> Result<(), String> {
+    let ApplicationDriverOptions {
+        operation_review_policy,
+        workflows,
+        hosted_mcp_redirect_base,
+        operation_review,
+        abandoned_workflows,
+        #[cfg(test)]
+        late_adoption,
+    } = options;
+    let hosted_mcp = hosted_mcp_redirect_base.map(|base| (startup.hosted_mcp_auth(), base));
     let PrivateHostStartupIntent::PrepareApplication(reference) = startup.intent().clone() else {
         return Err("schema4 driver requires its exact preparation request".into());
     };
@@ -830,8 +1259,7 @@ pub async fn run(
     if crate::application_bootstrap::hash(&bytes) != reference.sha256 {
         return Err("preparation input changed".into());
     }
-    let mut plan: ApplicationPreparationPlan =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let mut plan = read_plan(&bytes)?;
     if plan.schema != 1
         || plan.hold_timeout_ms == 0
         || plan.hold_timeout_ms > 900_000
@@ -841,29 +1269,52 @@ pub async fn run(
         return Err("invalid application preparation plan".into());
     }
     plan.owner.validate().map_err(|error| error.to_string())?;
-    plan.acquisition
-        .validate()
-        .map_err(|error| error.to_string())?;
-    if plan.acquisition.standing_policy.is_some()
-        && !plan.application.helper_tools.requires_software_review()
-    {
-        return Err(
-            "standing acquisition policy requires the selected checked setup surface".into(),
-        );
+    if plan.application.helper.is_some() != plan.acquisition.is_some() {
+        return Err("helper and acquisition must be selected together".into());
     }
-    if plan.application.helper_tools.requires_software_review()
-        && terminal.is_none()
-        && plan.acquisition.console_setup.is_none()
-        && plan.acquisition.standing_policy.is_none()
-    {
-        return Err(
-            "checked helper installation requires the selected terminal or Console presenter"
-                .into(),
-        );
+    if let Some(acquisition) = &plan.acquisition {
+        acquisition.validate().map_err(|error| error.to_string())?;
+        if workflows.is_some()
+            && (acquisition.standing_policy.is_none()
+                || (terminal.is_none() && acquisition.console_setup.is_none()))
+        {
+            return Err("shared workflows require an explicit application policy and actual review presenter".into());
+        }
+        let tools = plan
+            .application
+            .helper_tools
+            .ok_or("helper tools are absent")?;
+        if acquisition.standing_policy.is_some() && !tools.requires_software_review() {
+            return Err(
+                "standing acquisition policy requires the selected checked setup surface".into(),
+            );
+        }
+        if tools.requires_software_review()
+            && terminal.is_none()
+            && acquisition.console_setup.is_none()
+            && acquisition.standing_policy.is_none()
+        {
+            return Err(
+                "checked helper installation requires the selected terminal or Console presenter"
+                    .into(),
+            );
+        }
+    } else {
+        plan.authorities
+            .validate_without_helper()
+            .map_err(|error| error.to_string())?;
+        if workflows.is_some() {
+            return Err("shared workflows require a selected setup acquisition".into());
+        }
     }
     if plan.owner.native_host.members != plan.application.members
+        || plan.owner.native_host.member_classes != plan.application.member_classes
         || plan.owner.native_host.realm.as_str() != plan.application.realm.realm_id
-        || (plan.application.helper.controller_parent.is_empty()
+        || (plan
+            .application
+            .helper
+            .as_ref()
+            .is_some_and(|helper| helper.controller_parent.is_empty())
             && !plan
                 .authorities
                 .controllers
@@ -876,6 +1327,12 @@ pub async fn run(
     // Held construction keeps route authority unavailable until actual reports
     // resolve the retained requests and finalization precedes publication.
     let validation = plan.application.clone().validate()?;
+    let workflow_realm = plan
+        .application
+        .realm
+        .resolve()
+        .map_err(|error| error.to_string())?
+        .locator;
     // Open the canonical pair once. It issues no route-dependent authority
     // until the same runtime returns the selected members' actual held reports.
     let mut owner = PreparedInstallationOwner::open(
@@ -884,94 +1341,165 @@ pub async fn run(
         plan.startup.clone(),
     )
     .map_err(|error| error.to_string())?;
+    // Bind before resources or native factories can be created. Reopening a
+    // missing issuer is never an implicit fresh selection, and this exact
+    // owner is retained across Driver, factory and settlement lifetimes.
+    let operation_review = operation_review
+        .map(|selection| selection.bind(&owner))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let bounds = McpAttemptGuardBounds::new(
         Duration::from_secs(60),
         Duration::from_secs(5),
         Duration::from_secs(5),
     )
     .map_err(|error| error.to_string())?;
-    let resources = InstalledResources::locate().map_err(|error| error.to_string())?;
-    let (prepared_resources, mut local_owner) = resources
-        .prepare_with_local_round_owner(validation.storage(), async {
-            let _error = startup.wait_lost().await;
-            Ok(())
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut compilation = match validation.prepare(prepared_resources) {
-        Ok(compilation) => compilation,
-        Err(error) => return Err(local_round::preparation_failed(error, &mut local_owner).await),
-    };
-    // Retain the actual fresh owner before compilation creates shared or weak
-    // resource references. Reopening an installed descriptor cannot replace it.
-    let attempts = match compilation.retain_local_round_owner(local_owner) {
-        Ok(attempts) => attempts,
-        Err(failed) => {
-            let (mut owner, error) = *failed;
-            return Err(local_round::preparation_failed(error, &mut owner).await);
-        }
-    };
-    let guards = McpAttemptGuards::new(attempts.clone(), bounds);
-    let compilation = Arc::new(compilation);
-    let prepared_driver = async {
-        let selected = compilation.project_policy(plan.owner.clone())?;
-        owner.project_helper_member(&plan.application.helper.member, &compilation.helper().member)
+    let (compilation, attempts) = if plan.application.helper.is_some() {
+        let resources = InstalledResources::locate().map_err(|error| error.to_string())?;
+        let (prepared_resources, mut local_owner) = resources
+            .prepare_with_local_round_owner(validation.storage(), async {
+                let _error = startup.wait_lost().await;
+                Ok(())
+            })
+            .await
             .map_err(|error| error.to_string())?;
+        let mut compilation = match validation.prepare(prepared_resources) {
+            Ok(compilation) => compilation,
+            Err(error) => {
+                return Err(local_round::preparation_failed(error, &mut local_owner).await);
+            }
+        };
+        let attempts = match compilation.retain_local_round_owner(local_owner) {
+            Ok(attempts) => attempts,
+            Err(failed) => {
+                let (mut owner, error) = *failed;
+                return Err(local_round::preparation_failed(error, &mut owner).await);
+            }
+        };
+        (compilation, Some(attempts))
+    } else {
+        (validation.prepare_without_helper()?, None)
+    };
+    let compilation = Arc::new(compilation);
+    let workflow_resources = workflows.as_ref().map(|_| {
+        crate::installed_service_review::composer::LiveSharedSetup::new(
+            workflow_realm,
+            compilation.prepared_tool_policy(),
+            compilation.definition().clone(),
+            &plan.application.member_classes,
+        )
+    });
+    let local_round = attempts.map(|attempts| {
+        let factory: Arc<dyn meerkat_mcp::McpAttemptGuardFactory> = match &workflow_resources {
+            Some(resources) => resources.guards(attempts.clone()),
+            None => attempts.clone(),
+        };
+        (attempts, McpAttemptGuards::new(factory, bounds))
+    });
+    let prepared_driver = async {
+        if abandoned_workflows.is_some() && workflow_resources.is_none() {
+            return Err("abandoned recovery requires selected workflow resources".into());
+        }
+        if let Some(resources) = &workflow_resources {
+            let issuer = operation_review.as_ref().map(|review| review.owner()).transpose()
+                .map_err(|error| error.to_string())?;
+            resources.bind_consent_owner(issuer).map_err(|error| error.to_string())?;
+            resources.bind_abandoned_recovery(abandoned_workflows).map_err(|error| error.to_string())?;
+        }
+        let selected = compilation.project_policy(plan.owner.clone())?;
+        if let (Some(previous), Some(compiled)) = (&plan.application.helper, compilation.helper()) {
+            owner.project_helper_member(&previous.member, &compiled.member).map_err(|error| error.to_string())?;
+            plan.authorities = plan.authorities.project_helper_member(&previous.member, &compiled.member);
+        }
         if owner.selected() != &selected { return Err("prepared owner projection changed".into()); }
-        plan.authorities = plan.authorities.project_helper_member(
-            &plan.application.helper.member, &compilation.helper().member);
         plan.owner = selected;
-        let selected_policy = plan.acquisition.standing_policy.map(|selection|
-            crate::application_acquisition::selected_policy::SelectedPolicyBinding::new(selection,
+        let selected_policy = plan.acquisition.as_ref().and_then(|row| row.standing_policy).map(|selection|
+            crate::application_acquisition::selected_policy::SelectedPolicyBinding::new_with_member_classes(selection,
                 plan.owner.native_host.grant_administrator.clone(), plan.owner.deployment.clone(), plan.owner.native_host.realm.clone(),
-                plan.owner.native_host.members.iter().map(|row| row.member.member.clone()).collect()));
+                plan.owner.native_host.members.iter().map(|row| row.member.member.clone()).collect(), plan.owner.native_host.member_classes.clone()));
         let recovery_participant = selected_policy.as_ref().map(|binding| binding.participant()).or_else(||
-            plan.application.helper_tools.requires_software_review().then(||
-                crate::application_acquisition::selected_policy::SelectedPolicyBinding::human_review_participant(
+            (plan.application.helper_tools.is_some_and(|tools| tools.requires_software_review()) || !plan.application.member_classes.is_empty()).then(||
+                crate::application_acquisition::selected_policy::SelectedPolicyBinding::human_review_participant_with_member_classes(
                     plan.owner.native_host.grant_administrator.clone(), plan.owner.deployment.clone(), plan.owner.native_host.realm.clone(),
-                    plan.owner.native_host.members.iter().map(|row| row.member.member.clone()).collect())));
+                    plan.owner.native_host.members.iter().map(|row| row.member.member.clone()).collect(), plan.owner.native_host.member_classes.clone())));
         let prepared = match recovery_participant {
             Some(participant) => owner.prepare_with_application_service_policy(
                 compilation.prepared_tool_policy(), participant).await,
             None => owner.prepare(compilation.prepared_tool_policy()).await,
         }.map_err(|error| error.to_string())?;
         let resources = compilation.clone();
+        let live_resources = workflow_resources.clone();
         let registration = Arc::new(PreparedMemberRegistration::new(compilation.clone(), compilation.registry(),
-            Arc::new(move |identity, destination| resources.selected_destination(identity, destination))));
-        let tools = InstalledAcquisitionTools::new(Duration::from_millis(plan.acquisition.limits.admission_timeout_ms))
-            .map_err(|error| error.to_string())?;
-        let runtime = prepared.gateway_runtime(registration.clone(), tools, plan.acquisition.output_audience.clone())
-            .map_err(|error| error.to_string())?;
-        let mut configuration = prepared.take_configuration().map_err(|error| error.to_string())?;
-        configuration.configured_mcp_attachment = Some(Arc::new(crate::application_setup::resource::SetupResourceProvider::new(
-            compilation.resource_selection(), configuration.configured_mcp_attachment.take(),
-        )));
-        let (presenters, reviews) = if retain_presenter_channel(plan.acquisition.standing_policy.as_ref(),
-            terminal.is_some(), plan.acquisition.console_setup.is_some()) {
-            let (presenters, reviews) = crate::application_gateway::setup_presenter::channel(plan.deployment_root.clone());
-            let presenters = if plan.acquisition.console_setup.is_some() { presenters.with_pending_console() } else { presenters };
-            (Some(presenters), Some(reviews))
-        } else { (None, None) };
-        Ok::<_, String>((registration, runtime, configuration, prepared, presenters, selected_policy, reviews))
-    }.await;
-    let (registration, runtime, configuration, prepared, presenters, selected_policy, reviews) =
-        match prepared_driver {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                // No native factory has received the installation yet. Closing it
-                // recovers this exact unentered owner after any preparation refusal.
-                let mut cleanup = LocalRoundCleanup::default();
-                let joined = cleanup.join_until_settled(&attempts, &guards).await;
-                return Err(match joined {
-                    Ok(()) => error,
-                    Err(_) => format!("{error}; local preparation cleanup remains unavailable"),
-                });
+            Arc::new(move |identity, destination| {
+                resources.selected_destination(identity, destination)?;
+                if let Some(live) = &live_resources { live.selected_destination(identity, destination)?; }
+                Ok(())
+            })));
+        let runtime = match &plan.acquisition {
+            Some(acquisition) => {
+                let tools = InstalledAcquisitionTools::new(Duration::from_millis(acquisition.limits.admission_timeout_ms))
+                    .map_err(|error| error.to_string())?;
+                prepared.gateway_runtime(registration.clone(), tools, acquisition.output_audience.clone())
+                    .map_err(|error| error.to_string())?
             }
+            None => prepared.gateway_runtime_without_acquisition(registration.clone()),
         };
+        let workflow = match workflows {
+            Some(launch) => Some(Arc::new(crate::application_acquisition::workflow::ApplicationWorkflowCommissioner::new(
+                launch, prepared.originals(), runtime.acquisition().ok_or("workflow acquisition absent")?.1))),
+            None => None,
+        };
+        let mut configuration = prepared.take_configuration().map_err(|error| error.to_string())?;
+        if let Some(resource) = compilation.resource_selection() {
+            configuration.configured_mcp_attachment = Some(Arc::new(crate::application_setup::resource::SetupResourceProvider::new(
+                resource, configuration.configured_mcp_attachment.take(),
+            )));
+        }
+        if let Some(resources) = &workflow_resources {
+            configuration.configured_mcp_attachment = Some(resources.configured(configuration.configured_mcp_attachment.take()));
+        }
+        let (presenters, reviews) = match &plan.acquisition {
+            Some(acquisition) if retain_presenter_channel(acquisition.standing_policy.as_ref(),
+                terminal.is_some(), acquisition.console_setup.is_some()) => {
+                let (presenters, reviews) = crate::application_gateway::setup_presenter::channel(plan.deployment_root.clone());
+                let presenters = if acquisition.console_setup.is_some() { presenters.with_pending_console() } else { presenters };
+                (Some(presenters), Some(reviews))
+            }
+            _ => (None, None),
+        };
+        Ok::<_, String>((registration, runtime, configuration, prepared, presenters, selected_policy, reviews, workflow))
+    }.await;
+    let (
+        registration,
+        runtime,
+        configuration,
+        prepared,
+        presenters,
+        selected_policy,
+        reviews,
+        workflow,
+    ) = match prepared_driver {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // No native factory has received the installation yet. Closing it
+            // recovers this exact unentered owner after any preparation refusal.
+            let mut cleanup = LocalRoundCleanup::default();
+            let joined = match &local_round {
+                Some((attempts, guards)) => cleanup.join_until_settled(attempts, guards).await,
+                None => Ok(()),
+            };
+            return Err(match joined {
+                Ok(()) => error,
+                Err(_) => format!("{error}; local preparation cleanup remains unavailable"),
+            });
+        }
+    };
     let (deliver, completed) = oneshot::channel();
     let (adopted, receive) = oneshot::channel();
     let (closed, _) = watch::channel(false);
     let driver = Arc::new(Driver {
+        operation_review_policy,
+        operation_review,
         plan,
         plan_reference: reference,
         plan_bytes: bytes,
@@ -984,6 +1512,7 @@ pub async fn run(
         selected_policy,
         publication: Mutex::new(Publication {
             closed: false,
+            admission_stopped: false,
             installed: None,
         }),
         closed,
@@ -991,9 +1520,14 @@ pub async fn run(
         completed: OnceLock::new(),
         deliver: Mutex::new(Some(deliver)),
         adopted: Mutex::new(Some(receive)),
-        attempt_guards: guards,
-        local_round_attempts: attempts,
+        local_round,
         local_round_cleanup: tokio::sync::Mutex::new(LocalRoundCleanup::default()),
+        member_class_context: OnceLock::new(),
+        workflow,
+        workflow_resources,
+        hosted_mcp,
+        #[cfg(test)]
+        late_adoption,
     });
     let actor_driver = driver.clone();
     let actor = tokio::spawn(async move {
@@ -1094,7 +1628,7 @@ mod close_order_tests {
             "the installed host's join waits for the recovery"
         );
         release.send(()).unwrap();
-        assert_eq!(closing.await.unwrap(), Ok(()));
+        assert_eq!(closing.await.unwrap(), (Ok(()), Ok(()), Ok(())));
         assert!(host_started.load(Ordering::SeqCst));
     }
 
@@ -1118,7 +1652,10 @@ mod close_order_tests {
         )
         .await;
         assert!(
-            matches!(closed, Ok(Err(GatewayHostError::SettlementIncomplete))),
+            matches!(
+                closed,
+                Ok((Ok(()), Err(GatewayHostError::SettlementIncomplete), Ok(())))
+            ),
             "the recovery join is bounded and the close reports itself incomplete"
         );
         assert!(
@@ -1220,3 +1757,8 @@ mod standing_presentation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod helperless_tests;
+#[cfg(test)]
+mod late_adoption_tests;

@@ -46,7 +46,9 @@ impl ObservedBridge {
         }
         let helper_control = matches!(
             self.fault.mode,
-            DeliveryMode::HoldHelperBeforeLookup | DeliveryMode::HoldHelperAcceptedReply
+            DeliveryMode::HoldHelperBeforeBind
+                | DeliveryMode::HoldHelperBeforeLookup
+                | DeliveryMode::HoldHelperAcceptedReply
         );
         if helper_control {
             if self.fault.helper_session.get() != Some(session_id) {
@@ -86,13 +88,16 @@ impl ObservedBridge {
         let accepted = self.fault.accepted.fetch_add(1, Ordering::SeqCst) + 1;
         match self.fault.mode {
             DeliveryMode::Normal
+            | DeliveryMode::HoldHelperBeforeBind
             | DeliveryMode::HoldHelperBeforeLookup
             | DeliveryMode::RefuseSecondBeforeLookup
             | DeliveryMode::HelperPolicyChangesOnce
             | DeliveryMode::HelperPolicyChangesAlways
             | DeliveryMode::HelperPolicyChangesThenUnresolved
             | DeliveryMode::HelperPolicyChangesThenRetirement
-            | DeliveryMode::HelperPolicyChangesThenDeadline => {}
+            | DeliveryMode::HelperPolicyChangesThenDeadline
+            | DeliveryMode::HelperPolicyChangeHeld(_)
+            | DeliveryMode::HelperPolicyChangesHeld(..) => {}
             DeliveryMode::HoldAccepted | DeliveryMode::HoldHelperAcceptedReply => {
                 // Native admission is real and its reply is retained unchanged.
                 // IdentityRuntime owns the entry permit and finishes it only
@@ -151,30 +156,39 @@ impl ObservedBridge {
         if ordinal == 1 {
             *self.fault.helper_input.lock().unwrap() = Some(input.id().clone());
         }
-        let _change_arm =
-            if ordinal == 1 || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways) {
-                let association = input
-                    .header()
-                    .authority_association
-                    .as_ref()
-                    .expect("actual bound helper association")
-                    .clone();
-                assert_eq!(
-                    association.candidate().target.context.as_str(),
-                    session_id.to_string()
-                );
-                assert!(
-                    self.fault
-                        .helper_admission_change
-                        .lock()
-                        .unwrap()
-                        .replace((association, NATIVE_CONTROLLER_ADMISSION_READS))
-                        .is_none()
-                );
-                Some(AdmissionChangeArm(self.fault.clone()))
+        let _change_arm = if ordinal == 1
+            || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways)
+            || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesHeld(count, _) if ordinal <= count)
+        {
+            let association = input
+                .header()
+                .authority_association
+                .as_ref()
+                .expect("actual bound helper association")
+                .clone();
+            assert_eq!(
+                association.candidate().target.context.as_str(),
+                session_id.to_string()
+            );
+            // A change held in progress is met by native's one read; it
+            // makes no in-place re-read while a change is in progress.
+            let reads = if self.fault.mode.held_change().is_some() {
+                1
             } else {
-                None
+                NATIVE_CONTROLLER_ADMISSION_READS
             };
+            assert!(
+                self.fault
+                    .helper_admission_change
+                    .lock()
+                    .unwrap()
+                    .replace((association, reads))
+                    .is_none()
+            );
+            Some(AdmissionChangeArm(self.fault.clone()))
+        } else {
+            None
+        };
         let real = self
             .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
             .await;
@@ -300,9 +314,11 @@ const NATIVE_CONTROLLER_ADMISSION_READS: usize = 2;
 
 /// Forward the real policy unchanged, then invalidate its enclosing native
 /// admission observation, and the one in-place re-read of it too, so that
-/// the admission meets back-to-back changes. The earlier source/grant
-/// lookups remain unblocked. Native detects the changed stamp and produces
-/// the actual typed refusal.
+/// the admission meets back-to-back changes. The helper wait controls'
+/// HelperPolicyChangeHeld instead holds one real owner change in progress
+/// across that observation. The earlier source/grant lookups remain
+/// unblocked. Native detects the changed stamp and produces the actual typed
+/// refusal.
 pub(super) struct AdmissionChangingOwner {
     pub inner: Arc<dyn OperationPolicyOwner>,
     pub fault: Arc<DeliveryFault>,
@@ -331,7 +347,29 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
                 _ => false,
             }
         };
-        if selected {
+        if selected && let Some(hold) = self.fault.mode.held_change() {
+            // No semantic policy fact is changed either: a real owner change
+            // begins after the genuine policy read and stays in progress, on
+            // its own thread, through Core's enclosing currentness check, for
+            // the mode's hold or until the control ends it. No lock or writer
+            // crosses an await.
+            let publication = self.publication.clone();
+            let (began, beginning) = std::sync::mpsc::channel();
+            let (end, ending) = std::sync::mpsc::channel::<()>();
+            let held = std::thread::spawn(move || {
+                let change = publication.try_begin_owner_change();
+                let _ = began.send(change.is_ok());
+                let _ = ending.recv_timeout(hold);
+                drop(change);
+            });
+            let counter = if beginning.recv().unwrap_or(false) {
+                &self.fault.publication_changes
+            } else {
+                &self.fault.publication_change_failures
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            self.fault.held_changes.lock().unwrap().push((end, held));
+        } else if selected {
             // No semantic policy fact is changed. This bounded fault advances
             // the actual stamp after its genuine policy read, before Core's
             // enclosing currentness check. No lock or writer crosses an await.
@@ -479,6 +517,13 @@ impl SessionBridge for ObservedBridge {
         self.inner.member_durability(session_id).await
     }
 
+    async fn member_registration(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<meerkat_runtime::RuntimeSessionRegistrationWitness> {
+        self.inner.member_registration(session_id).await
+    }
+
     async fn raw_member_alias_exists(&self, alias: &str) -> Result<bool, BridgeError> {
         self.inner.raw_member_alias_exists(alias).await
     }
@@ -531,12 +576,18 @@ impl SessionBridge for ObservedBridge {
         identity: &AgentIdentity,
         spec: &DurableAgentSpec,
         draft: &AgentBuildDraft,
-    ) -> Result<SessionId, BridgeError> {
+    ) -> Result<meerkat_core::types::SessionId, BridgeError> {
         self.inner.rotate_member(identity, spec, draft).await
     }
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         self.inner.release_member(identity).await
+    }
+
+    async fn broken_members(
+        &self,
+    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
+        self.inner.broken_members().await
     }
 
     async fn capture_queued_member_inputs(
@@ -740,7 +791,27 @@ impl SessionBridge for ObservedBridge {
         runtime_id: &AgentRuntimeId,
         session_id: &meerkat_core::types::SessionId,
     ) -> Result<meerkat_core::ControllerModelClient, BridgeAdmissionError> {
-        self.inner.governed_controller(runtime_id, session_id).await
+        let controller = self
+            .inner
+            .governed_controller(runtime_id, session_id)
+            .await?;
+        if matches!(self.fault.mode, DeliveryMode::HoldHelperBeforeBind)
+            && self.fault.helper_session.get() == Some(session_id)
+        {
+            let lookup = self
+                .fault
+                .helper_controller_lookups
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            // complete() and advance() each prepare the real helper controller.
+            // The third lookup belongs to the already retained SubmitHelperBinder;
+            // Meta calls bind only after this unchanged controller is returned.
+            if lookup == 3 {
+                self.fault.entered.notify_one();
+                self.fault.release.acquire().await.unwrap().forget();
+            }
+        }
+        Ok(controller)
     }
 
     async fn begin_delivery_with_output(

@@ -4,7 +4,7 @@ description: "Call service operations and embed native setup in a Python applica
 icon: "python"
 ---
 
-The distribution is `meerkat-toolkit` version `0.9.0`, requiring Python 3.11
+The distribution is `meerkat-toolkit` version `0.9.10`, requiring Python 3.11
 or newer. Import concrete `meerkat_toolkit` submodules; the root package exports
 no operation classes.
 
@@ -15,17 +15,17 @@ Install the release wheel with the optional service profile you need:
 ```sh
 python3 -m venv .venv-toolkit
 .venv-toolkit/bin/python -m pip install \
-  'meerkat-toolkit[slack] @ https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0/meerkat_toolkit-0.9.0-py3-none-any.whl'
+  'meerkat-toolkit[slack] @ https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10/meerkat_toolkit-0.9.10-py3-none-any.whl'
 ```
 
-For source development, use `.venv-toolkit/bin/python -m pip install './sdk/python[slack]'` from the checkout root.
+For source development, use `.venv-toolkit/bin/python -m pip install './connect/sdk/python[slack]'` from the repository root.
 
 | Extra | Purpose |
 | --- | --- |
 | `home-assistant`, `gmail`, `google-calendar`, `google-drive`, `slack` | Selected HTTPX/AnyIO service operations |
 | `paired-host-live` | Live image input for a paired host |
 | `telegram` | Telegram provider normalization dependency |
-| `native-host` | Application composition with `meerkat-meta==0.9.0`; requires the matching SDK and Connect gateway |
+| `native-host` | Application composition with `meerkat-meta==0.9.10`; requires the matching SDK and Connect gateway |
 
 Service extras currently require HTTPX `>=0.28.1,<0.29` and AnyIO `>=4.13,<5`. The stdlib-only Gmail formatting and base Telegram wire transport do not require those extras.
 
@@ -37,7 +37,12 @@ The native classes use `meerkat_meta.runtime.MetaRuntime` configuration, callbac
 | --- | --- |
 | Original-owner Restore | `host_control.ToolkitMobKitRuntime(config, selection)` |
 | Fresh application | `application_runtime.ToolkitApplicationRuntime(config, preparation, finalize)` |
-| Admitted replacement | `application_update.ToolkitApplicationUpdateRuntime(config, startup)` |
+| Admitted replacement (development only) | `application_update.ToolkitApplicationUpdateRuntime(config, startup)` |
+
+Connect 0.9.10 does not support in-place updates that change an application's
+tool policy, definition, instructions or runtime.
+Replacement requires a matching development SDK and gateway; see the
+[release limits](/availability).
 
 Import these modules under `meerkat_toolkit`. The selected input types
 `HostBootstrapSelection`, `ApplicationPreparation`, `ApplicationUpdateStartup`
@@ -68,6 +73,128 @@ startup can retain the same capability as `gateway_cleanup` on the original
 exception. Retain the startup outcome separately from the cleanup result.
 
 See [host composition](/guides/host-composition#native-application-lifecycle) for startup, reconnect and lifecycle management.
+
+## Retain member MCP bindings
+
+<Note>
+This optional API is development functionality. Use a matching Connect SDK and
+gateway built with member-MCP support; the release installation above does not
+provide it. Native end-to-end qualification remains pending.
+</Note>
+
+Applications declaring member classes require an existing gateway-composed
+build customizer at fresh or restored startup. Explicitly configuring MobKit's
+`agent_customizer` is a straightforward supported setup; a pass-through is enough
+when the application needs no custom behavior. An existing memory customizer
+also satisfies this presence check, without requiring an SDK callback. This is
+not a reason to enable memory or proof that every callback works. Connect
+composes its selected member-class factory around the existing customizer
+without adding grants. Applications without member classes may omit it.
+See [declaring member classes](/guides/host-composition#declare-member-classes-unreleased)
+for the compiler inputs, factory identity and policy lifecycle.
+
+The selected development native API now reports `AgentCustomizerRequired`
+before bootstrap, with an actionable instruction to configure an SDK agent
+customizer; a pass-through is enough. This requirement is conditional on declared
+member classes. The supplied ordinary Add and same-session rebuild check has
+passed with actual `customize_build` and `after_create` callbacks; it does not
+qualify member MCP account access, cold restore or shared-helper reconstruction.
+
+`MemberMcpApplication` connects native member admission to the application's
+existing private admission row. It adds no store or roster owner. Construct it
+on the application's running event loop after loading that store and before
+native startup: cold registration may request a lookup before the application's
+normal start hook runs.
+
+This example adapts application-owned JSON callbacks. `retain_row` and
+`lookup_row` are your existing row transactions, not SDK storage methods:
+
+```python
+from meerkat_toolkit.host_control import ToolkitMobKitRuntime
+from meerkat_toolkit.member_classes import (
+    MemberMcpAdmissionSelection,
+    MemberMcpApplication,
+    RetainedMemberMcpBindings,
+)
+
+
+async def compose_runtime(config, selection, retain_row, lookup_row):
+    async def retain(value: RetainedMemberMcpBindings) -> None:
+        await retain_row(value.wire())
+
+    async def lookup(
+        selection: MemberMcpAdmissionSelection,
+    ) -> RetainedMemberMcpBindings:
+        return RetainedMemberMcpBindings.from_wire(
+            await lookup_row(selection.wire())
+        )
+
+    participant = MemberMcpApplication(retain, lookup)
+    runtime = ToolkitMobKitRuntime(config, selection, member_mcp=participant)
+    return runtime, participant
+```
+
+The same optional `member_mcp=participant` keyword is accepted by
+`ToolkitApplicationRuntime(config, preparation, finalize)` and
+`ToolkitApplicationUpdateRuntime(config, startup)`. A later process Restore
+constructs a new participant over the same durable rows after the previous
+runtime has joined shutdown; it cannot reopen the closed participant.
+
+Development source also supports [applications without an initial setup helper](/guides/host-composition#applications-without-a-setup-helper-unreleased).
+Its zero-member startup, later Add and process-Restore verifier is source-reviewed
+but has not established native execution. The required class customizer still
+applies with an empty initial roster.
+
+Development source adds an explicit **observed requirement** contract for
+remote Python owners. Pass `observed_requirement=callback` to
+`MemberMcpApplication`; the async callback receives the exact admission selection
+and `PrivateSourceEvidence`, and returns `ObservedMemberMcpRequirement` from the
+actual nonvoided application row, or `None` when no accepted requirement exists.
+`None` is a normal negative observation: setup is refused, but this answer alone
+does not make `participant.join()` report a callback failure.
+The value carries the full source evidence and ordered service intents. The
+participant's `requirement_contract` reports `"observed_requirement"` when this
+callback is configured. Select that source in `MemberMcpAddIntent.origin` as
+`{"accepted_application_requirement": {"source": source_fields}}`.
+
+This is observation around setup issuance, not a synchronous current-owner
+promise. Connect reads the requirement before and after issue; drift withholds
+the binding and revokes its exact grant. Failed revocation remains retained and
+is retried at the next native startup before member registration. Protected human
+approval and native grant checks still apply. In-process Rust owners retain their
+strict synchronous predicate. The existing `operator_self` path and its wire
+values are unchanged. Native validation remains pending; this does not qualify
+installed Forge setup, MCP account access or approval reuse across members.
+
+The exact selection contains `admission_id` (the original Add request ID),
+`identity` and `class`; the Python field for `class` is `class_id`. Retention must
+conditionally update that same nonvoided, admitting row with the complete
+`bindings` list and return only after durable commit. An exact replay may
+succeed; changed identity, class or bindings must refuse. Lookup must return
+that exact retained selection from an admitting or listed row. An explicitly
+retained empty list means no bindings; a missing, voided, retired or unreadable
+ordinary row must raise, never become an empty list. For observed requirements,
+`RetainedMemberMcpBindings.accepted_requirement` retains the full association
+alongside all pending binding locators **before any grant is issued**. The retain
+transaction must compare that complete source and ordered intent with the same
+nonvoided row. Preserve this retained association after void or retirement for
+cleanup; it grants no authority. The application still owns final publication in
+its existing Add completion callback and must compare its row before publishing.
+
+Connect acknowledges native continuation only after the callback succeeds.
+A lost acknowledgement or callback error does not prove the application write
+rolled back. Neither callback publishes a member or grants access. Binding
+references stay in the private admission row and must not appear in public
+rosters or model-facing inputs.
+
+During shutdown, explicitly await `participant.join()` to settlement **before
+closing application storage**. It closes callback entry and joins entered
+writes. If the shutdown caller is cancelled, keep the store open while the
+host's existing cleanup owner finishes that join. Preserve any reported
+uncertainty while completing cleanup. Later `runtime.shutdown()` repeats the
+same idempotent join, including its retained failure; it does not cancel an
+entered application write. See the
+[host lifecycle ordering](/guides/host-composition#member-mcp-application-storage).
 
 ## Supply the MCP browser callback
 

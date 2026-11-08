@@ -3,7 +3,7 @@ use super::wire::MAX_FRAME;
 use std::{
     fs::File,
     io::{self, Read, Write},
-    os::fd::AsFd,
+    os::fd::{AsFd, OwnedFd},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -15,17 +15,60 @@ impl Pipe {
         // Duplicate only the inherited child endpoint. No global stdin reader or
         // blocking thread remains alive after an explicit close with stdin open.
         let duplicate = nix::unistd::dup(fd.as_fd()).map_err(io::Error::from)?;
-        let flags = nix::fcntl::fcntl(duplicate.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
+        Self::owned(duplicate)
+    }
+
+    pub fn owned(fd: OwnedFd) -> io::Result<Self> {
+        // Adopt this exact endpoint, with no second descriptor left outside
+        // invocation custody. On every error the owned descriptor is dropped.
+        let descriptor_flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFD)
             .map_err(io::Error::from)?;
         nix::fcntl::fcntl(
-            duplicate.as_fd(),
+            fd.as_fd(),
+            nix::fcntl::FcntlArg::F_SETFD(
+                nix::fcntl::FdFlag::from_bits_truncate(descriptor_flags)
+                    | nix::fcntl::FdFlag::FD_CLOEXEC,
+            ),
+        )
+        .map_err(io::Error::from)?;
+        let flags = nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)
+            .map_err(io::Error::from)?;
+        nix::fcntl::fcntl(
+            fd.as_fd(),
             nix::fcntl::FcntlArg::F_SETFL(
                 nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK,
             ),
         )
         .map_err(io::Error::from)?;
-        let file = File::from(duplicate);
+        let file = File::from(fd);
         Ok(Self(crate::owned_fd::register(file)?))
+    }
+
+    pub fn owned_pair(input: OwnedFd, output: OwnedFd) -> io::Result<(Self, Self)> {
+        fn require_fifo(fd: &OwnedFd, access: nix::fcntl::OFlag) -> io::Result<()> {
+            let stat = nix::sys::stat::fstat(fd).map_err(io::Error::from)?;
+            let flags =
+                nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL).map_err(io::Error::from)?;
+            if nix::sys::stat::SFlag::from_bits_truncate(stat.st_mode)
+                & nix::sys::stat::SFlag::S_IFMT
+                != nix::sys::stat::SFlag::S_IFIFO
+                || nix::fcntl::OFlag::from_bits_truncate(flags) & nix::fcntl::OFlag::O_ACCMODE
+                    != access
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "owned transport requires a read-only input FIFO and write-only output FIFO",
+                ));
+            }
+            Ok(())
+        }
+        // Validate both original endpoints before registration or flag changes.
+        // Inherited stdio intentionally keeps its existing wider descriptor API.
+        require_fifo(&input, nix::fcntl::OFlag::O_RDONLY)?;
+        require_fifo(&output, nix::fcntl::OFlag::O_WRONLY)?;
+        let input = Self::owned(input)?;
+        let output = Self::owned(output)?;
+        Ok((input, output))
     }
 }
 impl AsyncRead for Pipe {
@@ -158,3 +201,7 @@ impl Write for BoundedFrame {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "stdio_owned_pipe_tests.rs"]
+mod owned_pipe_tests;

@@ -80,7 +80,21 @@ mod readback_process;
 #[cfg(all(unix, feature = "console"))]
 pub use local_round::LocalRoundAttempts;
 #[cfg(unix)]
+pub(crate) use local_round::private_attempt::PrivateLocalRoundAttempts;
+#[cfg(unix)]
 pub use local_round::{LocalRoundGuard, LocalRoundOwner, OwnedLocalRoundGuard};
+#[cfg(unix)]
+mod shared_setup;
+// The SDK parent's private-host pipes, for other native test fixtures.
+#[cfg(all(unix, test, feature = "console"))]
+pub(crate) use shared_setup::sdk_host;
+#[cfg(all(unix, feature = "console"))]
+pub use shared_setup::{AbandonedPhysicalDisposition, SharedSetupAttemptReport};
+#[cfg(unix)]
+pub use shared_setup::{
+    ColdPhysicalNoEntry, PhysicalSelection, PreparedSharedConnection, PreparedSharedSetup,
+    SharedSetupCallContext, SharedSetupOwner, SharedSetupPeer,
+};
 
 #[cfg(not(unix))]
 impl InstalledResources {
@@ -107,10 +121,19 @@ struct Manifest {
     python: String,
     node: String,
     npm_cli: String,
+    // Pinned selection is interpreted by the selected Python preparer.
+    #[serde(
+        default,
+        rename = "families",
+        deserialize_with = "selected_string_present"
+    )]
+    _families: Option<String>,
     #[serde(default, deserialize_with = "npm_resources_present")]
     npm_acquisition: Option<NpmResources>,
     starter: String,
     archive: String,
+    #[serde(default, deserialize_with = "selected_string_present")]
+    library_release: Option<String>,
     entries: Vec<Entry>,
     sources: Vec<Source>,
 }
@@ -123,6 +146,14 @@ struct NpmResources {
     npm_archive: String,
 }
 
+fn selected_string_present<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Only omission requests defaults; explicit null is not a selection.
+    String::deserialize(deserializer).map(Some)
+}
+
 fn npm_resources_present<'de, D>(deserializer: D) -> Result<Option<NpmResources>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -133,6 +164,8 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(feature = "console")]
+    mod shared_preparation_startup;
 
     use super::*;
     use serde_json::{Value, json};
@@ -220,6 +253,122 @@ mod tests {
         )
         .unwrap();
         assert!(fixture.verify(&pin).is_err());
+    }
+
+    #[test]
+    fn optional_family_selection_is_pinned_and_only_omission_uses_defaults() {
+        let fixture = Fixture::new();
+        let old_pin = fixture.pin(fixture.manifest());
+        assert!(fixture.verify(&old_pin).is_ok());
+        let mut manifest = fixture.manifest();
+        manifest["families"] = json!("agno,services,activepieces,official-github");
+        let selected_pin = fixture.pin(manifest.clone());
+        assert!(fixture.verify(&selected_pin).is_ok());
+        assert!(fixture.verify(&old_pin).is_err());
+        for malformed in [Value::Null, json!(true), json!(["official-github"])] {
+            manifest["families"] = malformed;
+            assert!(fixture.verify(&fixture.pin(manifest.clone())).is_err());
+        }
+    }
+
+    #[test]
+    fn immutable_library_selection_is_explicit_archive_derived_and_hash_bound() {
+        let fixture = Fixture::new();
+        let legacy = fixture.pin(fixture.manifest());
+        assert!(fixture.verify(&legacy).is_ok());
+        let release = fixture.root.join("library/library");
+        fs::create_dir_all(&release).unwrap();
+        let payload = release.join("tool");
+        fs::write(&payload, "inert selected release").unwrap();
+        fs::set_permissions(&payload, fs::Permissions::from_mode(0o555)).unwrap();
+        for directory in [release.as_path(), release.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let mut manifest = fixture.manifest();
+        manifest["library_release"] = json!("library/library");
+        let selected = fixture.pin(manifest.clone());
+        assert!(fixture.verify(&selected).is_ok());
+        assert!(fixture.verify(&legacy).is_err());
+        for invalid in [
+            Value::Null,
+            json!(true),
+            json!([]),
+            json!(""),
+            json!("library/other"),
+            json!("../library/library"),
+            json!("/library/library"),
+            json!("library/library/"),
+        ] {
+            manifest["library_release"] = invalid;
+            assert!(fixture.verify(&fixture.pin(manifest.clone())).is_err());
+        }
+        manifest["library_release"] = json!("library/library");
+        let pin = fixture.pin(manifest);
+        fs::set_permissions(&payload, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&payload, "changed selected tree").unwrap();
+        fs::set_permissions(&payload, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(fixture.verify(&pin).is_err());
+        for directory in [release.as_path(), release.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn immutable_library_refuses_writable_or_linked_members_even_if_manifest_matches() {
+        let fixture = Fixture::new();
+        let release = fixture.root.join("library/library");
+        fs::create_dir_all(&release).unwrap();
+        let payload = release.join("tool");
+        fs::write(&payload, "inert selected release").unwrap();
+        let select = || {
+            let mut manifest = fixture.manifest();
+            manifest["library_release"] = json!("library/library");
+            fixture.pin(manifest)
+        };
+        for directory in [release.as_path(), release.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        for writable in [0o644, 0o755, 0o666] {
+            fs::set_permissions(&payload, fs::Permissions::from_mode(writable)).unwrap();
+            assert!(fixture.verify(&select()).is_err());
+        }
+        fs::set_permissions(&payload, fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(fixture.verify(&select()).is_ok());
+        for directory in [release.as_path(), release.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(fixture.verify(&select()).is_err());
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        fs::set_permissions(&release, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_file(&payload).unwrap();
+        symlink("../../prepare.py", &payload).unwrap();
+        fs::set_permissions(&release, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(fixture.verify(&select()).is_err());
+        for directory in [release.as_path(), release.parent().unwrap()] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn installed_closure_rejects_same_length_tampering_across_hash_chunks() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join("runtime/python/bin/python3.11");
+        let mut bytes = vec![0x5a; 64 * 1024 + 17];
+        fs::write(&path, &bytes).unwrap();
+        let pin = fixture.pin(fixture.manifest());
+        assert!(fixture.verify(&pin).is_ok());
+
+        // Keep the manifest, size and mode unchanged. The entire content must
+        // still be checked, including the final partial streaming chunk.
+        for offset in [0, 64 * 1024 - 1, 64 * 1024, bytes.len() - 1] {
+            bytes[offset] ^= 1;
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+            assert!(fixture.verify(&pin).is_err(), "changed byte at {offset}");
+            bytes[offset] ^= 1;
+        }
+        fs::write(&path, &bytes).unwrap();
+        assert!(fixture.verify(&pin).is_ok());
     }
 
     #[test]
@@ -571,6 +720,27 @@ fn inventory(root: &Path) -> Result<BTreeSet<String>, ConnectError> {
 }
 
 impl InstalledResources {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn locate_protected(
+        executable: &Path,
+        root: &Path,
+        expected: &[u8; 32],
+    ) -> Result<Self, ConnectError> {
+        let pin = option_env!("MEERKAT_CONNECT_RESOURCES_SHA256").ok_or_else(invalid)?;
+        let selected = expected
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if selected != pin || std::env::current_exe().map_err(|_| invalid())? != executable {
+            return Err(invalid());
+        }
+        let installed = Self::from_executable(executable, pin)?;
+        if installed.root != root {
+            return Err(invalid());
+        }
+        Ok(installed)
+    }
+
     pub fn locate() -> Result<Self, ConnectError> {
         let pin = option_env!("MEERKAT_CONNECT_RESOURCES_SHA256").ok_or_else(invalid)?;
         let executable = std::env::current_exe().map_err(|_| invalid())?;
@@ -709,6 +879,40 @@ impl InstalledResources {
                     {
                         return Err(invalid());
                     }
+                }
+            }
+        }
+        if let Some(release) = &manifest.library_release {
+            let archive_name = Path::new(&manifest.archive)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(invalid)?;
+            let stem = archive_name.strip_suffix(".tar.gz").ok_or_else(invalid)?;
+            if release != &format!("library/{stem}")
+                || !matches!(
+                    expected.get("library"),
+                    Some(Entry::Directory { mode: 0o555, .. })
+                )
+                || !matches!(
+                    expected.get(release),
+                    Some(Entry::Directory { mode: 0o555, .. })
+                )
+            {
+                return Err(invalid());
+            }
+            let prefix = format!("{release}/");
+            for (name, entry) in &expected {
+                if name.starts_with(&prefix)
+                    && !matches!(
+                        entry,
+                        Entry::Directory { mode: 0o555, .. }
+                            | Entry::File {
+                                mode: 0o444 | 0o555,
+                                ..
+                            }
+                    )
+                {
+                    return Err(invalid());
                 }
             }
         }

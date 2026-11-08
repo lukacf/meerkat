@@ -70,6 +70,9 @@ impl ApplicationUpdateSelection {
             serde_json::from_slice(&read_pin(&self.compilation_input)?)
                 .map_err(|error| error.to_string())?;
         let compilation = input.validate()?;
+        if compilation.input.helper.is_none() {
+            return Err("helperless application update is not supported".into());
+        }
         let policy_bytes = read_pin(&self.application_tool_policy)?;
         if policy_bytes != compilation.policy_bytes {
             return Err("selected update policy differs from its exact compiler input".into());
@@ -123,7 +126,8 @@ impl ApplicationUpdateSelection {
             toolkit_package::canonical_json(value).map_err(|error| error.to_string())
         };
         if encode(&input.realm)? != encode(&prepared.realm)?
-            || input.helper.member != prepared.source_helper_member
+            || Some(&input.helper.as_ref().ok_or("update helper absent")?.member)
+                != prepared.source_helper_member.as_ref()
             || input.helper_profile != prepared.helper_profile
             || toolkit_package::canonical_json(&input.helper_tools)
                 .map_err(|error| error.to_string())?
@@ -135,14 +139,16 @@ impl ApplicationUpdateSelection {
         // Reuse the exact retained preparer result. No new resource owner or
         // policy registry is constructed, and absent grants are never filled.
         let projection = prepared.helper_projection()?;
-        let mut helper = input.helper.clone();
+        let mut helper = input.helper.clone().ok_or("update helper absent")?;
         helper.member = projection.member().clone();
-        if helper != prepared.helper {
+        if Some(&helper) != prepared.helper.as_ref() {
             return Err("update changes the original helper authority or request selection".into());
         }
         let mut members = input.members.clone();
-        members[compilation.helper_index].member = projection.member().clone();
+        members[compilation.helper_index.ok_or("update helper absent")?].member =
+            projection.member().clone();
         if members.len() != owner.native_host.members.len()
+            || input.member_classes != owner.native_host.member_classes
             || members
                 .iter()
                 .any(|member| !owner.native_host.members.contains(member))

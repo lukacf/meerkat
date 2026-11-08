@@ -465,7 +465,7 @@ impl NativeHostLifetime {
     /// Fixed order: activation entry, then exact component entry. Both actual
     /// close writers need these exclusive gates. The bounded callback cannot reenter
     /// this owner, await, or detach work. Its result is produced while open.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_component_open<T>(
         &self,
         component: &Id,

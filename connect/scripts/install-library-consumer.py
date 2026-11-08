@@ -2625,12 +2625,74 @@ def verify_existing(args: argparse.Namespace) -> dict:
             "custody": "Point-in-time observation of operator-controlled directories; not a filesystem sandbox or a claim the environment is safe to execute."}
 
 
-# One fixed official route. No package-selected executable is invoked here.
+# Explicit official profiles. No package-selected executable is invoked here.
 OFFICIAL_FAMILY = "official-github"
 OFFICIAL_PROFILE = "selected-reads"
 OFFICIAL_TOOLS = ["get_me", "list_commits", "get_file_contents"]
 OFFICIAL_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
 OFFICIAL_ARGS = ["stdio", "--read-only", "--gh-host", "https://github.com", "--tools", ",".join(OFFICIAL_TOOLS)]
+# Raw names from this retained upstream source, not inferred from profile IDs.
+# context_tools.go:GetMe and repositories.go:ListCommits/GetFileContents, also
+# observed by the pinned tools/list schemas in docs/verification/20261003-github-mcp.
+OFFICIAL_MAPPED_REVISION = "85598ba6e1256f7ebf4867b95d63b833c4549264"
+OFFICIAL_OPERATION_TOOLS = {
+    "get_me": "get_me", "list_commits": "list_commits", "get_file_contents": "get_file_contents",
+}
+GHE_PROFILE = "enterprise-selected-reads"
+GHE_TOOLS = ["list_pull_requests", "pull_request_read", "list_commits", "get_commit",
+             "actions_list", "actions_get", "list_issues", "issue_read", "get_me"]
+# The pinned context_tools.go:GetMe reads Users.Get(ctx, "") using the selected
+# client. Catalog availability does not select it or prove authenticated identity.
+GHE_SOURCE_REVISION = "b98d115bbb080e9555466a96656ec4df605aea21"
+GHE_ARTIFACT_SHA256 = "13608f06cb754be101a87ea5ebeb9ed15e632d3f709ba3b3e5866f3fc7970c70"
+GHE_LICENSE_SHA256 = "9e48ecfa18e2b15169746a3c97beda4d1d6c6796097038498ca434ca7e0ccd44"
+GHE_TEMPLATE_ARGS = ["stdio", "--read-only", "--gh-host", "SELECTED_GHE_HTTPS_ORIGIN",
+                     "--toolsets=", "--tools", "SELECTED_READ_TOOLS"]
+
+
+def official_profile(component):
+    profile = component.get("profile", OFFICIAL_PROFILE)
+    if profile == GHE_PROFILE:
+        if (component.get("target") != "linux-x86_64"
+                or component.get("source_revision") != GHE_SOURCE_REVISION
+                or component.get("artifact_sha256") != GHE_ARTIFACT_SHA256):
+            raise InstallError("unsupported enterprise artifact")
+    elif profile != OFFICIAL_PROFILE:
+        raise InstallError("unsupported official profile")
+    return profile
+
+
+def official_template(profile):
+    enterprise = profile == GHE_PROFILE
+    return {"mcpServers": {"github-enterprise-reads" if enterprise else "github-selected-reads": {
+        "command": "ABS_GITHUB_INSTALL/github-mcp-server",
+        "args": GHE_TEMPLATE_ARGS if enterprise else OFFICIAL_ARGS,
+        "cwd": "ABS_GITHUB_INSTALL", "env": {}}}}
+
+
+def enterprise_configuration(value):
+    """Accept only the selected source's read tools and a canonical HTTPS origin."""
+    if (not isinstance(value, dict) or set(value) != {"profile", "operations", "config"}
+            or value.get("profile") != GHE_PROFILE or not isinstance(value.get("config"), dict)
+            or set(value["config"]) != {"token_env", "github_host"}
+            or value["config"]["token_env"] != OFFICIAL_ENV):
+        raise InstallError("unsupported enterprise configuration")
+    operations = value["operations"]
+    if (not isinstance(operations, list) or not operations
+            or any(not isinstance(tool, str) or tool not in GHE_TOOLS for tool in operations)
+            or operations != [tool for tool in GHE_TOOLS if tool in operations]):
+        raise InstallError("unsupported enterprise operations")
+    host = value["config"]["github_host"]
+    # No userinfo, port, path, query, fragment, IP literal or implicit TLS choice.
+    if not isinstance(host, str) or not host.startswith("https://"):
+        raise InstallError("canonical enterprise HTTPS origin required")
+    domain = host[len("https://"):]
+    labels = domain.split(".")
+    if (len(domain) > 253 or len(labels) < 2 or domain in ("github.com", "api.github.com", "localhost")
+            or domain.endswith(".localhost") or not re.fullmatch(r"[a-z][a-z0-9-]*", labels[-1])
+            or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+        raise InstallError("canonical enterprise HTTPS DNS origin required")
+    return value
 
 
 def official_target(component):
@@ -2702,14 +2764,14 @@ def official_inputs(bundle: Path, expected: str, component: str):
     if len(selected) != 1:
         raise InstallError("missing or ambiguous official component")
     selected = selected[0]
+    profile = official_profile(selected)
+    operations = GHE_TOOLS if profile == GHE_PROFILE else OFFICIAL_TOOLS
     if (selected.get("artifact") != "github/github-mcp-server" or selected.get("configuration_template") != "github/mcp.template.json"
-            or selected.get("notices") != "github/notices" or selected.get("selected_operations") != OFFICIAL_TOOLS
+            or selected.get("notices") != "github/notices" or selected.get("selected_operations") != operations
             or selected.get("required_secret_environment") != [OFFICIAL_ENV]
             or not isinstance(selected.get("source_revision"), str) or not re.fullmatch(r"[0-9a-f]{40}", selected["source_revision"])):
         raise InstallError("unsupported official profile")
-    expected_template = {"mcpServers": {"github-selected-reads": {
-        "command": "ABS_GITHUB_INSTALL/github-mcp-server", "args": OFFICIAL_ARGS,
-        "cwd": "ABS_GITHUB_INSTALL", "env": {}}}}
+    expected_template = official_template(profile)
     if unique_json(files["github/mcp.template.json"]) != expected_template:
         raise InstallError("unsupported official template")
     binary = files["github/github-mcp-server"]
@@ -2717,7 +2779,11 @@ def official_inputs(bundle: Path, expected: str, component: str):
     if sha(binary) != selected["artifact_sha256"]:
         raise InstallError("unsupported official executable")
     notices = [path for path in files if path.startswith("github/notices/")]
-    if len(notices) != 78 or "github/notices/upstream-LICENSE" not in notices:
+    if profile == GHE_PROFILE:
+        if (notices != ["github/notices/upstream-LICENSE"]
+                or sha(files[notices[0]]) != GHE_LICENSE_SHA256):
+            raise InstallError("unsupported enterprise license payload")
+    elif len(notices) != 78 or "github/notices/upstream-LICENSE" not in notices:
         raise InstallError("incomplete official notices")
     expected_files = {"delivery.json", "github/github-mcp-server", "github/mcp.template.json", "github/UPSTREAM-PROFILE.md", *notices}
     if set(files) != expected_files:
@@ -2727,10 +2793,27 @@ def official_inputs(bundle: Path, expected: str, component: str):
 
 def official_help(files, component):
     target = official_target(component)
+    if official_profile(component) == GHE_PROFILE:
+        return {"profile": GHE_PROFILE, "operations": GHE_TOOLS, "effect": "read", "selectable_operations": True,
+            "operation_tools": {tool: tool for tool in GHE_TOOLS},
+            "fields": [{"name": "token_env", "kind": "string", "required": True, "credential_reference": True},
+                       {"name": "github_host", "kind": "string", "required": True, "credential_reference": False}],
+            "prerequisites": [
+                {"kind": "host_platform", "instruction": "Installation and readback require Linux x86_64. Metadata and configuration checks do not establish executable compatibility or callability."},
+                {"kind": "host_credential_injection", "instruction": "Enter only GITHUB_PERSONAL_ACCESS_TOKEN as token_env. The native host supplies its protected PAT to that child environment variable. No secret is read or created here."},
+                {"kind": "selected_route", "instruction": "Select a nonempty subset of the listed read tools in catalog order and an explicit canonical HTTPS GHE DNS origin. The exact host and tool selection are retained in the launch and checked on readback. A fixed empty toolset prevents inherited toolsets from expanding the selected tools."}],
+            "unresolved_details": ["Account permissions, repository scope, live access and native attachment are not checked.",
+                "Tool selection does not restrict repository arguments or establish full-history coverage.",
+                "The host owns the whole child environment; env:{} does not clear inherited variables.",
+                "The release archive supplies its upstream license; a complete dependency-notice audit is not established by this route."],
+            "scope": "configuration_only", "target": target, "guide_text": files["github/UPSTREAM-PROFILE.md"].decode("utf-8"),
+            "source_revision": component["source_revision"], "artifact_sha256": component["artifact_sha256"]}
     platform_help = ("Installation and readback support macOS arm64 only. Metadata and configuration checks do not establish host compatibility or callability."
                      if target == "macos-arm64" else
                      "Installation and readback require Linux x86_64. Consult the selected bundle guide for its runtime evidence and limits. Metadata and configuration checks do not establish host compatibility or callability.")
     return {"profile": OFFICIAL_PROFILE, "operations": OFFICIAL_TOOLS, "effect": "read", "selectable_operations": False,
+        **({"operation_tools": dict(OFFICIAL_OPERATION_TOOLS)}
+           if component["source_revision"] == OFFICIAL_MAPPED_REVISION else {}),
         "fields": [{"name": "token_env", "kind": "string", "required": True, "credential_reference": True}],
         "prerequisites": [{"kind": "host_platform", "instruction": platform_help},
             {"kind": "host_credential_injection", "instruction": "Enter only GITHUB_PERSONAL_ACCESS_TOKEN as token_env. The host must supply its existing secret to that child environment variable. No credential is read or created here."},
@@ -2740,18 +2823,28 @@ def official_help(files, component):
         "source_revision": component["source_revision"], "artifact_sha256": component["artifact_sha256"]}
 
 
-def official_configuration(raw):
+def official_configuration(raw, component=None):
     value = unique_json(raw)
-    if (set(value) != {"profile", "operations", "config"} or value["profile"] != OFFICIAL_PROFILE
+    profile = official_profile(component) if component is not None else OFFICIAL_PROFILE
+    if profile == GHE_PROFILE:
+        enterprise_configuration(value)
+    elif (not isinstance(value, dict) or set(value) != {"profile", "operations", "config"} or value["profile"] != OFFICIAL_PROFILE
             or value["operations"] != OFFICIAL_TOOLS or value["config"] != {"token_env": OFFICIAL_ENV}):
         raise InstallError("unsupported official configuration")
-    return {"profile": OFFICIAL_PROFILE, "valid": True, "scope": "configuration_only",
+    return {"profile": profile, "valid": True, "scope": "configuration_only",
         "credential_environment_references": [{"field_path": ["config", "token_env"], "environment_variable": OFFICIAL_ENV}]}
 
 
-def official_launch(destination, server):
+def official_launch(destination, server, configuration=None):
+    argv = OFFICIAL_ARGS
+    if isinstance(configuration, dict) and configuration.get("profile") == GHE_PROFILE:
+        value = enterprise_configuration(configuration)
+        argv = ["stdio", "--read-only", "--gh-host", value["config"]["github_host"],
+                "--toolsets=", "--tools", ",".join(value["operations"])]
+    elif configuration is not None:
+        official_configuration(encoded(configuration))
     return {"mcpServers": {server: {"command": str(destination / "github-mcp-server"),
-                                   "args": OFFICIAL_ARGS, "cwd": str(destination), "env": {}}}}
+                                   "args": argv, "cwd": str(destination), "env": {}}}}
 
 
 def official_consumer(args):
@@ -2760,13 +2853,15 @@ def official_consumer(args):
     bundle = Path(existing_resolved(Path(args.official_bundle)))
     files, component = official_inputs(bundle, args.contents_sha256, args.component)
     target = official_target(component)
+    profile = official_profile(component)
+    operations = GHE_TOOLS if profile == GHE_PROFILE else OFFICIAL_TOOLS
     if args.official_describe:
-        return {"family": OFFICIAL_FAMILY, "profiles": [{"profile": OFFICIAL_PROFILE, "operations": OFFICIAL_TOOLS, "effect": "read"}],
+        return {"family": OFFICIAL_FAMILY, "profiles": [{"profile": profile, "operations": operations, "effect": "read"}],
                 "help": official_help(files, component), "contents_sha256": args.contents_sha256, "target": target, "scope": "official_metadata_only"}
     raw = selected_configuration(args)
     if raw is None:
         raise InstallError("official route requires explicit configuration")
-    projection = official_configuration(raw)
+    projection = official_configuration(raw, component)
     if target == "linux-x86_64":
         projection["target"] = target
     if args.check_config_only:
@@ -2777,11 +2872,11 @@ def official_consumer(args):
     if target == "linux-x86_64" and (sys.platform != "linux" or platform.machine() != "x86_64"):
         raise InstallError("official setup requires Linux x86_64")
     destination = existing_destination(args.destination, bundle) if args.verify_existing else new_destination(args.destination, bundle)
-    launch = official_launch(destination, args.server_name)
-    command = [str(destination / "github-mcp-server"), *OFFICIAL_ARGS]
+    launch = official_launch(destination, args.server_name, unique_json(raw))
+    command = [str(destination / "github-mcp-server"), *launch["mcpServers"][args.server_name]["args"]]
     payloads = {path.removeprefix("github/"): data for path, data in files.items() if path.startswith("github/")}
     expected = {"schema_version": 1, "scope": "observed_software_installation_only", "family": OFFICIAL_FAMILY,
-        "component": "github", "profile": OFFICIAL_PROFILE, "contents_sha256": args.contents_sha256,
+        "component": "github", "profile": profile, "contents_sha256": args.contents_sha256,
         "inputs": {name: sha(data) for name, data in sorted(files.items())},
         "artifact_sha256": component["artifact_sha256"], "source_revision": component["source_revision"],
         "target": target, "command": command, "destination": str(destination), "mcp_configuration": launch,

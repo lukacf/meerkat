@@ -3,6 +3,7 @@
 //! input acceptance stay distinct; retries retain the native item and source.
 
 use super::*;
+use crate::admission_progress::{AdmissionProgress, AdmissionStage};
 use crate::{
     original_ingress::helper_originals::{
         AdmittedHelperWork, HelperAdmissionSelection, HelperOperation, bind_work_request,
@@ -38,30 +39,118 @@ pub(crate) enum SetupWorkerObservation {
         deduplicated: bool,
         source_settlement: PrivateSourceSettlement,
     },
+    /// Shared planning launch, durable transfer and native context admission
+    /// are separate observations. None is an individual setup decision or
+    /// completion; pending context delivery remains owned by host recovery.
+    WorkflowLead {
+        observation: crate::private_originals::WorkflowLaunchObservation,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_transfer:
+            Option<crate::private_originals::setup_workflow::WorkflowTransferObservation>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_delivery: Option<WorkflowContextDeliveryStep>,
+    },
     AdmissionUnresolved,
     NativeOutcomeUnavailable,
 }
 
+/// Delivery failures do not erase an already completed disclosure or G launch.
+/// The caller sees the typed boundary; host recovery retains its entered owner.
+#[derive(serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum WorkflowContextDeliveryStep {
+    Observed {
+        observation: crate::private_originals::WorkflowDeliveryObservation,
+    },
+    Denied,
+    Conflict,
+    Unavailable,
+}
+impl From<Result<crate::private_originals::WorkflowDeliveryObservation, PrivateOriginalError>>
+    for WorkflowContextDeliveryStep
+{
+    fn from(
+        result: Result<crate::private_originals::WorkflowDeliveryObservation, PrivateOriginalError>,
+    ) -> Self {
+        match result {
+            Ok(observation) => Self::Observed { observation },
+            Err(PrivateOriginalError::Denied) => Self::Denied,
+            Err(PrivateOriginalError::Conflict) => Self::Conflict,
+            Err(PrivateOriginalError::Unavailable) => Self::Unavailable,
+        }
+    }
+}
+
+// Preserve the native stale-observation fact through the installed adapter.
+// This carries no nonentry certificate or authority to replay earlier effects.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SetupAdvanceError {
+    #[error(transparent)]
+    Setup(#[from] SetupError),
+    #[error("workflow binding observation is stale")]
+    ObservationChanged,
+}
+
 impl InstalledAcquisition {
+    // Keep the existing prepare/depart owner and error precedence together. The
+    // marker retains the refusal boundary before cleanup changes the last stage;
+    // it does not identify an inner cause or grant admission.
+    pub(crate) async fn prepare_workflow_effects(
+        planning: &Arc<crate::private_originals::InstalledWorkflowPlanning>,
+        membership: &meerkat_toolkit::setup::SetupWorkflowWaiter,
+        original: &crate::private_originals::acquisition::AcquisitionOriginal,
+        access: SetupAccess<'_>,
+        progress: &AdmissionProgress,
+    ) -> Result<(), SetupError> {
+        progress.enter(AdmissionStage::PrepareEffects);
+        if let Err(error) = planning
+            .prepare_waiter_effects(membership, original, access)
+            .await
+        {
+            progress.refused();
+            #[cfg(any(test, feature = "test-support"))]
+            aa1_private_failure("advance.workflow_prepare_effects", error);
+            // Close the exact interest and reconcile every deterministic
+            // child ID, including a write whose response was uncertain.
+            // Cleanup uncertainty remains unavailable, never success.
+            progress.enter(AdmissionStage::DepartAfterFailure);
+            progress.cleanup_started();
+            planning.depart_waiter(membership).await.map_err(|error| {
+                progress.cleanup_failed();
+                #[cfg(any(test, feature = "test-support"))]
+                aa1_private_failure("advance.workflow_depart_after_failure", error);
+                source_error(error)
+            })?;
+            progress.cleanup_completed();
+            return Err(source_error(error));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn advance(
         &self,
         operation: &Id,
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
-    ) -> Result<SetupWorkerObservation, SetupError> {
+        entered: &meerkat_core::EnteredDispatchOperation,
+        review: crate::review_custody::ReviewCustody,
+        progress: &AdmissionProgress,
+    ) -> Result<SetupWorkerObservation, SetupAdvanceError> {
         let started = tokio::time::Instant::now();
+        progress.enter(AdmissionStage::AdvanceHost);
         let admission = self
             .host
             .admit_invocation(call.id, context)
             .await
             .map_err(|error| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 crate::aa1_admission_failure("advance.host", &error);
                 host_admission_error(error)
             })?;
         let authorization = context.work_authorization().ok_or(SetupError::Denied)?;
         let current = admission.context.borrowed(authorization);
         let store = SetupStore::new_conditional(self.store.as_ref(), self.scope.clone())?;
+        progress.enter(AdmissionStage::AdvanceLoad);
         let snapshot = store
             .load(
                 operation,
@@ -71,7 +160,7 @@ impl InstalledAcquisition {
             )
             .await
             .inspect_err(|_error| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 crate::aa1_setup_failure("advance.load", _error);
             })?;
         if snapshot.state().terminal_revision != 0 {
@@ -91,8 +180,180 @@ impl InstalledAcquisition {
         let source_deadline = started
             .checked_add(Duration::from_millis(remaining))
             .ok_or(SetupError::Rejected)?;
-        let content = String::from_utf8(canonical_json(snapshot.request().request())?)
-            .map_err(|_| SetupError::InvalidRecord)?;
+        let content = String::from_utf8(
+            canonical_json(snapshot.request().request()).map_err(SetupError::from)?,
+        )
+        .map_err(|_| SetupError::InvalidRecord)?;
+        let originals = &self.host.originals;
+        progress.enter(AdmissionStage::AdvanceOriginal);
+        let original = originals
+            .acquisition_original(context)
+            .await
+            .map_err(|error| {
+                #[cfg(any(test, feature = "test-support"))]
+                aa1_private_failure("advance.workflow_original", error);
+                source_error(error)
+            })?;
+        if let Some(planning) = originals
+            .retained_workflow_selection(&original.original, &snapshot.request().host().correlation)
+            .map_err(|error| {
+                #[cfg(any(test, feature = "test-support"))]
+                aa1_private_failure("advance.workflow_selection", error);
+                source_error(error)
+            })?
+        {
+            // Durable membership is independent for every A/B/C request. The
+            // existing single launch outbox arbitrates G, without creating a
+            // per-waiter helper or interpreting a workflow receipt as consent.
+            let membership = store.workflow_waiter(
+                planning.terms(),
+                &snapshot,
+                original.source_record.key.clone(),
+            )?;
+            progress.enter(AdmissionStage::WaiterJoin);
+            let joined = planning
+                .join_waiter_conditionally(
+                    &self.store,
+                    &membership,
+                    &original,
+                    SetupAccess {
+                        evidence: &admission.evidence,
+                        context: &current,
+                        references: self.references.as_ref(),
+                    },
+                    &self.work_backend,
+                    (context, source_deadline),
+                )
+                .await
+                .map_err(|error| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    aa1_private_failure("advance.workflow_waiter_join", error);
+                    source_error(error)
+                })?
+                .inspect_err(|_error| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    crate::aa1_setup_failure("advance.workflow_waiter_admission", _error);
+                })?;
+            progress.enter(AdmissionStage::RetainInterest);
+            planning
+                .retain_launch_interest(
+                    &joined.snapshot,
+                    &membership,
+                    &original,
+                    Some((context, source_deadline)),
+                )
+                .await
+                .map_err(|error| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    aa1_private_failure("advance.workflow_retain_interest", error);
+                    source_error(error)
+                })?;
+            Self::prepare_workflow_effects(
+                &planning,
+                &membership,
+                &original,
+                SetupAccess {
+                    evidence: &admission.evidence,
+                    context: &current,
+                    references: self.references.as_ref(),
+                },
+                progress,
+            )
+            .await?;
+            let transfer = originals
+                .retained_workflow_context_transfer(
+                    &original.original,
+                    &snapshot.request().host().correlation,
+                )
+                .map_err(|error| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    aa1_private_failure("advance.workflow_transfer_selection", error);
+                    source_error(error)
+                })?;
+            let context_transfer = if let Some(transfer) = &transfer {
+                let selected_control = (|| {
+                    let selected = self
+                        .transfer_recovery
+                        .lock()
+                        .map_err(|_| SetupError::NativeExecutionUnavailable)?;
+                    selected
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                        .ok_or(SetupError::NativeExecutionUnavailable)
+                })();
+                // The selection guard is gone before any test diagnostic I/O.
+                let control = selected_control.inspect_err(|_error| {
+                    #[cfg(any(test, feature = "test-support"))]
+                    crate::aa1_setup_failure("advance.workflow_recovery_owner", _error);
+                })?;
+                progress.enter(AdmissionStage::CommitTransfer);
+                Some(
+                    transfer
+                        .commit_entered(
+                            &snapshot,
+                            &membership,
+                            call,
+                            context,
+                            &self.work_backend,
+                            &control,
+                            entered,
+                            review.clone(),
+                            source_deadline,
+                        )
+                        .await
+                        .map_err(|error| {
+                            #[cfg(any(test, feature = "test-support"))]
+                            aa1_private_failure("advance.workflow_commit", error);
+                            source_error(error)
+                        })?,
+                )
+            } else {
+                None
+            };
+            progress.enter(AdmissionStage::Launch);
+            let observation = planning
+                .launch_from_dispatch_with_review(
+                    &joined.snapshot,
+                    review.clone(),
+                    context,
+                    source_deadline,
+                )
+                .await
+                .map_err(|error| match error {
+                    crate::private_originals::WorkflowChildPreparationError::ObservationChanged => {
+                        crate::aa1_failure(
+                            "advance.workflow_launch",
+                            "WorkflowChildPreparationError::ObservationChanged",
+                        );
+                        SetupAdvanceError::ObservationChanged
+                    }
+                    crate::private_originals::WorkflowChildPreparationError::Refused(error) => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        aa1_private_failure("advance.workflow_launch", error);
+                        SetupAdvanceError::Setup(source_error(error))
+                    }
+                })?;
+            // This bounded poll may admit the exact completed context after G
+            // becomes available. Caller loss or a slow native/store step leaves
+            // the registered delivery owner for the existing recovery worker.
+            let context_delivery = match transfer {
+                Some(transfer) => {
+                    progress.enter(AdmissionStage::ContextDelivery);
+                    Some(
+                        self.poll_workflow_context_delivery_with_review(&transfer, review.clone())
+                            .await
+                            .into(),
+                    )
+                }
+                None => None,
+            };
+            return Ok(SetupWorkerObservation::WorkflowLead {
+                observation,
+                context_transfer,
+                context_delivery,
+            });
+        }
+        progress.enter(AdmissionStage::PrepareWork);
         let preparation = self
             .prepare_bound_work(
                 &store,
@@ -112,7 +373,7 @@ impl InstalledAcquisition {
         if preparation.input_reference().content_digest
             != ContentDigest::of_bytes(content.as_bytes())
         {
-            return Err(SetupError::InvalidRecord);
+            return Err(SetupError::InvalidRecord.into());
         }
         let owner = SameHostSetupWorkOwner {
             acquisition: self,
@@ -122,7 +383,10 @@ impl InstalledAcquisition {
             context,
             content: &content,
             source_deadline,
+            entered,
+            review: &review,
         };
+        progress.enter(AdmissionStage::WorkStep);
         let step = store
             .step_native_work_admission(
                 &preparation,
@@ -157,15 +421,19 @@ impl InstalledAcquisition {
         // Metadata recovery carries no live source handles. Current M1 replay
         // reacquires the exact complete contributor set before native runtime
         // preparation, without ever creating work on this completed path.
+        progress.enter(AdmissionStage::ObserveHelper);
+        #[cfg(any(test, feature = "test-support"))]
+        crate::observe_helper_probe::observe(call.id);
         let admitted = originals
             .observe_setup_helper_for_live_replay(
-                call,
                 context,
+                entered,
                 self.work_backend.service(),
                 preparation.admission_key().clone(),
                 preparation.work_request().clone(),
                 owner.operation(&preparation)?,
                 owner.selection(),
+                review.clone(),
             )
             .await
             .map_err(|error| {
@@ -179,16 +447,21 @@ impl InstalledAcquisition {
                 SetupError::NativeExecutionUnavailable
             })?;
         match_observation(&observed, &SameHostSetupWorkOwner::observation(&admitted)?)?;
+        progress.enter(AdmissionStage::PrepareHelper);
         let prepared = originals
-            .prepare_setup_helper(admitted, content.clone(), source_deadline)
+            .prepare_setup_helper(admitted, content.clone(), source_deadline, review.clone())
             .await
             .map_err(|error| {
                 #[cfg(test)]
                 aa1_private_failure("advance.prepare_helper", error);
                 source_error(error)
             })?;
+        progress.enter(AdmissionStage::RecoverHelper);
+        // One churn for this recovery's waits: its retention's lineage
+        // resolution.
+        let mut churn = context.owner_change_churn();
         let held = originals
-            .recover_setup_helper_source(&prepared)
+            .recover_setup_helper_source(&prepared, context, &mut churn)
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -200,6 +473,7 @@ impl InstalledAcquisition {
                 crate::aa1_failure("advance.source_absent", "None");
                 SetupError::NativeExecutionUnavailable
             })?;
+        progress.enter(AdmissionStage::HostAfterPublication);
         let admission = self
             .host
             .admit_invocation(call.id, context)
@@ -210,6 +484,7 @@ impl InstalledAcquisition {
                 host_admission_error(error)
             })?;
         let current = admission.context.borrowed(authorization);
+        progress.enter(AdmissionStage::LoadAfterPublication);
         let snapshot = store
             .load(
                 operation,
@@ -225,10 +500,11 @@ impl InstalledAcquisition {
         if snapshot.state().terminal_revision != 0
             || current.now_ms >= snapshot.request().host().limits.deadline_ms
         {
-            return Err(SetupError::Rejected);
+            return Err(SetupError::Rejected.into());
         }
         // Historical publication must match this exact source and actual
         // destination. No new Dispatch basis is fabricated on this read path.
+        progress.enter(AdmissionStage::LoadPublication);
         let published = store
             .load_prepared_work_exact(
                 operation,
@@ -248,10 +524,19 @@ impl InstalledAcquisition {
         if published.child().association() != held.original().association()
             || &published.child().association().candidate().target != prepared.target()
         {
-            return Err(SetupError::InvalidRecord);
+            return Err(SetupError::InvalidRecord.into());
         }
+        progress.enter(AdmissionStage::SubmitHelper);
         let submission = originals
-            .submit_setup_helper(&prepared, held, &snapshot, content, source_deadline)
+            .submit_setup_helper(
+                &prepared,
+                held,
+                &snapshot,
+                content,
+                source_deadline,
+                review.clone(),
+                Some(context),
+            )
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -294,6 +579,8 @@ struct SameHostSetupWorkOwner<'a> {
     context: &'a ToolDispatchContext,
     content: &'a str,
     source_deadline: tokio::time::Instant,
+    entered: &'a meerkat_core::EnteredDispatchOperation,
+    review: &'a crate::review_custody::ReviewCustody,
 }
 
 impl SameHostSetupWorkOwner<'_> {
@@ -338,7 +625,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         preparation: &NativeWorkPreparation,
     ) -> Result<Option<NativeWorkObservation<Self::Retained>>, SetupError> {
         self.acquisition
-            .observe_private_work(preparation)
+            .observe_private_work(preparation, self.review.clone())
             .await
             .inspect_err(|_error| {
                 #[cfg(test)]
@@ -355,17 +642,23 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         let acquisition = self.acquisition;
         let originals = &acquisition.host.originals;
         let operation = self.operation(preparation)?;
+        // One churn for this work step's owner-change waits: its helper
+        // admission, its retention's lineage resolution and its two reads
+        // after the helper's grants were issued and its source bound.
+        let mut churn = self.context.owner_change_churn();
         // Observation is historical metadata only. Creation or replay must
         // enter the actual native current full-source fence on every attempt.
         let admitted = originals
             .admit_setup_helper(
-                self.call,
                 self.context,
+                self.entered,
                 acquisition.work_backend.service(),
                 preparation.admission_key().clone(),
                 preparation.work_request().clone(),
                 operation,
                 self.selection(),
+                self.review.clone(),
+                &mut churn,
             )
             .await
             .map_err(|error| {
@@ -383,6 +676,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 admitted.clone(),
                 self.content.to_owned(),
                 self.source_deadline,
+                self.review.clone(),
             )
             .await
             .map_err(|error| {
@@ -391,7 +685,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 source_error(error)
             })?;
         let held = match originals
-            .recover_setup_helper_source(&prepared)
+            .recover_setup_helper_source(&prepared, self.context, &mut churn)
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -405,10 +699,11 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 // provide the required current check-and-issue reservation.
                 let (lineage, operation_basis) = originals
                     .issue_or_reconcile_setup_helper_grants(
-                        self.call,
                         self.context,
+                        self.entered,
                         preparation,
                         &prepared,
+                        self.review.clone(),
                     )
                     .await
                     .map_err(|error| {
@@ -417,7 +712,13 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                         source_error(error)
                     })?;
                 originals
-                    .retain_setup_helper_source(&prepared, lineage, operation_basis)
+                    .retain_setup_helper_source(
+                        &prepared,
+                        lineage,
+                        operation_basis,
+                        self.context,
+                        &mut churn,
+                    )
                     .await
                     .map_err(|error| {
                         #[cfg(test)]
@@ -472,11 +773,20 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 published
             }
             Err(SetupError::Store(StoreError::NotFound)) => {
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(hold) = crate::source_hold_probe::observe(
+                    crate::source_hold_probe::Site::PublicationSource,
+                    self.call.id,
+                ) {
+                    crate::source_hold_probe::retain(originals.hold_sources_for_test(hold));
+                }
                 let helper_source = originals
                     .setup_helper_publication_source(
                         &prepared,
                         &held,
                         acquisition.work_backend.service(),
+                        self.context,
+                        &mut churn,
                     )
                     .await
                     .map_err(|error| {
@@ -529,7 +839,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                     )
                     .await?;
                 let mut conditions = originals
-                    .setup_helper_contributor_conditions(&admitted)
+                    .setup_helper_contributor_conditions(&admitted, self.context, &mut churn)
                     .await
                     .map_err(|error| {
                         #[cfg(test)]
@@ -572,7 +882,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn aa1_private_failure(stage: &'static str, error: PrivateOriginalError) {
     crate::aa1_failure(
         stage,
@@ -695,6 +1005,7 @@ impl InstalledAcquisition {
     async fn observe_private_work(
         &self,
         preparation: &NativeWorkPreparation,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<NativeWorkObservation<()>>, SetupError> {
         self.authorize_observation(preparation).await?;
         let service = self.work_backend.service().clone();
@@ -710,6 +1021,7 @@ impl InstalledAcquisition {
         // The private async read is outside all publication/activation custody.
         // A timed-out blocking backend may finish later, but cannot disclose.
         let read = tokio::task::spawn_blocking(move || {
+            let _review = review;
             runtime.block_on(service.observe_admission(key, request))
         })
         .await

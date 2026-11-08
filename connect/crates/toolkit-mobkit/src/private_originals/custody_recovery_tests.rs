@@ -12,6 +12,7 @@ enum CloseOrder {
     PublicationFailed,
     BeforeCallback,
     PoisonedBeforeCallback,
+    AdmissionFenceBeforeCallback,
 }
 
 fn pending(fixture: &Fixture) -> Arc<PendingOriginalAdmission> {
@@ -49,9 +50,9 @@ async fn exercise(order: CloseOrder) {
     let mode = match order {
         CloseOrder::Acknowledged => DeliveryMode::Normal,
         CloseOrder::PublicationFailed => DeliveryMode::PoisonPublicationAfterAcceptance,
-        CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback => {
-            DeliveryMode::HoldAccepted
-        }
+        CloseOrder::BeforeCallback
+        | CloseOrder::PoisonedBeforeCallback
+        | CloseOrder::AdmissionFenceBeforeCallback => DeliveryMode::HoldAccepted,
     };
     let fixture = Fixture::new(mode, false).await;
     // The three existing fixture phases have a finite observation bound. This
@@ -64,7 +65,8 @@ async fn exercise(order: CloseOrder) {
         fixture.source.start_custody_recovery(
             fixture.native.mob_runtime().continuation_source_announcer(),
         ).unwrap();
-        let result = if matches!(order, CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback) {
+        let result = if matches!(order, CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback
+            | CloseOrder::AdmissionFenceBeforeCallback) {
             let submit = fixture.submit();
             tokio::pin!(submit);
             tokio::select! {
@@ -87,21 +89,32 @@ async fn exercise(order: CloseOrder) {
                 Err(meerkat_runtime::input_authority::NativeAdmissionError::Readiness(
                     meerkat_core::authorization::ControllerReadinessFailure::OriginalAdmissionPending))));
             // A source read has no I/O/native lock dependency: hold the actual
-            // source writer and the handoff lock and require prompt refusal.
+            // source writer, the recovery control and the handoff lock, and
+            // require the prompt current answer, never their contention.
             {
                 let _writer = fixture.owner.source_writer().await;
                 held.handoff.assert_read_is_nonblocking_for_test(&fixture.owner, claims);
             }
-            if matches!(order, CloseOrder::PoisonedBeforeCallback) {
+            if matches!(order, CloseOrder::AdmissionFenceBeforeCallback) {
+                fixture.source.stop_admitting_work().unwrap();
+                fixture.source.stop_admitting_work().unwrap();
+                assert!(matches!(fixture.source.submit_authenticated_original(fixture.submission.clone()).await,
+                    Err(PrivateOriginalError::Unavailable)), "a bound source cannot submit through drain");
+                assert!(matches!(fixture.owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+                    Ok(meerkat_runtime::meerkat_machine::RetainedCustody::AdmissionPending)),
+                    "admission-only drain preserves the actual pending callback's custody");
+            } else if matches!(order, CloseOrder::PoisonedBeforeCallback) {
                 // Poison only the actual source control while the real native
                 // acceptance reply is held. This does not fabricate a receipt.
                 fixture.source.poison_custody_control_for_test();
             } else {
                 fixture.source.stop_custody_recovery();
             }
-            assert!(!matches!(fixture.owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
+            if !matches!(order, CloseOrder::AdmissionFenceBeforeCallback) {
+                assert!(!matches!(fixture.owner.retained_custody(&claims.ingress_namespace, &claims.original_work),
                 Ok(meerkat_runtime::meerkat_machine::RetainedCustody::AdmissionPending)),
                 "stop fences pending before the actual native callback returns");
+            }
             fixture.fault.release.add_permits(1);
             submit.await
         } else {
@@ -123,7 +136,7 @@ async fn exercise(order: CloseOrder) {
         assert_eq!(input_id, &held.input.id().to_string());
         assert!(TurnTicket::parse(ticket).is_ok());
         match order {
-            CloseOrder::Acknowledged => {
+            CloseOrder::Acknowledged | CloseOrder::AdmissionFenceBeforeCallback => {
                 assert!(matches!(source_settlement, PrivateSourceSettlement::FreshAcceptancePromoted));
                 assert_eq!(before_close_publication, Some((true, Ok(()))));
                 assert_eq!(fixture.observe_contributor().await, Ok(true));
@@ -158,13 +171,14 @@ async fn exercise(order: CloseOrder) {
 
         // Exercise the real host ordering: source close, native shutdown, then
         // source join. Publication recovery must not depend on a live actor now.
+        fixture.source.stop_custody_recovery();
         native_cleanup = Some(native_shutdown.as_mut().await);
         native_cleanup.as_ref().unwrap().as_ref().unwrap();
         fixture.source.join_custody_recovery().await.unwrap();
         assert!(held.handoff.phase() == HandoffPhase::Done);
         let settled = publication(&held).expect("joined terminal source guard");
         match order {
-            CloseOrder::Acknowledged => assert_eq!(settled, (true, Ok(()))),
+            CloseOrder::Acknowledged | CloseOrder::AdmissionFenceBeforeCallback => assert_eq!(settled, (true, Ok(()))),
             CloseOrder::PublicationFailed => assert_eq!(Some(settled), before_close_publication,
                 "join must preserve the original publication error and false acknowledgement"),
             CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback => assert!(matches!(settled, (false, Err(_))),
@@ -238,4 +252,9 @@ async fn close_before_actual_accepted_callback_retains_receipt_without_live_publ
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poisoned_source_control_before_actual_callback_preserves_receipt_without_publication() {
     exercise(CloseOrder::PoisonedBeforeCallback).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admission_fence_refuses_bound_source_submission_and_preserves_accepted_callback() {
+    exercise(CloseOrder::AdmissionFenceBeforeCallback).await;
 }

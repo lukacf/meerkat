@@ -943,6 +943,7 @@ mod tests {
             Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))
@@ -965,6 +966,7 @@ mod tests {
             Arc::new(FileLockCoordinator::new(root.join("credential-locks"))),
         );
         let mut startup = SessionStartup {
+            provider_store_root: None,
             storage,
             config: meerkat::Config::default(),
             factory: meerkat::AgentFactory::new(root.join("factory"))

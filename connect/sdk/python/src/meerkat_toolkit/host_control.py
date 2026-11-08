@@ -6,6 +6,7 @@ not protect against arbitrary native code executing as that account.
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
@@ -17,8 +18,12 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Callable, Literal, Protocol, TypedDict, cast
+from typing import Any, Awaitable, Callable, Literal, Protocol, TypedDict, TYPE_CHECKING, cast
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from .workflow_commission import WorkflowCommissionAttempt, WorkflowCommissionRequest
+
 
 from meerkat_meta._transport import PersistentTransport
 from meerkat_meta.runtime import MetaRuntime
@@ -47,6 +52,8 @@ class HostReplyCode(StrEnum):
     DENIED = "denied"
     WRONG_OWNER = "wrong_owner"
     NOT_SETTLED = "not_settled"
+    # A stale read, not a no-effect receipt or permission to resend a command.
+    OBSERVATION_CHANGED = "observation_changed"
 
 
 class HostReplyError(HostControlError):
@@ -179,6 +186,136 @@ class PrivateOriginalRef:
         _source_digest(self.event_sha256)
 
 
+@dataclass(frozen=True)
+class PrivateOriginalSubmit:
+    original: PrivateOriginalRef
+    content: str
+    transport_authentication: PrivateSourceEvidence
+
+
+class WorkflowWorkItemRef(TypedDict):
+    realm_id: str
+    namespace: str
+    item_id: str
+
+
+class WorkflowWorkOwnerKey(TypedDict):
+    kind: Literal["principal", "agent", "session", "mob", "label"]
+    id: str
+
+
+class WorkflowMcpTarget(TypedDict):
+    kind: Literal["mcp_server"]
+    server: str
+
+
+class WorkflowRegisteredTarget(TypedDict):
+    kind: Literal["registered_tool_bundle_operation"]
+    bundle: str
+    operation: str
+
+
+class WorkflowSetupTarget(TypedDict):
+    target: WorkflowMcpTarget | WorkflowRegisteredTarget | None
+    issuance_id: str
+
+
+@dataclass(frozen=True)
+class WorkflowChildLaunchRequest:
+    """Actual host selectors for a new child, not authority or a G commissioner.
+
+    The native owner must already retain this exact parent/planning workflow.
+    Work relationships, targets, audiences and current permission are checked
+    there. No SDK sorting, union, missing-target inference or grant is added.
+    """
+    parent: PrivateOriginalRef
+    planning: PrivateOriginalRef
+    submission: PrivateOriginalSubmit
+    child: WorkflowWorkItemRef
+    child_owner: WorkflowWorkOwnerKey
+    issuance_id: str
+    targets: tuple[WorkflowSetupTarget, ...]
+    output_audiences: tuple[str, ...]
+
+    def wire(self) -> dict[str, Any]:
+        if (not isinstance(self.parent, PrivateOriginalRef) or not isinstance(self.planning, PrivateOriginalRef)
+                or not isinstance(self.submission, PrivateOriginalSubmit)
+                or not isinstance(self.submission.original, PrivateOriginalRef)
+                or not isinstance(self.submission.content, str)
+                or not isinstance(self.submission.transport_authentication, PrivateSourceEvidence)
+                or not isinstance(self.targets, tuple) or not isinstance(self.output_audiences, tuple)):
+            raise HostControlError("invalid workflow child request")
+        # Snapshot mutable nested selectors before the first write/wait.
+        wire = dataclasses.asdict(self)
+        _workflow_child_bounds(wire)
+        return wire
+
+
+@dataclass(frozen=True)
+class ConsoleWorkflowChildRequest:
+    """One proposed authenticated Console send, never source or grant authority.
+
+    The native Console creates its actual input and source. The key correlates
+    this proposal only; identity, human, login, content and current work must
+    still match at actual bind. A failed bind cannot claim another input.
+    """
+    parent: PrivateOriginalRef
+    planning: PrivateOriginalRef
+    route: str
+    send_key: str
+    content_sha256: str
+    child: WorkflowWorkItemRef
+    child_owner: WorkflowWorkOwnerKey
+    issuance_id: str
+    targets: tuple[WorkflowSetupTarget, ...]
+    output_audiences: tuple[str, ...]
+
+    def wire(self) -> dict[str, Any]:
+        if (not isinstance(self.parent, PrivateOriginalRef) or not isinstance(self.planning, PrivateOriginalRef)
+                or not isinstance(self.send_key, str) or not 0 < len(self.send_key.encode("utf-8")) <= 256
+                or not isinstance(self.targets, tuple) or not isinstance(self.output_audiences, tuple)):
+            raise HostControlError("invalid Console workflow child proposal")
+        _workflow_token(self.route)
+        _source_digest(self.content_sha256)
+        wire = dataclasses.asdict(self)
+        _workflow_child_bounds(wire)
+        return wire
+
+
+def _workflow_child_bounds(wire: dict[str, Any]) -> None:
+    for key in ("realm_id", "namespace", "item_id"):
+        _workflow_token(_fields(wire["child"], {"realm_id", "namespace", "item_id"})[key])
+    owner = _fields(wire["child_owner"], {"kind", "id"})
+    if owner["kind"] not in {"principal", "agent", "session", "mob", "label"}:
+        raise HostControlError("invalid workflow child owner kind")
+    _workflow_token(owner["id"])
+    _source_identifier(wire["issuance_id"])
+    for item in wire["targets"]:
+        row = _fields(item, {"target", "issuance_id"})
+        _source_identifier(row["issuance_id"])
+        target = row["target"]
+        if target is None:
+            continue
+        if isinstance(target, dict) and target.get("kind") == "mcp_server":
+            selected = _fields(target, {"kind", "server"})
+            _workflow_token(selected["server"])
+        elif isinstance(target, dict) and target.get("kind") == "registered_tool_bundle_operation":
+            selected = _fields(target, {"kind", "bundle", "operation"})
+            _workflow_token(selected["bundle"])
+            _workflow_token(selected["operation"])
+        else:
+            raise HostControlError("invalid workflow setup target shape")
+    for audience in wire["output_audiences"]:
+        _source_identifier(audience)
+
+
+def _workflow_token(value: Any) -> str:
+    # Preserve the actual WorkGraph token; do not derive/normalize an owner.
+    if not isinstance(value, str) or not value.strip() or any(unicodedata.category(c) == "Cc" for c in value):
+        raise HostControlError("invalid workflow selector")
+    return value
+
+
 class ServiceReceiptRunScope(TypedDict):
     kind: Literal["run"]
     run_id: str
@@ -247,7 +384,8 @@ class PrivateOriginalRetention:
 @dataclass(frozen=True)
 class PrivateOriginalCancellation:
     original: PrivateOriginalRef
-    state: str = "operations_cancelled"
+    # Neither value certifies native run, process or controller settlement.
+    state: Literal["operations_cancelled", "operations_cancelled_cleanup_pending"] = "operations_cancelled"
 
 
 def _original_ref(value: Any) -> PrivateOriginalRef:
@@ -444,7 +582,7 @@ def _service_input_observation(value: Any) -> ServiceInputObservation:
         outcome = report["outcome"]
         if not isinstance(outcome, dict) or outcome.get("completion_type") not in {
             "completed", "completed_without_result", "callback_pending", "callback_batch_pending", "cancelled",
-            "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated",
+            "abandoned", "abandoned_with_error", "completed_with_finalization_failure", "runtime_terminated", "outcome_unknown",
         }:
             raise HostControlError("invalid native completion outcome")
     else:
@@ -492,6 +630,65 @@ def _component(value: Any) -> HostComponentObservation:
         raise HostControlError("invalid native component observation")
     return HostComponentObservation(UUID(value["incarnation"]), value["component"],
                                     revision, HostComponentState(value["state"]))
+
+
+class NativeOriginalOperationsRequest(TypedDict):
+    not_before_ms: int
+    expires_at_ms: int
+    targets: list[dict[str, Any]]
+
+
+def validate_native_original_operations_request(value: NativeOriginalOperationsRequest) -> NativeOriginalOperationsRequest:
+    """Validate finite targets and return an isolated JSON snapshot for retention.
+
+    Success returns a dict, never None. Validating that dict again returns an
+    equal value; prepare_original_native_operations accepts it unchanged.
+    This pure shape check raises HostControlError for invalid selections. It
+    does not retain intent, issue grants or check current native permission.
+    Retain the returned snapshot; preparation applies this same validation
+    before dispatch.
+    """
+    try:
+        row = json.loads(json.dumps(value, allow_nan=False))
+    except (TypeError, ValueError) as error:
+        raise HostControlError("invalid native target selection") from error
+    _fields(row, {"not_before_ms", "expires_at_ms", "targets"})
+    if any(type(row[key]) is not int or not 0 <= row[key] < 2**64 - 1
+           for key in ("not_before_ms", "expires_at_ms")) or row["not_before_ms"] >= row["expires_at_ms"]:
+        raise HostControlError("native operations require a finite ordered lifetime")
+    if not isinstance(row["targets"], list) or not 1 <= len(row["targets"]) <= 32:
+        raise HostControlError("invalid native target selection")
+    ids = []
+    for entry in row["targets"]:
+        _fields(entry, {"issuance_id", "target"})
+        ids.append(_source_identifier(entry["issuance_id"]))
+        target = entry["target"]
+        if not isinstance(target, dict):
+            raise HostControlError("invalid native target")
+        if target.get("kind") == "peer_directory":
+            _fields(target, {"kind"})
+            continue
+        if target.get("kind") == "peer":
+            _fields(target, {"kind", "route", "actions"})
+            route = target["route"]
+            # Peer routes are Toolkit Id values, not native EvidenceId values.
+            if (not isinstance(route, str) or not route or len(route) > 192
+                    or not route.isascii() or not route[0].isalnum()
+                    or any(not (char.isalnum() or char in "._-/:@") for char in route)
+                    or any(part in ("", ".", "..") for part in route.split("/"))):
+                raise HostControlError("invalid native peer route")
+            allowed = ["message", "request"]
+        elif target.get("kind") == "recorder_identity":
+            _fields(target, {"kind", "actions"})
+            allowed = ["read", "write", "delete"]
+        else:
+            raise HostControlError("unsupported native target scope")
+        actions = target["actions"]
+        if not isinstance(actions, list) or not actions or any(action not in allowed for action in actions) or actions != [action for action in allowed if action in actions]:
+            raise HostControlError("invalid native actions")
+    if len(set(ids)) != len(ids):
+        raise HostControlError("duplicate native issuance identity")
+    return cast(NativeOriginalOperationsRequest, row)
 
 
 def _review_integer(value: Any) -> int:
@@ -1287,7 +1484,8 @@ class PrivateHostClient:
     concurrent disable, nor does a timeout cancel or invent native settlement.
     """
 
-    def __init__(self, command_fd: int, response_fd: int, *, timeout: float = 60.0):
+    def __init__(self, command_fd: int, response_fd: int, *, timeout: float = 60.0,
+                 bootstrap_timeout: float | None = None, member_mcp: Any = None):
         # Per-call timeouts may extend observation, never this transport budget.
         if os.name != "posix":
             raise HostControlError("private host control requires POSIX")
@@ -1295,6 +1493,14 @@ class PrivateHostClient:
             raise HostControlError("invalid private host descriptors")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("native host timeout must be positive and finite")
+        if bootstrap_timeout is not None and (
+            isinstance(bootstrap_timeout, bool)
+            or not isinstance(bootstrap_timeout, (int, float))
+            or not math.isfinite(bootstrap_timeout)
+            or bootstrap_timeout <= 0
+        ):
+            raise ValueError("private bootstrap timeout must be positive and finite")
+        self._bootstrap_timeout = bootstrap_timeout
         for fd in (command_fd, response_fd):
             os.set_inheritable(fd, False)
             os.set_blocking(fd, False)
@@ -1304,6 +1510,10 @@ class PrivateHostClient:
         self._write_lock = threading.Lock()
         self._condition = threading.Condition()
         self._pending: dict[int, dict[str, Any] | None] = {}
+        self._member_mcp = member_mcp
+        self._member_listings: dict[int, Any] = {}
+        self._member_listing_join_ids: dict[int, Any] = {}
+        self._member_listing_ack_ids: set[int] = set()
         self._abandoned: set[int] = set()
         self._failure: BaseException | None = None
         self._next_id = 1
@@ -1315,6 +1525,8 @@ class PrivateHostClient:
         with self._condition:
             if self._failure is None:
                 self._failure = failure
+                for attempt in tuple(self._member_listings.values()):
+                    attempt._pipe_lost()
             self._condition.notify_all()
         # Close the command writer under the same lock as writes. EOF informs
         # native ownership even when the response half alone failed.
@@ -1360,9 +1572,32 @@ class PrivateHostClient:
                         raise HostControlError("native host protocol version or correlation is invalid")
                     if not isinstance(response["result"], dict):
                         raise HostControlError("native host response result is invalid")
+                    if response["result"].get("kind") == "member_class_mcp_required":
+                        if response["id"] != 0 or self._member_mcp is None:
+                            raise HostControlError("member MCP application participant is unavailable")
+                        self._member_mcp._request(self, response["result"])
+                        continue
                     with self._condition:
+                        attempt = self._member_listings.get(response["id"])
+                        if response["result"].get("kind") == "member_class_listing_required":
+                            _fields(response["result"], {"kind", "operation_id", "admission_id", "identity", "class"})
+                            if (attempt is None or type(response["result"]["operation_id"]) is not int
+                                    or response["result"]["operation_id"] != response["id"]
+                                    or response["result"]["admission_id"] != attempt._listing_selection["admission_id"]
+                                    or response["result"]["identity"] != attempt._listing_selection["identity"]
+                                    or response["result"]["class"] != attempt._listing_selection["class"]):
+                                raise HostControlError("native listing names another Add")
+                            attempt._listing_required()
+                            continue
                         if response["id"] not in self._pending or self._pending[response["id"]] is not None:
                             raise HostControlError("native host response has unknown or duplicate correlation")
+                        self._member_listing_ack_ids.discard(response["id"])
+                        if attempt is not None:
+                            attempt._native_received(response["result"])
+                        joined_attempt = self._member_listing_join_ids.pop(response["id"], None)
+                        if (joined_attempt is not None and response["result"].get("kind") == "member_class"
+                                and response["result"].get("observation", {}).get("state") in {"settled", "native_refused"}):
+                            joined_attempt._native_received(response["result"])
                         if response["id"] in self._abandoned:
                             self._abandoned.remove(response["id"])
                             del self._pending[response["id"]]
@@ -1379,6 +1614,7 @@ class PrivateHostClient:
                 os.close(fd)
 
     def _start_call(self, command: dict[str, Any], *, timeout: float | None = None, _retirement: bool = False, _expected_id: int | None = None,
+                    _member_listing: bool = False, _listing_ack: bool = False,
                     _publish: Callable[[int, float], None] | None = None) -> tuple[int, float]:
         duration = self._timeout if timeout is None else timeout
         if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
@@ -1397,7 +1633,11 @@ class PrivateHostClient:
                 with self._condition:
                     if self._failure is not None:
                         raise HostTransportError("native host control unavailable") from self._failure
-                    if len(self._pending) >= 32 + int(_retirement):
+                    if _member_listing and len(self._member_listings) >= 16:
+                        raise HostControlError("application listing observation limit reached")
+                    full = (len(self._member_listing_ack_ids) >= 16 if _listing_ack else
+                            len(self._pending) - len(self._member_listing_ack_ids) >= 32 + int(_retirement))
+                    if full:
                         if _retirement:
                             raise HostTransportError("Console retirement could not enter reserved capacity; settlement is unknown")
                         raise HostControlError("native host observation limit reached")
@@ -1418,6 +1658,8 @@ class PrivateHostClient:
                         raise HostTransportError("native host control unavailable") from self._failure
                     self._next_id += 1
                     self._pending[identifier] = None
+                    if _listing_ack:
+                        self._member_listing_ack_ids.add(identifier)
                     if _publish is not None:
                         # A retained owner takes correlation before the first byte.
                         _publish(identifier, deadline)
@@ -1595,7 +1837,8 @@ class PrivateHostClient:
         return self._controller_review_call("retire_controller_review", review_id, {"retired"})
 
     def bootstrap(self, selection: HostBootstrapSelection) -> None:
-        self._call({"kind": "bootstrap", "selection": dataclasses.asdict(selection)}, "bootstrap_accepted")
+        self._call({"kind": "bootstrap", "selection": dataclasses.asdict(selection)}, "bootstrap_accepted",
+                   timeout=self._bootstrap_timeout)
 
     def replace_application(self, selected: ApplicationUpdateStartup) -> None:
         """Initial private selection only; native init and settlement follow."""
@@ -1603,7 +1846,8 @@ class PrivateHostClient:
             raise HostControlError("invalid application update startup")
         selected.__post_init__()
         identifier, deadline = self._start_call(
-            {"kind": "replace_application", "startup": dataclasses.asdict(selected)}, _expected_id=1,
+            {"kind": "replace_application", "startup": dataclasses.asdict(selected)},
+            timeout=self._bootstrap_timeout, _expected_id=1,
         )
         try:
             self._await_call(identifier, deadline, "bootstrap_accepted")
@@ -1676,6 +1920,138 @@ class PrivateHostClient:
             self._fail(error)
             raise HostTransportError("native submission response was rejected; settlement is unknown") from error
 
+    def prepare_original_native_operations(self, submission: PrivateOriginalSubmit,
+                                           request: NativeOriginalOperationsRequest, *,
+                                           timeout: float | None = None) -> PrivateOriginalRef:
+        """Select finite outbound peer/directory and own-identity Recorder actions.
+
+        Available on the same inherited private client after Fresh or Restore.
+        Call before submitting this new authenticated original. Routes must name
+        actual installed members, including completed Add selections. Native
+        selects peer keys, audience and identity scope. This grants no receiving
+        original, automatic reply or mob-scope Recorder operation.
+        """
+        if not isinstance(submission, PrivateOriginalSubmit):
+            raise HostControlError("invalid native operation source")
+        selected = validate_native_original_operations_request(request)
+        reply = self._call({"kind": "prepare_original_native_operations",
+            "submission": dataclasses.asdict(submission), "request": selected},
+            "native_operations_prepared", timeout=timeout, reply_fields={"kind", "original"})
+        try:
+            original = _original_ref(reply["original"])
+            if original != submission.original:
+                raise HostControlError("native selection names another original")
+            return original
+        except BaseException as error:
+            self._fail(error)
+            raise HostTransportError("native operation selection response rejected") from error
+
+    def prepare_workflow_parent(self, request: WorkflowCommissionRequest, *,
+                                parent_root_issuance_id: str, parent_leaf_issuance_id: str,
+                                timeout: float | None = None) -> PrivateOriginalRef:
+        """Select P's exact contribution ceiling before its first admission.
+
+        The native owner derives bounds from the installed workflow class. This
+        does not create G, admit P, or authorize an installation. A lost reply
+        leaves named issuance uncertain; never select fresh IDs as a retry.
+        """
+        from .workflow_commission import WorkflowCommissionRequest
+        if not isinstance(request, WorkflowCommissionRequest):
+            raise HostControlError("invalid workflow parent request")
+        wire = request.wire()
+        identifiers = [parent_root_issuance_id, parent_leaf_issuance_id,
+                       wire["controller_issuance_id"], wire["planning_root_issuance_id"],
+                       wire["planning_leaf_issuance_id"]]
+        for value in identifiers:
+            _source_identifier(value)
+        if len(set(identifiers)) != len(identifiers):
+            raise HostControlError("workflow issuance identities must differ")
+        expected = _original_ref(wire["parent"]["original"])
+        reply = self._call({"kind": "prepare_workflow_parent", "request": {
+            "commission": wire, "parent_root_issuance_id": parent_root_issuance_id,
+            "parent_leaf_issuance_id": parent_leaf_issuance_id}}, "workflow_parent_prepared",
+            timeout=timeout, reply_fields={"kind", "original"})
+        try:
+            if _original_ref(reply["original"]) != expected:
+                raise HostControlError("workflow preparation names another parent")
+            return expected
+        except BaseException as error:
+            self._fail(error)
+            raise HostTransportError("workflow parent response rejected; issuance is unknown") from error
+
+    def begin_workflow_commission(self, request: WorkflowCommissionRequest, *,
+                                  publish: Callable[[], Awaitable[None]], timeout: float | None = None) -> WorkflowCommissionAttempt:
+        """Commission once using the application's actual durable listing callback.
+
+        Requires explicit fresh private workflow launch. The returned attempt
+        retains entered listing even if its observer times out or is cancelled.
+        Prepared means a native member and planning selection, not a submitted
+        G input or a completed shared acquisition. No automatic retry occurs.
+        """
+        from .workflow_commission import begin_workflow_commission
+        return begin_workflow_commission(self, request, publish=publish, timeout=timeout)
+
+    async def commission_workflow(self, request: WorkflowCommissionRequest, *,
+                                  publish: Callable[[], Awaitable[None]], timeout: float | None = None) -> dict[str, Any]:
+        """Observe one commission; use begin_workflow_commission to retain its handle."""
+        attempt = self.begin_workflow_commission(request, publish=publish, timeout=timeout)
+        return await asyncio.to_thread(attempt.result)
+
+    def prepare_console_workflow_child(self, request: ConsoleWorkflowChildRequest,
+                                      login: ConsoleLoginEnrollment, *, timeout: float | None = None) -> PrivateOriginalRef | None:
+        """Select or observe one proposed Console child; never send an input.
+
+        Repeating the exact proposal observes the same first-input claim. A
+        returned source locator is recorded before source writes and issuance:
+        it proves neither preparation success, native admission nor completion.
+        Only an actual authenticated Console send can bind this proposal.
+        Observation requires the same enrollment still retained on this open
+        connection. Expiry/pruning or connection loss can make it unavailable;
+        retain any observed locator and the original request/issuance IDs.
+        """
+        if (not isinstance(request, ConsoleWorkflowChildRequest)
+                or not isinstance(login, ConsoleLoginEnrollment) or login._client is not self
+                or not login._finished or login._error is not None):
+            raise HostControlError("Console child selection needs the acknowledged same-client login")
+        wire = request.wire()
+        reply = self._call({"kind": "prepare_console_workflow_child", "request": wire,
+                            "enrollment_id": login.enrollment_id}, "console_workflow_child_selected",
+                           timeout=timeout, reply_fields={"kind", "original"})
+        try:
+            if reply["original"] is None:
+                return None
+            original = _original_ref(reply["original"])
+            if original.route != wire["route"]:
+                raise HostControlError("Console child source names another route")
+            return original
+        except BaseException as error:
+            self._fail(error)
+            raise HostTransportError("Console child source observation was rejected") from error
+
+    def prepare_workflow_child(self, request: WorkflowChildLaunchRequest, *,
+                               timeout: float | None = None) -> PrivateOriginalRef:
+        """Prepare one exact child before first submission, without submitting it.
+
+        Requires the fresh host's explicit private-workflow launch selection and
+        an already commissioned actual P/G retained by that native owner. This
+        command alone is not complete shared setup. It cannot retrofit a bound
+        singleton original. Native refusal is preserved, and timeout means
+        unknown preparation/issuance settlement, never permission to retry.
+        """
+        if not isinstance(request, WorkflowChildLaunchRequest):
+            raise HostControlError("invalid workflow child request")
+        wire = request.wire()
+        expected = _original_ref(wire["submission"]["original"])
+        reply = self._call({"kind": "prepare_workflow_child", "request": wire},
+                           "workflow_child_prepared", timeout=timeout, reply_fields={"kind", "original"})
+        try:
+            if _original_ref(reply["original"]) != expected:
+                raise HostControlError("workflow preparation names another original")
+            return expected
+        except BaseException as error:
+            self._fail(error)
+            raise HostTransportError("workflow child preparation response was rejected; settlement is unknown") from error
+
     def observe_service_input_receipt(self, original: PrivateOriginalRef, *,
                                       timeout: float | None = None) -> ServiceInputObservation:
         """Read one canonical approved B without submitting or waking work.
@@ -1701,16 +2077,22 @@ class PrivateHostClient:
     def cancel_original_operation(self, original: PrivateOriginalRef, *, timeout: float | None = None) -> PrivateOriginalCancellation:
         """Durably cancel this original's operations without revoking shared access.
 
-        This does not stop a runtime run or its controller. A timeout remains
-        unknown. The command is never automatically repeated.
+        Cleanup pending means source cancellation and workflow departure
+        succeeded; the host recovery worker continues unresolved cleanup.
+        Callers do not need to repeat cancellation to drive that recovery.
+        Neither state certifies runtime, process or controller settlement. A
+        timeout remains unknown. The command is never automatically repeated.
+        Shared-workflow hosts require the matching SDK generation accepting
+        cleanup pending; older closed-set decoders reject that state. Protocol
+        v1 does not negotiate this capability.
         """
         if not isinstance(original, PrivateOriginalRef):
             raise HostControlError("invalid original reference")
         reply = self._call({"kind": "cancel_original_operation", "original": dataclasses.asdict(original)}, "original_operation_cancelled", timeout=timeout, reply_fields={"kind", "original", "state"})
         try:
-            if _original_ref(reply["original"]) != original or reply["state"] != "operations_cancelled":
+            if _original_ref(reply["original"]) != original or reply["state"] not in ("operations_cancelled", "operations_cancelled_cleanup_pending"):
                 raise HostControlError("original cancellation response names another original or state")
-            return PrivateOriginalCancellation(original)
+            return PrivateOriginalCancellation(original, reply["state"])
         except BaseException as error:
             self._fail(error)
             raise HostTransportError("original cancellation response was rejected") from error
@@ -1876,16 +2258,54 @@ class ApplicationPreparationSettlement:
     private_close: Any
 
 
+def _hosted_mcp_redirect_base(value: str | None) -> str | None:
+    """Trusted startup input only; native owns URL and origin validation."""
+    if value is not None and (not isinstance(value, str) or not value.strip()
+                              or any(unicodedata.category(c) == "Cc" for c in value)):
+        raise HostControlError("hosted MCP redirect base must be a nonempty string without controls")
+    return value
+
+
+def _check_private_workflow_launch(selection: Any, enabled: bool, initialize_native_owner: bool) -> None:
+    if type(enabled) is not bool:
+        raise HostControlError("private workflow launch must be an explicit boolean")
+    if enabled and (not isinstance(selection, (ApplicationPreparation, HostBootstrapSelection)) or initialize_native_owner):
+        raise HostControlError("private workflow launch requires preparation or ordinary installed Restore")
+
+
 class ToolkitPersistentTransport(PersistentTransport):
-    """Start the private owner before sending the ordinary MobKit init request."""
+    """Start the private owner before sending the ordinary MobKit init request.
+
+    bootstrap_timeout selects only the Restore/replacement acknowledgement
+    observation. Omission retains timeout; application preparation keeps its
+    explicit budget. Ordinary requests, writes and settlement are unchanged.
+    """
 
     def __init__(self, gateway_bin: str, selection: HostBootstrapSelection | ApplicationPreparation | ApplicationUpdateStartup, *,
                  env: dict[str, str] | None = None, timeout: float = 60.0,
-                 initialize_native_owner: bool = False):
+                 bootstrap_timeout: float | None = None,
+                 initialize_native_owner: bool = False, member_mcp: Any = None,
+                 private_workflow_launch: bool = False, hosted_mcp_redirect_base: str | None = None):
+        # This trusted process option selects the existing native private path.
+        # Bootstrap still authenticates its exact selection; no wire owner flag,
+        # new plan or replacement permission is manufactured by the option.
+        _check_private_workflow_launch(selection, private_workflow_launch, initialize_native_owner)
+        self._private_workflow_launch = private_workflow_launch
+        self._hosted_mcp_redirect_base = _hosted_mcp_redirect_base(hosted_mcp_redirect_base)
         if type(initialize_native_owner) is not bool:
             raise HostControlError("native owner initialization must be an explicit boolean")
         if os.name != "posix":
             raise HostControlError("Toolkit native host requires POSIX")
+        if bootstrap_timeout is not None and (
+            isinstance(bootstrap_timeout, bool)
+            or not isinstance(bootstrap_timeout, (int, float))
+            or not math.isfinite(bootstrap_timeout)
+            or bootstrap_timeout <= 0
+        ):
+            raise ValueError("private bootstrap timeout must be positive and finite")
+        # Only the initial private acknowledgement uses this observation cap.
+        # Writes, ordinary requests and native settlement keep their own budgets.
+        self._bootstrap_timeout = bootstrap_timeout
         super().__init__(gateway_bin, env=env, timeout=timeout, inherited_fds=(), extra_args=())
         self._selection = selection
         self.preparation: ApplicationPreparationAttempt | None = None
@@ -1895,6 +2315,11 @@ class ToolkitPersistentTransport(PersistentTransport):
         # after a lost bootstrap response; later starts restore the existing
         # operator-provisioned grant and original owner stores.
         self._initialize_native_owner = initialize_native_owner
+        if member_mcp is not None:
+            from .member_classes import MemberMcpApplication
+            if not isinstance(member_mcp, MemberMcpApplication):
+                raise HostControlError("member MCP participant has invalid type")
+        self._member_mcp = member_mcp
         self.host_control: PrivateHostClient | None = None
         self._host_stop_settled = False
 
@@ -1928,13 +2353,18 @@ class ToolkitPersistentTransport(PersistentTransport):
             self._inherited_fds = (child_read, child_write)
             self._extra_args = ("--host-control-read-fd", str(child_read),
                                 "--host-control-write-fd", str(child_write))
+            if self._hosted_mcp_redirect_base is not None:
+                self._extra_args += ("--hosted-mcp-redirect-base", self._hosted_mcp_redirect_base)
+            if self._private_workflow_launch:
+                self._extra_args += ("--private-workflow-launch",)
             if self._initialize_native_owner:
                 self._extra_args += ("--initialize-native-owner",)
             # Consume the retained flag before Popen so an automatic respawn
             # never retries the unsupported legacy initialization path.
             self._initialize_native_owner = False
             super().start()
-            client = PrivateHostClient(parent_write, parent_read, timeout=self.request_timeout)
+            client = PrivateHostClient(parent_write, parent_read, timeout=self.request_timeout,
+                                       bootstrap_timeout=self._bootstrap_timeout, member_mcp=self._member_mcp)
             temporary_fds = [child_read, child_write]
             self.host_control = client
         except BaseException as error:
@@ -2035,15 +2465,34 @@ class ToolkitPersistentTransport(PersistentTransport):
             )
 
 
+def _check_private_gateway_transport(config: Any) -> None:
+    """Refuse a second transport owner without invoking or claiming it."""
+    if getattr(config, "gateway_transport", None) is not None:
+        raise HostControlError(
+            "Toolkit private bootstrap does not accept gateway_transport; "
+            "its local gateway has a private process owner"
+        )
+
+
 class ToolkitMobKitRuntime(MetaRuntime):
     """Local native Toolkit composition selected by the trusted Python host.
 
     Use with toolkit_gateway. Public init metadata cannot select this subclass
     or its exact bootstrap artifacts. The ordinary builder config is retained.
+    hosted_mcp_redirect_base is trusted child startup input only; Core parses
+    the URL. Omission preserves the native local redirect behavior.
     """
 
     def __init__(self, config: Any, selection: HostBootstrapSelection | ApplicationPreparation | ApplicationUpdateStartup, *,
-                 initialize_native_owner: bool = False):
+                 initialize_native_owner: bool = False, member_mcp: Any = None,
+                 private_workflow_launch: bool = False, hosted_mcp_redirect_base: str | None = None):
+        _check_private_gateway_transport(config)
+        # This trusted process option selects the existing native private path.
+        # Bootstrap still authenticates its exact selection; no wire owner flag,
+        # new plan or replacement permission is manufactured by the option.
+        _check_private_workflow_launch(selection, private_workflow_launch, initialize_native_owner)
+        self._private_workflow_launch = private_workflow_launch
+        self._hosted_mcp_redirect_base = _hosted_mcp_redirect_base(hosted_mcp_redirect_base)
         if not config.gateway_bin:
             raise HostControlError("Toolkit native host requires its local gateway")
         if type(initialize_native_owner) is not bool:
@@ -2051,16 +2500,58 @@ class ToolkitMobKitRuntime(MetaRuntime):
         super().__init__(config)
         self._host_selection = selection
         self._initialize_native_owner = initialize_native_owner
+        if member_mcp is not None:
+            from .member_classes import MemberMcpApplication
+            if not isinstance(member_mcp, MemberMcpApplication):
+                raise HostControlError("member MCP participant has invalid type")
+        self._member_mcp = member_mcp
 
     def _make_gateway_transport(self) -> ToolkitPersistentTransport:
+        _check_private_gateway_transport(self._config)
         if self._config.gateway_bin is None:
             raise HostControlError("Toolkit native host requires its local gateway")
         transport = ToolkitPersistentTransport(self._config.gateway_bin, self._host_selection,
-                                               initialize_native_owner=self._initialize_native_owner)
+                                               bootstrap_timeout=getattr(self._config, "gateway_init_timeout", None),
+                                               initialize_native_owner=self._initialize_native_owner, member_mcp=self._member_mcp,
+                                               private_workflow_launch=self._private_workflow_launch,
+                                               hosted_mcp_redirect_base=self._hosted_mcp_redirect_base)
         # A later runtime bootstrap uses restore, including when the first
         # transport lost an initialization reply. Missing state remains an error.
         self._initialize_native_owner = False
         return transport
+
+    async def _join_member_mcp(self, primary: BaseException | None = None) -> None:
+        if self._member_mcp is None:
+            return
+        try:
+            await self._member_mcp.join()
+        except BaseException as cleanup:
+            if primary is None:
+                raise
+            # Keep the native/bootstrap exception and its existing cleanup
+            # intact; retain the independent application callback uncertainty.
+            primary.add_note("Member MCP application callback cleanup did not settle")
+            primary.member_mcp_cleanup_error = cleanup
+
+    async def shutdown(self) -> None:
+        if self._member_mcp is not None:
+            self._member_mcp._close_entry()
+        try:
+            await super().shutdown()
+        except BaseException as primary:
+            await self._join_member_mcp(primary)
+            raise
+        await self._join_member_mcp()
+
+    async def _cleanup_failed_bootstrap(self, transport: Any, startup_error: BaseException) -> None:
+        if self._member_mcp is not None:
+            self._member_mcp._close_entry()
+        try:
+            await super()._cleanup_failed_bootstrap(transport, startup_error)
+        except BaseException as primary:
+            await self._join_member_mcp(primary)
+            raise
+        await self._join_member_mcp(startup_error)
 
     @property
     def host_control(self) -> PrivateHostClient:
@@ -2068,3 +2559,9 @@ class ToolkitMobKitRuntime(MetaRuntime):
         if not isinstance(transport, ToolkitPersistentTransport) or transport.host_control is None:
             raise HostControlError("native host control is unavailable")
         return transport.host_control
+
+    @property
+    def member_classes(self):
+        """Application class operations on this exact native child's private pipe."""
+        from .member_classes import MemberClassClient
+        return MemberClassClient(self.host_control)

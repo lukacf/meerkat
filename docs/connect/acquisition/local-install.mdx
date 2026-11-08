@@ -18,6 +18,15 @@ Connect's setup agent can research and prepare a package outside the built-in li
 
 The host selects trusted runtimes, permitted acquisition profiles and resource locations. The agent selects the integration, version, entrypoint and operations.
 
+## Inspect acquired dependencies (unreleased)
+
+When the host enables acquired-source inspection and the advertised tool schema
+includes `archive_sha256`, `setup_inspect_acquired` can read a retained dependency
+selected by its exact digest in the acquisition job's `artifacts` array. Omitting
+the selector preserves primary-archive inspection. The agent still selects the
+entrypoint and authors metadata; inspection executes no package code and does
+not establish native-addon or runtime compatibility.
+
 ## Describe the package
 
 Prepare an `IntegrationPackage` in `package.json` and an `ActivationManifest` in `activation.json`. Obtain the canonical package digest with:
@@ -27,6 +36,12 @@ Prepare an `IntegrationPackage` in `package.json` and an `ActivationManifest` in
 ```
 
 Use `summary.package_content_digest` in the activation manifest. It identifies the canonical package content; raw file hashes identify the input files.
+
+The manifest's owner IDs need [actual runtime bindings](/connect/reference/packages#bind-declarations-to-runtime-owners).
+Selected-Python installation does not resolve those names into authentication,
+readiness, shutdown or policy handlers. Keep the host's exact configuration and
+policy references, and bind the selected connection through the native owners.
+Do not substitute fixture IDs or remove unresolved package requirements.
 
 ## Input layouts
 
@@ -53,6 +68,26 @@ Use `summary.package_content_digest` in the activation manifest. It identifies t
     ```
 
     The npm project uses `private: true` and a dependency on `file:./artifact.tgz`. Retain the version-3 lock and every selected dependency archive. The manifest identifies a JavaScript entrypoint in the primary package. Installation uses the retained closure with offline npm.
+
+    **Unreleased conditional closures:** Matching development acquisition and
+    installer versions also retain `closure/npm-target`, pinned as `npm-target`
+    in the manifest's `PinnedClosure`. Keep the unchanged lock and every
+    lock-referenced archive, including excluded optional packages.
+
+    The target binds the host-observed Node executable hash, version, module ABI,
+    OS, architecture and libc. The installer requires the selected Node target to
+    match and validates every archive before excluding incompatible optional
+    branches with explicit reasons. Required dependencies and shared rows remain
+    protected. Every package retained in the selected graph must match its exact
+    installed files; npm success alone is insufficient. Unconditional graphs keep
+    their existing behavior.
+
+    Do not edit the lock or guess host facts. Conditional peer graphs, unsupported
+    libc and native compilation remain outside this subset; selected prebuilt
+    addons have a separate contract. The installer does not download missing
+    dependencies or choose newer versions. Readback does not probe the reader
+    host's current OS/libc or establish authentication, a native grant or MCP
+    readiness. See the source contracts below for the full supported graph.
   </Tab>
   <Tab title="MCPB">
     ```text
@@ -74,6 +109,18 @@ Call `setup_selected_check` with the prepared inputs. Review its proposal, then 
 
 The host then supplies account credentials, approves operation access and attaches the emitted connection through the [native MCP owner](/connect/guides/native-mcp).
 
+A bare configuration exposes the whole server; a declared read operation does
+not hide its write tools or authorize their use. Connect's native protected
+attachment can separately enforce the host-approved subset of exact MCP tool
+names. Inspect the actual schemas and request only the operations needed through
+that protected review; separate write tools do not themselves prevent a scoped
+read grant.
+
+An operation-name allowlist does not constrain query semantics, prevent startup
+effects or provide filesystem confinement. Check those behaviors and apply the
+host's separate resource controls. Installation and effect metadata alone do not
+prove a read-only connection.
+
 ## Inspect the installed server
 
 Discover the server's tools and schemas through the selected MCP connection. Choose the operations needed for the task, apply the host's access policy and invoke them through the intended agent.
@@ -83,6 +130,52 @@ For an update, prepare the new selection in a separate directory, switch the con
 ## Reuse a selection
 
 Save the exact package, activation and source observations as a local recipe. Future setup can read that recipe and apply current configuration and access decisions. See [local recipes](/connect/sdks/rust#retain-local-recipes).
+
+## Packages that need a build (unreleased)
+
+<Note>
+This is unreleased development functionality, not part of Connect 0.9.0. One
+Linux source-addon installation and fresh Node consumer have passed. Each
+integration still needs its own MCP compatibility and operation checks.
+</Note>
+
+Some Node packages ship source that must be compiled, or need a script to generate
+their JavaScript entrypoint. The setup agent can propose those steps when the host
+has explicitly enabled a matching build toolchain. Ordinary users stay in the same
+setup conversation and review the resulting installation proposal.
+
+1. The agent inspects the acquired package and its build instructions.
+2. `setup_state.node_build` reports available executable and input-file IDs,
+   the exact Node target and limits. The agent chooses a plan from that evidence.
+3. `setup_selected_check` freezes the plan with the package and returns its
+   commands, inputs and output destinations for review.
+4. After approval, `setup_selected_install` runs the commands and verifies the
+   generated files. Native attachment and operation review follow separately.
+
+For inline metadata, supply `build_plan_json`. For staged metadata, retain the plan
+as `closure/node-build-plan` and supply its exact `build_plan_sha256`. Both forms
+select the Node profile and bind the same reserved artifact in the dependency
+closure. With `acquired_source`, the host retains the original acquisition evidence
+and adds the authored plan to the selected declaration; do not rewrite its receipt.
+
+The version-1 plan has `schema_version`, `target`, `inputs`, `steps` and `outputs`.
+Inputs copy selected original npm files or host toolchain files into a separate
+working directory. Steps select host executable IDs and literal arguments.
+Outputs map generated files to exact installed package paths. Replacing an
+original file requires its original hash; an addition cannot overwrite it.
+Use the advertised tool description and pinned installer's contract for the full
+shape.
+
+npm lifecycle scripts remain disabled. An explicitly reviewed build step may run
+package source or a build script as trusted local code. This is not a sandbox or a
+complete toolchain deployment service. Missing tools require a host correction.
+
+Readback checks the selected inputs and generated files without rebuilding or
+importing the addon. A lost or invalid build reply leaves that live attempt
+unconfirmed. Replaying its install call observes the same job; an explicit retry
+proposes a new destination and review. Cold readback establishes current file
+consistency, not proof of the historical build. Installation success does not
+establish server compatibility or completion of the user's task.
 
 ## Container-backed selections
 

@@ -310,7 +310,7 @@ promised, and expired provider cursors are not replaced with guessed timestamps.
 The implementation is original Toolkit code, porting the existing Python Slack
 operation contract and reusing the Toolkit Fetch/strict-JSON pattern. No Slack
 SDK or other agent framework is included. There are no new runtime dependencies.
-Node 22 or later is the supported execution profile. Browser execution has not
+Node 22.12.0 or later is the supported execution profile. Browser execution has not
 been established by the Node test suite.
 
 Local HTTP and controlled Fetch tests exercise pagination fidelity, account

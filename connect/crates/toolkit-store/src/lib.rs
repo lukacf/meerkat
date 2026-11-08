@@ -11,6 +11,7 @@
 //! It does not claim distributed fencing across independent database copies.
 
 mod conditional;
+mod io_custody;
 mod sqlite;
 
 use async_trait::async_trait;
@@ -23,6 +24,7 @@ use thiserror::Error;
 pub use conditional::{
     ConditionalAdmission, ConditionalAdmissionStore, ConditionalTransition, RecordCondition,
 };
+pub use io_custody::retain_io_custody;
 pub use sqlite::{SqliteStore, StoreCustody};
 
 /// Mechanical invalidation supplied by the actual installed record owner.

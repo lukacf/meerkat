@@ -62,7 +62,7 @@ impl PrivateOriginals {
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         self.service_input_host_current()?;
         self.service_batch_basis(source, task, true).await?;
-        let route = self.route(&source.route)?;
+        let route = &self.route(&source.route)?;
         let mut expires_at_ms = task.before_ms;
         for reference in task.grants() {
             let stored = self
@@ -246,7 +246,7 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Conflict);
         }
-        let route = self.route(&source.route)?;
+        let route = &self.route(&source.route)?;
         let setup_targets = task
             .setup()
             .map(|setup| setup.binding_targets())

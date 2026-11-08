@@ -276,6 +276,7 @@ async fn fixture() -> (
             },
             principal(),
             Some(rule.clone()),
+            vec![],
         )
         .await
         .unwrap();
@@ -348,13 +349,28 @@ async fn accepted_native_candidate_survives_failed_promotion_or_lost_store_ack_o
 
 #[tokio::test]
 async fn active_reservation_revocation_blocks_admission_and_recovery() {
-    let (_dir, _policy, owner, rule, _store) = fixture().await;
+    let (_dir, policy, owner, rule, _store) = fixture().await;
     let prepared = prepared(&owner, &rule, "request", "discovered_read").await;
     let approval = ServiceToolPolicyApproval::until_superseded(&prepared.proposal).unwrap();
     let mut transaction = prepared.begin(&approval, &|| Ok(())).await.unwrap();
     transaction.publish(&|| Ok(())).await.unwrap();
     drop(transaction);
+    let member = MobMemberBinding {
+        mob_id: "fixture".into(),
+        member: "original".into(),
+        role: "worker".into(),
+    };
+    let surface = PreparedToolSurface {
+        tools: vec![],
+        projected: vec![],
+        catalog: PreparedToolCatalog::VisibleOnly,
+    };
+    assert!(policy.select(&member, &surface).is_ok());
     rule.current.store(false, Ordering::SeqCst);
+    assert!(
+        policy.select(&member, &surface).is_err(),
+        "bootstrap membership cannot bypass revoked current policy"
+    );
     assert!(owner.check_current().is_err());
     assert!(owner.observed_current.lock().unwrap().is_none());
     assert!(owner.recover().await.is_err());
@@ -583,6 +599,7 @@ async fn legacy_service_permit_cannot_recover_or_publish_member_policy() {
             },
             principal(),
             Some(Arc::new(Legacy { owner: principal() })),
+            vec![],
         )
         .await
         .unwrap();

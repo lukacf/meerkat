@@ -6,7 +6,7 @@ use super::*;
 use crate::private_host::{ConsoleLoginHandle, ConsoleLoginReservation, ConsoleLogins};
 use meerkat_mobkit::{
     access::{ACTION_AGENT_SEND, AccessController},
-    console_governed_ingress::ConsoleGovernedIngress,
+    console_governed_ingress::{ConsoleGovernedIngress, ConsoleSendContext},
     identity_first::{
         AgentIdentity, BoundGovernedInput, GovernedBindContext, GovernedEntryFence,
         GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedSettlement,
@@ -15,6 +15,49 @@ use meerkat_mobkit::{
 };
 use meerkat_runtime::{Input, identifiers::IdempotencyKey};
 use meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin;
+
+/// Set only while retaining the actual Console child's raw input. Historical
+/// evidence never restores the verified human, login or a live entry permit.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ConsoleChildInputEvidence {
+    NativeConsole,
+}
+
+pub(super) fn validate_console_child_input(
+    record: &SourceRecord,
+    bound: &Input,
+) -> Result<(), PrivateOriginalError> {
+    if record.console_child_input != Some(ConsoleChildInputEvidence::NativeConsole)
+        || record.workflow_child.is_none()
+        || !matches!(
+            record.planning_source_evidence,
+            Some(planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. })
+        )
+        || record.final_association.is_none()
+        || bound.header().authority_association.as_ref() != record.final_association.as_ref()
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    let Input::Prompt(mut raw) = bound.clone() else {
+        return Err(PrivateOriginalError::Conflict);
+    };
+    // Native added this exact checked association. Preserve every other raw
+    // input field, including id, timestamp, stock key and content.
+    raw.header.authority_association = None;
+    let raw = Input::Prompt(raw);
+    stock_console_event_key(&raw).map_err(|_| PrivateOriginalError::Conflict)?;
+    let raw_digest = digest(&canonical_json(&raw).map_err(|_| PrivateOriginalError::Conflict)?);
+    if record.event.original.as_str() != raw.id().to_string()
+        || record.event.occurrence != record.event.original
+        || record.event.root_event.resource_id != record.event.original
+        || record.event.root_event.sha256 != raw_digest
+        || record.event.content_sha256 != raw_digest
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    Ok(())
+}
 
 /// Retains the native verifier observation and live access owner for this
 /// single input. Setup retains only the same login, never this expiring token.
@@ -104,7 +147,6 @@ impl GovernedEntryFence for ConsoleEntry {
 struct InstalledConsoleIngress {
     source: Arc<PrivateOriginals>,
     logins: ConsoleLogins,
-    routes: Vec<PrivateOriginalRoute>,
     access: Option<AccessController>,
 }
 impl PrivateOriginals {
@@ -124,20 +166,31 @@ impl PrivateOriginals {
         lifetime
             .validate_current_selection()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
-        let policy = lifetime.selected_policy();
-        let native = policy
-            .native_host
-            .as_ref()
-            .ok_or(PrivateOriginalError::Unavailable)?;
+        self.current_console_routes()?;
+        Ok(Arc::new(InstalledConsoleIngress {
+            source: self.clone(),
+            logins,
+            access,
+        }))
+    }
+
+    pub(super) fn current_console_routes(
+        &self,
+    ) -> Result<Vec<PrivateOriginalRoute>, PrivateOriginalError> {
         let mut routes = vec![];
-        for route in self.routes()? {
-            let Some(compiled) = native
-                .routes
-                .iter()
-                .find(|selected| selected.id == route.id)
-            else {
-                return Err(PrivateOriginalError::Denied);
-            };
+        for route in self.current_routes()? {
+            if self
+                .service_tool_policy
+                .get()
+                .map(|owner| owner.member_route(&route.id))
+                .transpose()
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .flatten()
+                .is_some_and(|(admission, _)| !admission.class.purpose.is_ordinary())
+            {
+                continue;
+            }
+            let (compiled, _, _) = self.selected_source_route(&route.id)?;
             if !matches!(
                 &compiled.origin,
                 CompiledNativeSourceOrigin::LocalConsole { .. }
@@ -151,14 +204,9 @@ impl PrivateOriginals {
             {
                 continue;
             }
-            routes.push(route.clone());
+            routes.push(route);
         }
-        Ok(Arc::new(InstalledConsoleIngress {
-            source: self.clone(),
-            logins,
-            routes,
-            access,
-        }))
+        Ok(routes)
     }
 }
 impl ConsoleGovernedIngress for InstalledConsoleIngress {
@@ -170,17 +218,40 @@ impl ConsoleGovernedIngress for InstalledConsoleIngress {
         identity: &AgentIdentity,
         human: &AuthenticatedConsoleHuman,
     ) -> Result<Arc<dyn GovernedInputBinder>, String> {
+        self.select_binder(identity, human, None)
+    }
+    fn binder_for_send(
+        &self,
+        identity: &AgentIdentity,
+        human: &AuthenticatedConsoleHuman,
+        send: &ConsoleSendContext,
+    ) -> Result<Arc<dyn GovernedInputBinder>, String> {
+        let child = self
+            .source
+            .console_child_for_send(&send.idempotency_key)
+            .map_err(|_| "The Console child selection is unavailable")?;
+        self.select_binder(identity, human, child)
+    }
+}
+impl InstalledConsoleIngress {
+    fn select_binder(
+        &self,
+        identity: &AgentIdentity,
+        human: &AuthenticatedConsoleHuman,
+        child: Option<Arc<setup_workflow::PreparedConsoleChild>>,
+    ) -> Result<Arc<dyn GovernedInputBinder>, String> {
         let principal = human
             .principal()
             .map_err(|_| "The Console human is unqualified")?;
         let routes: Vec<_> = self
-            .routes
-            .iter()
+            .source
+            .current_console_routes()
+            .map_err(|_| "The current Console routes are unavailable")?
+            .into_iter()
             .filter(|route| {
                 route.requester == principal
                     && route.represented_subject.as_ref() == Some(&principal)
             })
-            .cloned()
             .collect();
         if routes.is_empty() {
             return Err("No installed Console route matches this human".into());
@@ -192,6 +263,11 @@ impl ConsoleGovernedIngress for InstalledConsoleIngress {
             .logins
             .resolve(human.issuer(), human.subject(), scope)
             .map_err(|_| "The exact Console login is unavailable")?;
+        if let Some(child) = &child {
+            child
+                .check(&self.source, identity, &principal, &login)
+                .map_err(|_| "The prepared Console child does not match this send")?;
+        }
         let entry = ConsoleEntry {
             source: self.source.clone(),
             identity: identity.clone(),
@@ -204,6 +280,7 @@ impl ConsoleGovernedIngress for InstalledConsoleIngress {
             source: self.source.clone(),
             routes,
             entry,
+            child,
             delegate: OnceLock::new(),
         }))
     }
@@ -213,6 +290,7 @@ struct ConsoleBinder {
     source: Arc<PrivateOriginals>,
     routes: Vec<PrivateOriginalRoute>,
     entry: ConsoleEntry,
+    child: Option<Arc<setup_workflow::PreparedConsoleChild>>,
     delegate: OnceLock<Arc<OriginalBinder>>,
 }
 #[async_trait::async_trait]
@@ -231,6 +309,24 @@ impl GovernedInputBinder for ConsoleBinder {
         let reservation = self.entry.reserve()?;
         if context.spec.identity != self.entry.identity {
             return Err("The native registered Console target changed".into());
+        }
+        if let Some(child) = &self.child {
+            let principal = self
+                .entry
+                .human
+                .principal()
+                .map_err(|_| "The Console human is unqualified")?;
+            child
+                .check(
+                    &self.source,
+                    &context.spec.identity,
+                    &principal,
+                    self.entry.login(),
+                )
+                .map_err(|_| "The prepared Console child is no longer current")?;
+            child
+                .claim(&input)
+                .map_err(|_| "The prepared Console child was reused or its input changed")?;
         }
         let runtime = self
             .source
@@ -252,6 +348,22 @@ impl GovernedInputBinder for ConsoleBinder {
             }
         }
         let route = selected.ok_or("No installed Console route matches the native target")?;
+        if self
+            .child
+            .as_ref()
+            .is_some_and(|child| child.route() != &route.id)
+        {
+            return Err("The Console child selected another source route".into());
+        }
+        if self
+            .source
+            .route(&route.id)
+            .map_err(|_| "The selected Console route is unavailable")?
+            .as_ref()
+            != route
+        {
+            return Err("The selected Console route changed".into());
+        }
         let bytes = canonical_json(&input).map_err(|_| "The Console input cannot be retained")?;
         let input_id = EvidenceId::new(input.id().to_string())
             .map_err(|_| "The Console input id is invalid")?;
@@ -281,14 +393,48 @@ impl GovernedInputBinder for ConsoleBinder {
             contributors: vec![],
             content_sha256: digest(&bytes),
         };
+        if let Some(child) = &self.child {
+            child
+                .retain_source_locator(PrivateOriginalRef {
+                    route: event.route.clone(),
+                    original: event.original.clone(),
+                    event_sha256: digest(
+                        &canonical_json(&event)
+                            .map_err(|_| "The Console event cannot be retained")?,
+                    ),
+                })
+                .map_err(|_| "The Console child already retained a source")?;
+        }
         let original = self
             .source
-            .retain_event(event)
+            .retain_event_for_route_with_input(
+                event,
+                route,
+                None,
+                self.child
+                    .as_ref()
+                    .map(|_| ConsoleChildInputEvidence::NativeConsole),
+            )
             .await
             .map_err(|_| "The Console original could not be retained")?;
         self.entry.check()?;
+        if let Some(child) = &self.child {
+            child
+                .prepare(
+                    &self.source,
+                    original.clone(),
+                    self.entry.clone(),
+                    context,
+                    &input,
+                    authentication.clone(),
+                )
+                .await
+                .map_err(|_| "The selected Console child could not be prepared")?;
+            self.entry.check()?;
+        }
         reservation.settled();
         let binder = Arc::new(OriginalBinder {
+            review_custody: crate::review_custody::ReviewCustody::default(),
             source: self.source.clone(),
             grant: None,
             batch: None,

@@ -1021,12 +1021,22 @@ them.
   turn's notifications now go to the connections of the requests that
   started it, and a turn no request waits on (queued work, comms,
   schedules, a resumed run) to the connection that holds its session: the
-  one that created it or, once that one is gone, the next one that starts
-  a turn on it; never to another connection. The runtime's default route
-  (`SessionRuntime::set_notification_sink`) now takes only the turns of
-  sessions no connection holds, and a TCP connection no longer replaces
-  it; `MethodRouter::new` and the `RpcServer` constructors still install
-  their connection there, so build one of them per runtime.
+  one that created or forked it or, once that one is gone, the next one
+  that starts a turn on it, and to no other connection. Such a turn of a
+  session no connection holds goes to the runtime's default route
+  (`SessionRuntime::set_notification_sink`), which a TCP connection no
+  longer replaces. `MethodRouter::new` and the `RpcServer` constructors
+  still install their connection as that route, so an embedder that builds
+  one of them per connection over one runtime still sends those turns to
+  the one it built last; serve each such connection with
+  `serve_tcp_connection` instead, whose connections never take that route.
+  On a TCP server the turns of sessions no connection holds now reach no
+  connection; before, the most recently connected client got them. After a
+  reconnect, a client gets a session's turns that no request waits on once
+  it has started a turn on that session; to receive them without starting
+  one, watch the session with `session/stream_open` (a mob member with
+  `mob/stream_open`).
+  (#2116, thanks @zond)
 
 ### Upgrade notes
 

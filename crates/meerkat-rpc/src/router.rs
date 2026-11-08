@@ -4551,6 +4551,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });
@@ -4612,6 +4618,12 @@ impl MethodRouter {
                 .await
             {
                 Ok(mut result) => {
+                    // The forking connection holds the child's session/event
+                    // route, as a creating connection holds its session's.
+                    self.runtime.hold_session_event_route(
+                        result.session_id.clone(),
+                        self.notification_sink.clone(),
+                    );
                     result.session_ref = self.runtime.realm_id().map(|realm| {
                         meerkat_contracts::format_session_ref(&realm, &result.session_id)
                     });

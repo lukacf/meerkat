@@ -3583,14 +3583,15 @@ unless that request sent `"session_events": false`; a turn that carries the
 inputs of several requests goes to each of their connections. A turn no
 request waits on (queued work such as `session/external_event`, comms,
 schedules, a resumed run) goes to the connection that holds the session: the
-one that created it or, once that one is gone, the next one that starts a
-turn on it. While the holder is gone the notifications are written nowhere;
-read the turn back with `session/history`, or watch the session with
-`session/stream_open`. No other connection receives them. On a server with
-several connections (`--tcp`), a session no connection holds (one the host or
-a mob created, or one from before a restart, that no connection has started a
-turn on) has its turns written to none of them; a stdio server writes them to
-its one client.
+one that created it (`session/create`, `help/ask`) or forked it
+(`session/fork_at`, `session/fork_replace`) or, once that one is gone, the
+next one that starts a turn on it. While the holder is gone the notifications
+are written nowhere; read the turn back with `session/history`, or watch the
+session with `session/stream_open`. No other connection receives them. On a
+TCP server (`--tcp`), a session no connection holds (one the host or a mob
+created, or one from before a restart, that no connection has started a turn
+on) has its turns written to no connection; a stdio server writes them to its
+one client.
 
 Event types match the `AgentEvent` enum in `crates/meerkat-core/src/event.rs`
 (`agent_event_type` assigns each variant its stable wire name) and its schema

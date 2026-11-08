@@ -3144,9 +3144,9 @@ pub struct SessionRuntime {
     /// [`TurnSessionEventsRequest`]).
     turn_session_event_routes: TurnSessionEventRoutes,
     /// The connection that holds each session's `session/event` route: the
-    /// connection that created the session or, once that connection is gone,
-    /// the next connection that started a turn on it. A turn no waiting
-    /// request routes writes its copies there (see
+    /// connection that created or forked the session or, once that connection
+    /// is gone, the next connection that started a turn on it. A turn no
+    /// waiting request routes writes its copies there (see
     /// [`Self::turn_session_event_sinks`]).
     session_event_holders: StdRwLock<HashMap<SessionId, crate::router::NotificationSink>>,
     /// The `keep_alive` create waiting for each staged session's first
@@ -4926,8 +4926,9 @@ impl SessionRuntime {
         }
     }
 
-    /// `sink`'s connection created `session_id`: it holds the session's
-    /// `session/event` route (see [`Self::turn_session_event_sinks`]).
+    /// `sink`'s connection created `session_id`, or forked it from another
+    /// session: it holds the session's `session/event` route (see
+    /// [`Self::turn_session_event_sinks`]).
     pub(crate) fn hold_session_event_route(
         &self,
         session_id: SessionId,
@@ -4989,12 +4990,12 @@ impl SessionRuntime {
     /// waiting adds that request's connection, or nothing when the request
     /// opted out. An input no waiting request admitted (queued work, comms,
     /// schedules, a resumed or requeued run) adds the connection that holds
-    /// the session: the one that created it or, once that one is gone, the
-    /// next one that started a turn on it. While that holder is closed the
-    /// copies go nowhere. Only a session no connection ever held falls back
-    /// to the runtime's process-default route ([`Self::set_notification_sink`]).
-    /// No other connection receives them; a connection that is gone receives
-    /// nothing.
+    /// the session: the one that created or forked it or, once that one is
+    /// gone, the next one that started a turn on it. While that holder is
+    /// closed the copies go nowhere. Only a session no connection ever held
+    /// falls back to the runtime's process-default route
+    /// ([`Self::set_notification_sink`]). No other connection receives them;
+    /// a connection that is gone receives nothing.
     pub(crate) fn turn_session_event_sinks(
         &self,
         session_id: &SessionId,

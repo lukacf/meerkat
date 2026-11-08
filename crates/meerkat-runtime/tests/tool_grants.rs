@@ -2401,11 +2401,21 @@ async fn an_approval_executed_in_another_life_of_the_identity_issues_nothing() {
                 .is_some(),
             "{backend:?}: the request of the life the identity lives issues"
         );
+
+        // The next pass owes the requests' notices.
+        rig.pass().await;
         let notices = rig.notices.0.lock().unwrap().clone();
         let earlier_notice = notices
             .iter()
             .find(|notice| notice.decision_id == earlier.decision_id)
             .expect("the earlier request's notice");
+        assert_eq!(
+            earlier_notice.outcome,
+            ToolGrantRequestOutcome::Refused {
+                reason: "subject_ended".to_owned()
+            },
+            "{backend:?}"
+        );
         assert_eq!(
             earlier_notice.subject_life,
             Some(ToolGrantSubjectLife::new("0.0")),

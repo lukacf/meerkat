@@ -108,6 +108,15 @@ impl MobWireErrorSource for MobAppendSystemContextError {
         MobAppendSystemContextError::wire_detail(self)
     }
 
+    /// A mob refusal keeps its structured data (an identity entry's
+    /// `identity_member`, for one), as every other mob door renders it.
+    fn structured_data(&self) -> Option<serde_json::Value> {
+        match self {
+            MobAppendSystemContextError::Mob(error) => MobError::structured_data(error),
+            MobAppendSystemContextError::Session(_) => None,
+        }
+    }
+
     fn wire_error_code(&self) -> Option<meerkat_contracts::ErrorCode> {
         MobAppendSystemContextError::wire_error_code(self)
     }

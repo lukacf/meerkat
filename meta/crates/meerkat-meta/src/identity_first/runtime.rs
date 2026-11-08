@@ -10365,9 +10365,11 @@ impl IdentityRuntime {
         // Committed under the lifecycle lock: a retire, reset or row change
         // is ordered around a keyed send as around an unkeyed one. The
         // caller's handling is committed with the content, as Core keeps it.
+        // The host's own keyed door: Core's external keyed send refuses an
+        // identity entry, as its unkeyed send does.
         let mob_handle = mob.handle();
         mob_tools
-            .mob_member_send_keyed(
+            .mob_member_send_keyed_as_host(
                 mob_handle.mob_id(),
                 member.clone(),
                 content_to_deliver,

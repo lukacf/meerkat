@@ -20394,6 +20394,52 @@ impl MobHandle {
         .await?
     }
 
+    /// Enter the actor's serialized principal gate for a door that acts on
+    /// `identity`'s member session as its host (a turn start, a system
+    /// context append, a live channel's open, control or close), before the
+    /// door does anything. The handle's principal must hold `required`, the
+    /// door's own scope ([`MobError::ScopeDenied`] otherwise). An identity
+    /// entry, or a member whose name is reserved unreadable, is reached only
+    /// by a principal that also holds [`crate::ControlScope::AdminHost`]
+    /// (the owner holds every scope): any other is refused
+    /// [`MobError::IdentityMember`]. Every other member is admitted as by
+    /// [`Self::admit_control_scope`], and the agent lane never acts on an
+    /// entry's member through such a door. Decided in the actor's own step,
+    /// from its machine state.
+    pub async fn admit_member_host_door(
+        &self,
+        required: mob_dsl::ControlScope,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        self.admit_control_scope_for(
+            required,
+            super::state::ScopeAdmissionSubject::MemberHost(identity.clone()),
+        )
+        .await
+    }
+
+    /// Ask MobMachine whether it admits external work for `identity` now,
+    /// as it answers an unkeyed member send ([`MemberHandle::send`]:
+    /// SubmitWork of `WorkOrigin::External` at the member's current
+    /// incarnation), with nothing submitted or recorded. The handle's
+    /// principal must hold [`crate::ControlScope::SendCommand`]
+    /// ([`MobError::ScopeDenied`] otherwise). `Ok` when MobMachine admits it;
+    /// otherwise the send's typed refusal: [`MobError::IdentityMember`] for
+    /// an identity entry or a name reserved unreadable,
+    /// [`MobError::NotExternallyAddressable`] for a member whose runtime
+    /// admits no external work, [`MobError::MemberNotFound`], or the invalid
+    /// transition of a mob that is not running. Decided in the actor's own
+    /// step, from its machine state. A door that commits external work
+    /// for later delivery (a keyed member send) asks it before its commit,
+    /// and its delivery asks again.
+    pub async fn admit_external_work(&self, identity: &AgentIdentity) -> Result<(), MobError> {
+        self.admit_control_scope_for(
+            mob_dsl::ControlScope::SendCommand,
+            super::state::ScopeAdmissionSubject::ExternalWork(identity.clone()),
+        )
+        .await
+    }
+
     /// [`Self::admit_control_scope`] for an operation addressed to
     /// `subject`: chokepoint (a) applies the lane rules the operation itself
     /// meets (an agent never acts on an identity entry's member, and never

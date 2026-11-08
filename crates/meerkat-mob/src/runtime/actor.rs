@@ -31116,10 +31116,29 @@ impl MobActor {
                     // Reaching the handler is the serialized validation ACK.
                     let _ = reply_tx.send(Ok(()));
                 }
-                MobCommand::AdmitControlScope { reply_tx, .. } => {
+                MobCommand::AdmitControlScope {
+                    subject, reply_tx, ..
+                } => {
                     // The requested scope was enforced at the serialized
-                    // mailbox gate. No projection or mutation occurs here.
-                    let _ = reply_tx.send(Ok(()));
+                    // mailbox gate. A member host door also refuses an
+                    // identity entry to a principal without AdminHost, and an
+                    // external work admission answers MobMachine's SubmitWork
+                    // admission of external work for the member, both from
+                    // this actor's state. No projection or mutation occurs
+                    // here.
+                    let result = match &subject {
+                        super::state::ScopeAdmissionSubject::MemberHost(agent_identity) => {
+                            self.member_host_door_refusal(authority, agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::ExternalWork(agent_identity) => {
+                            self.external_work_admission(agent_identity)
+                        }
+                        super::state::ScopeAdmissionSubject::Mob
+                        | super::state::ScopeAdmissionSubject::Member(_)
+                        | super::state::ScopeAdmissionSubject::LegacyAdoption(_)
+                        | super::state::ScopeAdmissionSubject::DeclaredApply => Ok(()),
+                    };
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::PruneStaleMemberOperatorRequests { reply_tx } => {
                     let result = self.prune_stale_member_operator_requests().await;
